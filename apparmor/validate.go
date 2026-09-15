@@ -57,6 +57,17 @@ var (
 	// total) and therefore never matches anything: intersection would
 	// silently drop it.
 	ErrGlobTooComplex = errors.New("glob pattern exceeds size or alternative limits")
+
+	// ErrUnsupportedVariable is returned when a path references an AppArmor
+	// variable such as @{HOME}. Variables are expanded by the AppArmor
+	// parser from definitions this package does not have, so it cannot tell
+	// which files such a path covers and would match it as a literal "@"
+	// followed by an alternation.
+	ErrUnsupportedVariable = errors.New("AppArmor variables are not supported")
+
+	// ErrRelativePath is returned by ValidateStrict when a path does not
+	// start with "/". AppArmor file rules must use absolute paths.
+	ErrRelativePath = errors.New("relative path (must be absolute)")
 )
 
 func isKnownCapability(name string) bool {
@@ -80,7 +91,8 @@ func isKnownCapability(name string) bool {
 // Validate checks an AppArmor profile for structural issues.
 // Capability names are validated against the known set of Linux
 // capabilities. Filesystem paths and executable paths are not validated
-// beyond being non-empty.
+// beyond being non-empty and free of AppArmor variables, which the merge
+// cannot interpret (ErrUnsupportedVariable).
 //
 // The checks catch issues that would produce confusing merge results:
 // duplicate paths across filesystem categories, which expand into
@@ -94,10 +106,10 @@ func Validate(profile *Profile) error {
 
 	var errs []error
 
-	err := validateEmptyPathsInProfile(profile)
-	if err != nil {
-		errs = append(errs, err)
-	}
+	visitPathLists(profile, func(context string, paths []string) {
+		errs = append(errs, validateEmptyPaths(context, paths)...)
+		errs = append(errs, validateNoVariables(context, paths)...)
+	})
 
 	if profile.Filesystem != nil {
 		normalized := &FilesystemRules{
@@ -145,11 +157,12 @@ func Validate(profile *Profile) error {
 
 // ValidateStrict performs all checks from Validate and additionally detects
 // duplicate paths in AllowedExecutables and AllowedLibraries, compared in
-// their normalized form, and glob patterns that exceed the matcher's limits
-// and would never match. The merge path handles duplicates by
-// deduplication and drops unmatchable globs on intersection, so Validate
-// permits them. ValidateStrict is intended for user-authored profiles where
-// both are likely mistakes.
+// their normalized form, relative paths, which AppArmor file rules cannot
+// use, and glob patterns that exceed the matcher's limits and would never
+// match. The merge path handles duplicates by deduplication and drops
+// unmatchable globs on intersection, so Validate permits them.
+// ValidateStrict is intended for user-authored profiles where all of these
+// are likely mistakes.
 func ValidateStrict(profile *Profile) error {
 	var errs []error
 
@@ -176,10 +189,52 @@ func ValidateStrict(profile *Profile) error {
 	}
 
 	visitPathLists(profile, func(context string, paths []string) {
+		// Cleaning never changes whether a path is absolute, so the raw
+		// paths are checked and reported as written. Glob limits apply to
+		// the normalized form, which is what the merge matches.
+		errs = append(errs, validateAbsolutePaths(context, paths)...)
 		errs = append(errs, validateGlobLimits(context, normalizePaths(paths))...)
 	})
 
 	return errors.Join(errs...)
+}
+
+// rejectPaths reports every path for which reject holds, quoting the path
+// unless quote is false.
+func rejectPaths(
+	context string, paths []string, reject func(string) bool, sentinel error, quote bool,
+) []error {
+	var errs []error
+
+	for idx, path := range paths {
+		if !reject(path) {
+			continue
+		}
+
+		if quote {
+			errs = append(errs, fmt.Errorf("%s[%d]: %q: %w", context, idx, path, sentinel))
+		} else {
+			errs = append(errs, fmt.Errorf("%s[%d]: %w", context, idx, sentinel))
+		}
+	}
+
+	return errs
+}
+
+// validateNoVariables reports paths that reference an AppArmor variable.
+func validateNoVariables(context string, paths []string) []error {
+	return rejectPaths(context, paths, func(path string) bool {
+		return strings.Contains(path, "@{")
+	}, ErrUnsupportedVariable, true)
+}
+
+// validateAbsolutePaths reports paths that do not start with "/", the only
+// form apparmor_parser accepts for a file rule. Empty paths are reported by
+// Validate instead.
+func validateAbsolutePaths(context string, paths []string) []error {
+	return rejectPaths(context, paths, func(path string) bool {
+		return path != "" && path[0] != '/'
+	}, ErrRelativePath, true)
 }
 
 // visitPathLists calls visit for every list of paths in the profile, named
@@ -203,29 +258,15 @@ func visitPathLists(profile *Profile, visit func(context string, paths []string)
 // itself is left out of the message, since it is at least 4 KiB or has over
 // 100 alternatives.
 func validateGlobLimits(context string, paths []string) []error {
-	var errs []error
-
-	for idx, pattern := range paths {
-		if IsGlobPattern(pattern) && globNeverMatches(pattern) {
-			errs = append(errs, fmt.Errorf("%s[%d]: %w", context, idx, ErrGlobTooComplex))
-		}
-	}
-
-	return errs
+	return rejectPaths(context, paths, func(pattern string) bool {
+		return IsGlobPattern(pattern) && globNeverMatches(pattern)
+	}, ErrGlobTooComplex, false)
 }
 
 func validateEmptyPaths(context string, paths []string) []error {
-	var errs []error
-
-	for idx, path := range paths {
-		if path == "" {
-			errs = append(errs, fmt.Errorf(
-				"%s[%d]: %w", context, idx, ErrEmptyPath,
-			))
-		}
-	}
-
-	return errs
+	return rejectPaths(context, paths, func(path string) bool {
+		return path == ""
+	}, ErrEmptyPath, false)
 }
 
 // validateEmptyPathsInProfile checks for empty paths before normalization,

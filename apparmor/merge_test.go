@@ -825,20 +825,76 @@ func TestIntersectThreeProfiles(t *testing.T) {
 	}
 }
 
-func TestIntersectNilFields(t *testing.T) {
+func TestIntersectNilSectionsDenyEverything(t *testing.T) {
 	t.Parallel()
 
-	left := &apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      nil,
+	full := &apparmor.Profile{
+		Executable: &apparmor.ExecutableRules{
+			AllowedExecutables: []string{"/usr/bin/bash"},
+			AllowedLibraries:   []string{"/usr/lib/libc.so"},
+		},
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths:  []string{pathEtcConfig},
+			WriteOnlyPaths: []string{pathVarLog},
+			ReadWritePaths: []string{"/tmp"},
+		},
+		Network: &apparmor.NetworkRules{
+			AllowRaw: boolPtr(true),
+			Protocols: &apparmor.AllowedProtocols{
+				AllowTCP: boolPtr(true),
+				AllowUDP: boolPtr(true),
+			},
+		},
 		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{capNetAdmin}},
 	}
 
+	// To AppArmor an absent section denies everything it covers, so a
+	// profile that omits every section permits nothing, whichever side it
+	// is on, and the result spells the denial explicitly.
+	empty := &apparmor.Profile{Executable: nil, Filesystem: nil, Network: nil, Capabilities: nil}
+	want := "Profile{net:!raw,!tcp,!udp caps:none}"
+
+	for name, inputs := range map[string][]*apparmor.Profile{
+		"left nil":  {empty, full},
+		"right nil": {full, empty},
+		"both nil":  {empty, empty},
+		"single":    {empty},
+	} {
+		result, err := apparmor.Intersect(inputs...)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", name, err)
+		}
+
+		if got := apparmor.FormatProfile(result); got != want {
+			t.Errorf("%s: Intersect = %s, want %s", name, got, want)
+		}
+
+		if result.Executable == nil || result.Filesystem == nil ||
+			result.Network == nil || result.Network.Protocols == nil {
+			t.Errorf("%s: every section must be explicit in the result", name)
+		}
+	}
+}
+
+func TestIntersectNilNetworkBooleansAreFalse(t *testing.T) {
+	t.Parallel()
+
+	left := &apparmor.Profile{
+		Executable: nil,
+		Filesystem: nil,
+		Network: &apparmor.NetworkRules{
+			AllowRaw:  nil,
+			Protocols: &apparmor.AllowedProtocols{AllowTCP: boolPtr(true), AllowUDP: nil},
+		},
+		Capabilities: nil,
+	}
 	right := &apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      nil,
+		Executable: nil,
+		Filesystem: nil,
+		Network: &apparmor.NetworkRules{
+			AllowRaw:  boolPtr(true),
+			Protocols: nil,
+		},
 		Capabilities: nil,
 	}
 
@@ -847,13 +903,43 @@ func TestIntersectNilFields(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if result.Capabilities == nil {
-		t.Fatal("capabilities should not be nil (one side has it)")
+	// A nil boolean is false on intersection: raw is unset on the left,
+	// tcp is unset on the right (its whole protocols section is), and udp
+	// is unset on both.
+	want := "Profile{net:!raw,!tcp,!udp caps:none}"
+	if got := apparmor.FormatProfile(result); got != want {
+		t.Errorf("Intersect = %s, want %s", got, want)
+	}
+}
+
+func TestUnionNilSectionsDeferToTheOtherSide(t *testing.T) {
+	t.Parallel()
+
+	empty := &apparmor.Profile{Executable: nil, Filesystem: nil, Network: nil, Capabilities: nil}
+	caps := &apparmor.Profile{
+		Executable:   nil,
+		Filesystem:   nil,
+		Network:      &apparmor.NetworkRules{AllowRaw: boolPtr(true), Protocols: nil},
+		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{capNetAdmin}},
 	}
 
-	want := []string{capNetAdmin}
-	if !slices.Equal(result.Capabilities.AllowedCapabilities, want) {
-		t.Errorf("capabilities = %v, want %v", result.Capabilities.AllowedCapabilities, want)
+	for name, inputs := range map[string][]*apparmor.Profile{
+		"left nil":  {empty, caps},
+		"right nil": {caps, empty},
+	} {
+		result, err := apparmor.Union(inputs...)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", name, err)
+		}
+
+		want := "Profile{net:raw caps:NET_ADMIN}"
+		if got := apparmor.FormatProfile(result); got != want {
+			t.Errorf("%s: Union = %s, want %s", name, got, want)
+		}
+
+		if result.Executable != nil || result.Filesystem != nil {
+			t.Errorf("%s: sections nil on both sides stay nil", name)
+		}
 	}
 }
 
@@ -875,352 +961,6 @@ func TestNilProfileAtIndex(t *testing.T) {
 	_, err = apparmor.Union(valid, nil)
 	if err == nil {
 		t.Fatal("expected error for nil profile at index 1 (union)")
-	}
-}
-
-func TestIntersectExecutableLeftNil(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{pathBinPython},
-			AllowedLibraries:   []string{pathLibC},
-		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.Executable == nil {
-		t.Fatal("executable should not be nil")
-	}
-
-	if !slices.Equal(result.Executable.AllowedExecutables, []string{pathBinPython}) {
-		t.Errorf(
-			"AllowedExecutables = %v, want [%s]",
-			result.Executable.AllowedExecutables, pathBinPython,
-		)
-	}
-}
-
-func TestIntersectExecutableRightNil(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{pathBinBash},
-			AllowedLibraries:   nil,
-		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.Executable == nil {
-		t.Fatal("executable should not be nil")
-	}
-
-	if !slices.Equal(result.Executable.AllowedExecutables, []string{pathBinBash}) {
-		t.Errorf(
-			"AllowedExecutables = %v, want [%s]",
-			result.Executable.AllowedExecutables, pathBinBash,
-		)
-	}
-}
-
-func TestIntersectFilesystemLeftNil(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.Filesystem == nil {
-		t.Fatal("filesystem should not be nil")
-	}
-
-	if !slices.Equal(result.Filesystem.ReadOnlyPaths, []string{pathEtcConfig}) {
-		t.Errorf("ReadOnlyPaths = %v, want [%s]", result.Filesystem.ReadOnlyPaths, pathEtcConfig)
-	}
-}
-
-func TestIntersectFilesystemRightNil(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  nil,
-			WriteOnlyPaths: []string{pathVarLog},
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.Filesystem == nil {
-		t.Fatal("filesystem should not be nil")
-	}
-
-	if !slices.Equal(result.Filesystem.WriteOnlyPaths, []string{pathVarLog}) {
-		t.Errorf("WriteOnlyPaths = %v, want [%s]", result.Filesystem.WriteOnlyPaths, pathVarLog)
-	}
-}
-
-func TestIntersectNetworkLeftNil(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw: boolPtr(true),
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: boolPtr(true),
-				AllowUDP: boolPtr(false),
-			},
-		},
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.Network == nil {
-		t.Fatal("network should not be nil")
-	}
-
-	if result.Network.AllowRaw == nil || !*result.Network.AllowRaw {
-		t.Error("AllowRaw should be true (cloned from right)")
-	}
-}
-
-func TestIntersectNetworkRightNil(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw:  boolPtr(false),
-			Protocols: nil,
-		},
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.Network == nil {
-		t.Fatal("network should not be nil")
-	}
-
-	if result.Network.AllowRaw == nil || *result.Network.AllowRaw {
-		t.Error("AllowRaw should be false (cloned from left)")
-	}
-
-	if result.Network.Protocols != nil {
-		t.Error("Protocols should be nil")
-	}
-}
-
-func TestIntersectNetworkLeftProtocolsNil(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw:  boolPtr(true),
-			Protocols: nil,
-		},
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw: boolPtr(true),
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: boolPtr(true),
-				AllowUDP: boolPtr(false),
-			},
-		},
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.Network.Protocols == nil {
-		t.Fatal("Protocols should not be nil (cloned from right)")
-	}
-
-	if result.Network.Protocols.AllowTCP == nil || !*result.Network.Protocols.AllowTCP {
-		t.Error("AllowTCP should be true")
-	}
-}
-
-func TestIntersectNetworkRightProtocolsNil(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw: boolPtr(true),
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: boolPtr(false),
-				AllowUDP: boolPtr(true),
-			},
-		},
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw:  boolPtr(true),
-			Protocols: nil,
-		},
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.Network.Protocols == nil {
-		t.Fatal("Protocols should not be nil (cloned from left)")
-	}
-
-	if result.Network.Protocols.AllowUDP == nil || !*result.Network.Protocols.AllowUDP {
-		t.Error("AllowUDP should be true")
-	}
-}
-
-func TestIntersectBoolOneNil(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw: nil,
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: boolPtr(true),
-				AllowUDP: nil,
-			},
-		},
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw: boolPtr(true),
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: nil,
-				AllowUDP: boolPtr(false),
-			},
-		},
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.Network.AllowRaw == nil || !*result.Network.AllowRaw {
-		t.Error("AllowRaw should be true (left nil, right true)")
-	}
-
-	if result.Network.Protocols.AllowTCP == nil || !*result.Network.Protocols.AllowTCP {
-		t.Error("AllowTCP should be true (left true, right nil)")
-	}
-
-	if result.Network.Protocols.AllowUDP == nil || *result.Network.Protocols.AllowUDP {
-		t.Error("AllowUDP should be false (left nil, right false)")
 	}
 }
 
@@ -1268,85 +1008,6 @@ func TestUnionBoolOneNil(t *testing.T) {
 
 	if result.Network.Protocols.AllowUDP == nil || !*result.Network.Protocols.AllowUDP {
 		t.Error("AllowUDP should be true (left nil, right true)")
-	}
-}
-
-func TestIntersectBoolBothNil(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw: nil,
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: nil,
-				AllowUDP: nil,
-			},
-		},
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw: nil,
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: nil,
-				AllowUDP: nil,
-			},
-		},
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.Network.AllowRaw != nil {
-		t.Error("AllowRaw should be nil when both inputs are nil")
-	}
-
-	if result.Network.Protocols.AllowTCP != nil {
-		t.Error("AllowTCP should be nil when both inputs are nil")
-	}
-}
-
-func TestIntersectCapabilitiesOneNil(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin},
-		},
-	}
-
-	right := &apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.Capabilities == nil {
-		t.Fatal("capabilities should not be nil")
-	}
-
-	if !slices.Equal(result.Capabilities.AllowedCapabilities, []string{capNetAdmin}) {
-		t.Errorf(
-			"capabilities = %v, want [%s]",
-			result.Capabilities.AllowedCapabilities, capNetAdmin,
-		)
 	}
 }
 

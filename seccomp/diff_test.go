@@ -103,13 +103,15 @@ func TestDiffDefaultAction(t *testing.T) {
 func TestDiffArchitectures(t *testing.T) {
 	t.Parallel()
 
+	// Architectures no test host runs on, since the native one is implied
+	// on both sides and never reported.
 	left := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
-		Architectures: []specs.Arch{specs.ArchX86_64, specs.ArchARM},
+		Architectures: []specs.Arch{specs.ArchMIPS, specs.ArchARM},
 	}
 	right := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
-		Architectures: []specs.Arch{specs.ArchX86_64, specs.ArchAARCH64},
+		Architectures: []specs.Arch{specs.ArchMIPS, specs.ArchPPC64},
 	}
 
 	diff, err := seccomp.Diff(left, right)
@@ -125,8 +127,35 @@ func TestDiffArchitectures(t *testing.T) {
 		t.Errorf("removed = %v, want [SCMP_ARCH_ARM]", diff.Architectures.Removed)
 	}
 
-	if len(diff.Architectures.Added) != 1 || diff.Architectures.Added[0] != specs.ArchAARCH64 {
-		t.Errorf("added = %v, want [SCMP_ARCH_AARCH64]", diff.Architectures.Added)
+	if len(diff.Architectures.Added) != 1 || diff.Architectures.Added[0] != specs.ArchPPC64 {
+		t.Errorf("added = %v, want [SCMP_ARCH_PPC64]", diff.Architectures.Added)
+	}
+}
+
+func TestDiffArchitecturesNativeImplied(t *testing.T) {
+	t.Parallel()
+
+	native, ok := seccomp.NativeArchitecture()
+	if !ok {
+		t.Skip("native architecture unknown on this host")
+	}
+
+	left := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
+	right := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Architectures: []specs.Arch{native},
+	}
+
+	diff, err := seccomp.Diff(left, right)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Runtimes always cover the native architecture, so listing it changes
+	// nothing and the README flow of diffing an artifact against its
+	// intersection with a native-only baseline reports no change.
+	if !diff.Equal {
+		t.Errorf("expected equal, got %s", seccomp.FormatDiff(diff))
 	}
 }
 
@@ -300,7 +329,7 @@ func TestDiffFormatComplex(t *testing.T) {
 
 	left := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
-		Architectures: []specs.Arch{specs.ArchX86_64},
+		Architectures: []specs.Arch{specs.ArchMIPS},
 		Syscalls: []specs.LinuxSyscall{
 			{Names: []string{syscallRead}, Action: specs.ActAllow},
 			{Names: []string{syscallWrite}, Action: specs.ActAllow},
@@ -308,10 +337,10 @@ func TestDiffFormatComplex(t *testing.T) {
 	}
 	right := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActAllow,
-		Architectures: []specs.Arch{specs.ArchARM},
+		Architectures: []specs.Arch{specs.ArchPPC64},
 		Syscalls: []specs.LinuxSyscall{
 			{Names: []string{syscallRead}, Action: specs.ActLog},
-			{Names: []string{syscallClose}, Action: specs.ActAllow},
+			{Names: []string{syscallClose}, Action: specs.ActErrno},
 		},
 	}
 
@@ -327,10 +356,10 @@ func TestDiffFormatComplex(t *testing.T) {
 
 	for _, want := range []string{
 		"default:SCMP_ACT_ERRNO->SCMP_ACT_ALLOW",
-		"-SCMP_ARCH_X86_64",
-		"+SCMP_ARCH_ARM",
+		"-SCMP_ARCH_MIPS",
+		"+SCMP_ARCH_PPC64",
 		"-write->SCMP_ACT_ALLOW",
-		"+close->SCMP_ACT_ALLOW",
+		"+close->SCMP_ACT_ERRNO",
 		"~read:",
 	} {
 		if !strings.Contains(got, want) {
@@ -379,13 +408,13 @@ func TestDiffSyscallErrnoRet(t *testing.T) {
 	errnoB := uint(2)
 
 	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
+		DefaultAction: specs.ActAllow,
 		Syscalls: []specs.LinuxSyscall{
 			{Names: []string{syscallRead}, Action: specs.ActErrno, ErrnoRet: &errnoA},
 		},
 	}
 	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
+		DefaultAction: specs.ActAllow,
 		Syscalls: []specs.LinuxSyscall{
 			{Names: []string{syscallRead}, Action: specs.ActErrno, ErrnoRet: &errnoB},
 		},
@@ -605,7 +634,8 @@ func TestDiffMultiEntrySameSyscall(t *testing.T) {
 			},
 			{
 				Names:  []string{syscallClone},
-				Action: specs.ActErrno,
+				Action: specs.ActLog,
+				Args:   []specs.LinuxSeccompArg{{Index: 1, Value: 1, Op: specs.OpEqualTo}},
 			},
 		},
 	}
@@ -614,7 +644,8 @@ func TestDiffMultiEntrySameSyscall(t *testing.T) {
 		Syscalls: []specs.LinuxSyscall{
 			{
 				Names:  []string{syscallClone},
-				Action: specs.ActErrno,
+				Action: specs.ActLog,
+				Args:   []specs.LinuxSeccompArg{{Index: 1, Value: 1, Op: specs.OpEqualTo}},
 			},
 		},
 	}

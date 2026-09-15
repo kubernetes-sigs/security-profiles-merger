@@ -46,12 +46,11 @@ import "sigs.k8s.io/security-profiles-merger/seccomp"
 | `MoreRestrictive` | Return the more restrictive of two seccomp actions |
 | `LessRestrictive` | Return the less restrictive of two seccomp actions |
 | `NativeArchitecture` | The seccomp architecture of the running program, from `runtime.GOARCH` |
-| `PopulateNativeArchitecture` | Set a profile's empty architecture list to the native architecture before merging |
-| `Validate` | Check for known actions and non-empty syscall names |
-| `ValidateStrict` | All Validate checks plus duplicates (reported once per name), unknown archs/flags/operators, out-of-range arg indices, errno values above 4095 on actions that return them, `valueTwo` on operators that ignore it, and `errnoRet` on actions that ignore it |
-| `ValidateArtifact` | Validate plus the shape checks for untrusted OCI artifacts; rejects `SCMP_ACT_NOTIFY`, the listener settings (`listenerPath`, `listenerMetadata`, `SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV`), errno values above 4095 on actions that return them, more than `MaxArtifactEntriesPerSyscall` entries per syscall, and conflicting entries for one syscall (same shape, different result); allows duplicates and ignores `valueTwo` and `errnoRet` where runtimes ignore them |
+| `Validate` | Check for what a runtime needs to load the profile: known actions, non-empty syscall names, known arg operators, arg indices in range, and known architectures and flags |
+| `ValidateStrict` | All Validate checks plus duplicates (syscall names, reported once per name, architectures, flags), errno values above 4095 on actions that return them, `valueTwo` on operators that ignore it, and `errnoRet` on actions that ignore it |
+| `ValidateArtifact` | Validate plus the shape checks for untrusted OCI artifacts (duplicate architectures and flags, errno values above 4095 on actions that return them); rejects `SCMP_ACT_NOTIFY`, the listener settings (`listenerPath`, `listenerMetadata`, `SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV`), more than `MaxArtifactEntriesPerSyscall` entries per syscall, and conflicting entries for one syscall (same shape, different result); allows duplicate syscall names and ignores `valueTwo` and `errnoRet` where runtimes ignore them |
 | `FormatProfile` | Human-readable representation of a seccomp profile |
-| `Diff` | Structured diff between two profiles; errno values are compared as runtimes apply them |
+| `Diff` | Structured diff between two profiles, compared by what a runtime loads from them (see merge semantics) |
 | `FormatDiff` | Human-readable representation of a profile diff |
 
 See [pkg.go.dev](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp)
@@ -72,39 +71,34 @@ formatting.
 Sentinel errors (`ErrNoProfiles`, `ErrNilProfile`, `ErrUnknownAction`,
 `ErrEmptySyscallNames`, `ErrDuplicateSyscallName`, `ErrUnknownOperator`,
 `ErrArgIndexOutOfRange`, `ErrErrnoOutOfRange`, `ErrUnusedValueTwo`,
-`ErrUnusedErrnoRet`, `ErrConflictingEntries`, `ErrDisjointArchitectures`,
-`ErrUnknownArch`, `ErrUnknownFlag`, `ErrUnknownNativeArchitecture`, etc.) are
-documented
+`ErrUnusedErrnoRet`, `ErrConflictingEntries`, `ErrUnknownArch`,
+`ErrUnknownFlag`, etc.) are documented
 in the [package reference](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#pkg-variables).
 
 ### Merge semantics
 
 - Default actions are merged using the same restrictiveness comparison as
   syscalls.
-- Architectures: intersection keeps only architectures present in all profiles;
-  union combines all. An empty architecture list is treated as "unspecified" and
-  defers to the other profile. Per the OCI runtime-spec, empty means "native
-  architecture only", but the native architecture is unknown at merge time.
-  Callers that need precise architecture intersection should populate the native
-  architecture explicitly before merging, for example with
-  `PopulateNativeArchitecture`. Two non-empty lists with no architecture in
-  common cannot be intersected: an empty result would again mean "native
-  architecture only", which neither input permits, so `Intersect` returns
-  `ErrDisjointArchitectures`.
+- Architectures follow how runc and crun load them: the filter always covers
+  the native architecture, and the listed architectures are added to it. An
+  empty list means "native only" and a non-empty list means "native plus
+  these", so intersection is the plain set intersection of the lists, which
+  may be empty, and union combines them. A list need not name the native
+  architecture, and a profile listing only foreign architectures is valid.
 - Flags are merged by what they do, so that a merged profile never loosens a
   baseline. `SECCOMP_FILTER_FLAG_SPEC_ALLOW` disables a mitigation: intersection
   keeps it only if every profile sets it, union if any does.
   `SECCOMP_FILTER_FLAG_LOG` adds audit logging: intersection keeps it if any
   profile sets it, union only if every profile does.
   `SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV` only matters with a listener and is
-  taken from the first profile, like `listenerPath`. Unknown flags are treated
-  like `SECCOMP_FILTER_FLAG_LOG`. An empty flag list means "no flags".
+  taken from the first profile, like `listenerPath`. Unknown flags are
+  rejected by `Validate`. An empty flag list means "no flags".
 - Argument conditions are compared as runtimes evaluate them: `valueTwo` is only
   read for `SCMP_CMP_MASKED_EQ` and is cleared for every other operator, so
   conditions that differ only there are the same filter.
-- A single profile is normalized as if it were merged with itself, so
-  `Intersect(p)` and `Union(p)` follow the evaluation model below and are
-  deterministic.
+- A single profile is normalized without merging: `Intersect(p)` and
+  `Union(p)` reduce it to what a runtime loads from it under the evaluation
+  model below, in the same form `Diff` compares.
 - Evaluation model: entries are evaluated the way runc and libseccomp load
   them. Entries whose action (and errno, for `ERRNO` and `TRACE`) equals the
   profile default are ignored. An unconditional entry applies to every call of
@@ -136,6 +130,18 @@ in the [package reference](https://pkg.go.dev/sigs.k8s.io/security-profiles-merg
   kept, with its action raised to the least restrictive action any input
   applies to matching calls. The result never denies a call that any input
   permits.
+- Precision: both directions are conservative rather than exact where filters
+  interact. Intersection lowers a conditional entry by every overlapping entry
+  of the other side, even one covering only part of its region, and union
+  collapses a whole syscall to its surrounding action once any of its entries
+  is inexpressible. For example, intersecting `read: ALLOW if arg0 == 1`
+  under default `ERRNO` with `read: ERRNO if arg0 < 5` and `read: TRAP if
+  arg1 == 1` under default `ALLOW` traps `arg0 == 1` entirely, although only
+  `arg0 >= 5 && arg1 == 1` needs to; and the union of the same inputs allows
+  every `read`, although `arg0 in {0, 2, 3, 4}` is denied by both. The safety
+  properties above always hold; only the tightness varies.
+- `SCMP_ACT_KILL_THREAD` is spelled `SCMP_ACT_KILL` in results, as libseccomp
+  defines them as the same action.
 - Output grouping: entries sharing the same action, errno, and argument filters
   are emitted as one multi-name entry, sorted by first name, then by argument
   filter, action, and errno, which is a total order, so equal inputs always
@@ -152,6 +158,18 @@ in the [package reference](https://pkg.go.dev/sigs.k8s.io/security-profiles-merg
   can depend on argument order, so results are order-independent in effect
   only for profiles without errno values.
 - `ListenerPath` and `ListenerMetadata` are taken from the first profile.
+- `Diff` compares syscall entries by what a runtime loads from them, using the
+  evaluation model above: entries equal to the profile default are ignored, an
+  unconditional entry hides the conditional entries for its syscall, several
+  conditions on one argument index are alternatives, entries with identical
+  filters merge into the least restrictive one, entries that can never decide
+  a call (their filter is wider than another entry's and their action no less
+  restrictive) are dropped, and errno values and `SCMP_ACT_KILL_THREAD` are
+  canonicalized. Architectures are compared with the native architecture
+  implied on both sides, as runtimes always cover it. A single-profile merge
+  is exactly this normalization, so `Diff(p, Intersect(p))` is always equal,
+  and a merge against a profile that constrains nothing compares equal to its
+  other input.
 
 **Action restrictiveness ordering** (most to least restrictive):
 
@@ -175,8 +193,8 @@ import "sigs.k8s.io/security-profiles-merger/apparmor"
 |----------|-------------|
 | `Intersect` | Merge via intersection; capabilities/paths intersected, network AND |
 | `Union` | Merge via union; all rules combined, network OR |
-| `Validate` | Check for cross-category path conflicts and known capabilities |
-| `ValidateStrict` | All Validate checks plus duplicate executables/libraries and glob patterns over the matcher's limits |
+| `Validate` | Check for cross-category path conflicts, known capabilities, and the absence of AppArmor variables |
+| `ValidateStrict` | All Validate checks plus duplicate executables/libraries, relative paths, and glob patterns over the matcher's limits |
 | `FormatProfile` | Human-readable representation of an AppArmor profile |
 | `IsGlobPattern` | Report whether a path contains AppArmor glob tokens |
 | `Diff` | Structured diff between two profiles |
@@ -200,7 +218,7 @@ documented in the
 
 Sentinel errors (`ErrNoProfiles`, `ErrNilProfile`, `ErrDuplicatePath`,
 `ErrUnknownCapability`, `ErrDuplicateExecutablePath`, `ErrGlobTooComplex`,
-etc.) are documented
+`ErrUnsupportedVariable`, `ErrRelativePath`, etc.) are documented
 in the [package reference](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#pkg-variables).
 
 ### Glob patterns
@@ -223,14 +241,22 @@ narrows to `/etc/*.conf` and to `/etc/foo/*.conf`). On union a glob prunes
 literals it matches; globs never prune other globs. Patterns longer than 4096
 bytes or with more than 100 alternatives in total never match, so they are
 dropped on intersection and kept verbatim on union; `ValidateStrict` reports
-them with `ErrGlobTooComplex`.
+them with `ErrGlobTooComplex`. AppArmor variables such as `@{HOME}` are not
+supported: their expansion is unknown to this package, so `Validate` rejects
+paths containing `@{` with `ErrUnsupportedVariable`. File rules must use
+absolute paths; `ValidateStrict` reports paths that do not start with `/`
+with `ErrRelativePath`.
 
 ### Nil vs empty semantics
 
-A nil field means "unspecified" and defers to the other profile during merge. A
-non-nil field with empty contents means "explicitly no permissions". For example,
-intersecting `{caps: [NET_ADMIN]}` with `{caps: nil}` yields `[NET_ADMIN]`,
-while intersecting with `{caps: []}` yields `[]`.
+A nil field means the profile says nothing about that section, which to
+AppArmor denies everything the section covers. `Intersect` treats a nil
+section as an explicit empty one and a nil network boolean as `false`, so
+intersecting `{caps: [NET_ADMIN]}` with `{caps: nil}` yields `[]` just like
+intersecting with `{caps: []}` does, and the result carries every section
+explicitly. `Union` lets a nil section defer to the other profile, which
+grants the same as an empty section would; only the shape of the result
+differs, as a section nil on both sides stays nil.
 
 ### Filesystem merge
 
@@ -239,9 +265,9 @@ intersection, OR for union), and collapsed back into read-only, write-only, and
 read-write lists. A read-write path intersected with a read-only path becomes
 read-only (only the shared permission survives). A read-only path in one profile
 and write-only in the other is dropped on intersection (no shared permissions)
-but becomes read-write on union. When two non-nil filesystem rule sets produce
-no overlapping paths after intersection, the result is a non-nil empty
-`FilesystemRules` (preserving the nil-vs-empty distinction).
+but becomes read-write on union. When no paths overlap after intersection,
+the result is an empty `FilesystemRules`, which is explicit like every
+section of an intersection result.
 
 ## landlock
 

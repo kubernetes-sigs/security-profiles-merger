@@ -61,7 +61,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - run: go test -count=1 ./apparmor/... ./landlock/... ./seccomp/... ./internal/...
+      - run: go test -count=1 ./...
 
   fuzz-prepare:
     name: fuzz / prepare
@@ -114,9 +114,12 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      # The corpus the fuzzing engine grows lives in the Go build cache, not
+      # in testdata/fuzz, which only holds committed regression inputs.
+      - run: echo "GOFUZZCACHE=$(go env GOCACHE)/fuzz" >> "$GITHUB_ENV"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ matrix.fuzz.package }}testdata/fuzz
+          path: ${{ env.GOFUZZCACHE }}
           key: fuzz-${{ matrix.fuzz.name }}-${{ github.sha }}
           restore-keys: fuzz-${{ matrix.fuzz.name }}-
       - run: go test -fuzz="^${{ matrix.fuzz.target }}\$" -fuzztime=30s ${{ matrix.fuzz.package }}

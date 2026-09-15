@@ -82,26 +82,20 @@ if err := seccomp.ValidateArtifact(ociPulledProfile); err != nil {
     return err // report as a permanent rejection
 }
 
-// At apply time: an empty architecture list means "native" to the runtime
-// but "unspecified" to the merge, so populate it on every input first.
-for _, profile := range []*specs.LinuxSeccomp{nodeBaseline, podBaseProfile, ociPulledProfile} {
-    if err := seccomp.PopulateNativeArchitecture(profile); err != nil {
-        return err
-    }
-}
-
-// Inputs go from most to least trusted: the runtime baseline, the optional
-// pod-spec base profile, then the artifact. Tie-breaks such as errno values
-// favor the earlier input. ErrDisjointArchitectures means the artifact was
-// built for another architecture: report it as a permanent rejection, like
-// a ValidateArtifact failure.
+// At apply time, inputs go from most to least trusted: the runtime
+// baseline, the optional pod-spec base profile, then the artifact.
+// Tie-breaks such as errno values favor the earlier input. Architectures
+// need no preparation: as in runc and crun, every profile covers the native
+// architecture plus the ones it lists, and the merge intersects the lists.
 effective, err := seccomp.Intersect(nodeBaseline, podBaseProfile, ociPulledProfile)
 if err != nil {
     return err
 }
 
 // effective permits only what every input permits. What the merge took away
-// from the artifact is visible in the diff, for logging or metrics.
+// from the artifact is visible in the diff, for logging or metrics. Diff
+// compares profiles by what a runtime loads from them, so it is equal when
+// the baseline changed nothing, even though the merge normalizes its output.
 constrained, err := seccomp.Diff(ociPulledProfile, effective)
 if err != nil {
     return err
@@ -124,6 +118,9 @@ if err != nil {
 ### AppArmor profile merge
 
 ```go
+// A section a profile omits denies everything it covers, as it does in
+// AppArmor, so a baseline without a capability section grants no
+// capability to the intersection.
 aaEffective, err := apparmor.Intersect(baseProfile, ociProfile)
 aaCombined, err := apparmor.Union(recorded1, recorded2)
 ```

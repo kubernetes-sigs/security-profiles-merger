@@ -71,8 +71,27 @@ func LessRestrictive(first, second specs.LinuxSeccompAction) specs.LinuxSeccompA
 	return second
 }
 
-func actionsEquivalent(a, b specs.LinuxSeccompAction) bool {
-	return restrictiveness(a) == restrictiveness(b)
+// actionsEquivalent reports whether two actions have the same effect.
+// Unknown actions are equivalent only to themselves, so that unvalidated
+// profiles (as Diff accepts) do not conflate distinct unknown actions.
+func actionsEquivalent(first, second specs.LinuxSeccompAction) bool {
+	level := restrictiveness(first)
+	if level == levelUnknown {
+		return first == second
+	}
+
+	return level == restrictiveness(second)
+}
+
+// canonicalAction spells SCMP_ACT_KILL_THREAD as SCMP_ACT_KILL, which
+// libseccomp defines as the same action. Clauses are built in this form, so
+// every result spells the action the same way.
+func canonicalAction(action specs.LinuxSeccompAction) specs.LinuxSeccompAction {
+	if action == specs.ActKillThread {
+		return specs.ActKill
+	}
+
+	return action
 }
 
 func restrictiveness(action specs.LinuxSeccompAction) int {

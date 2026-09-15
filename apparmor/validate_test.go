@@ -667,8 +667,111 @@ func TestValidateStrictGlobTooComplex(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	want := "Profile{r:/etc/passwd}"
+	want := "Profile{r:/etc/passwd net:!raw,!tcp,!udp caps:none}"
 	if got := apparmor.FormatProfile(result); got != want {
 		t.Errorf("Intersect = %s, want %s", got, want)
+	}
+}
+
+func TestValidateRejectsVariables(t *testing.T) {
+	t.Parallel()
+
+	profile := &apparmor.Profile{
+		Executable: &apparmor.ExecutableRules{
+			AllowedExecutables: []string{"@{HOME}/bin/*"}, AllowedLibraries: nil,
+		},
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths:  []string{"/etc/passwd", "@{PROC}/[0-9]*/status"},
+			WriteOnlyPaths: nil, ReadWritePaths: nil,
+		},
+		Network:      nil,
+		Capabilities: nil,
+	}
+
+	err := apparmor.Validate(profile)
+	if !errors.Is(err, apparmor.ErrUnsupportedVariable) {
+		t.Fatalf("expected ErrUnsupportedVariable, got: %v", err)
+	}
+
+	for _, want := range []string{"AllowedExecutables[0]", "ReadOnlyPaths[1]"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %s", err, want)
+		}
+	}
+
+	_, err = apparmor.Intersect(profile, profile)
+	if !errors.Is(err, apparmor.ErrUnsupportedVariable) {
+		t.Errorf("Intersect: expected ErrUnsupportedVariable, got: %v", err)
+	}
+}
+
+func TestValidateStrictRejectsRelativePaths(t *testing.T) {
+	t.Parallel()
+
+	profile := &apparmor.Profile{
+		Executable: &apparmor.ExecutableRules{
+			AllowedExecutables: []string{"bin/sh", "/bin/sh"}, AllowedLibraries: nil,
+		},
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths:  []string{"etc/**", "/etc/**", "{/usr,/opt}/**", "./etc/x"},
+			WriteOnlyPaths: nil,
+			ReadWritePaths: nil,
+		},
+		Network:      nil,
+		Capabilities: nil,
+	}
+
+	err := apparmor.Validate(profile)
+	if err != nil {
+		t.Fatalf("Validate must accept relative paths, got: %v", err)
+	}
+
+	err = apparmor.ValidateStrict(profile)
+	if !errors.Is(err, apparmor.ErrRelativePath) {
+		t.Fatalf("expected ErrRelativePath, got: %v", err)
+	}
+
+	msg := err.Error()
+
+	// apparmor_parser only accepts file rules starting with "/", so a
+	// leading alternation is relative too, and paths are reported as
+	// written rather than cleaned.
+	for _, want := range []string{
+		`AllowedExecutables[0]: "bin/sh"`,
+		`ReadOnlyPaths[0]: "etc/**"`,
+		`ReadOnlyPaths[2]: "{/usr,/opt}/**"`,
+		`ReadOnlyPaths[3]: "./etc/x"`,
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q does not name %s", msg, want)
+		}
+	}
+
+	for _, unwanted := range []string{`"/bin/sh"`, "ReadOnlyPaths[1]"} {
+		if strings.Contains(msg, unwanted) {
+			t.Errorf("error %q must not flag absolute path %s", msg, unwanted)
+		}
+	}
+}
+
+func TestValidateStrictEmptyPathReportedOnce(t *testing.T) {
+	t.Parallel()
+
+	profile := &apparmor.Profile{
+		Executable: nil,
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths: []string{""}, WriteOnlyPaths: nil, ReadWritePaths: nil,
+		},
+		Network:      nil,
+		Capabilities: nil,
+	}
+
+	err := apparmor.ValidateStrict(profile)
+	if !errors.Is(err, apparmor.ErrEmptyPath) {
+		t.Fatalf("expected ErrEmptyPath, got: %v", err)
+	}
+
+	if errors.Is(err, apparmor.ErrRelativePath) {
+		t.Errorf("empty path must not also be reported as relative: %v", err)
 	}
 }

@@ -430,9 +430,13 @@ func (set fieldSet) lookup(key string) (reflect.Type, bool) {
 }
 
 // jsonFields collects the JSON-visible fields of a struct type, including
-// those promoted from embedded structs.
+// those promoted from embedded structs. As in encoding/json, a field of the
+// struct itself wins over a promoted field of the same name, so promoted
+// fields are added last.
 func jsonFields(typ reflect.Type) fieldSet {
 	set := fieldSet{exact: map[string]reflect.Type{}, folded: map[string]reflect.Type{}}
+
+	var embedded []reflect.Type
 
 	for idx := range typ.NumField() {
 		field := typ.Field(idx)
@@ -443,7 +447,7 @@ func jsonFields(typ reflect.Type) fieldSet {
 		}
 
 		if field.Anonymous && name == "" {
-			set.addPromoted(field.Type)
+			embedded = append(embedded, field.Type)
 
 			continue
 		}
@@ -453,6 +457,10 @@ func jsonFields(typ reflect.Type) fieldSet {
 		}
 
 		set.add(name, field.Type)
+	}
+
+	for _, embeddedType := range embedded {
+		set.addPromoted(embeddedType)
 	}
 
 	return set

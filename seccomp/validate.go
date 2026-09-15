@@ -105,8 +105,10 @@ var (
 const MaxArtifactEntriesPerSyscall = 128
 
 // Validate checks that a seccomp profile contains only known actions and
-// that every syscall entry has non-empty names. Intersect and Union run it
-// on every input and fail on the first invalid profile, so callers that
+// that every syscall entry has non-empty names, known argument operators,
+// argument indices in range, and known architectures and flags, which is
+// what a runtime needs to load the profile at all. Intersect and Union run
+// it on every input and fail on the first invalid profile, so callers that
 // want to report all problems up front can call it themselves. All
 // validation failures are collected and returned together.
 func Validate(profile *specs.LinuxSeccomp) error {
@@ -120,6 +122,12 @@ func Validate(profile *specs.LinuxSeccomp) error {
 	if err != nil {
 		errs = append(errs, err)
 	}
+
+	errs = append(errs,
+		validateSyscallArgs(profile.Syscalls),
+		validateArchitectures(profile.Architectures),
+		validateFlags(profile.Flags),
+	)
 
 	for idx := range profile.Syscalls {
 		if len(profile.Syscalls[idx].Names) == 0 {
@@ -147,13 +155,13 @@ func Validate(profile *specs.LinuxSeccomp) error {
 }
 
 // ValidateStrict performs all checks from Validate and additionally detects
-// duplicate syscall names across entries, unknown architectures, unknown
-// flags, unknown arg operators, out-of-range arg indices and errno values,
-// valueTwo set on an operator that ignores it, and errnoRet set on an action
-// that ignores it. The OCI runtime-spec allows the same syscall to appear in
-// multiple entries (for example with different argument filters), so the
-// merge path uses Validate which permits this. ValidateStrict is intended
-// for user-authored profiles where duplicates are likely mistakes.
+// duplicate syscall names across entries, duplicate architectures and
+// flags, out-of-range errno values, valueTwo set on an operator that
+// ignores it, and errnoRet set on an action that ignores it. The OCI
+// runtime-spec allows the same syscall to appear in multiple entries (for
+// example with different argument filters), so the merge path uses Validate
+// which permits this. ValidateStrict is intended for user-authored profiles
+// where duplicates are likely mistakes.
 func ValidateStrict(profile *specs.LinuxSeccomp) error {
 	return validateWith(
 		profile,
@@ -167,12 +175,12 @@ func ValidateStrict(profile *specs.LinuxSeccomp) error {
 // ValidateArtifact validates a profile received from an untrusted source,
 // such as an OCI artifact pulled by a container runtime (KEP-6061). It
 // performs all checks from Validate and the shape checks from ValidateStrict
-// (unknown or duplicate architectures and flags, unknown arg operators,
-// out-of-range arg indices and errno values), and rejects what a distributed
-// profile must not control: SCMP_ACT_NOTIFY, because it needs a listener
-// that only the runtime can provide, and the listener settings listenerPath,
-// listenerMetadata and SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, because they
-// belong to the node-local listener. Duplicate syscall names are allowed, as
+// (duplicate architectures and flags, out-of-range errno values),
+// and rejects what a distributed profile must not control: SCMP_ACT_NOTIFY,
+// because it needs a listener that only the runtime can provide, and the
+// listener settings listenerPath, listenerMetadata and
+// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, because they belong to the
+// node-local listener. Duplicate syscall names are allowed, as
 // the OCI runtime-spec permits them and Intersect handles them, but no
 // syscall may appear in more than MaxArtifactEntriesPerSyscall entries,
 // which bounds the merge cost, and entries for one syscall must not
@@ -214,16 +222,12 @@ func validateWith(profile *specs.LinuxSeccomp, checks ...profileCheck) error {
 }
 
 // validateShape runs the checks shared by ValidateStrict and
-// ValidateArtifact that do not depend on trust: unknown or duplicate
-// architectures and flags, unknown arg operators, and out-of-range arg
-// indices.
+// ValidateArtifact that do not depend on trust: duplicate architectures and
+// flags, and out-of-range errno values.
 func validateShape(profile *specs.LinuxSeccomp) error {
 	return errors.Join(
-		validateArchitectures(profile.Architectures),
 		validateDuplicateArchitectures(profile.Architectures),
-		validateFlags(profile.Flags),
 		validateDuplicateFlags(profile.Flags),
-		validateSyscallArgs(profile.Syscalls),
 		validateErrnoRange(profile),
 	)
 }

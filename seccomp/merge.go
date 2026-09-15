@@ -18,7 +18,6 @@ package seccomp
 
 import (
 	"cmp"
-	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -35,11 +34,6 @@ var (
 	ErrNoProfiles = merge.ErrNoProfiles
 	// ErrNilProfile is returned when a nil profile is provided.
 	ErrNilProfile = merge.ErrNilProfile
-	// ErrDisjointArchitectures is returned by Intersect when two profiles
-	// list architectures but have none in common. An empty result would
-	// mean "native architecture only" to the runtime, which neither input
-	// permits.
-	ErrDisjointArchitectures = errors.New("no architecture in common")
 )
 
 // Intersect merges multiple seccomp profiles via intersection: the resulting
@@ -73,15 +67,13 @@ var (
 // other action is ignored. The result spells EPERM as an unset errnoRet and
 // drops ignored values.
 //
-// An empty Architectures list is treated as "unspecified" and defers to the
-// other profile. Per the OCI runtime-spec, empty means "native architecture
-// only", but the native architecture is unknown at merge time. Callers that
-// need precise architecture intersection should populate the native
-// architecture explicitly before merging, for example with
-// PopulateNativeArchitecture. Two non-empty lists with no architecture in
-// common cannot be intersected: an empty result would again mean "native
-// architecture only", which neither input permits, so Intersect returns
-// ErrDisjointArchitectures instead.
+// Architectures are merged the way runc and crun load them: the filter
+// always covers the native architecture, and the listed architectures are
+// added to it. An empty list therefore means "native only" and a non-empty
+// list means "native plus these", so the intersection is the plain set
+// intersection of the lists, which may be empty. Since the native
+// architecture is always implied, a list need not name it, and a profile
+// that lists only foreign architectures is still valid.
 //
 // Flags are merged by what they do. SECCOMP_FILTER_FLAG_SPEC_ALLOW loosens
 // confinement and survives only if every profile sets it, so a profile
@@ -89,15 +81,16 @@ var (
 // hardens auditing and survives if any profile sets it, so a profile cannot
 // silence the baseline's logging. SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV
 // belongs to the listener and, like ListenerPath, is taken from the first
-// profile. Unknown flags are treated like SECCOMP_FILTER_FLAG_LOG. An empty
-// Flags list means "no flags".
+// profile. Unknown flags are rejected by Validate. An empty Flags list means
+// "no flags".
 //
 // Argument conditions are compared as runtimes evaluate them: valueTwo is
 // only significant for SCMP_CMP_MASKED_EQ and is cleared for every other
 // operator, so conditions that differ only there are the same filter.
 //
-// A single profile is normalized as if merged with itself, so the result is
-// deterministic and follows the same evaluation model as a merge.
+// A single profile is normalized without merging: it is reduced to what a
+// runtime loads from it under this evaluation model, in the form Diff
+// compares, so Diff(p, Intersect(p)) is always equal.
 //
 // Syscall entries in the result are grouped: names sharing the same action,
 // errno, and argument filters are emitted as one entry, sorted by name, then
@@ -129,7 +122,8 @@ func Intersect(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 // Flags mirror Intersect: SECCOMP_FILTER_FLAG_SPEC_ALLOW survives if any
 // profile sets it, SECCOMP_FILTER_FLAG_LOG only if every profile does, and
 // SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV comes from the first profile.
-// Architectures are combined.
+// Architectures are combined, which under the runtime model described for
+// Intersect (native plus the listed architectures) is the exact union.
 //
 // Argument conditions, single profiles, and output ordering are handled as
 // described for Intersect.
@@ -155,21 +149,22 @@ func foldProfiles(
 		}
 	}
 
-	// A single profile is merged with itself so that it goes through the
-	// same evaluation model as a real merge instead of a plain clone.
-	if len(profiles) == 1 {
-		profiles = []*specs.LinuxSeccomp{profiles[0], profiles[0]}
+	if len(profiles) == 0 {
+		return nil, fmt.Errorf("merge: %w", ErrNoProfiles)
 	}
 
-	result, err := merge.Fold(
-		profiles,
-		cloneProfile,
-		func(a, b *specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
-			return mergeTwo(a, b, strategy)
-		},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("merge: %w", err)
+	var result *specs.LinuxSeccomp
+
+	// A single profile is normalized to the form a merge result takes, which
+	// is also the form Diff compares.
+	if len(profiles) == 1 {
+		result = normalizeProfile(profiles[0])
+	} else {
+		result = mergeTwo(profiles[0], profiles[1], strategy)
+
+		for _, profile := range profiles[2:] {
+			result = mergeTwo(result, profile, strategy)
+		}
 	}
 
 	result.Syscalls = regroupSyscalls(result.Syscalls)
@@ -180,10 +175,58 @@ func foldProfiles(
 	return result, nil
 }
 
+// normalizeProfile returns the profile in the form a merge result takes,
+// without merging it against anything: syscall entries are reduced to what
+// a runtime loads from them (see normalizeSyscalls), errno values and
+// SCMP_ACT_KILL_THREAD are spelled canonically, and the other fields are
+// copied. Diff compares profiles in this form.
+func normalizeProfile(profile *specs.LinuxSeccomp) *specs.LinuxSeccomp {
+	def := defaultClause(profile)
+
+	return &specs.LinuxSeccomp{
+		DefaultAction:    def.action,
+		DefaultErrnoRet:  outputErrno(def.action, def.errnoRet),
+		Architectures:    merge.DeduplicateSlice(profile.Architectures),
+		Flags:            merge.DeduplicateSlice(profile.Flags),
+		ListenerPath:     profile.ListenerPath,
+		ListenerMetadata: profile.ListenerMetadata,
+		Syscalls:         normalizeSyscalls(profile.Syscalls, def),
+	}
+}
+
+// normalizeSyscalls reduces syscall entries to the clauses a runtime loads
+// from them, following the evaluation model documented on the clause type:
+// entries equal to def are dropped (when def is non-nil), the first
+// unconditional entry wins and hides conditional ones, several conditions
+// on one argument index become alternatives, clauses with identical filters
+// merge into the least restrictive one, and clauses that can never decide a
+// call are pruned. The result has one name per entry; callers regroup it.
+func normalizeSyscalls(syscalls []specs.LinuxSyscall, def *clause) []specs.LinuxSyscall {
+	rules := collectRules(syscalls, def)
+
+	var result []specs.LinuxSyscall
+
+	for _, name := range slices.Sorted(maps.Keys(rules)) {
+		current := rules[name]
+
+		if current.unconditional != nil {
+			result = append(result, clauseToSyscall(name, *current.unconditional))
+
+			continue
+		}
+
+		for _, next := range unionRules().collapseClauses(current.conditional, nil) {
+			result = append(result, clauseToSyscall(name, next))
+		}
+	}
+
+	return result
+}
+
 func mergeTwo(
 	left, right *specs.LinuxSeccomp,
 	strategy mergeStrategy,
-) (*specs.LinuxSeccomp, error) {
+) *specs.LinuxSeccomp {
 	// The merged default follows the same tie-break as every other clause:
 	// the left side wins when the actions are equivalent, so its errno
 	// survives.
@@ -198,43 +241,15 @@ func mergeTwo(
 
 	merged.Flags = mergeFlags(left.Flags, right.Flags, strategy.isIntersect)
 
-	if !strategy.isIntersect {
-		merged.Syscalls = unionRules().mergeProfileSyscalls(left, right, &mergedDefault)
+	if strategy.isIntersect {
+		merged.Architectures = merge.IntersectSlice(left.Architectures, right.Architectures)
+		merged.Syscalls = intersectRules().mergeProfileSyscalls(left, right, &mergedDefault)
+	} else {
 		merged.Architectures = merge.UnionSlice(left.Architectures, right.Architectures)
-
-		return merged, nil
+		merged.Syscalls = unionRules().mergeProfileSyscalls(left, right, &mergedDefault)
 	}
 
-	archs, err := intersectArchitectures(left.Architectures, right.Architectures)
-	if err != nil {
-		return nil, err
-	}
-
-	merged.Architectures = archs
-	merged.Syscalls = intersectRules().mergeProfileSyscalls(left, right, &mergedDefault)
-
-	return merged, nil
-}
-
-// intersectArchitectures keeps the architectures both sides list. An empty
-// side is "unspecified" and defers to the other. Two non-empty sides with
-// nothing in common are an error, since an empty list would mean "native
-// architecture only" to the runtime.
-func intersectArchitectures(left, right []specs.Arch) ([]specs.Arch, error) {
-	if len(left) == 0 {
-		return slices.Clone(right), nil
-	}
-
-	if len(right) == 0 {
-		return slices.Clone(left), nil
-	}
-
-	result := merge.IntersectSlice(left, right)
-	if len(result) == 0 {
-		return nil, fmt.Errorf("%w: %v and %v", ErrDisjointArchitectures, left, right)
-	}
-
-	return result, nil
+	return merged
 }
 
 // regroupSyscalls drops entries without names, merges entries sharing the
@@ -349,35 +364,4 @@ func UnionSyscalls(left, right []specs.LinuxSyscall) []specs.LinuxSyscall {
 // Validate on the enclosing profile first.
 func IntersectSyscalls(left, right []specs.LinuxSyscall) []specs.LinuxSyscall {
 	return regroupSyscalls(intersectRules().mergeBareSyscalls(left, right))
-}
-
-func cloneSyscall(syscall *specs.LinuxSyscall) specs.LinuxSyscall {
-	clone := specs.LinuxSyscall{
-		Names:  slices.Clone(syscall.Names),
-		Action: syscall.Action,
-		Args:   slices.Clone(syscall.Args),
-	}
-
-	clone.ErrnoRet = merge.ClonePtr(syscall.ErrnoRet)
-
-	return clone
-}
-
-func cloneProfile(profile *specs.LinuxSeccomp) *specs.LinuxSeccomp {
-	clone := &specs.LinuxSeccomp{
-		DefaultAction:    profile.DefaultAction,
-		DefaultErrnoRet:  merge.ClonePtr(profile.DefaultErrnoRet),
-		ListenerPath:     profile.ListenerPath,
-		ListenerMetadata: profile.ListenerMetadata,
-	}
-
-	clone.Architectures = slices.Clone(profile.Architectures)
-	clone.Flags = slices.Clone(profile.Flags)
-	clone.Syscalls = make([]specs.LinuxSyscall, len(profile.Syscalls))
-
-	for idx := range profile.Syscalls {
-		clone.Syscalls[idx] = cloneSyscall(&profile.Syscalls[idx])
-	}
-
-	return clone
 }

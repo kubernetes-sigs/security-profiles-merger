@@ -81,9 +81,10 @@ func FormatDiffItems[T ~string](prefix string, removed, added []T) string {
 	return prefix + ":" + strings.Join(items, ",")
 }
 
-// DiffSlice returns elements added to and removed from left relative to right.
-// Both slices are treated as sets; duplicates within a slice are ignored.
-// Results are sorted. Returns nil, nil when the sets are equal.
+// DiffSlice compares two slices as sets and returns, in this order, the
+// elements only right has (added) and the elements only left has (removed).
+// Duplicates within a slice are ignored. Results are sorted. Returns nil,
+// nil when the sets are equal.
 func DiffSlice[T cmp.Ordered](left, right []T) ([]T, []T) {
 	if len(left) == 0 && len(right) == 0 {
 		return nil, nil

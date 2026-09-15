@@ -111,10 +111,21 @@ type SyscallDetail struct {
 
 // Diff compares two seccomp profiles and returns a structured diff.
 // Unlike Intersect and Union, Diff does not validate profiles before comparing.
-// Errno values are compared the way runtimes apply them: an unset errnoRet
-// on SCMP_ACT_ERRNO or SCMP_ACT_TRACE equals EPERM, and errnoRet on any
-// other action is ignored. The diff reports errno values in that form, with
-// EPERM spelled as unset.
+//
+// Profiles are compared by what a runtime loads from them, following the
+// evaluation model described for Intersect, so a profile and its merge
+// result compare equal unless the merge changed what the profile permits.
+// Entries equal to the profile default are ignored, an unconditional entry
+// hides the conditional entries for its syscall and the first one wins,
+// several conditions on one argument index are alternatives, entries with
+// identical filters merge into the least restrictive one, clauses that can
+// never decide a call are dropped, and SCMP_ACT_KILL_THREAD equals
+// SCMP_ACT_KILL. Errno values are compared the way runtimes apply them: an
+// unset errnoRet on SCMP_ACT_ERRNO or SCMP_ACT_TRACE equals EPERM, and
+// errnoRet on any other action is ignored. The diff reports entries in that
+// form, with EPERM spelled as unset.
+// Architectures are compared with the native architecture (see
+// NativeArchitecture) implied on both sides, as runtimes always cover it.
 // Returns ErrNilProfile if either profile is nil.
 func Diff(left, right *specs.LinuxSeccomp) (*ProfileDiff, error) {
 	if left == nil || right == nil {
@@ -143,17 +154,22 @@ func Diff(left, right *specs.LinuxSeccomp) (*ProfileDiff, error) {
 }
 
 // DiffSyscalls compares two bare syscall slices and returns the syscall
-// portion of a profile diff. Multi-name entries are normalized to
+// portion of a profile diff, or nil when they are equal. Entries are
+// compared as described for Diff, except that without a profile default no
+// entry is ignored for equaling it. Multi-name entries are normalized to
 // one-name-per-entry and argument filters are sorted before comparison, so
-// entries differing only in filter order compare equal. Errno values are
-// compared as described for Diff. This is the syscall-slice analogue of
-// Diff, matching IntersectSyscalls and UnionSyscalls.
+// entries differing only in filter order compare equal. This is the
+// syscall-slice analogue of Diff, matching IntersectSyscalls and
+// UnionSyscalls.
 //
 // This function does not validate its inputs.
 func DiffSyscalls(left, right []specs.LinuxSyscall) *SyscallsDiff {
-	leftMap := buildSyscallMap(left)
-	rightMap := buildSyscallMap(right)
+	return diffSyscallMaps(buildSyscallMap(left, nil), buildSyscallMap(right, nil))
+}
 
+// diffSyscallMaps compares two per-name entry maps and returns nil when
+// they are equal.
+func diffSyscallMaps(leftMap, rightMap map[string][]SyscallEntry) *SyscallsDiff {
 	var result SyscallsDiff
 
 	leftNames := slices.Sorted(maps.Keys(leftMap))
@@ -173,8 +189,8 @@ func DiffSyscalls(left, right []specs.LinuxSyscall) *SyscallsDiff {
 func diffDefaultAction(
 	diff *ProfileDiff, left, right *specs.LinuxSeccomp,
 ) {
-	leftAction := canonicalAction(left.DefaultAction)
-	rightAction := canonicalAction(right.DefaultAction)
+	leftAction := defaultClause(left).action
+	rightAction := defaultClause(right).action
 
 	if leftAction != rightAction {
 		diff.Equal = false
@@ -212,14 +228,30 @@ func equalUintPtr(first, second *uint) bool {
 	return *first == *second
 }
 
+// diffArchitectures compares the architecture lists with the native
+// architecture implied on both sides, as runtimes always cover it: a
+// profile that lists it and one that does not are the same to the runtime.
 func diffArchitectures(
 	diff *ProfileDiff, left, right *specs.LinuxSeccomp,
 ) {
-	added, removed := merge.DiffSlice(left.Architectures, right.Architectures)
+	added, removed := merge.DiffSlice(
+		withoutNative(left.Architectures), withoutNative(right.Architectures),
+	)
 	if len(added) > 0 || len(removed) > 0 {
 		diff.Equal = false
 		diff.Architectures = &SliceDiff[specs.Arch]{Added: added, Removed: removed}
 	}
+}
+
+func withoutNative(archs []specs.Arch) []specs.Arch {
+	native, ok := NativeArchitecture()
+	if !ok {
+		return archs
+	}
+
+	return slices.DeleteFunc(slices.Clone(archs), func(arch specs.Arch) bool {
+		return arch == native
+	})
 }
 
 func diffFlags(
@@ -255,21 +287,13 @@ func diffListener(
 func diffSyscallEntries(
 	diff *ProfileDiff, left, right *specs.LinuxSeccomp,
 ) {
-	leftMap := buildSyscallMap(left.Syscalls)
-	rightMap := buildSyscallMap(right.Syscalls)
-
-	var syscallsDiff SyscallsDiff
-
-	leftNames := slices.Sorted(maps.Keys(leftMap))
-	collectRemovedSyscalls(&syscallsDiff, leftNames, leftMap, rightMap)
-	collectAddedSyscalls(&syscallsDiff, slices.Sorted(maps.Keys(rightMap)), leftMap, rightMap)
-	collectChangedSyscalls(&syscallsDiff, leftNames, leftMap, rightMap)
-
-	if len(syscallsDiff.Added) > 0 ||
-		len(syscallsDiff.Removed) > 0 ||
-		len(syscallsDiff.Changed) > 0 {
+	syscallsDiff := diffSyscallMaps(
+		buildSyscallMap(left.Syscalls, defaultClause(left)),
+		buildSyscallMap(right.Syscalls, defaultClause(right)),
+	)
+	if syscallsDiff != nil {
 		diff.Equal = false
-		diff.Syscalls = &syscallsDiff
+		diff.Syscalls = syscallsDiff
 	}
 }
 
@@ -320,20 +344,21 @@ func collectChangedSyscalls(
 	}
 }
 
+// buildSyscallMap expands syscall entries into the per-name entries a
+// runtime loads from them, in the normal form the merge produces. def is
+// the profile default, or nil for bare syscall lists.
 func buildSyscallMap(
-	syscalls []specs.LinuxSyscall,
+	syscalls []specs.LinuxSyscall, def *clause,
 ) map[string][]SyscallEntry {
 	result := make(map[string][]SyscallEntry)
 
-	for _, syscall := range syscalls {
-		action := canonicalAction(syscall.Action)
-
+	for _, syscall := range normalizeSyscalls(syscalls, def) {
 		for _, name := range syscall.Names {
 			entry := SyscallEntry{
 				Name:     name,
-				Action:   action,
-				ErrnoRet: outputErrno(action, syscall.ErrnoRet),
-				Args:     sortedArgs(syscall.Args),
+				Action:   syscall.Action,
+				ErrnoRet: syscall.ErrnoRet,
+				Args:     syscall.Args,
 			}
 
 			if !containsSyscallEntry(result[name], entry) {
@@ -343,16 +368,6 @@ func buildSyscallMap(
 	}
 
 	return result
-}
-
-func canonicalAction(
-	action specs.LinuxSeccompAction,
-) specs.LinuxSeccompAction {
-	if action == specs.ActKillThread {
-		return specs.ActKill
-	}
-
-	return action
 }
 
 func containsSyscallEntry(entries []SyscallEntry, entry SyscallEntry) bool {
