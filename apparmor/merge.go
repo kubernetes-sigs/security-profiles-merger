@@ -37,6 +37,11 @@ var (
 // Capabilities are intersected, file access rules are intersected, and network
 // permissions use AND semantics.
 //
+// A nil section or network boolean is treated as an explicit empty section
+// or false, since to AppArmor an absent section denies everything it covers,
+// and the result carries it explicitly. Intersecting against a profile that
+// omits a section therefore permits nothing in that section.
+//
 // This implements the profile merging semantics defined in KEP-6061 for CRI
 // runtimes merging OCI-pulled profiles with node baselines.
 func Intersect(profiles ...*Profile) (*Profile, error) {
@@ -46,7 +51,8 @@ func Intersect(profiles ...*Profile) (*Profile, error) {
 // Union merges multiple AppArmor profiles via union: the resulting profile
 // permits an operation if any input profile permits it. Capabilities are
 // combined, file access rules are combined, and network permissions use OR
-// semantics.
+// semantics. A nil section defers to the other profile, which for a union
+// grants the same as an empty one would.
 //
 // This implements the merge semantics used by the Security Profiles Operator
 // for combining recorded profiles.
@@ -59,6 +65,8 @@ type strategy interface {
 	mergePaths(left, right []string) []string
 	mergeBool(left, right *bool) *bool
 	mergeFilesystem(left, right *FilesystemRules) *FilesystemRules
+	// prepare adjusts a normalized copy of an input before it is merged.
+	prepare(profile *Profile)
 }
 
 func foldProfiles(profiles []*Profile, mergeOp strategy) (*Profile, error) {
@@ -73,6 +81,7 @@ func foldProfiles(profiles []*Profile, mergeOp strategy) (*Profile, error) {
 	for idx, profile := range profiles {
 		normalized[idx] = normalizeProfile(profile)
 		deduplicateProfile(normalized[idx])
+		mergeOp.prepare(normalized[idx])
 	}
 
 	for idx, profile := range normalized {
@@ -213,6 +222,52 @@ func mergeCapabilities(left, right *CapabilityRules, mergeStrategy strategy) *Ca
 // intersectStrategy implements intersection (AND) semantics.
 type intersectStrategy struct{}
 
+// prepare makes omitted sections explicit, since to AppArmor an absent
+// section denies everything it covers and the intersection must not permit
+// more than that input does.
+func (intersectStrategy) prepare(profile *Profile) {
+	populateEmpty(profile)
+}
+
+// populateEmpty replaces every nil section of the profile with an explicit
+// empty one and every nil network boolean with false, which is what an
+// absent section means to AppArmor.
+func populateEmpty(profile *Profile) {
+	if profile.Executable == nil {
+		profile.Executable = &ExecutableRules{AllowedExecutables: nil, AllowedLibraries: nil}
+	}
+
+	if profile.Filesystem == nil {
+		profile.Filesystem = &FilesystemRules{
+			ReadOnlyPaths: nil, WriteOnlyPaths: nil, ReadWritePaths: nil,
+		}
+	}
+
+	if profile.Capabilities == nil {
+		profile.Capabilities = &CapabilityRules{AllowedCapabilities: nil}
+	}
+
+	if profile.Network == nil {
+		profile.Network = &NetworkRules{AllowRaw: nil, Protocols: nil}
+	}
+
+	if profile.Network.AllowRaw == nil {
+		profile.Network.AllowRaw = new(bool)
+	}
+
+	if profile.Network.Protocols == nil {
+		profile.Network.Protocols = &AllowedProtocols{AllowTCP: nil, AllowUDP: nil}
+	}
+
+	if profile.Network.Protocols.AllowTCP == nil {
+		profile.Network.Protocols.AllowTCP = new(bool)
+	}
+
+	if profile.Network.Protocols.AllowUDP == nil {
+		profile.Network.Protocols.AllowUDP = new(bool)
+	}
+}
+
 func (intersectStrategy) mergeStrings(left, right []string) []string {
 	return merge.IntersectSlice(left, right)
 }
@@ -310,6 +365,10 @@ func matchFsEntries(
 
 // unionStrategy implements union (OR) semantics.
 type unionStrategy struct{}
+
+// prepare leaves omitted sections alone: for a union, a nil section and an
+// empty one both yield the other side's grants.
+func (unionStrategy) prepare(*Profile) {}
 
 func (unionStrategy) mergeStrings(left, right []string) []string {
 	return merge.UnionSlice(left, right)

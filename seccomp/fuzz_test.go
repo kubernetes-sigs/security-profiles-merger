@@ -17,7 +17,6 @@ limitations under the License.
 package seccomp_test
 
 import (
-	"errors"
 	"slices"
 	"testing"
 
@@ -301,10 +300,6 @@ func fuzzMerge(
 	)
 
 	result, err := cfg.merge(left, right)
-	if errors.Is(err, seccomp.ErrDisjointArchitectures) {
-		t.Skip("disjoint architectures cannot be intersected")
-	}
-
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,8 +308,10 @@ func fuzzMerge(
 		t.Fatal("result must not be nil")
 	}
 
+	// The result spells SCMP_ACT_KILL_THREAD as SCMP_ACT_KILL, so compare
+	// by restrictiveness rather than by name.
 	expectedDefault := cfg.pickDefault(left.DefaultAction, right.DefaultAction)
-	if result.DefaultAction != expectedDefault {
+	if !sameRestrictiveness(result.DefaultAction, expectedDefault) {
 		t.Errorf(
 			"default = %q, want %q (pick of %q and %q)",
 			result.DefaultAction, expectedDefault,

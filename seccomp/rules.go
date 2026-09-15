@@ -143,7 +143,7 @@ func collectRules(syscalls []specs.LinuxSyscall, def *clause) map[string]*syscal
 // runc loads such entries; every other entry yields exactly one clause.
 func entryClauses(entry *specs.LinuxSyscall) []clause {
 	base := clause{
-		action:   entry.Action,
+		action:   canonicalAction(entry.Action),
 		errnoRet: runtimeErrno(entry.Action, entry.ErrnoRet),
 		args:     nil,
 	}
@@ -586,7 +586,39 @@ func (m ruleMerger) collapseClauses(clauses []clause, fallback *clause) []clause
 		result = append(result, current)
 	}
 
-	return sortClauses(result)
+	return sortClauses(pruneDominated(result))
+}
+
+// pruneDominated drops clauses that can never decide a call: a clause whose
+// filter is a superset of another clause's filter matches only calls the
+// other matches too, and since the least restrictive matching clause wins,
+// it is dead unless it is less restrictive than that other clause. Clauses
+// with the same result also collapse into the wider one.
+func pruneDominated(clauses []clause) []clause {
+	kept := make([]clause, 0, len(clauses))
+
+	for idx, current := range clauses {
+		dominated := false
+
+		for otherIdx, other := range clauses {
+			if otherIdx == idx || len(other.args) >= len(current.args) ||
+				!argsSubset(other.args, current.args) {
+				continue
+			}
+
+			if current.sameResult(other) || stricter(current, other) {
+				dominated = true
+
+				break
+			}
+		}
+
+		if !dominated {
+			kept = append(kept, current)
+		}
+	}
+
+	return kept
 }
 
 // raiseOverlapsOfRedundant raises every clause that is stricter than a
@@ -628,7 +660,7 @@ func stricter(first, second clause) bool {
 
 func defaultClause(profile *specs.LinuxSeccomp) *clause {
 	return &clause{
-		action:   profile.DefaultAction,
+		action:   canonicalAction(profile.DefaultAction),
 		errnoRet: runtimeErrno(profile.DefaultAction, profile.DefaultErrnoRet),
 		args:     nil,
 	}

@@ -17,6 +17,7 @@ limitations under the License.
 package seccomp_test
 
 import (
+	"errors"
 	"slices"
 	"testing"
 
@@ -84,13 +85,6 @@ func TestMergeFlagsByPolarity(t *testing.T) {
 			wantUnion:     nil,
 		},
 		{
-			name:          "unknown flag counts as hardening",
-			left:          []specs.LinuxSeccompFlag{unknown},
-			right:         nil,
-			wantIntersect: []specs.LinuxSeccompFlag{unknown},
-			wantUnion:     nil,
-		},
-		{
 			name:          "mixed",
 			left:          []specs.LinuxSeccompFlag{log, spec},
 			right:         []specs.LinuxSeccompFlag{log},
@@ -122,5 +116,21 @@ func TestMergeFlagsByPolarity(t *testing.T) {
 				t.Errorf("union flags = %v, want %v", united.Flags, testCase.wantUnion)
 			}
 		})
+	}
+}
+
+func TestMergeRejectsUnknownFlag(t *testing.T) {
+	t.Parallel()
+
+	profile := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Flags:         []specs.LinuxSeccompFlag{"SECCOMP_FILTER_FLAG_FUTURE"},
+	}
+
+	// No runtime can load a flag it does not know, so the merge path
+	// rejects it instead of guessing its polarity.
+	_, err := seccomp.Intersect(profile)
+	if !errors.Is(err, seccomp.ErrUnknownFlag) {
+		t.Errorf("expected ErrUnknownFlag, got: %v", err)
 	}
 }

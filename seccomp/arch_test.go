@@ -17,9 +17,7 @@ limitations under the License.
 package seccomp_test
 
 import (
-	"errors"
 	"runtime"
-	"slices"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -45,48 +43,5 @@ func TestNativeArchitecture(t *testing.T) {
 		if known && arch == "" {
 			t.Error("known native architecture must not be empty")
 		}
-	}
-}
-
-func TestPopulateNativeArchitecture(t *testing.T) {
-	t.Parallel()
-
-	err := seccomp.PopulateNativeArchitecture(nil)
-	if !errors.Is(err, seccomp.ErrNilProfile) {
-		t.Errorf("nil profile: expected ErrNilProfile, got %v", err)
-	}
-
-	preset := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Architectures: []specs.Arch{specs.ArchARM},
-	}
-
-	err = seccomp.PopulateNativeArchitecture(preset)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !slices.Equal(preset.Architectures, []specs.Arch{specs.ArchARM}) {
-		t.Errorf("populated profile changed: %v", preset.Architectures)
-	}
-
-	empty := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
-	err = seccomp.PopulateNativeArchitecture(empty)
-
-	native, ok := seccomp.NativeArchitecture()
-	if !ok {
-		if !errors.Is(err, seccomp.ErrUnknownNativeArchitecture) {
-			t.Errorf("unknown GOARCH: expected ErrUnknownNativeArchitecture, got %v", err)
-		}
-
-		return
-	}
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !slices.Equal(empty.Architectures, []specs.Arch{native}) {
-		t.Errorf("architectures = %v, want [%s]", empty.Architectures, native)
 	}
 }

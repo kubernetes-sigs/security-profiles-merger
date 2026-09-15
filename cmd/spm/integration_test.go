@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -48,7 +49,12 @@ func buildTestBinary(t *testing.T) string {
 	t.Helper()
 
 	testBinaryOnce.Do(func() {
-		binary := filepath.Join(os.TempDir(), fmt.Sprintf("spm_integration_test_%d", os.Getpid()))
+		name := fmt.Sprintf("spm_integration_test_%d", os.Getpid())
+		if runtime.GOOS == "windows" {
+			name += ".exe"
+		}
+
+		binary := filepath.Join(os.TempDir(), name)
 
 		cmd := exec.CommandContext(t.Context(), "go", "build", "-o", binary, ".")
 		cmd.Stderr = os.Stderr

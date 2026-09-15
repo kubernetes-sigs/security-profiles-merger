@@ -18,7 +18,6 @@ package seccomp_test
 
 import (
 	"cmp"
-	"errors"
 	"slices"
 	"testing"
 
@@ -1160,21 +1159,21 @@ func TestIntersectArchitecturesOneEmpty(t *testing.T) {
 
 	left := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
-		Architectures: []specs.Arch{specs.ArchX86_64},
+		Architectures: []specs.Arch{specs.ArchX86_64, specs.ArchX86},
 	}
 
 	right := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
 
+	// Runtimes always cover the native architecture and add the listed
+	// ones, so an empty list is "native only" and the intersection with it
+	// is empty: it must not admit the extra architectures of the other side.
 	result, err := seccomp.Intersect(left, right)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(result.Architectures) != 1 || result.Architectures[0] != specs.ArchX86_64 {
-		t.Errorf(
-			"architectures = %v, want [%v] (intersect with empty keeps all)",
-			result.Architectures, specs.ArchX86_64,
-		)
+	if len(result.Architectures) != 0 {
+		t.Errorf("architectures = %v, want none (native only)", result.Architectures)
 	}
 }
 
@@ -2748,11 +2747,15 @@ func TestIntersectArchitecturesDisjoint(t *testing.T) {
 		Architectures: []specs.Arch{specs.ArchAARCH64},
 	}
 
-	// An empty list would mean "native architecture only", which neither
-	// input permits, so the merge refuses instead.
-	_, err := seccomp.Intersect(left, right)
-	if !errors.Is(err, seccomp.ErrDisjointArchitectures) {
-		t.Fatalf("expected ErrDisjointArchitectures, got: %v", err)
+	// Both filters cover the native architecture, so the intersection is
+	// valid and covers native only.
+	result, err := seccomp.Intersect(left, right)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(result.Architectures) != 0 {
+		t.Errorf("architectures = %v, want none (native only)", result.Architectures)
 	}
 
 	union, err := seccomp.Union(left, right)

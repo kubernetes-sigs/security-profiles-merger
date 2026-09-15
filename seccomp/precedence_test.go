@@ -354,3 +354,86 @@ func TestIntersectKeepsLeftmostErrnoOverCollapsedConditional(t *testing.T) {
 		t.Errorf("Intersect = %s, want %s", got, want)
 	}
 }
+
+func TestUnionRaisesStricterOverlapOfRedundantClause(t *testing.T) {
+	t.Parallel()
+
+	left := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls: []specs.LinuxSyscall{
+			{
+				Names: []string{"read"}, Action: specs.ActAllow,
+				Args: []specs.LinuxSeccompArg{argEq(0, 1)},
+			},
+		},
+	}
+	right := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActAllow,
+		Syscalls: []specs.LinuxSyscall{
+			{
+				Names: []string{"read"}, Action: specs.ActErrno,
+				Args: []specs.LinuxSeccompArg{{Index: 0, Value: 5, Op: specs.OpLessThan}},
+			},
+			{
+				Names: []string{"read"}, Action: specs.ActTrap,
+				Args: []specs.LinuxSeccompArg{argEq(1, 1)},
+			},
+		},
+	}
+
+	result, err := seccomp.Union(left, right)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The merged default is ALLOW, which makes the left clause for arg0 == 1
+	// redundant. Runtimes skip such an entry, so it cannot shield arg0 == 1
+	// from the stricter right clauses that overlap it: those are raised to
+	// ALLOW as well and everything folds into the default. The exact union
+	// (deny arg0 in {0, 2, 3, 4}) is not expressible, so the result
+	// over-approximates in the permissive direction.
+	want := "Profile{default:SCMP_ACT_ALLOW}"
+	if got := seccomp.FormatProfile(result); got != want {
+		t.Errorf("Union = %s, want %s", got, want)
+	}
+}
+
+func TestMergeCanonicalizesKillThread(t *testing.T) {
+	t.Parallel()
+
+	profile := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActKillThread,
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{"read"}, Action: specs.ActKill},
+			{Names: []string{"write"}, Action: specs.ActKillThread},
+			{Names: []string{"open"}, Action: specs.ActAllow},
+		},
+	}
+
+	for name, mergeFn := range map[string]func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error){
+		"intersect": seccomp.Intersect,
+		"union":     seccomp.Union,
+	} {
+		result, err := mergeFn(profile)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", name, err)
+		}
+
+		// libseccomp defines SCMP_ACT_KILL_THREAD as SCMP_ACT_KILL, so both
+		// spellings equal the default and are elided, and the default is
+		// spelled the way Diff spells it.
+		want := "Profile{default:SCMP_ACT_KILL open->SCMP_ACT_ALLOW}"
+		if got := seccomp.FormatProfile(result); got != want {
+			t.Errorf("%s = %s, want %s", name, got, want)
+		}
+	}
+
+	bare := seccomp.UnionSyscalls(
+		[]specs.LinuxSyscall{{Names: []string{"read"}, Action: specs.ActKill}},
+		[]specs.LinuxSyscall{{Names: []string{"write"}, Action: specs.ActKillThread}},
+	)
+
+	if len(bare) != 1 || bare[0].Action != specs.ActKill || len(bare[0].Names) != 2 {
+		t.Errorf("UnionSyscalls = %+v, want one SCMP_ACT_KILL entry for both names", bare)
+	}
+}
