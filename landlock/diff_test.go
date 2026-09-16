@@ -514,24 +514,65 @@ func TestDiffFormatComplex(t *testing.T) {
 func TestDiffNormalizesPathsBeforeComparing(t *testing.T) {
 	t.Parallel()
 
-	left := &landlock.Profile{
-		HandledAccessFS:  []landlock.FSAccessRight{"read_file"},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{
-			{Path: "/var/log/../data", AccessFS: []landlock.FSAccessRight{"read_file"}},
-		},
-		NetRules: nil,
+	profile := func(path string, rights ...landlock.FSAccessRight) *landlock.Profile {
+		return &landlock.Profile{
+			HandledAccessFS:  []landlock.FSAccessRight{"read_file", "write_file"},
+			HandledAccessNet: nil,
+			Scoped:           nil,
+			PathRules:        []landlock.PathRule{{Path: path, AccessFS: rights}},
+			NetRules:         nil,
+		}
 	}
 
-	right := &landlock.Profile{
-		HandledAccessFS:  []landlock.FSAccessRight{"read_file"},
-		HandledAccessNet: nil,
+	right := profile("/var/data", "read_file", "write_file")
+
+	for _, path := range []string{"/var//data/", "/var/./data", "//var/data"} {
+		diff, err := landlock.Diff(profile(path, "write_file", "read_file", "write_file"), right)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !diff.IsEqual() {
+			t.Errorf("Diff(%q) = %s, want equal", path, landlock.FormatDiff(diff))
+		}
+	}
+
+	// ".." depends on symlinks, so it is not folded.
+	diff, err := landlock.Diff(profile("/var/log/../data", "read_file", "write_file"), right)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if diff.IsEqual() {
+		t.Error(`Diff folded ".." in "/var/log/../data"`)
+	}
+}
+
+func TestDiffSortsRuleRights(t *testing.T) {
+	t.Parallel()
+
+	handled := []landlock.FSAccessRight{"execute", "read_file"}
+	left := &landlock.Profile{
+		HandledAccessFS:  handled,
+		HandledAccessNet: []landlock.NetAccessRight{"connect_tcp", "bind_tcp"},
 		Scoped:           nil,
 		PathRules: []landlock.PathRule{
-			{Path: "/var/data", AccessFS: []landlock.FSAccessRight{"read_file"}},
+			{Path: "/var", AccessFS: []landlock.FSAccessRight{"read_file"}},
 		},
-		NetRules: nil,
+		NetRules: []landlock.NetRule{
+			{Port: 80, AccessNet: []landlock.NetAccessRight{"connect_tcp"}},
+		},
+	}
+	right := &landlock.Profile{
+		HandledAccessFS:  handled,
+		HandledAccessNet: []landlock.NetAccessRight{"connect_tcp", "bind_tcp"},
+		Scoped:           nil,
+		PathRules: []landlock.PathRule{
+			{Path: "/var", AccessFS: []landlock.FSAccessRight{"read_file", "execute"}},
+		},
+		NetRules: []landlock.NetRule{
+			{Port: 80, AccessNet: []landlock.NetAccessRight{"connect_tcp", "bind_tcp"}},
+		},
 	}
 
 	diff, err := landlock.Diff(left, right)
@@ -539,7 +580,8 @@ func TestDiffNormalizesPathsBeforeComparing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !diff.IsEqual() {
-		t.Error("expected equal after path normalization")
+	want := "Diff{~/var:[read_file]->[execute,read_file] ~:80:[connect_tcp]->[bind_tcp,connect_tcp]}"
+	if got := landlock.FormatDiff(diff); got != want {
+		t.Errorf("FormatDiff = %s, want %s", got, want)
 	}
 }

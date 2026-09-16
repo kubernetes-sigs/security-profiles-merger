@@ -18,9 +18,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
-	"errors"
-	"flag"
 	"fmt"
 	"io"
 )
@@ -28,49 +25,62 @@ import (
 const validateUsage = `Usage: spm validate [options] [files...]
 
 Validate one or more security profiles.
-Reads from stdin (as a JSON array) when no files are provided.
-Writes the validated profiles on success; use --quiet for the exit code alone.
+Reads from stdin when no files are provided: a single profile, or a JSON
+array of profiles.
+Writes the validated profiles on success; --quiet writes no profile.
+Errors, warnings and notes always go to stderr.
+--quiet cannot be combined with --output, nor --strict with --artifact.
 
 Options:
 `
 
 func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet(cmdValidate, flag.ContinueOnError)
-	flags.SetOutput(stderr)
-
-	flags.Usage = func() {
-		_, _ = fmt.Fprint(stderr, validateUsage)
-
-		flags.PrintDefaults()
-	}
+	flags := newFlagSet(cmdValidate, stderr)
 
 	profileType := flags.String(
 		"type", "", "profile type: seccomp, apparmor, landlock (auto-detected if omitted)",
 	)
 	strict := flags.Bool(
 		"strict", false,
-		"use strict validation, which also rejects unknown fields (not with --artifact)",
+		"use strict validation, which also rejects unknown and repeated fields "+
+			"(not with --artifact)",
 	)
 	artifact := flags.Bool(
 		"artifact", false,
-		"validate as an untrusted OCI artifact the way container runtimes do",
+		"validate as an untrusted OCI artifact the way container runtimes do, "+
+			"rejecting repeated fields",
 	)
 	format := flags.String("format", formatJSON, "output format: json, human")
-	output := flags.String("output", "", "write output to file (default: stdout)")
+	output := flags.String(
+		"output", "", "write output to file (default: stdout, not with --quiet)",
+	)
 	quiet := flags.Bool(
-		"quiet", false, "report only errors, writing no profile on success",
+		"quiet", false,
+		"write no profile on success; errors, warnings and notes still go to stderr "+
+			"(not with --output)",
 	)
 
-	err := flags.Parse(args)
-	if err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
-		}
-
-		return exitUsage
+	if done, code := parseFlags(flags, validateUsage, args, stdout, stderr); done {
+		return code
 	}
 
-	if code := validateValidateFlags(*profileType, *format, *strict, *artifact, stderr); code != 0 {
+	if code := checkFlagOrder(flags.Args(), stderr); code != 0 {
+		return code
+	}
+
+	code := validateValidateFlags(validateFlags{
+		profileType: *profileType,
+		format:      *format,
+		output:      *output,
+		strict:      *strict,
+		artifact:    *artifact,
+		quiet:       *quiet,
+	}, stderr)
+	if code != 0 {
+		return code
+	}
+
+	if code := checkStdin(flags, validateUsage, stdin, stderr); code != 0 {
 		return code
 	}
 
@@ -94,7 +104,7 @@ func validateInputs(
 		return 1
 	}
 
-	kind, code := resolveKind(profileType, data, stderr)
+	kind, code := resolveKind(profileType, data, 1, stderr)
 	if code != 0 {
 		return code
 	}
@@ -126,20 +136,36 @@ func modeFromFlags(strict, artifact bool) validateMode {
 	}
 }
 
-func validateValidateFlags(
-	profileType, format string, strict, artifact bool, stderr io.Writer,
-) int {
-	if code := validateFormat(format, stderr); code != 0 {
+// validateFlags holds the parsed flags of the validate command.
+type validateFlags struct {
+	profileType string
+	format      string
+	output      string
+	strict      bool
+	artifact    bool
+	quiet       bool
+}
+
+func validateValidateFlags(opts validateFlags, stderr io.Writer) int {
+	if code := validateFormat(opts.format, stderr); code != 0 {
 		return code
 	}
 
-	if code := validateProfileType(profileType, stderr); code != 0 {
+	if code := validateProfileType(opts.profileType, stderr); code != 0 {
 		return code
 	}
 
-	if strict && artifact {
+	if opts.strict && opts.artifact {
 		_, _ = fmt.Fprintln(
 			stderr, "error: --strict cannot be combined with --artifact",
+		)
+
+		return exitUsage
+	}
+
+	if opts.quiet && opts.output != "" {
+		_, _ = fmt.Fprintln(
+			stderr, "error: --quiet cannot be combined with --output",
 		)
 
 		return exitUsage
@@ -148,18 +174,18 @@ func validateValidateFlags(
 	return 0
 }
 
-// validateProfiles decodes and checks every profile. With rejectUnknown set,
-// as under --strict, members the profile type does not know are errors
-// rather than warnings.
+// validateProfiles decodes and checks every profile. The policy selects
+// which JSON ambiguities, such as members the profile type does not know,
+// are errors rather than warnings.
 func validateProfiles[T any](
 	data [][]byte,
 	check func(*T) error,
-	rejectUnknown bool,
+	policy decodePolicy,
 	format string,
 	formatFn func(*T) string,
 	stdout, stderr io.Writer,
 ) int {
-	profiles, err := unmarshalAll[T](data, rejectUnknown, stderr)
+	profiles, err := unmarshalAll[T](data, policy, stderr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 
@@ -201,12 +227,9 @@ func writeValidated[T any](
 			_, _ = fmt.Fprintln(stdout, str)
 		}
 	default:
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-
-		err := enc.Encode(profiles)
+		err := encodeJSON(stdout, profiles)
 		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "error: encoding output: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 
 			return 1
 		}

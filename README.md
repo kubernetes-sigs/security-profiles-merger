@@ -88,15 +88,25 @@ if err := seccomp.ValidateArtifact(ociPulledProfile); err != nil {
 // Tie-breaks such as errno values favor the earlier input. Architectures
 // need no preparation: as in runc and crun, every profile covers the native
 // architecture plus the ones it lists, and the merge intersects the lists.
-effective, err := seccomp.Intersect(nodeBaseline, podBaseProfile, ociPulledProfile)
+// Every input must be non-nil (a nil profile fails with ErrNilProfile), so
+// the pod-spec profile is only passed when the pod sets one.
+inputs := []*specs.LinuxSeccomp{nodeBaseline}
+if podBaseProfile != nil {
+    inputs = append(inputs, podBaseProfile)
+}
+inputs = append(inputs, ociPulledProfile)
+effective, err := seccomp.Intersect(inputs...)
 if err != nil {
     return err
 }
 
-// effective permits only what every input permits. What the merge took away
+// effective permits only what every input permits, judged by what runc and
+// crun load through libseccomp: rules whose effect depends on libseccomp's
+// order of evaluation are read at their most restrictive, and the result
+// only contains rules libseccomp evaluates exactly. What the merge took away
 // from the artifact is visible in the diff, for logging or metrics. Diff
-// compares profiles by what a runtime loads from them, so it is equal when
-// the baseline changed nothing, even though the merge normalizes its output.
+// compares profiles by the rules a runtime loads from them, so it is equal
+// when the baseline changed nothing and the merge kept the artifact's rules.
 // Diff implies the architecture of the running program; a caller comparing
 // profiles for another node names it with seccomp.DiffForArch instead.
 constrained, err := seccomp.Diff(ociPulledProfile, effective)
@@ -161,7 +171,9 @@ spm validate --type landlock --strict examples/landlock_baseline.json
 ## CLI
 
 The `spm` command-line tool provides profile merging and validation without
-writing Go code.
+writing Go code. Flags must precede file arguments. Run `spm help <command>`
+for the options of a command. Without file arguments, commands read from
+stdin, unless stdin is a terminal.
 
 ### Install
 
@@ -177,11 +189,11 @@ To verify a downloaded binary:
 cosign verify-blob \
   --bundle checksums.txt.sigstore.json \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity-regexp 'github.com/kubernetes-sigs/security-profiles-merger' \
+  --certificate-identity-regexp '^https://github.com/kubernetes-sigs/security-profiles-merger/\.github/workflows/release\.yml@refs/tags/v' \
   checksums.txt
 
-# Verify binary against signed checksums
-sha256sum -c checksums.txt
+# Verify the downloaded binaries against the signed checksums
+sha256sum --ignore-missing -c checksums.txt
 
 # Or verify build provenance directly
 gh attestation verify spm_*_linux_amd64 -R kubernetes-sigs/security-profiles-merger
@@ -210,7 +222,8 @@ Without `--type`, the type is detected from the fields the profiles carry.
 Inputs that mix profile types are rejected, since merging them would drop
 whatever the chosen type has no field for.
 
-Profiles can also be read from stdin as a JSON array:
+Profiles can also be read from stdin, as a single profile or a JSON array of
+profiles:
 
 ```sh
 cat profiles.json | spm merge --type landlock --strategy intersect
@@ -240,10 +253,16 @@ spm validate --type landlock --artifact pulled-profile.json
 not author. It cannot be combined with `--strict`.
 
 A field the profile type does not know, such as a misspelled key, would
-silently drop the rule it was meant to carry. All commands warn about such
-fields on stderr, and `validate --strict` rejects them.
+silently drop the rule it was meant to carry. A field repeated within the same
+JSON object, including one that differs only in capitalization, is ambiguous:
+spm, like other Go programs, matches field names case-insensitively and keeps
+the last value, while other parsers may keep the first or treat the spellings
+as different fields. All commands warn about such fields on
+stderr. `validate --strict` rejects both, and `validate --artifact` rejects
+repeated fields.
 
-Profiles can also be read from stdin:
+Profiles can also be read from stdin, as a single profile or a JSON array of
+profiles:
 
 ```sh
 cat profile.json | spm validate --type seccomp
@@ -256,12 +275,21 @@ spm validate --type seccomp --format human profile.json
 ```
 
 Validation outputs the profile on success (exit 0) or prints errors to
-stderr on failure (exit 1). Use `--strict` for stricter checks intended
-for user-authored profiles, and `--quiet` to get the exit code alone:
+stderr when a profile is invalid or cannot be read (exit 1). Usage errors
+exit 2, such as an unknown `--type` or `--format`, `--strict` with
+`--artifact`, `--quiet` with `--output`, a flag after the file arguments,
+inputs that mix profile types, and inputs whose type cannot be detected
+without `--type`. Use `--strict` for stricter checks
+intended for user-authored profiles, and `--quiet` to write no profile on
+success:
 
 ```sh
 spm validate --type seccomp --quiet profile.json
 ```
+
+`--quiet` only suppresses the profile output, so it cannot be combined with
+`--output`. Errors, warnings, and the note about an auto-detected profile type
+still go to stderr.
 
 ### Diff profiles
 
@@ -285,6 +313,11 @@ spm version
 spm --version
 spm -v
 ```
+
+Release binaries report their tag, such as `v0.4.2`. `make build` reports
+the output of `git describe --tags --always --dirty`, which equals the tag
+only for a clean checkout of a tagged commit. A binary installed with
+`go install` reports its module version.
 
 ## Community, discussion, contribution, and support
 

@@ -51,11 +51,20 @@ func TestMergeErrors(t *testing.T) {
 		wantStderr string
 	}{
 		{
-			name:       "merge help",
-			args:       []string{cmdMerge, flagHelp},
+			name:       "invalid JSON without type",
+			args:       []string{cmdMerge, flagStrategy, strategyUnion, invalidFile},
 			stdin:      nil,
-			wantCode:   0,
-			wantStderr: "[files...]",
+			wantCode:   1,
+			wantStderr: testParsingProfile0,
+		},
+		{
+			name: "flag after file",
+			args: []string{
+				cmdMerge, flagStrategy, strategyIntersect, testdataSeccompA, flagType, typeSeccomp,
+			},
+			stdin:      nil,
+			wantCode:   exitUsage,
+			wantStderr: "flags must precede file arguments",
 		},
 		{
 			name:       "empty stdin",
@@ -214,8 +223,8 @@ func TestMergeSeccompInvalidStrategy(t *testing.T) {
 		&bytes.Buffer{}, &bytes.Buffer{},
 	)
 
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1", code)
+	if code != exitUsage {
+		t.Fatalf("exit code = %d, want %d", code, exitUsage)
 	}
 }
 
@@ -244,8 +253,8 @@ func TestMergeAppArmorInvalidStrategy(t *testing.T) {
 		&bytes.Buffer{}, &bytes.Buffer{},
 	)
 
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1", code)
+	if code != exitUsage {
+		t.Fatalf("exit code = %d, want %d", code, exitUsage)
 	}
 }
 
@@ -274,8 +283,8 @@ func TestMergeLandlockInvalidStrategy(t *testing.T) {
 		&bytes.Buffer{}, &bytes.Buffer{},
 	)
 
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1", code)
+	if code != exitUsage {
+		t.Fatalf("exit code = %d, want %d", code, exitUsage)
 	}
 }
 
@@ -932,7 +941,9 @@ func TestUnmarshalAllReportsEveryUnknownField(t *testing.T) {
 
 	var stderr bytes.Buffer
 
-	profiles, err := unmarshalAll[specs.LinuxSeccomp]([][]byte{[]byte(raw)}, false, &stderr)
+	profiles, err := unmarshalAll[specs.LinuxSeccomp](
+		[][]byte{[]byte(raw)}, lenientDecode(), &stderr,
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -948,7 +959,9 @@ func TestUnmarshalAllReportsEveryUnknownField(t *testing.T) {
 		t.Errorf("stderr = %q, want %q", stderr.String(), want)
 	}
 
-	_, err = unmarshalAll[specs.LinuxSeccomp]([][]byte{[]byte(raw)}, true, &bytes.Buffer{})
+	_, err = unmarshalAll[specs.LinuxSeccomp](
+		[][]byte{[]byte(raw)}, modeStrict.decodePolicy(), &bytes.Buffer{},
+	)
 	if !errors.Is(err, errUnknownField) {
 		t.Errorf("expected errUnknownField when rejecting, got: %v", err)
 	}
@@ -959,7 +972,7 @@ func TestUnmarshalAllRejectsTrailingData(t *testing.T) {
 
 	_, err := unmarshalAll[specs.LinuxSeccomp](
 		[][]byte{[]byte(`{"defaultAction":"SCMP_ACT_ERRNO"} trailing`)},
-		false, &bytes.Buffer{},
+		lenientDecode(), &bytes.Buffer{},
 	)
 	if err == nil || !strings.Contains(err.Error(), "after top-level value") {
 		t.Errorf("expected a trailing data error, got: %v", err)

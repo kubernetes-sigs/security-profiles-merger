@@ -42,13 +42,14 @@ const (
 	testEtcPath     = "/etc"
 	testSyscallRead = "read"
 
-	testUnknownType   = "unknown type"
-	testUnknownFormat = "unknown format"
-	testNoInput       = "no input"
-	testErrorColon    = "error:"
-	testExactlyTwo    = "exactly 2"
-	testdataSeccompA  = "testdata/seccomp_a.json"
-	testdataSeccompB  = "testdata/seccomp_b.json"
+	testUnknownType     = "unknown type"
+	testUnknownFormat   = "unknown format"
+	testNoInput         = "no input"
+	testErrorColon      = "error:"
+	testExactlyTwo      = "exactly 2"
+	testParsingProfile0 = "error: parsing profile 0: "
+	testdataSeccompA    = "testdata/seccomp_a.json"
+	testdataSeccompB    = "testdata/seccomp_b.json"
 )
 
 func TestNoArgs(t *testing.T) {

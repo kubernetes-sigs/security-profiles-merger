@@ -19,8 +19,6 @@ package landlock
 import (
 	"slices"
 	"testing"
-
-	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
 // TestPathAncestorsMatchesRelation checks the enumeration the merge uses
@@ -38,11 +36,11 @@ func TestPathAncestorsMatchesRelation(t *testing.T) {
 	}
 
 	for _, raw := range paths {
-		cleaned := merge.CleanPath(raw)
+		cleaned := cleanPath(raw)
 		ancestors := pathAncestors(cleaned)
 
 		for _, other := range paths {
-			candidate := merge.CleanPath(other)
+			candidate := cleanPath(other)
 
 			listed := slices.Contains(ancestors, candidate)
 			want := isAncestorOrSelf(candidate, cleaned)

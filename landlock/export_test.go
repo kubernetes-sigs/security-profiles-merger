@@ -19,7 +19,28 @@ package landlock
 import (
 	"maps"
 	"slices"
+	"strings"
 )
+
+// isAncestorOrSelf reports whether ancestor is path itself or one of its
+// parent directories. Paths are expected to be cleaned. This states the
+// hierarchy relation pathAncestors enumerates; the merge uses the
+// enumeration, and a test keeps the two in agreement.
+func isAncestorOrSelf(ancestor, path string) bool {
+	if ancestor == path {
+		return true
+	}
+
+	if ancestor == "/" {
+		return strings.HasPrefix(path, "/")
+	}
+
+	return strings.HasPrefix(path, ancestor+"/")
+}
+
+// CleanPath exposes cleanPath, so external tests compare paths the way the
+// merge does.
+var CleanPath = cleanPath
 
 // IsAncestorOrSelf exposes isAncestorOrSelf to external tests so the fuzz
 // oracle evaluates path hierarchy exactly like the merge does.

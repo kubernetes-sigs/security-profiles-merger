@@ -172,6 +172,7 @@ const (
 	ABIV4
 	ABIV5
 	ABIV6
+	// ABIV7 and ABIV8 added landlock_restrict_self flags but no access rights.
 	ABIV7
 	ABIV8
 	ABIV9

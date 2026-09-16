@@ -683,12 +683,12 @@ func TestValidateMixedCaseCapabilities(t *testing.T) {
 func TestValidateStrictGlobTooComplex(t *testing.T) {
 	t.Parallel()
 
-	tooLong := "/tmp/" + strings.Repeat("a", 4096) + "/*"
 	tooManyAlternatives := "/tmp/" + strings.Repeat("{a,b}", 51) + "/**"
+	tooManyNested := "/tmp/" + strings.Repeat("{a,c,", 45) + "b" + strings.Repeat("}", 45)
 
 	profile := &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{tooLong},
+			AllowedExecutables: []string{tooManyNested},
 			AllowedLibraries:   nil,
 		},
 		Filesystem: &apparmor.FilesystemRules{

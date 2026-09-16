@@ -16,7 +16,18 @@ limitations under the License.
 
 package seccomp
 
+import specs "github.com/opencontainers/runtime-spec/specs-go"
+
 // CondHolds exposes condHolds to external tests so the fuzz oracle evaluates
 // argument conditions exactly like the merge does. Operator semantics are
 // covered independently by the internal condHolds tests.
 var CondHolds = condHolds
+
+// SafeShape exposes the classification the merge applies to the rules a
+// runtime loads for one syscall of a profile, so that the libseccomp tests
+// can check it against the evaluator and against libseccomp.
+func SafeShape(profile *specs.LinuxSeccomp, name string) bool {
+	current, ok := collectRules(profile.Syscalls, defaultClause(profile))[name]
+
+	return !ok || current.unconditional != nil || safeShape(current.conditional)
+}

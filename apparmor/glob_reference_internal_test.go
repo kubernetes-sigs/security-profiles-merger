@@ -20,6 +20,7 @@ import (
 	"math/rand"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -28,44 +29,106 @@ import (
 // test asserting that the indexed implementation agrees with it.
 //
 // Intersection is defined pairwise: a literal survives when the other side
-// matches it, and two globs survive when they are identical or one is the
-// "**" expansion of a literal prefix containing the other's. The shipped
-// implementation reaches the same pairs through a prefix index, because
-// scanning the other side once per path makes a profile with many paths
-// quadratic to merge. The reference states the definition; the test keeps
-// the index faithful to it.
+// matches it, and two globs survive when they are identical or one is a
+// "<prefix>**" pattern granting every path the other matches. The reference
+// decides both with the evaluator of evaluator_internal_test.go over a set
+// of canonical probe paths, rather than with the prefix reasoning the
+// shipped implementation uses, so the test checks that reasoning against
+// what the patterns match. The shipped implementation reaches the same
+// pairs through a prefix index, because scanning the other side once per
+// path makes a profile with many paths quadratic to merge.
 
-// refNarrowGlobs is the pairwise narrowing rule the index encodes.
+// refProbes are the canonical paths the reference decides glob inclusion
+// over. They include every directory a corpus "**" pattern expands, and a
+// name each corpus glob matches outside every such directory it is not
+// under.
+var refProbes = []string{
+	"/", "/etc/", "/etc/passwd", "/etc/x", "/etc/a.conf", "/etc/.conf", "/etc/foo/",
+	"/etc/foo/a.conf", "/etc/foo", "/etc/a/foo", "/etc/!", "/etc/a", "/etc/é",
+	"/var/", "/var/log/", "/var/log/app.log", "/var/log/x/y", "/var/data",
+	"/usr/", "/usr/bin/", "/usr/bin/sh", "/usr/bin/x", "/a/", "/a/b/", "/a/b/c",
+	"/a/x/c", "/a/b/d", "/x1/y", "/x2/y", "/qq/z", "/ea/f", "/esc/*", "/etc",
+	"/tmp/é", "/tmp/a", "/tmp/ab", "/tmp/\xe9", "/b", "/etc/foo/b/c",
+}
+
+// refIsStarStar reports whether a pattern is a "<prefix>**" pattern with a
+// non-empty literal prefix ending in "/", written without escapes.
+func refIsStarStar(pattern string) bool {
+	prefix, ok := strings.CutSuffix(pattern, "**")
+
+	return ok && strings.HasSuffix(prefix, "/") && !strings.ContainsAny(prefix, patternSyntax)
+}
+
+// refIncludes reports whether every probe the glob matches is matched by
+// base too.
+func refIncludes(base, glob string) bool {
+	key := [2]string{base, glob}
+	if cached, ok := refIncluded.Load(key); ok {
+		included, _ := cached.(bool)
+
+		return included
+	}
+
+	included := true
+
+	for _, probe := range refProbes {
+		if matchGlob(glob, probe) && !matchGlob(base, probe) {
+			included = false
+
+			break
+		}
+	}
+
+	refIncluded.Store(key, included)
+
+	return included
+}
+
+// refIncluded caches refIncludes by pattern pair.
+var refIncluded sync.Map
+
+// refNarrowGlobs is the pairwise narrowing rule: the glob both sides permit,
+// or "" when there is none the merge can name.
 func refNarrowGlobs(left, right string) string {
 	if left == right {
 		return left
 	}
 
-	leftPrefix := globLiteralPrefix(left)
-	rightPrefix := globLiteralPrefix(right)
-
-	if left == leftPrefix+"**" && strings.HasPrefix(rightPrefix, leftPrefix) {
+	if refIsStarStar(left) && refIncludes(left, right) {
 		return right
 	}
 
-	if right == rightPrefix+"**" && strings.HasPrefix(leftPrefix, rightPrefix) {
+	if refIsStarStar(right) && refIncludes(right, left) {
 		return left
 	}
 
 	return ""
 }
 
+// refName resolves the single-character escapes the corpus uses.
+func refName(path string) string {
+	var builder strings.Builder
+
+	for idx := 0; idx < len(path); idx++ {
+		if path[idx] == '\\' && idx+1 < len(path) {
+			idx++
+		}
+
+		builder.WriteByte(path[idx])
+	}
+
+	return builder.String()
+}
+
 // refMatches reports whether any path of the list is the given literal or a
 // glob covering it.
 func refMatches(paths []string, path string) bool {
-	name := unescapeLiteral(path)
-
 	for _, candidate := range paths {
 		if candidate == path {
 			return true
 		}
 
-		if IsGlobPattern(candidate) && globToRegex(candidate).MatchString(name) {
+		if IsGlobPattern(candidate) && matchGlob(candidate, refName(path)) {
 			return true
 		}
 	}
@@ -102,12 +165,12 @@ func refAddMatchedLiterals(paths, other []string, add func(string)) {
 
 func refAddNarrowedGlobs(left, right []string, add func(string)) {
 	for _, leftPath := range left {
-		if !IsGlobPattern(leftPath) || globNeverMatches(leftPath) {
+		if !IsGlobPattern(leftPath) {
 			continue
 		}
 
 		for _, rightPath := range right {
-			if !IsGlobPattern(rightPath) || globNeverMatches(rightPath) {
+			if !IsGlobPattern(rightPath) {
 				continue
 			}
 
@@ -120,44 +183,27 @@ func refAddNarrowedGlobs(left, right []string, add func(string)) {
 
 // refMatchKey is the pairwise rule for filesystem entries: the narrower of
 // two interacting paths, or "" when they do not interact.
-func refMatchKey(left, right fsPathEntry) string {
-	if left.path == right.path {
-		return left.path
+func refMatchKey(left, right string) string {
+	if left == right {
+		return left
 	}
 
+	leftGlob, rightGlob := IsGlobPattern(left), IsGlobPattern(right)
+
 	switch {
-	case left.expr == nil && right.expr != nil:
-		if right.expr.MatchString(unescapeLiteral(left.path)) {
-			return left.path
+	case !leftGlob && rightGlob:
+		if matchGlob(right, refName(left)) {
+			return left
 		}
-	case left.expr != nil && right.expr == nil:
-		if left.expr.MatchString(unescapeLiteral(right.path)) {
-			return right.path
+	case leftGlob && !rightGlob:
+		if matchGlob(left, refName(right)) {
+			return right
 		}
-	case left.expr != nil && right.expr != nil:
-		return refNarrowGlobs(left.path, right.path)
+	case leftGlob && rightGlob:
+		return refNarrowGlobs(left, right)
 	}
 
 	return ""
-}
-
-func refEntries(perms map[string]fsPermission) []fsPathEntry {
-	entries := make([]fsPathEntry, 0, len(perms))
-
-	for path, perm := range perms {
-		entry := fsPathEntry{path: path, perm: perm, expr: nil}
-
-		if IsGlobPattern(path) {
-			entry.expr = globToRegex(path)
-			if entry.expr == neverMatchRe {
-				continue
-			}
-		}
-
-		entries = append(entries, entry)
-	}
-
-	return entries
 }
 
 func refMergeFilesystem(left, right *FilesystemRules) *FilesystemRules {
@@ -166,40 +212,18 @@ func refMergeFilesystem(left, right *FilesystemRules) *FilesystemRules {
 
 	merged := make(map[string]fsPermission)
 
-	for path, leftPerm := range leftPerms {
-		if IsGlobPattern(path) {
-			continue
-		}
-
-		if rightPerm, ok := rightPerms[path]; ok {
-			intersected := leftPerm.intersect(rightPerm)
-			if intersected.read || intersected.write {
-				merged[path] = intersected
-			}
-		}
-	}
-
-	refApplyPairs(refEntries(leftPerms), refEntries(rightPerms), merged)
-
-	return collapseFsPerms(merged)
-}
-
-func refApplyPairs(left, right []fsPathEntry, merged map[string]fsPermission) {
-	for _, leftEntry := range left {
-		for _, rightEntry := range right {
-			if leftEntry.expr == nil && rightEntry.expr == nil {
-				// Literal against literal is the map lookup in the caller.
-				continue
-			}
-
-			key := refMatchKey(leftEntry, rightEntry)
+	for leftPath, leftPerm := range leftPerms {
+		for rightPath, rightPerm := range rightPerms {
+			key := refMatchKey(leftPath, rightPath)
 			if key == "" {
 				continue
 			}
 
-			refRecord(merged, key, leftEntry.perm.intersect(rightEntry.perm))
+			refRecord(merged, key, leftPerm.intersect(rightPerm))
 		}
 	}
+
+	return collapseFsPerms(merged)
 }
 
 func refRecord(merged map[string]fsPermission, key string, perm fsPermission) {
@@ -217,13 +241,19 @@ func refRecord(merged map[string]fsPermission, key string, perm fsPermission) {
 }
 
 // refCorpus mixes literals, globs of every token kind, "**" expansions at
-// several depths, and an escaped literal, so that generated path lists hit
-// the cases the index treats differently.
+// several depths, globs that also match their own prefix, byte-oriented
+// patterns, and an escaped literal, so that generated path lists hit the
+// cases the index treats differently. Every glob matches at least one
+// probe, as the reference would treat one matching none as included in
+// everything.
 var refCorpus = []string{
 	"/etc/passwd", "/etc/", "/etc/**", "/etc/*", "/etc/*.conf", "/etc/foo/*.conf",
 	"/**", "/*", "/var/log/**", "/var/log/app.log", "/usr/bin/sh", "/usr/bin/*",
 	"/usr/**", "/a/b/c", "/a/**", "/a/*/c", "/x{1,2}/y", "/q?/z", "/e[a-c]/f",
 	`/esc/\*`, "/var/", "/var/data", "/a/b/**", "/",
+	"/etc/{,**}", "/etc/{,foo}", "/{,etc}", "/etc/**foo", "/etc/[!a]", "/etc/{a,}",
+	"/tmp/?", "/tmp/??", "/tmp/é", "/etc/{**,x}", "/{etc,var}/**", "/etc/foo/**",
+	"/etc/*/**", "/tmp/**",
 }
 
 func refRandPaths(rnd *rand.Rand) []string {
@@ -240,6 +270,20 @@ func sortedClone(paths []string) []string {
 	slices.Sort(cloned)
 
 	return cloned
+}
+
+// TestRefCorpusGlobsMatchProbes guards the reference's premise: a corpus
+// glob matching no probe would count as included in every "**" pattern.
+func TestRefCorpusGlobsMatchProbes(t *testing.T) {
+	t.Parallel()
+
+	for _, pattern := range refCorpus {
+		if IsGlobPattern(pattern) && !slices.ContainsFunc(refProbes, func(probe string) bool {
+			return matchGlob(pattern, probe)
+		}) {
+			t.Errorf("corpus glob %q matches no probe", pattern)
+		}
+	}
 }
 
 func TestIntersectPathsMatchesReference(t *testing.T) {

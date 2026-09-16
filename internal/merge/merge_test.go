@@ -305,7 +305,7 @@ func TestFoldMergeErrorSubsequentPair(t *testing.T) {
 	}
 }
 
-func TestFormatDiffItems(t *testing.T) {
+func TestFormatSliceDiff(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -349,11 +349,27 @@ func TestFormatDiffItems(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := merge.FormatDiffItems(test.prefix, test.removed, test.added)
+			got := merge.FormatSliceDiff(test.prefix, merge.SliceDiff[string]{
+				Added:   test.added,
+				Removed: test.removed,
+			})
 			if got != test.want {
-				t.Errorf("FormatDiffItems() = %q, want %q", got, test.want)
+				t.Errorf("FormatSliceDiff() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+// TestFormatSliceDiffOfDiffSlice checks that the results of DiffSlice land
+// on the right side of the formatted diff.
+func TestFormatSliceDiffOfDiffSlice(t *testing.T) {
+	t.Parallel()
+
+	added, removed := merge.DiffSlice([]string{"a", "b"}, []string{"b", "c"})
+
+	got := merge.FormatSliceDiff("x", merge.SliceDiff[string]{Added: added, Removed: removed})
+	if want := "x:-a,+c"; got != want {
+		t.Errorf("FormatSliceDiff() = %q, want %q", got, want)
 	}
 }
 

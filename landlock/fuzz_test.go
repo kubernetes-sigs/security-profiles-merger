@@ -22,7 +22,6 @@ import (
 	"strings"
 	"testing"
 
-	"sigs.k8s.io/security-profiles-merger/internal/merge"
 	"sigs.k8s.io/security-profiles-merger/landlock"
 )
 
@@ -69,12 +68,14 @@ func fuzzLandlockProfile(
 	}
 }
 
-// fuzzPath cleans a fuzz-generated path and substitutes the fallback for
-// inputs Validate rejects: empty paths, paths that clean to ".", and paths
-// with NUL bytes.
+// fuzzPath substitutes the fallback for paths Validate rejects: empty paths,
+// paths with NUL bytes or ".." components, and paths that clean to ".".
+// Other paths reach the merge as generated, including repeated slashes, "."
+// components, trailing slashes, and relative paths.
 func fuzzPath(path, fallback string) string {
-	path = merge.CleanPath(strings.ReplaceAll(path, "\x00", ""))
-	if path == "." {
+	if path == "" || strings.ContainsRune(path, 0) ||
+		slices.Contains(strings.Split(path, "/"), "..") ||
+		landlock.CleanPath(path) == "." {
 		return fallback
 	}
 
@@ -246,6 +247,21 @@ func addLandlockFuzzSeeds(f *testing.F) {
 		uint8(0x01), uint8(0x01),
 	)
 
+	// Uncleaned and relative paths: "//etc/" and "/etc/./" name the same
+	// rule, "etc" is unrelated to "/etc", and refer is handled.
+	f.Add(
+		uint32(0x1FFFF), uint8(0x00), uint8(0x00),
+		"//etc/", "./etc",
+		uint32(0x1FFFF), uint32(0x01),
+		uint16(0), uint16(0),
+		uint8(0x00), uint8(0x00),
+		uint32(0x07), uint8(0x00), uint8(0x00),
+		"/etc/./", "etc//sub",
+		uint32(0x05), uint32(0x07),
+		uint16(0), uint16(0),
+		uint8(0x00), uint8(0x00),
+	)
+
 	// Single FS right, single scope, no net
 	f.Add(
 		uint32(0x01), uint8(0x00), uint8(0x01),
@@ -332,8 +348,8 @@ func fuzzMerge(
 }
 
 // semanticallyEqual compares two profiles by the access they permit rather
-// than by rule structure: handled and scoped sets must match, and every path
-// or port named by either profile must permit the same rights.
+// than by rule structure: handled and scoped sets must match, and every probe
+// path or port must permit the same rights.
 func semanticallyEqual(left, right *landlock.Profile) bool {
 	if !slices.Equal(left.HandledAccessFS, right.HandledAccessFS) ||
 		!slices.Equal(left.HandledAccessNet, right.HandledAccessNet) ||
@@ -341,17 +357,17 @@ func semanticallyEqual(left, right *landlock.Profile) bool {
 		return false
 	}
 
-	for _, rule := range slices.Concat(left.PathRules, right.PathRules) {
+	for _, path := range probePaths(left, right) {
 		for _, access := range allFSRights() {
-			if fsPermits(left, rule.Path, access) != fsPermits(right, rule.Path, access) {
+			if fsPermits(left, path, access) != fsPermits(right, path, access) {
 				return false
 			}
 		}
 	}
 
-	for _, rule := range slices.Concat(left.NetRules, right.NetRules) {
+	for _, port := range probePorts(left, right) {
 		for _, access := range allNetRights() {
-			if netPermits(left, rule.Port, access) != netPermits(right, rule.Port, access) {
+			if netPermits(left, port, access) != netPermits(right, port, access) {
 				return false
 			}
 		}
@@ -387,24 +403,38 @@ func scopeRightSet(rights []landlock.ScopeRight) map[landlock.ScopeRight]struct{
 	return set
 }
 
-func pathRuleMap(rules []landlock.PathRule) map[string][]landlock.FSAccessRight {
-	result := make(map[string][]landlock.FSAccessRight, len(rules))
-	for _, rule := range rules {
-		result[rule.Path] = rule.AccessFS
+// probePaths returns the cleaned rule paths of all profiles, a descendant of
+// each, the root, and a relative path, sorted and without duplicates. The
+// merge result is questioned at these paths.
+func probePaths(profiles ...*landlock.Profile) []string {
+	probes := []string{"/", "probe"}
+
+	for _, profile := range profiles {
+		for _, rule := range profile.PathRules {
+			path := landlock.CleanPath(rule.Path)
+			probes = append(probes, path, strings.TrimSuffix(path, "/")+"/probe")
+		}
 	}
 
-	return result
+	slices.Sort(probes)
+
+	return slices.Compact(probes)
 }
 
-func netRulePortMap(
-	rules []landlock.NetRule,
-) map[uint16][]landlock.NetAccessRight {
-	result := make(map[uint16][]landlock.NetAccessRight, len(rules))
-	for _, rule := range rules {
-		result[rule.Port] = rule.AccessNet
+// probePorts returns the rule ports of all profiles and one more port,
+// sorted and without duplicates.
+func probePorts(profiles ...*landlock.Profile) []uint16 {
+	ports := []uint16{65535}
+
+	for _, profile := range profiles {
+		for _, rule := range profile.NetRules {
+			ports = append(ports, rule.Port)
+		}
 	}
 
-	return result
+	slices.Sort(ports)
+
+	return slices.Compact(ports)
 }
 
 func assertIntersectInvariants(
@@ -413,12 +443,51 @@ func assertIntersectInvariants(
 ) {
 	t.Helper()
 
+	both := func(l, r bool) bool { return l && r }
+
+	assertResultShape(t, result, left, right)
 	assertPathsFromInputs(t, result, left, right)
-	assertIntersectPathsExact(t, result, left, right)
-	assertIntersectNetExact(t, result, left, right)
+	assertFSExact(t, "intersect", both, result, left, right)
+	assertNetExact(t, "intersect", both, result, left, right)
 	assertHandledFromInputs(t, result, left, right)
 	assertHandledCoversInputs(t, result, left, right)
 	assertIntersectScopedCoversInputs(t, result, left, right)
+}
+
+// assertResultShape checks what every merge result satisfies: it validates,
+// its rules are sorted, and it is loadable unless an input uses a relative
+// path or the result restricts nothing.
+func assertResultShape(t *testing.T, result *landlock.Profile, inputs ...*landlock.Profile) {
+	t.Helper()
+
+	err := landlock.Validate(result)
+	if err != nil {
+		t.Errorf("merge result does not validate: %v", err)
+	}
+
+	if !slices.IsSortedFunc(result.PathRules, func(a, b landlock.PathRule) int {
+		return cmp.Compare(a.Path, b.Path)
+	}) {
+		t.Error("result path rules are not sorted")
+	}
+
+	for _, input := range inputs {
+		for _, rule := range input.PathRules {
+			if !strings.HasPrefix(rule.Path, "/") {
+				return
+			}
+		}
+	}
+
+	if len(result.HandledAccessFS) == 0 && len(result.HandledAccessNet) == 0 &&
+		len(result.Scoped) == 0 {
+		return
+	}
+
+	err = landlock.ValidateStrict(result)
+	if err != nil {
+		t.Errorf("merge result is not loadable: %v\nresult=%s", err, landlock.FormatProfile(result))
+	}
 }
 
 func assertPathsFromInputs(
@@ -428,12 +497,8 @@ func assertPathsFromInputs(
 	t.Helper()
 
 	inputPaths := make(map[string]struct{})
-	for _, rule := range left.PathRules {
-		inputPaths[rule.Path] = struct{}{}
-	}
-
-	for _, rule := range right.PathRules {
-		inputPaths[rule.Path] = struct{}{}
+	for _, rule := range slices.Concat(left.PathRules, right.PathRules) {
+		inputPaths[landlock.CleanPath(rule.Path)] = struct{}{}
 	}
 
 	for _, rule := range result.PathRules {
@@ -585,19 +650,28 @@ func assertUnionScopedCoversCommon(
 }
 
 // fsPermits reports whether a profile permits a filesystem right under a
-// path: either the right is unhandled, or a rule on the path or one of its
-// ancestors grants it.
+// cleaned path, following the kernel: a right is denied when the profile
+// handles it, and refer is also denied when the profile handles any
+// filesystem right. A denied right is permitted where a rule on the path or
+// one of its ancestors grants it; a rule can only grant a right the profile
+// lists as handled, since the kernel refuses any other grant.
 func fsPermits(profile *landlock.Profile, path string, right landlock.FSAccessRight) bool {
-	if _, handled := fsRightSet(profile.HandledAccessFS)[right]; !handled {
+	handled := fsRightSet(profile.HandledAccessFS)
+
+	_, listed := handled[right]
+	denied := listed || (right == landlock.FSAccessRefer && len(handled) > 0)
+
+	if !denied {
 		return true
 	}
 
-	for _, rule := range profile.PathRules {
-		if !landlock.IsAncestorOrSelf(rule.Path, path) {
-			continue
-		}
+	if !listed {
+		return false
+	}
 
-		if slices.Contains(rule.AccessFS, right) {
+	for _, rule := range profile.PathRules {
+		if landlock.IsAncestorOrSelf(landlock.CleanPath(rule.Path), path) &&
+			slices.Contains(rule.AccessFS, right) {
 			return true
 		}
 	}
@@ -606,72 +680,14 @@ func fsPermits(profile *landlock.Profile, path string, right landlock.FSAccessRi
 }
 
 // netPermits reports whether a profile permits a network right on a port:
-// either the right is unhandled, or the rule for the port grants it.
+// either the right is unhandled, or a rule for the port grants it.
 func netPermits(profile *landlock.Profile, port uint16, right landlock.NetAccessRight) bool {
 	if _, handled := netRightSet(profile.HandledAccessNet)[right]; !handled {
 		return true
 	}
 
-	return slices.Contains(netRulePortMap(profile.NetRules)[port], right)
-}
-
-// assertIntersectPathsExact checks that every right in the result is
-// permitted by both inputs at its path, and that every right both inputs
-// permit at an input path appears in the result.
-func assertIntersectPathsExact(
-	t *testing.T,
-	result, left, right *landlock.Profile,
-) {
-	t.Helper()
-
-	normLeft := normalized(t, left)
-	normRight := normalized(t, right)
-
-	for _, rule := range result.PathRules {
-		for _, access := range rule.AccessFS {
-			if !fsPermits(normLeft, rule.Path, access) || !fsPermits(normRight, rule.Path, access) {
-				t.Errorf(
-					"intersect path %q has right %q not permitted by both inputs",
-					rule.Path, access,
-				)
-			}
-		}
-	}
-
-	resultPaths := pathRuleMap(result.PathRules)
-
-	for _, rule := range slices.Concat(normLeft.PathRules, normRight.PathRules) {
-		assertPathRightsComplete(t, rule.Path, resultPaths[rule.Path], normLeft, normRight)
-	}
-}
-
-func assertPathRightsComplete(
-	t *testing.T,
-	path string,
-	granted []landlock.FSAccessRight,
-	left, right *landlock.Profile,
-) {
-	t.Helper()
-
-	for _, access := range allFSRights() {
-		expected := fsPermits(left, path, access) &&
-			fsPermits(right, path, access) &&
-			fsRuleGrants(left, right, path, access)
-
-		if expected && !slices.Contains(granted, access) {
-			t.Errorf("intersect path %q is missing right %q", path, access)
-		}
-	}
-}
-
-// fsRuleGrants reports whether at least one input grants the right through a
-// rule (rather than by leaving it unhandled), which is required for the
-// right to appear in the result.
-func fsRuleGrants(
-	left, right *landlock.Profile, path string, access landlock.FSAccessRight,
-) bool {
-	for _, rule := range slices.Concat(left.PathRules, right.PathRules) {
-		if landlock.IsAncestorOrSelf(rule.Path, path) && slices.Contains(rule.AccessFS, access) {
+	for _, rule := range profile.NetRules {
+		if rule.Port == port && slices.Contains(rule.AccessNet, right) {
 			return true
 		}
 	}
@@ -679,68 +695,50 @@ func fsRuleGrants(
 	return false
 }
 
-// assertIntersectNetExact mirrors assertIntersectPathsExact for ports.
-func assertIntersectNetExact(
+// assertFSExact checks at every probe path and for every right that the
+// result permits exactly what combine makes of the inputs' answers: both for
+// an intersection, either for a union.
+func assertFSExact(
 	t *testing.T,
+	name string,
+	combine func(left, right bool) bool,
 	result, left, right *landlock.Profile,
 ) {
 	t.Helper()
 
-	normLeft := normalized(t, left)
-	normRight := normalized(t, right)
-
-	for _, rule := range result.NetRules {
-		for _, access := range rule.AccessNet {
-			if !netPermits(normLeft, rule.Port, access) ||
-				!netPermits(normRight, rule.Port, access) {
+	for _, path := range probePaths(left, right, result) {
+		for _, access := range allFSRights() {
+			want := combine(fsPermits(left, path, access), fsPermits(right, path, access))
+			if got := fsPermits(result, path, access); got != want {
 				t.Errorf(
-					"intersect port %d has right %q not permitted by both inputs",
-					rule.Port, access,
+					"%s permits %q at %q = %v, want %v\nleft=%s\nright=%s\nresult=%s",
+					name, access, path, got, want,
+					landlock.FormatProfile(left),
+					landlock.FormatProfile(right),
+					landlock.FormatProfile(result),
 				)
 			}
 		}
 	}
-
-	resultPorts := netRulePortMap(result.NetRules)
-
-	for _, rule := range slices.Concat(normLeft.NetRules, normRight.NetRules) {
-		assertNetRightsComplete(t, rule.Port, resultPorts[rule.Port], normLeft, normRight)
-	}
 }
 
-func assertNetRightsComplete(
+// assertNetExact mirrors assertFSExact for ports.
+func assertNetExact(
 	t *testing.T,
-	port uint16,
-	granted []landlock.NetAccessRight,
-	left, right *landlock.Profile,
+	name string,
+	combine func(left, right bool) bool,
+	result, left, right *landlock.Profile,
 ) {
 	t.Helper()
 
-	leftRule := netRulePortMap(left.NetRules)[port]
-	rightRule := netRulePortMap(right.NetRules)[port]
-
-	for _, access := range allNetRights() {
-		expected := netPermits(left, port, access) &&
-			netPermits(right, port, access) &&
-			(slices.Contains(leftRule, access) || slices.Contains(rightRule, access))
-
-		if expected && !slices.Contains(granted, access) {
-			t.Errorf("intersect port %d is missing right %q", port, access)
+	for _, port := range probePorts(left, right, result) {
+		for _, access := range allNetRights() {
+			want := combine(netPermits(left, port, access), netPermits(right, port, access))
+			if got := netPermits(result, port, access); got != want {
+				t.Errorf("%s permits %q on port %d = %v, want %v", name, access, port, got, want)
+			}
 		}
 	}
-}
-
-// normalized returns the profile as the merge sees it: paths cleaned and
-// duplicate rules folded, obtained by intersecting the profile with itself.
-func normalized(t *testing.T, profile *landlock.Profile) *landlock.Profile {
-	t.Helper()
-
-	result, err := landlock.Intersect(profile)
-	if err != nil {
-		t.Fatalf("normalize: %v", err)
-	}
-
-	return result
 }
 
 func allFSRights() []landlock.FSAccessRight {
@@ -757,49 +755,21 @@ func assertUnionInvariants(
 ) {
 	t.Helper()
 
-	assertUnionPathCoverage(t, result, left, right)
-	assertUnionPathRightsSuperset(t, result, left, right)
-	assertUnionNetRightsSuperset(t, result, left, right)
+	either := func(l, r bool) bool { return l || r }
+
+	assertResultShape(t, result, left, right)
+	assertPathsFromInputs(t, result, left, right)
+	assertFSExact(t, "union", either, result, left, right)
+	assertNetExact(t, "union", either, result, left, right)
 	assertUnionHandledSubset(t, result, left, right)
 	assertUnionHandledCoversCommon(t, result, left, right)
 	assertUnionScopedSubset(t, result, left, right)
 	assertUnionScopedCoversCommon(t, result, left, right)
 }
 
-func assertUnionPathCoverage(
-	t *testing.T,
-	result, left, right *landlock.Profile,
-) {
-	t.Helper()
-
-	resultPaths := make(map[string]struct{})
-	for _, rule := range result.PathRules {
-		resultPaths[rule.Path] = struct{}{}
-	}
-
-	handled := fsRightSet(result.HandledAccessFS)
-
-	// Rights outside the merged handled set are pruned, so a rule survives
-	// only when it grants a handled right.
-	for _, input := range []*landlock.Profile{left, right} {
-		for _, rule := range input.PathRules {
-			if _, ok := resultPaths[rule.Path]; !ok &&
-				len(handledFSRights(rule.AccessFS, handled)) > 0 {
-				t.Errorf("path %q missing from union", rule.Path)
-			}
-		}
-	}
-
-	if !slices.IsSortedFunc(
-		result.PathRules,
-		func(a, b landlock.PathRule) int {
-			return cmp.Compare(a.Path, b.Path)
-		},
-	) {
-		t.Error("result path rules are not sorted")
-	}
-}
-
+// assertUnionHandledSubset checks that the union handles only rights both
+// inputs handle. Refer is the exception: both inputs deny it when they
+// handle any filesystem right, so the union may list it then.
 func assertUnionHandledSubset(
 	t *testing.T,
 	result, left, right *landlock.Profile,
@@ -809,12 +779,17 @@ func assertUnionHandledSubset(
 	leftHandledFS := fsRightSet(left.HandledAccessFS)
 	rightHandledFS := fsRightSet(right.HandledAccessFS)
 
-	for _, r := range result.HandledAccessFS {
-		_, inL := leftHandledFS[r]
-		_, inR := rightHandledFS[r]
+	for _, fsRight := range result.HandledAccessFS {
+		_, inL := leftHandledFS[fsRight]
+		_, inR := rightHandledFS[fsRight]
+
+		if fsRight == landlock.FSAccessRefer {
+			inL = len(leftHandledFS) > 0
+			inR = len(rightHandledFS) > 0
+		}
 
 		if !inL || !inR {
-			t.Errorf("union handled FS right %q not in both inputs", r)
+			t.Errorf("union handled FS right %q not in both inputs", fsRight)
 		}
 	}
 
@@ -877,130 +852,6 @@ func assertUnionHandledCoversCommonNet(
 
 		if _, ok := resultNet[netRight]; !ok {
 			t.Errorf("union handled Net missing common right %q", netRight)
-		}
-	}
-}
-
-func assertUnionPathRightsSuperset(
-	t *testing.T,
-	result, left, right *landlock.Profile,
-) {
-	t.Helper()
-
-	resultPaths := pathRuleMap(result.PathRules)
-	leftPaths := pathRuleMap(left.PathRules)
-	rightPaths := pathRuleMap(right.PathRules)
-
-	handled := fsRightSet(result.HandledAccessFS)
-
-	assertPathRightsPresent(t, leftPaths, rightPaths, resultPaths, handled)
-	assertPathRightsPresent(t, rightPaths, leftPaths, resultPaths, handled)
-}
-
-func assertPathRightsPresent(
-	t *testing.T,
-	source, other map[string][]landlock.FSAccessRight,
-	result map[string][]landlock.FSAccessRight,
-	handled map[landlock.FSAccessRight]struct{},
-) {
-	t.Helper()
-
-	for path, access := range source {
-		if _, inOther := other[path]; !inOther {
-			continue
-		}
-
-		expected := handledFSRights(access, handled)
-		if len(expected) == 0 {
-			continue
-		}
-
-		resultAccess, inResult := result[path]
-		if !inResult {
-			t.Errorf("union missing shared path %q", path)
-
-			continue
-		}
-
-		resultSet := fsRightSet(resultAccess)
-
-		for _, right := range expected {
-			if _, ok := resultSet[right]; !ok {
-				t.Errorf("union path %q missing right %q", path, right)
-			}
-		}
-	}
-}
-
-// handledFSRights returns the rights of access that are in handled.
-func handledFSRights(
-	access []landlock.FSAccessRight, handled map[landlock.FSAccessRight]struct{},
-) []landlock.FSAccessRight {
-	var kept []landlock.FSAccessRight
-
-	for _, right := range access {
-		if _, ok := handled[right]; ok {
-			kept = append(kept, right)
-		}
-	}
-
-	return kept
-}
-
-func assertUnionNetRightsSuperset(
-	t *testing.T,
-	result, left, right *landlock.Profile,
-) {
-	t.Helper()
-
-	resultPorts := netRulePortMap(result.NetRules)
-	leftPorts := netRulePortMap(left.NetRules)
-	rightPorts := netRulePortMap(right.NetRules)
-
-	handled := netRightSet(result.HandledAccessNet)
-
-	assertNetRightsPresent(t, leftPorts, rightPorts, resultPorts, handled)
-	assertNetRightsPresent(t, rightPorts, leftPorts, resultPorts, handled)
-}
-
-func assertNetRightsPresent(
-	t *testing.T,
-	source, other map[uint16][]landlock.NetAccessRight,
-	result map[uint16][]landlock.NetAccessRight,
-	handled map[landlock.NetAccessRight]struct{},
-) {
-	t.Helper()
-
-	for port, access := range source {
-		if _, inOther := other[port]; !inOther {
-			continue
-		}
-
-		var expected []landlock.NetAccessRight
-
-		for _, right := range access {
-			if _, ok := handled[right]; ok {
-				expected = append(expected, right)
-			}
-		}
-
-		if len(expected) == 0 {
-			continue
-		}
-
-		resultAccess, inResult := result[port]
-		if !inResult {
-			t.Errorf("union missing shared port %d", port)
-
-			continue
-		}
-
-		resultSet := netRightSet(resultAccess)
-
-		for _, right := range expected {
-			if _, ok := resultSet[right]; !ok {
-				t.Errorf("union port %d missing right %q", port, right)
-			}
 		}
 	}
 }

@@ -53,11 +53,34 @@ var (
 	// more than once in AllowedExecutables or AllowedLibraries.
 	ErrDuplicateExecutablePath = errors.New("duplicate executable path")
 
-	// ErrGlobTooComplex is returned by ValidateStrict when a glob pattern
-	// exceeds the matcher's limits (4096 bytes, or 100 alternatives in
-	// total) and therefore never matches anything: intersection would
-	// silently drop it.
+	// ErrGlobTooComplex is returned by ValidateStrict and ValidateArtifact
+	// when a glob pattern exceeds the matcher's limits (100 alternatives in
+	// total, or a compiled regex too large) and therefore never matches
+	// anything: intersection would silently drop it.
 	ErrGlobTooComplex = errors.New("glob pattern exceeds size or alternative limits")
+
+	// ErrInvalidGlob is returned by ValidateStrict and ValidateArtifact when
+	// a path is a pattern apparmor_parser rejects, such as an unclosed "{"
+	// or "[", a "}" or "]" without its opening counterpart, an alternation
+	// without a comma, alternations nested 50 deep, a malformed character
+	// class, or a trailing backslash. It is also returned for the character
+	// class forms the parser accepts but translates into something other
+	// than what they say: "*" or "?" inside a class, an escaped "," inside a
+	// class, and "[]" or "[^]". The merge functions treat such a pattern as
+	// matching nothing.
+	ErrInvalidGlob = errors.New("invalid AppArmor path pattern")
+
+	// ErrPathTooLong is returned by Validate when a path is longer than
+	// 4096 bytes, the longest pattern the matcher accepts and longer than
+	// any Linux path. Validate checks the length before anything else, so
+	// an oversized path costs no further work.
+	ErrPathTooLong = errors.New("path exceeds 4096 bytes")
+
+	// ErrDotComponent is returned by ValidateStrict and ValidateArtifact
+	// when a path has a literal "." or ".." component. The kernel hands
+	// AppArmor canonical paths, so such a rule matches nothing; the merge
+	// functions keep it as written rather than resolving it.
+	ErrDotComponent = errors.New(`path contains a "." or ".." component`)
 
 	// ErrUnsupportedVariable is returned when a path references an AppArmor
 	// variable such as @{HOME}. Variables are expanded by the AppArmor
@@ -66,8 +89,9 @@ var (
 	// followed by an alternation.
 	ErrUnsupportedVariable = errors.New("AppArmor variables are not supported")
 
-	// ErrRelativePath is returned by ValidateStrict when a path does not
-	// start with "/". AppArmor file rules must use absolute paths.
+	// ErrRelativePath is returned by ValidateStrict and ValidateArtifact
+	// when a path does not start with "/". AppArmor file rules must use
+	// absolute paths.
 	ErrRelativePath = errors.New("relative path (must be absolute)")
 )
 
@@ -89,10 +113,22 @@ func isKnownCapability(name string) bool {
 	}
 }
 
-// Validate checks an AppArmor profile for structural issues.
-// Filesystem paths and executable paths are not validated
-// beyond being non-empty and free of AppArmor variables, which the merge
-// cannot interpret (ErrUnsupportedVariable).
+// Validate checks an AppArmor profile for structural issues. It reports:
+//
+//   - paths longer than 4096 bytes (ErrPathTooLong), before anything else;
+//   - empty paths (ErrEmptyPath);
+//   - paths referencing AppArmor variables, which the merge cannot
+//     interpret (ErrUnsupportedVariable);
+//   - a path listed in more than one filesystem category (ErrDuplicatePath)
+//     or more than once within one (ErrDuplicatePathInCategory);
+//   - empty capability names (ErrEmptyCapability) and capability names
+//     listed more than once, compared case-insensitively
+//     (ErrDuplicateCapability).
+//
+// Paths are not validated beyond that. Patterns apparmor_parser rejects
+// pass Validate and match nothing in the merge; ValidateStrict and
+// ValidateArtifact report them. Duplicate executable and library paths pass
+// Validate, as the merge deduplicates them; ValidateStrict reports them.
 //
 // Capability names are not checked against the known set: the kernel gains
 // capabilities over time, and failing a merge because one input names a
@@ -101,14 +137,19 @@ func isKnownCapability(name string) bool {
 // survives an intersection only when every profile grants it. ValidateStrict
 // reports unknown names for user-authored profiles, where they are typos.
 //
-// The checks catch issues that would produce confusing merge results:
-// duplicate paths across filesystem categories, which expand into
-// ambiguous permission sets. Paths are compared in their normalized form,
-// as the merge functions see them. All validation failures are collected
-// and returned together.
+// Duplicate filesystem paths would expand into ambiguous permission sets.
+// Paths are compared in their normalized form, as the merge functions see
+// them. All validation failures are collected and returned together.
 func Validate(profile *Profile) error {
 	if profile == nil {
 		return ErrNilProfile
+	}
+
+	// Oversized paths are reported on their own: every other check scans
+	// the paths.
+	err := validatePathLengths(profile)
+	if err != nil {
+		return err
 	}
 
 	var errs []error
@@ -158,11 +199,13 @@ func Validate(profile *Profile) error {
 // ValidateStrict performs all checks from Validate and additionally detects
 // capability names outside the known set of Linux capabilities, duplicate
 // paths in AllowedExecutables and AllowedLibraries, compared in
-// their normalized form, relative paths, which AppArmor file rules cannot
-// use, and glob patterns that exceed the matcher's limits and would never
-// match. The merge path handles duplicates by deduplication, drops
-// unmatchable globs on intersection, and treats capability names as opaque,
-// so Validate permits all of them.
+// their normalized form, and every path ValidateArtifact rejects: relative
+// paths (ErrRelativePath), patterns apparmor_parser rejects
+// (ErrInvalidGlob), glob patterns past the matcher's limits
+// (ErrGlobTooComplex), and "." or ".." components (ErrDotComponent). The
+// merge deduplicates executable and library paths, drops unmatchable globs
+// on intersection, and treats capability names as opaque, so Validate
+// permits all of them.
 // ValidateStrict is intended for user-authored profiles where all of these
 // are likely mistakes.
 func ValidateStrict(profile *Profile) error {
@@ -206,11 +249,16 @@ func ValidateStrict(profile *Profile) error {
 // such as an OCI artifact pulled by a container runtime. It performs all
 // checks from Validate and additionally rejects what a runtime could not
 // load or would silently drop: relative paths, which apparmor_parser does
-// not accept for a file rule, and glob patterns past the matcher's limits,
-// which never match and would vanish from an intersection without a trace.
+// not accept for a file rule (ErrRelativePath), patterns apparmor_parser
+// rejects (ErrInvalidGlob), glob patterns past the matcher's limits
+// (ErrGlobTooComplex), which never match and would vanish from an
+// intersection without a trace, and paths with "." or ".." components
+// (ErrDotComponent), which match nothing.
 //
-// Duplicates are accepted, as the merge deduplicates them, and so are
-// capability names outside the known set, which the merge treats as opaque.
+// Duplicate executable and library paths are accepted, as the merge
+// deduplicates them, and so are capability names outside the known set,
+// which the merge treats as opaque. Duplicate filesystem paths and
+// capabilities are rejected, as Validate rejects them.
 // ValidateArtifact does not compare the profile against a baseline; callers
 // intersect the result with their baseline afterwards.
 func ValidateArtifact(profile *Profile) error {
@@ -236,15 +284,158 @@ func ValidateArtifact(profile *Profile) error {
 func validateLoadablePaths(profile *Profile) []error {
 	var errs []error
 
+	if validatePathLengths(profile) != nil {
+		// Validate reported the oversized paths already.
+		return nil
+	}
+
 	visitPathLists(profile, func(context string, paths []string) {
-		// Cleaning never changes whether a path is absolute, so the raw
-		// paths are checked and reported as written. Glob limits apply to
-		// the normalized form, which is what the merge matches.
+		// Normalizing never changes whether a path is absolute, so the raw
+		// paths are checked and reported as written. The pattern checks
+		// apply to the normalized form, which is what the merge matches.
+		normalized := normalizePaths(paths)
+
 		errs = append(errs, validateAbsolutePaths(context, paths)...)
-		errs = append(errs, validateGlobLimits(context, normalizePaths(paths))...)
+		errs = append(errs, validateGlobStatus(context, normalized)...)
+		errs = append(errs, rejectPaths(
+			context, normalized, hasDotComponent, ErrDotComponent, true,
+		)...)
 	})
 
 	return errs
+}
+
+// validatePathLengths reports the paths longer than the pattern limit.
+func validatePathLengths(profile *Profile) error {
+	var errs []error
+
+	visitPathLists(profile, func(context string, paths []string) {
+		errs = append(errs, rejectPaths(context, paths, func(path string) bool {
+			return len(path) > maxGlobPatternLen
+		}, ErrPathTooLong, false)...)
+	})
+
+	return errors.Join(errs...)
+}
+
+// hasDotComponent reports whether a path has a "." or ".." component, with
+// escape sequences resolved. For a glob, the components of the literal text
+// before the first glob token count, and so do the later components that
+// are exactly "." or ".." and lie outside every alternation and class: a
+// dot component inside an alternation, as in "/{a,b/./c}", only rules out
+// that alternative.
+func hasDotComponent(path string) bool {
+	matcher := matcherFor(path)
+
+	switch matcher.kind {
+	case kindInvalid:
+		return false
+	case kindLiteral:
+		return dotComponent(matcher.literal)
+	case kindGlob:
+	}
+
+	// The literal text ends inside the component holding the first glob
+	// token, so only the components of its prefix are complete.
+	return dotComponent(matcher.prefix) ||
+		ungroupedDotComponent(filterSlashes(decodeEscapes(path)))
+}
+
+// ungroupedDotComponent reports whether a valid pattern, with escapes
+// decoded and slashes filtered as convertPattern receives it, has a
+// component outside every alternation and class that is exactly "." or
+// "..". It scans as convertPattern does: a backslash makes the next
+// character literal, "[" opens a class the next "]" closes, and "{" and "}"
+// nest only outside a class. An escaped "/" still separates components, as
+// the name holds a "/" there.
+func ungroupedDotComponent(pattern string) bool {
+	var scan dotScanner
+
+	for idx := range len(pattern) {
+		if scan.step(pattern[idx]) {
+			return true
+		}
+	}
+
+	return scan.endComponent()
+}
+
+// dotScanner holds the state of ungroupedDotComponent.
+type dotScanner struct {
+	component strings.Builder
+	// grouped reports that the current component holds part of an
+	// alternation or class.
+	grouped bool
+	inClass bool
+	escaped bool
+	depth   int
+}
+
+// step scans one character and reports whether it ends a dot component.
+func (scan *dotScanner) step(char byte) bool {
+	topLevel := scan.depth == 0 && !scan.inClass
+
+	switch {
+	case scan.escaped:
+		scan.escaped = false
+	case char == '\\':
+		scan.escaped = true
+
+		return false
+	default:
+		scan.nest(char)
+	}
+
+	switch {
+	case !topLevel || scan.depth > 0 || scan.inClass:
+		scan.grouped = true
+	case char == '/':
+		return scan.endComponent()
+	default:
+		scan.component.WriteByte(char)
+	}
+
+	return false
+}
+
+// nest tracks the classes and alternations an unescaped character opens or
+// closes.
+func (scan *dotScanner) nest(char byte) {
+	switch {
+	case char == '[':
+		scan.inClass = true
+	case char == ']':
+		scan.inClass = false
+	case scan.inClass:
+	case char == '{':
+		scan.depth++
+	case char == '}':
+		scan.depth--
+	}
+}
+
+// endComponent ends the current component and reports whether it is an
+// ungrouped "." or "..".
+func (scan *dotScanner) endComponent() bool {
+	text := scan.component.String()
+	grouped := scan.grouped
+
+	scan.component.Reset()
+	scan.grouped = false
+
+	return !grouped && (text == "." || text == "..")
+}
+
+// dotComponent reports whether a slash-separated text has a component that
+// is exactly "." or "..".
+func dotComponent(text string) bool {
+	for component := range strings.SplitSeq(text, "/") {
+		if component == "." || component == ".." {
+			return true
+		}
+	}
+
+	return false
 }
 
 // rejectPaths reports every path for which reject holds, quoting the path
@@ -300,15 +491,21 @@ func visitPathLists(profile *Profile, visit func(context string, paths []string)
 	}
 }
 
-// validateGlobLimits reports glob patterns that exceed the matcher's limits
-// and therefore never match. It runs on normalized patterns, the form the
-// merge matches, so it agrees with Intersect on what is dropped. The pattern
-// itself is left out of the message, since it is at least 4 KiB or has over
-// 100 alternatives.
-func validateGlobLimits(context string, paths []string) []error {
-	return rejectPaths(context, paths, func(pattern string) bool {
-		return IsGlobPattern(pattern) && globNeverMatches(pattern)
+// validateGlobStatus reports patterns apparmor_parser rejects and glob
+// patterns that exceed the matcher's limits, both of which never match. It
+// runs on normalized patterns, the form the merge matches, so it agrees with
+// Intersect on what is dropped. A pattern over the limits is left out of the
+// message, since it has over 100 alternatives.
+func validateGlobStatus(context string, paths []string) []error {
+	invalid := rejectPaths(context, paths, func(pattern string) bool {
+		return matcherFor(pattern).status == globInvalid
+	}, ErrInvalidGlob, true)
+
+	tooComplex := rejectPaths(context, paths, func(pattern string) bool {
+		return matcherFor(pattern).status == globTooComplex
 	}, ErrGlobTooComplex, false)
+
+	return append(invalid, tooComplex...)
 }
 
 func validateEmptyPaths(context string, paths []string) []error {
@@ -317,11 +514,17 @@ func validateEmptyPaths(context string, paths []string) []error {
 	}, ErrEmptyPath, false)
 }
 
-// validateEmptyPathsInProfile checks for empty paths before normalization,
-// since cleaning "" yields "." which would bypass Validate's check.
+// validateEmptyPathsInProfile checks for empty and oversized paths before
+// normalization, so that no normalization work is spent on an oversized
+// path.
 func validateEmptyPathsInProfile(profile *Profile) error {
 	if profile == nil {
 		return ErrNilProfile
+	}
+
+	err := validatePathLengths(profile)
+	if err != nil {
+		return err
 	}
 
 	var errs []error

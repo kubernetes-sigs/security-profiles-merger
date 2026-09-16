@@ -40,26 +40,54 @@ var (
 // profile permits a syscall only if all input profiles permit it. For each
 // syscall and argument combination, the more restrictive action is chosen.
 //
-// Argument filters are honored precisely where the OCI format can express
-// the result: filters on different argument indices are conjoined, identical
-// filters are kept, and multiple entries for the same syscall (an OR of
-// filters) are preserved. Where the exact intersection is not expressible,
-// for example conflicting conditions on the same argument index, the
-// affected calls fall back to the more restrictive surrounding action. The
-// result therefore never permits more than any input. The same fallback
-// bounds the merge cost: past an internal per-syscall budget of filtered
-// entries, a syscall collapses to its most restrictive action.
+// "Permit" is judged by what runc and crun load through libseccomp and what
+// the kernel then runs. Both runtimes skip entries whose action and errno
+// equal the profile default, and runc adds an entry with several conditions
+// on the same argument index as one rule per condition. libseccomp then
+// evaluates the rules of a syscall first-match, in an order of its own that
+// ignores the actions: argument index (highest first), then operator class,
+// then value. An unconditional rule decides every call of its syscall and
+// hides its conditional rules (the first of several unconditional rules
+// wins). For conditional rules, the order only does not matter in a few safe
+// shapes, where at most one result applies to any call: a single rule;
+// single SCMP_CMP_EQ conditions on one argument index with values that
+// differ in their lower 32 bits; single conditions sharing one result,
+// without a range comparison against a value above 32 bits on an index
+// several of them use; and two complementary single conditions, such as
+// arg0 == 1 and arg0 != 1. libseccomp compiles other rule sets in ways that
+// do not follow the profile, and some it refuses or never finishes
+// compiling.
 //
-// Within a single profile, entries are evaluated the way runc and libseccomp
-// load them: entries equal to the profile default are ignored, an
-// unconditional entry applies to every call of its syscall and overrides
-// conditional entries for the same syscall (the first unconditional entry
-// wins), and otherwise the least restrictive action among matching
-// conditional entries applies. Several conditions on the same argument index
-// within one entry are alternatives, as runc loads them. The result never
-// carries an unconditional entry next to conditional entries for the same
-// syscall; where that would be needed, a single filter is rewritten with its
-// complement and anything else collapses to the more restrictive action.
+// Intersect therefore reads a syscall whose conditional rules do not form a
+// safe shape conservatively, as one unconditional rule with the most
+// restrictive of its actions and the profile default, which is at least as
+// restrictive as whatever libseccomp makes of it. It merges the safe shapes
+// precisely where the OCI format can express the result: filters on
+// different argument indices are conjoined, identical filters are kept, and
+// multiple entries for the same syscall (an OR of filters) are preserved.
+// Where the exact intersection is not expressible, for example conflicting
+// conditions on the same argument index, the affected calls fall back to the
+// more restrictive surrounding action. The result only contains safe shapes
+// and never an unconditional entry next to conditional entries for the same
+// syscall. Where the merged rules of a syscall would need both, three
+// outcomes are possible. A single filtered entry with exactly one condition
+// whose operator has a complement (any operator but SCMP_CMP_MASKED_EQ) is
+// kept, and the unconditional rule becomes an entry for the complementary
+// condition, which is exact. An unconditional rule that differs from the
+// profile default only by errno is dropped when filtered entries with a
+// different action remain, so the calls it decided get the default's errno
+// instead. Anything else collapses to the most restrictive action involved.
+// The result therefore never permits more than any input. The same collapse
+// bounds the merge cost: past an internal per-syscall budget on the
+// pairwise comparison of filtered entries, a syscall collapses to its most
+// restrictive action. The budget is the product of the filtered entry
+// counts of both sides, so a side without filtered entries for the syscall
+// adds no work, and it admits MaxArtifactClausesPerSyscall rules against a
+// dozen on the other side.
+//
+// These guarantees hold for the program libseccomp compiles for a 64-bit
+// architecture. For a 32-bit architecture, libseccomp compares only the
+// lower 32 bits of each argument value, which the merge does not model.
 //
 // ListenerPath and ListenerMetadata are taken from the first profile.
 // When two profiles share the same default or syscall action, DefaultErrnoRet
@@ -86,13 +114,18 @@ var (
 // profile. Unknown flags are rejected by Validate. An empty Flags list means
 // "no flags".
 //
-// Argument conditions are compared as runtimes evaluate them: valueTwo is
-// only significant for SCMP_CMP_MASKED_EQ and is cleared for every other
-// operator, so conditions that differ only there are the same filter.
+// Argument conditions are compared as libseccomp evaluates them: valueTwo is
+// only significant for SCMP_CMP_MASKED_EQ, where libseccomp masks it with
+// value, and is cleared for every other operator, so conditions that differ
+// only there are the same filter. A SCMP_CMP_MASKED_EQ with an empty mask
+// holds for every value and is dropped, as libseccomp drops it.
 //
-// A single profile is normalized without merging: it is reduced to what a
-// runtime loads from it under this evaluation model, in the form Diff
-// compares, so Diff(p, Intersect(p)) is always equal.
+// A single profile is normalized without merging: it is reduced to the rules
+// a runtime loads from it, and syscalls whose conditional rules do not form a
+// safe shape collapse as described above. Diff compares profiles in the same
+// form but without collapsing, so Diff(p, Intersect(p)) is equal exactly
+// when every syscall of p is in a safe shape, and otherwise reports the
+// collapsed syscalls.
 //
 // Syscall entries in the result are grouped: names sharing the same action,
 // errno, and argument filters are emitted as one entry, sorted by name, then
@@ -109,13 +142,19 @@ func Intersect(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 // permits a syscall if any input profile permits it. For each syscall and
 // argument combination, the less restrictive action is chosen.
 //
-// Argument filters are preserved: every conditional entry of every input is
-// kept, with its action raised to the least restrictive action any input
-// applies to calls matching the filter. Where the exact union is not
-// expressible the result over-approximates in the permissive direction, so
-// it never permits less than any input. Past the same per-syscall budget as
-// Intersect, a syscall collapses to its least restrictive action. The
-// evaluation model within a profile is the one described for Intersect.
+// Profiles are read the way Intersect describes, except that a syscall
+// whose conditional rules do not form a safe shape is read as one
+// unconditional rule with the least restrictive of its actions and the
+// profile default. Argument filters of safe shapes are preserved: every
+// conditional entry of every input is kept, with its action raised to the
+// least restrictive action any input applies to calls matching the filter.
+// Where the exact union is not expressible, or would not form a safe shape,
+// the result over-approximates in the permissive direction, so it never
+// permits less than any input. The per-syscall budget of Intersect applies,
+// and a second budget bounds the combined number of filtered entries of
+// both sides, since union compares those pairwise as well. The second budget
+// applies even when one side has no filtered entries for the syscall; past
+// either budget, a syscall collapses to its least restrictive action.
 //
 // ListenerPath and ListenerMetadata are taken from the first profile.
 // When two profiles share the same default or syscall action, DefaultErrnoRet
@@ -142,6 +181,14 @@ type mergeStrategy struct {
 	isIntersect bool
 }
 
+func (s mergeStrategy) rules() ruleMerger {
+	if s.isIntersect {
+		return intersectRules()
+	}
+
+	return unionRules()
+}
+
 func foldProfiles(
 	profiles []*specs.LinuxSeccomp, strategy mergeStrategy,
 ) (*specs.LinuxSeccomp, error) {
@@ -161,7 +208,7 @@ func foldProfiles(
 	// A single profile is normalized to the form a merge result takes, which
 	// is also the form Diff compares.
 	if len(profiles) == 1 {
-		result = normalizeProfile(profiles[0])
+		result = normalizeProfile(profiles[0], strategy.rules())
 	} else {
 		result = mergeTwo(profiles[0], profiles[1], strategy)
 
@@ -180,10 +227,10 @@ func foldProfiles(
 
 // normalizeProfile returns the profile in the form a merge result takes,
 // without merging it against anything: syscall entries are reduced to what
-// a runtime loads from them (see normalizeSyscalls), errno values and
-// SCMP_ACT_KILL_THREAD are spelled canonically, and the other fields are
-// copied. Diff compares profiles in this form.
-func normalizeProfile(profile *specs.LinuxSeccomp) *specs.LinuxSeccomp {
+// a runtime loads from them and settled for the merge direction (see
+// settledSyscalls), errno values and SCMP_ACT_KILL_THREAD are spelled
+// canonically, and the other fields are copied.
+func normalizeProfile(profile *specs.LinuxSeccomp, rules ruleMerger) *specs.LinuxSeccomp {
 	def := defaultClause(profile)
 
 	return &specs.LinuxSeccomp{
@@ -193,37 +240,8 @@ func normalizeProfile(profile *specs.LinuxSeccomp) *specs.LinuxSeccomp {
 		Flags:            merge.DeduplicateSlice(profile.Flags),
 		ListenerPath:     profile.ListenerPath,
 		ListenerMetadata: profile.ListenerMetadata,
-		Syscalls:         normalizeSyscalls(profile.Syscalls, def),
+		Syscalls:         settledSyscalls(&rules, profile.Syscalls, def),
 	}
-}
-
-// normalizeSyscalls reduces syscall entries to the clauses a runtime loads
-// from them, following the evaluation model documented on the clause type:
-// entries equal to def are dropped (when def is non-nil), the first
-// unconditional entry wins and hides conditional ones, several conditions
-// on one argument index become alternatives, clauses with identical filters
-// merge into the least restrictive one, and clauses that can never decide a
-// call are pruned. The result has one name per entry; callers regroup it.
-func normalizeSyscalls(syscalls []specs.LinuxSyscall, def *clause) []specs.LinuxSyscall {
-	rules := collectRules(syscalls, def)
-
-	var result []specs.LinuxSyscall
-
-	for _, name := range slices.Sorted(maps.Keys(rules)) {
-		current := rules[name]
-
-		if current.unconditional != nil {
-			result = append(result, clauseToSyscall(name, *current.unconditional))
-
-			continue
-		}
-
-		for _, next := range unionRules().collapseClauses(current.conditional, nil) {
-			result = append(result, clauseToSyscall(name, next))
-		}
-	}
-
-	return result
 }
 
 func mergeTwo(
@@ -246,11 +264,11 @@ func mergeTwo(
 
 	if strategy.isIntersect {
 		merged.Architectures = merge.IntersectSlice(left.Architectures, right.Architectures)
-		merged.Syscalls = intersectRules().mergeProfileSyscalls(left, right, &mergedDefault)
 	} else {
 		merged.Architectures = merge.UnionSlice(left.Architectures, right.Architectures)
-		merged.Syscalls = unionRules().mergeProfileSyscalls(left, right, &mergedDefault)
 	}
+
+	merged.Syscalls = strategy.rules().mergeProfileSyscalls(left, right, &mergedDefault)
 
 	return merged
 }
@@ -340,12 +358,22 @@ func groupKey(entry *specs.LinuxSyscall) string {
 // UnionSyscalls merges two syscall lists via union: for each syscall name,
 // the less restrictive action is chosen per argument region, following the
 // same rules as Union, including how errno values are compared and spelled.
-// Unlike Union, this function operates on bare syscall
-// slices without a profile-level DefaultAction, so no entries are elided,
-// and it never collapses a syscall the way Union does past its budget: with
-// no default to fall back from, an unconditional entry would decide calls
-// neither list decides. Entries sharing the same action, errno, and argument
-// filters are grouped into one multi-name entry, sorted by name.
+// Unlike Union, this function operates on bare syscall slices without a
+// profile-level DefaultAction, so no entries are elided.
+//
+// Without a default, the result is only meaningful relative to the default
+// the caller loads it with. UnionSyscalls assumes that this default is the
+// same for both lists and the result, and that it is more restrictive than
+// every action in the lists, as in an allowlist; a runtime would skip an
+// entry equal to it. Under that assumption the result never permits less
+// than either list. Where a syscall's rules do not form a safe shape (see
+// Intersect), in a list or in the result, the syscall collapses to one
+// unconditional entry with the least restrictive action involved, which
+// decides calls the lists leave to the default, but never less permissively
+// than the default would. A syscall without an unconditional entry in either
+// list is never collapsed for the merge budget, since its union takes linear
+// work. Entries sharing the same action, errno, and argument filters are
+// grouped into one multi-name entry, sorted by name.
 //
 // This function does not validate its inputs. Callers should ensure that
 // actions are known and that every entry has at least one name, or call
@@ -357,14 +385,20 @@ func UnionSyscalls(left, right []specs.LinuxSyscall) []specs.LinuxSyscall {
 // IntersectSyscalls merges two syscall lists via intersection: for each
 // syscall name present in both lists, the more restrictive action is chosen
 // per argument region, following the same rules as Intersect, including
-// how errno values are compared and spelled. Syscalls
-// present in only one list are dropped. Unlike Intersect, this function
-// operates on bare syscall slices without a profile-level DefaultAction, so
-// a conditional entry survives only where the other list constrains the same
-// syscall. Past the same per-syscall budget as Intersect, a syscall present
-// in both lists collapses to one unconditional entry with its most
-// restrictive action. Entries sharing the same action, errno, and argument
-// filters are grouped into one multi-name entry, sorted by name.
+// how errno values are compared and spelled. Unlike Intersect, this function
+// operates on bare syscall slices without a profile-level DefaultAction.
+//
+// It makes the same assumption as UnionSyscalls: the caller loads both lists
+// and the result with one default that is more restrictive than every action
+// in the lists. Under that assumption the result never permits more than
+// either list. Calls a list leaves to the default are left to it in the
+// result, so syscalls present in only one list are dropped, and a
+// conditional entry survives only where the other list constrains every call
+// it matches. Where a syscall's rules do not form a safe shape (see
+// Intersect), in a list or in the result, or its merge exceeds the budget of
+// Intersect, the syscall is dropped, which leaves it to the default. Entries
+// sharing the same action, errno, and argument filters are grouped into one
+// multi-name entry, sorted by name.
 //
 // This function does not validate its inputs. Callers should ensure that
 // actions are known and that every entry has at least one name, or call

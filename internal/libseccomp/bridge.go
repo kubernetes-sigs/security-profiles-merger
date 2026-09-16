@@ -85,10 +85,10 @@ func SyscallNumber(name string) (int32, error) {
 
 // Instruction mirrors struct sock_filter, one classic BPF instruction.
 type Instruction struct {
-	Code uint16
-	JT   uint8
-	JF   uint8
-	K    uint32
+	Code uint16 `json:"code"`
+	JT   uint8  `json:"jt"`
+	JF   uint8  `json:"jf"`
+	K    uint32 `json:"k"`
 }
 
 // SECCOMP_RET_* action codes and their masks, from linux/seccomp.h.
@@ -162,7 +162,8 @@ func operatorValue(op specs.LinuxSeccompOperator) C.enum_scmp_compare {
 }
 
 func condition(arg specs.LinuxSeccompArg) C.struct_scmp_arg_cmp {
-	// valueTwo is the mask operand, which only SCMP_CMP_MASKED_EQ reads.
+	// For SCMP_CMP_MASKED_EQ, value is the mask and valueTwo the value the
+	// masked argument is compared with. No other operator reads valueTwo.
 	datumB := C.scmp_datum_t(0)
 	if arg.Op == specs.OpMaskedEqual {
 		datumB = C.scmp_datum_t(arg.ValueTwo)
@@ -180,12 +181,14 @@ func condition(arg specs.LinuxSeccompArg) C.struct_scmp_arg_cmp {
 // which is what makes runc add one rule per condition rather than one rule
 // conjoining them.
 func repeatsArgIndex(args []specs.LinuxSeccompArg) bool {
-	for idx, arg := range args {
-		for _, earlier := range args[:idx] {
-			if earlier.Index == arg.Index {
-				return true
-			}
+	seen := make(map[uint]struct{}, len(args))
+
+	for _, arg := range args {
+		if _, ok := seen[arg.Index]; ok {
+			return true
 		}
+
+		seen[arg.Index] = struct{}{}
 	}
 
 	return false
@@ -211,12 +214,16 @@ func addEntry(ctx C.scmp_filter_ctx, entry specs.LinuxSyscall, number C.int) err
 
 		code := C.addRule(ctx, action, number, C.uint(len(conditions)), first)
 
-		// libseccomp refuses a rule that matches the filter default or one
-		// already present. A runtime ignores that, since such a rule changes
-		// nothing either way.
+		// libseccomp refuses a rule whose action is the filter default with
+		// EACCES; runc and crun skip such entries before adding them, so the
+		// profile loads either way. EDOM reports a rule that does not apply to
+		// the architecture. EEXIST reports a rule that conflicts with one
+		// already present, and both runc and crun fail the container on it.
 		switch code {
-		case 0, -C.EACCES, -C.EEXIST, -C.EDOM:
+		case 0, -C.EACCES, -C.EDOM:
 			return nil
+		case -C.EEXIST:
+			return ErrRuleConflict
 		default:
 			return fmt.Errorf("%w: %d", ErrRuleRejected, int(code))
 		}
@@ -244,13 +251,58 @@ func addEntry(ctx C.scmp_filter_ctx, entry specs.LinuxSyscall, number C.int) err
 // runtime would not ignore.
 var ErrRuleRejected = errors.New("libseccomp rejected the rule")
 
+// ErrRuleConflict is returned when libseccomp refuses a rule with EEXIST
+// because it conflicts with a rule added before it. runc and crun fail
+// container creation on it, so a profile that triggers it does not load.
+var ErrRuleConflict = errors.New("libseccomp rejected a conflicting rule (EEXIST)")
+
 // Compile builds a filter from the profile the way runc does and returns the
 // classic BPF program libseccomp compiles for it, which is what the kernel
 // would run.
 func Compile(profile *specs.LinuxSeccomp, scratch string) ([]Instruction, error) {
+	var raw []byte
+
+	err := withFilter(profile, func(ctx C.scmp_filter_ctx) error {
+		var err error
+
+		raw, err = export(scratch, func(fd C.int) C.int {
+			return C.seccomp_export_bpf(ctx, fd)
+		})
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return decodeBPF(raw)
+}
+
+// ExportPFC builds a filter from the profile the way Compile does and returns
+// libseccomp's pseudo filter code for it, which shows the order in which the
+// compiled program evaluates the rules.
+func ExportPFC(profile *specs.LinuxSeccomp, scratch string) (string, error) {
+	var raw []byte
+
+	err := withFilter(profile, func(ctx C.scmp_filter_ctx) error {
+		var err error
+
+		raw, err = export(scratch, func(fd C.int) C.int {
+			return C.seccomp_export_pfc(ctx, fd)
+		})
+
+		return err
+	})
+
+	return string(raw), err
+}
+
+// withFilter builds a filter from the profile the way runc does and hands it
+// to use before releasing it.
+func withFilter(profile *specs.LinuxSeccomp, use func(ctx C.scmp_filter_ctx) error) error {
 	ctx := C.seccomp_init(actionValue(profile.DefaultAction, profile.DefaultErrnoRet))
 	if ctx == nil {
-		return nil, ErrFilterInit
+		return ErrFilterInit
 	}
 
 	defer C.seccomp_release(ctx)
@@ -259,36 +311,40 @@ func Compile(profile *specs.LinuxSeccomp, scratch string) ([]Instruction, error)
 		for _, name := range entry.Names {
 			number, err := SyscallNumber(name)
 			if err != nil {
-				return nil, err
+				return err
 			}
 
 			err = addEntry(ctx, entry, C.int(number))
 			if err != nil {
-				return nil, err
+				return err
 			}
 		}
 	}
 
-	return exportBPF(ctx, scratch)
+	return use(ctx)
 }
 
 // ErrFilterInit is returned when libseccomp cannot create a filter.
 var ErrFilterInit = errors.New("seccomp_init failed")
 
 // ErrExportFailed is returned when libseccomp cannot export the program.
-var ErrExportFailed = errors.New("seccomp_export_bpf failed")
+var ErrExportFailed = errors.New("seccomp export failed")
 
-// exportBPF writes the compiled program through a file in scratch, which is
-// the only form libseccomp offers, and decodes it.
-func exportBPF(ctx C.scmp_filter_ctx, scratch string) ([]Instruction, error) {
-	file, err := os.CreateTemp(scratch, "bpf")
+// export runs a libseccomp export function against a file in scratch, which
+// is the only destination libseccomp offers, and returns what it wrote. The
+// file is removed afterwards.
+func export(scratch string, write func(fd C.int) C.int) ([]byte, error) {
+	file, err := os.CreateTemp(scratch, "export")
 	if err != nil {
 		return nil, fmt.Errorf("create scratch file: %w", err)
 	}
 
-	defer func() { _ = file.Close() }()
+	defer func() {
+		_ = file.Close()
+		_ = os.Remove(file.Name())
+	}()
 
-	code := C.seccomp_export_bpf(ctx, C.int(file.Fd()))
+	code := write(C.int(file.Fd()))
 	if code != 0 {
 		return nil, fmt.Errorf("%w: %d", ErrExportFailed, int(code))
 	}
@@ -298,6 +354,11 @@ func exportBPF(ctx C.scmp_filter_ctx, scratch string) ([]Instruction, error) {
 		return nil, fmt.Errorf("read exported program: %w", err)
 	}
 
+	return raw, nil
+}
+
+// decodeBPF decodes an exported classic BPF program into its instructions.
+func decodeBPF(raw []byte) ([]Instruction, error) {
 	const size = 8
 
 	if len(raw)%size != 0 {

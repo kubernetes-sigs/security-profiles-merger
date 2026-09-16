@@ -36,20 +36,14 @@ const mergeUsage = `Usage: spm merge [options] [files...]
 
 Merge one or more security profiles using the given strategy.
 A single profile is normalized without merging.
-Reads from stdin (as a JSON array) when no files are provided.
+Reads from stdin when no files are provided: a single profile, or a JSON
+array of profiles.
 
 Options:
 `
 
 func runMerge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet(cmdMerge, flag.ContinueOnError)
-	flags.SetOutput(stderr)
-
-	flags.Usage = func() {
-		_, _ = fmt.Fprint(stderr, mergeUsage)
-
-		flags.PrintDefaults()
-	}
+	flags := newFlagSet(cmdMerge, stderr)
 
 	profileType := flags.String(
 		"type", "", "profile type: seccomp, apparmor, landlock (auto-detected if omitted)",
@@ -58,17 +52,20 @@ func runMerge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	format := flags.String("format", formatJSON, "output format: json, human")
 	output := flags.String("output", "", "write output to file (default: stdout)")
 
-	err := flags.Parse(args)
-	if err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
-		}
+	if done, code := parseFlags(flags, mergeUsage, args, stdout, stderr); done {
+		return code
+	}
 
-		return exitUsage
+	if code := checkFlagOrder(flags.Args(), stderr); code != 0 {
+		return code
 	}
 
 	code := validateMergeFlags(*profileType, *strategy, *format, flags, stderr)
 	if code != 0 {
+		return code
+	}
+
+	if code := checkStdin(flags, mergeUsage, stdin, stderr); code != 0 {
 		return code
 	}
 
@@ -79,7 +76,7 @@ func runMerge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	kind, code := resolveKind(*profileType, data, stderr)
+	kind, code := resolveKind(*profileType, data, 1, stderr)
 	if code != 0 {
 		return code
 	}
@@ -130,13 +127,6 @@ func mergeProfiles[T any](
 	formatFn func(*T) string,
 	stdout, stderr io.Writer,
 ) int {
-	profiles, err := unmarshalAll[T](data, false, stderr)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
-
-		return 1
-	}
-
 	var mergeFn func(...*T) (*T, error)
 
 	switch strategy {
@@ -145,7 +135,15 @@ func mergeProfiles[T any](
 	case strategyUnion:
 		mergeFn = union
 	default:
+		// runMerge checks the strategy before reading any input.
 		_, _ = fmt.Fprintf(stderr, "error: unknown strategy %q\n", strategy)
+
+		return exitUsage
+	}
+
+	profiles, err := unmarshalAll[T](data, lenientDecode(), stderr)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 
 		return 1
 	}
@@ -179,6 +177,21 @@ var (
 	errInputTooLarge  = fmt.Errorf("inputs exceed %d bytes in total", maxTotalInputSize)
 	errUnknownField   = errors.New("unknown field")
 )
+
+// decodePolicy selects which ambiguities in a profile's JSON are errors
+// rather than warnings.
+type decodePolicy struct {
+	// rejectUnknown rejects members the profile type has no field for.
+	rejectUnknown bool
+	// rejectDuplicates rejects members repeated within one object.
+	rejectDuplicates bool
+}
+
+// lenientDecode returns the policy that warns about every ambiguity and
+// rejects none.
+func lenientDecode() decodePolicy {
+	return decodePolicy{rejectUnknown: false, rejectDuplicates: false}
+}
 
 func readInputs(paths []string, stdin io.Reader) ([][]byte, error) {
 	if len(paths) == 0 {
@@ -298,9 +311,10 @@ func readFromStdin(reader io.Reader) ([][]byte, error) {
 
 // unmarshalAll decodes every raw profile. A member the profile type has no
 // field for, such as a misspelled key, silently drops the rule it was meant
-// to carry: every such member is an error when rejectUnknown is set and a
+// to carry, and a member repeated within one object is read differently by
+// different parsers. Each is an error when the policy rejects it and a
 // warning on stderr otherwise.
-func unmarshalAll[T any](data [][]byte, rejectUnknown bool, stderr io.Writer) ([]*T, error) {
+func unmarshalAll[T any](data [][]byte, policy decodePolicy, stderr io.Writer) ([]*T, error) {
 	profiles := make([]*T, len(data))
 
 	for idx, raw := range data {
@@ -311,9 +325,22 @@ func unmarshalAll[T any](data [][]byte, rejectUnknown bool, stderr io.Writer) ([
 			return nil, fmt.Errorf("parsing profile %d: %w", idx, err)
 		}
 
-		if unknown := unknownFieldsOf[T](raw); len(unknown) > 0 {
-			err := unknownFieldError(unknown)
-			if rejectUnknown {
+		checks := []struct {
+			paths  []string
+			kind   error
+			reject bool
+		}{
+			{duplicateKeys(raw), errDuplicateKey, policy.rejectDuplicates},
+			{unknownFieldsOf[T](raw), errUnknownField, policy.rejectUnknown},
+		}
+
+		for _, check := range checks {
+			if len(check.paths) == 0 {
+				continue
+			}
+
+			err := fieldPathsError(check.kind, check.paths)
+			if check.reject {
 				return nil, fmt.Errorf("parsing profile %d: %w", idx, err)
 			}
 
@@ -324,19 +351,6 @@ func unmarshalAll[T any](data [][]byte, rejectUnknown bool, stderr io.Writer) ([
 	}
 
 	return profiles, nil
-}
-
-func unknownFieldError(paths []string) error {
-	quoted := make([]string, len(paths))
-	for idx, field := range paths {
-		quoted[idx] = strconv.Quote(field)
-	}
-
-	if len(paths) == 1 {
-		return fmt.Errorf("%w %s", errUnknownField, quoted[0])
-	}
-
-	return fmt.Errorf("%ws %s", errUnknownField, strings.Join(quoted, ", "))
 }
 
 // unknownFieldsOf reports the members of raw that T has no field for.
@@ -537,12 +551,9 @@ func writeOutput(
 	case formatHuman:
 		_, _ = fmt.Fprintln(stdout, humanStr)
 	default:
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-
-		err := enc.Encode(result)
+		err := encodeJSON(stdout, result)
 		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "error: encoding output: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 
 			return 1
 		}

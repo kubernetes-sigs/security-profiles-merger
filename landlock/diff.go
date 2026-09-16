@@ -27,7 +27,9 @@ import (
 
 // ProfileDiff describes the differences between two Landlock profiles.
 type ProfileDiff struct {
-	// Equal is true when the two profiles are identical.
+	// Equal is true when the two profiles are equivalent after
+	// normalization: paths cleaned, duplicate rules and rights merged, and
+	// rights compared as sets (see Diff).
 	Equal bool `json:"equal"`
 
 	// HandledAccessFS is set when the handled filesystem access sets differ.
@@ -83,8 +85,11 @@ type NetRuleChange struct {
 }
 
 // Diff compares two Landlock profiles and returns a structured diff.
-// Paths are cleaned and duplicates are removed before comparing, so
-// "/var/log/../data" and "/var/data" are treated as identical.
+// Paths are cleaned (repeated and trailing slashes and "." components are
+// removed) and duplicate rules and rights are merged before comparing, so
+// "/var//data/" and "/var/data" are treated as identical. ".." components
+// are kept, since the kernel resolves them against the file system. Rights
+// are compared as sets and reported sorted.
 // Unlike Intersect and Union, Diff does not validate profiles before comparing.
 // Returns ErrNilProfile if either profile is nil.
 func Diff(left, right *Profile) (*ProfileDiff, error) {
@@ -92,17 +97,8 @@ func Diff(left, right *Profile) (*ProfileDiff, error) {
 		return nil, ErrNilProfile
 	}
 
-	normLeft := normalizeProfile(left)
-	deduplicatePathRules(normLeft)
-	deduplicateNetRules(normLeft)
-	deduplicateScoped(normLeft)
-	deduplicateHandledAccess(normLeft)
-
-	normRight := normalizeProfile(right)
-	deduplicatePathRules(normRight)
-	deduplicateNetRules(normRight)
-	deduplicateScoped(normRight)
-	deduplicateHandledAccess(normRight)
+	normLeft := canonicalProfile(left)
+	normRight := canonicalProfile(right)
 
 	diff := &ProfileDiff{
 		Equal:            true,
@@ -196,7 +192,7 @@ func collectPathChanges(
 			continue
 		}
 
-		if !equalRightsSorted(leftRule.AccessFS, rightRule.AccessFS) {
+		if !slices.Equal(leftRule.AccessFS, rightRule.AccessFS) {
 			pathDiff.Changed = append(pathDiff.Changed, PathRuleChange{
 				Path:  path,
 				Left:  leftRule.AccessFS,
@@ -259,7 +255,7 @@ func collectNetChanges(
 			continue
 		}
 
-		if !equalRightsSorted(leftRule.AccessNet, rightRule.AccessNet) {
+		if !slices.Equal(leftRule.AccessNet, rightRule.AccessNet) {
 			netDiff.Changed = append(netDiff.Changed, NetRuleChange{
 				Port:  port,
 				Left:  leftRule.AccessNet,
@@ -269,14 +265,13 @@ func collectNetChanges(
 	}
 }
 
-func equalRightsSorted[T ~string](left, right []T) bool {
-	sortedLeft := slices.Clone(left)
-	sortedRight := slices.Clone(right)
+// canonicalProfile returns a normalized, sorted copy of the profile, so two
+// profiles can be compared element by element.
+func canonicalProfile(profile *Profile) *Profile {
+	result := normalizeProfile(profile, cleanPaths(profile.PathRules))
+	sortProfile(result)
 
-	slices.Sort(sortedLeft)
-	slices.Sort(sortedRight)
-
-	return slices.Equal(sortedLeft, sortedRight)
+	return result
 }
 
 // FormatDiff returns a human-readable representation of a Landlock profile diff.
@@ -315,7 +310,7 @@ func FormatDiff(diff *ProfileDiff) string {
 }
 
 func formatRightsDiff[T ~string](prefix string, rightsDiff *RightsDiff[T]) string {
-	return merge.FormatDiffItems(prefix, rightsDiff.Removed, rightsDiff.Added)
+	return merge.FormatSliceDiff(prefix, *rightsDiff)
 }
 
 func formatPathRulesDiff(pathRulesDiff *PathRulesDiff) []string {

@@ -17,8 +17,11 @@ builds:
     goarch:
       - amd64
       - arm64
+    # The tag keeps its "v" prefix, as git describe (make build) and the
+    # module version of go install report it. Snapshots are not the tagged
+    # release, so they report their own version.
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w -X main.version={{ if .IsSnapshot }}v{{ .Version }}{{ else }}{{ .Tag }}{{ end }}
 
 archives:
   - formats:
@@ -39,6 +42,10 @@ signs:
 
 sboms:
   - artifacts: binary
+    # The default name starts with the binary name, which is spm.exe on
+    # Windows; the project name keeps every SBOM under dist/spm_*.
+    documents:
+      - "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}.sbom.json"
 
 changelog:
   use: github-native

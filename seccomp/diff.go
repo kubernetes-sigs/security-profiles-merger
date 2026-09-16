@@ -112,18 +112,21 @@ type SyscallDetail struct {
 // Diff compares two seccomp profiles and returns a structured diff.
 // Unlike Intersect and Union, Diff does not validate profiles before comparing.
 //
-// Profiles are compared by what a runtime loads from them, following the
-// evaluation model described for Intersect, so a profile and its merge
-// result compare equal unless the merge changed what the profile permits.
-// Entries equal to the profile default are ignored, an unconditional entry
-// hides the conditional entries for its syscall and the first one wins,
-// several conditions on one argument index are alternatives, entries with
-// identical filters merge into the least restrictive one, clauses that can
-// never decide a call are dropped, and SCMP_ACT_KILL_THREAD equals
-// SCMP_ACT_KILL. Errno values are compared the way runtimes apply them: an
-// unset errnoRet on SCMP_ACT_ERRNO or SCMP_ACT_TRACE equals EPERM, and
-// errnoRet on any other action is ignored. The diff reports entries in that
-// form, with EPERM spelled as unset.
+// Profiles are compared by the rules a runtime loads from them, as described
+// for Intersect: entries equal to the profile default are ignored, an
+// unconditional entry hides the conditional entries for its syscall and the
+// first one wins, several conditions on one argument index are alternatives,
+// conditions compare as libseccomp evaluates them, exact duplicates are
+// dropped, and SCMP_ACT_KILL_THREAD equals SCMP_ACT_KILL. Errno values are
+// compared the way runtimes apply them: an unset errnoRet on SCMP_ACT_ERRNO
+// or SCMP_ACT_TRACE equals EPERM, and errnoRet on any other action is
+// ignored. The diff reports entries in that form, with EPERM spelled as
+// unset. Rules are not rewritten beyond that: two rules with the same filter
+// and different results both remain, as does a rule that libseccomp's order
+// of evaluation never reaches. A profile and its merge result therefore
+// compare equal when the merge kept every syscall in its loaded form, and
+// Diff(p, Intersect(p)) reports exactly the syscalls whose rules Intersect
+// collapsed because they do not form a safe shape.
 // Architectures are compared with the architecture of the running program
 // (see NativeArchitecture) implied on both sides, as runtimes always cover
 // the native one. A profile destined for another architecture therefore
@@ -380,7 +383,7 @@ func buildSyscallMap(
 	// holds, so that a syscall carrying many entries stays linear.
 	seen := make(map[string]map[string]struct{})
 
-	for _, syscall := range normalizeSyscalls(syscalls, def) {
+	for _, syscall := range settledSyscalls(nil, syscalls, def) {
 		for _, name := range syscall.Names {
 			entry := SyscallEntry{
 				Name:     name,
@@ -617,7 +620,7 @@ func formatQuotedOrNone(str string) string {
 }
 
 func formatSliceDiff[T ~string](prefix string, sliceDiff *SliceDiff[T]) string {
-	return merge.FormatDiffItems(prefix, sliceDiff.Removed, sliceDiff.Added)
+	return merge.FormatSliceDiff(prefix, *sliceDiff)
 }
 
 func formatSyscallsDiff(syscallsDiff *SyscallsDiff) []string {

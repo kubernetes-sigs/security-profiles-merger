@@ -1713,12 +1713,12 @@ func TestIntersectArgsSameIndexReorderedFields(t *testing.T) {
 		{
 			name: "different ValueTwo order",
 			leftArgs: []specs.LinuxSeccompArg{
-				{Index: 0, Value: 1, ValueTwo: 20, Op: specs.OpMaskedEqual},
-				{Index: 0, Value: 1, ValueTwo: 10, Op: specs.OpMaskedEqual},
+				{Index: 0, Value: 0x30, ValueTwo: 0x20, Op: specs.OpMaskedEqual},
+				{Index: 0, Value: 0x30, ValueTwo: 0x10, Op: specs.OpMaskedEqual},
 			},
 			rightArgs: []specs.LinuxSeccompArg{
-				{Index: 0, Value: 1, ValueTwo: 10, Op: specs.OpMaskedEqual},
-				{Index: 0, Value: 1, ValueTwo: 20, Op: specs.OpMaskedEqual},
+				{Index: 0, Value: 0x30, ValueTwo: 0x10, Op: specs.OpMaskedEqual},
+				{Index: 0, Value: 0x30, ValueTwo: 0x20, Op: specs.OpMaskedEqual},
 			},
 		},
 		{

@@ -84,31 +84,51 @@ var (
 	// condition sets valueTwo with an operator other than
 	// SCMP_CMP_MASKED_EQ, the only one that reads it.
 	ErrUnusedValueTwo = errors.New("valueTwo is only used by SCMP_CMP_MASKED_EQ")
-	// ErrUnusedErrnoRet is returned by ValidateStrict when errnoRet or
-	// defaultErrnoRet is set on an action other than SCMP_ACT_ERRNO or
-	// SCMP_ACT_TRACE, the only ones that return it.
+	// ErrUnusedErrnoRet is returned by ValidateStrict and ValidateArtifact
+	// when errnoRet or defaultErrnoRet is set on an action other than
+	// SCMP_ACT_ERRNO or SCMP_ACT_TRACE, the only ones that return it. runc
+	// ignores such a value, but crun refuses the profile.
 	ErrUnusedErrnoRet = errors.New("errnoRet is only used by SCMP_ACT_ERRNO and SCMP_ACT_TRACE")
-	// ErrConflictingEntries is returned by ValidateArtifact when two entries
-	// for the same syscall have the same shape but different results: both
-	// unconditional, or both carrying the same argument filter. A runtime
-	// keeps only one of them.
+	// ErrConflictingEntries is returned by ValidateArtifact when entries for
+	// the same syscall yield different results and either the argument
+	// filter of one is equal to or wider than the other's (its conditions
+	// are a subset of the other's, which includes an unconditional entry),
+	// or they do not form one of the shapes libseccomp evaluates exactly. A
+	// runtime fails to load many such entries, and silently drops or
+	// reorders the others.
 	ErrConflictingEntries = errors.New("conflicting entries")
+	// ErrTooManyClauses is returned by ValidateArtifact when one syscall
+	// loads more than MaxArtifactClausesPerSyscall rules.
+	ErrTooManyClauses = errors.New("too many rules for syscall")
 )
 
 // MaxArtifactEntriesPerSyscall bounds how many entries may name the same
-// syscall in a profile accepted by ValidateArtifact. Intersect compares
-// every entry for a syscall against every entry for the same syscall in the
-// other profile, so the cost per syscall grows quadratically with the entry
-// count. Real profiles use a handful of argument-filtered entries per
-// syscall.
+// syscall in a profile accepted by ValidateArtifact. Real profiles use a
+// handful of argument-filtered entries per syscall.
 //
 // The cap bounds one syscall, not the profile: a profile spreading entries
 // over many syscalls stays under it while still costing the merge time
 // proportional to its total size. What bounds the merge as a whole is the
 // merge itself, which falls back to a conservative collapse past its own
-// per-syscall clause budget, so no profile of the size KEP-6061 recommends
+// per-syscall work budget, so no profile of the size KEP-6061 recommends
 // runtimes accept can turn it into a multi-second operation.
 const MaxArtifactEntriesPerSyscall = 128
+
+// MaxArtifactClausesPerSyscall bounds how many rules one syscall may load in
+// a profile accepted by ValidateArtifact, counted the way runtimes add them:
+// one per entry naming the syscall, except that an entry repeating an
+// argument index adds one rule per condition, and entries equal to the
+// default add none. It thereby also bounds the conditions of such an entry.
+// Every other entry has at most one condition per argument index, so at
+// most six once Validate limits indices to 0-5.
+//
+// Intersect compares every rule of a syscall against every rule for it on
+// the other side, and collapses the syscall to its most restrictive action
+// once that work exceeds an internal budget. The budget admits this many
+// rules against a baseline with a dozen filtered entries for the same
+// syscall, so an artifact within the bound is merged precisely there, and
+// one beyond it is rejected here rather than silently denied the syscall.
+const MaxArtifactClausesPerSyscall = 256
 
 // Validate checks that a seccomp profile contains only known actions and
 // that every syscall entry has non-empty names, known argument operators,
@@ -171,57 +191,101 @@ func Validate(profile *specs.LinuxSeccomp) error {
 func ValidateStrict(profile *specs.LinuxSeccomp) error {
 	return validateWith(
 		profile,
-		validateDuplicateNames,
-		validateShape,
-		validateUnusedValueTwo,
-		validateUnusedErrnoRet,
+		[]profileCheck{
+			validateDuplicateNames,
+			validateShape,
+			validateUnusedValueTwo,
+			validateUnusedErrnoRet,
+		},
 	)
 }
 
 // ValidateArtifact validates a profile received from an untrusted source,
-// such as an OCI artifact pulled by a container runtime (KEP-6061). It
-// performs all checks from Validate and the shape checks from ValidateStrict
-// (duplicate architectures and flags, out-of-range errno values),
-// and rejects what a distributed profile must not control: SCMP_ACT_NOTIFY,
-// because it needs a listener that only the runtime can provide, and the
-// listener settings listenerPath, listenerMetadata and
-// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, because they belong to the
-// node-local listener. Duplicate syscall names are allowed, as
-// the OCI runtime-spec permits them and Intersect handles them, but no
-// syscall may appear in more than MaxArtifactEntriesPerSyscall entries,
-// which bounds the merge cost, and entries for one syscall must not
-// conflict: two unconditional entries, or two entries with the same argument
-// filter, must yield the same result, since a runtime keeps only one of
-// them (ErrConflictingEntries). Entries equal to the default action do not
-// count, as runtimes skip them. valueTwo on an operator other than
-// SCMP_CMP_MASKED_EQ and errnoRet on an action other than SCMP_ACT_ERRNO or
-// SCMP_ACT_TRACE are accepted and ignored, as runtimes ignore them.
+// such as an OCI artifact pulled by a container runtime (KEP-6061), so that
+// it loads on every runtime. It performs all checks from Validate and the
+// shape checks from ValidateStrict (duplicate architectures and flags,
+// out-of-range errno values), and rejects what a distributed profile must
+// not control: SCMP_ACT_NOTIFY, because it needs a listener that only the
+// runtime can provide, and the listener settings listenerPath,
+// listenerMetadata and SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, because they
+// belong to the node-local listener. It also rejects errnoRet and
+// defaultErrnoRet on an action other than SCMP_ACT_ERRNO or SCMP_ACT_TRACE
+// (ErrUnusedErrnoRet): runc ignores the value, but crun refuses the profile.
+// valueTwo on an operator other than SCMP_CMP_MASKED_EQ is accepted, as
+// runtimes ignore it.
+//
+// Duplicate syscall names are allowed, as the OCI runtime-spec permits them
+// and Intersect handles them, but no syscall may appear in more than
+// MaxArtifactEntriesPerSyscall entries or load more than
+// MaxArtifactClausesPerSyscall rules, which bounds the merge cost, and the
+// rules of one syscall must not conflict (ErrConflictingEntries). Rules with
+// different results conflict when the filter of one is equal to or wider
+// than the other's, and when the conditional rules of the syscall do not
+// form one of the shapes libseccomp evaluates exactly (see Intersect).
+//
+// libseccomp refuses a rule with EEXIST, which runc and crun report as
+// a failure to load the profile, when its filter equals the filter of an
+// earlier rule with a different result, when its conditions are a prefix of
+// an earlier rule's conditions in libseccomp's order (highest argument index
+// first) and its result differs, and in further cases where rules with
+// different results compare the same argument: libseccomp splits every
+// 64-bit comparison into comparisons of the upper and the lower 32 bits,
+// and those coincide between otherwise different conditions. It accepts a
+// wider rule added before a narrower one and an unconditional rule in any
+// order, and keeps only one of the rules then. Rules sharing one result are
+// never refused. The checks above reject all of these cases, whatever the
+// order of the entries. Since libseccomp compares only the lower 32 bits of
+// each value on 32-bit architectures, filters are also compared with every
+// value truncated that way. Rules are counted and compared the way runtimes
+// add them (see MaxArtifactClausesPerSyscall), and these checks only run when
+// Validate passes.
+//
+// A profile that passes may still hold rules sharing one result that
+// libseccomp evaluates in its own order, miscompiles, or never finishes
+// adding. Intersect reads such rules conservatively and never emits them, so
+// runtimes should load the merge result rather than the artifact itself.
+//
 // ValidateArtifact does not compare the profile against a baseline; callers
 // intersect the result with their baseline afterwards.
 func ValidateArtifact(profile *specs.LinuxSeccomp) error {
 	return validateWith(
 		profile,
-		validateShape,
-		validateNoNotify,
-		validateNoListener,
-		validateEntryCount,
-		validateConflictingEntries,
+		[]profileCheck{
+			validateShape,
+			validateNoNotify,
+			validateNoListener,
+			validateEntryCount,
+			validateUnusedErrnoRet,
+		},
+		validateSyscallRules,
 	)
 }
 
 type profileCheck func(profile *specs.LinuxSeccomp) error
 
 // validateWith runs Validate and, if the profile is non-nil, every check,
-// collecting all failures into one error.
-func validateWith(profile *specs.LinuxSeccomp, checks ...profileCheck) error {
-	errs := []error{Validate(profile)}
-
+// collecting all failures into one error. The checks in loadable run only
+// when Validate passes: they expand entries the way a runtime loads them,
+// which assumes known operators and argument indices in range, so that an
+// entry without a repeated index carries at most one condition per index.
+func validateWith(
+	profile *specs.LinuxSeccomp, checks []profileCheck, loadable ...profileCheck,
+) error {
+	err := Validate(profile)
 	if profile == nil {
-		return errors.Join(errs...)
+		return err
 	}
+
+	errs := []error{err}
 
 	for _, check := range checks {
 		errs = append(errs, check(profile))
+	}
+
+	if err == nil {
+		for _, check := range loadable {
+			errs = append(errs, check(profile))
+		}
 	}
 
 	return errors.Join(errs...)
@@ -239,8 +303,7 @@ func validateShape(profile *specs.LinuxSeccomp) error {
 }
 
 // validateErrnoRange checks errno values where a runtime reads them; values
-// on other actions are ignored at load time and reported by ValidateStrict
-// through validateUnusedErrnoRet instead.
+// on other actions are reported through validateUnusedErrnoRet instead.
 func validateErrnoRange(profile *specs.LinuxSeccomp) error {
 	var errs []error
 
@@ -308,76 +371,270 @@ func validateDuplicateNames(profile *specs.LinuxSeccomp) error {
 	return validateDuplicateSyscallNames(profile.Syscalls)
 }
 
-// conflictTracker remembers the clauses seen for one syscall name, keyed by
-// their shape: the unconditional clause and one clause per argument filter.
-type conflictTracker struct {
-	unconditional *clause
-	conditional   map[string]clause
+// resultSet summarizes the results of the rules recorded under one key.
+type resultSet struct {
+	first clause
+	mixed bool
 }
 
-// record stores next and reports whether an earlier clause of the same shape
-// yields a different result.
-func (t *conflictTracker) record(next clause) bool {
-	if next.unconditional() {
-		if t.unconditional == nil {
-			t.unconditional = &next
+// conflicts reports whether a recorded rule yields a different result than
+// next. A nil set records nothing.
+func (r *resultSet) conflicts(next clause) bool {
+	return r != nil && (r.mixed || !r.first.sameResult(next))
+}
 
-			return false
-		}
-
-		return !t.unconditional.sameResult(next)
-	}
-
-	key := sortedArgsKey(next.args)
-
-	prior, ok := t.conditional[key]
+func recordResult(sets map[string]*resultSet, key string, next clause) {
+	current, ok := sets[key]
 	if !ok {
-		t.conditional[key] = next
+		sets[key] = &resultSet{first: next, mixed: false}
 
-		return false
+		return
 	}
 
-	return !prior.sameResult(next)
+	current.mixed = current.mixed || !current.first.sameResult(next)
 }
 
-// validateConflictingEntries rejects entries a runtime could not apply
-// together for one syscall: two unconditional entries with different
-// results, or two conditional entries with the same argument filter but
-// different results. libseccomp keeps only one of them, so the profile
-// would not load the way it reads. Entries are expanded the way the merge
-// loads them: entries equal to the profile default are skipped, and an
-// entry with several conditions on one argument index counts as one entry
-// per condition. Each syscall is reported once, at the first conflicting
-// entry.
-func validateConflictingEntries(profile *specs.LinuxSeccomp) error {
-	trackers := make(map[string]*conflictTracker)
-	reported := make(map[string]struct{})
+// conflictTracker remembers the rules seen for one syscall name, keyed by
+// their filter and by every filter strictly wider than theirs.
+type conflictTracker struct {
+	exact    map[string]*resultSet
+	narrower map[string]*resultSet
+}
 
-	var errs []error
+func newConflictTracker() *conflictTracker {
+	return &conflictTracker{
+		exact:    make(map[string]*resultSet),
+		narrower: make(map[string]*resultSet),
+	}
+}
 
-	def := defaultClause(profile)
+// record stores next and reports whether an earlier rule yields a different
+// result while its filter is equal to, wider than, or narrower than the
+// filter of next. A filter is wider when its conditions are a proper subset
+// of the other's. A rule of a profile that passes Validate has at most one
+// condition per argument index, so it has at most 63 such subsets.
+func (t *conflictTracker) record(next clause) bool {
+	key := sortedArgsKey(next.args)
+	conflict := t.exact[key].conflicts(next) || t.narrower[key].conflicts(next)
 
-	forEachClause(profile.Syscalls, def, func(idx int, name string, next clause) {
-		if _, done := reported[name]; done {
-			return
-		}
+	forEachProperSubset(next.args, func(subset []specs.LinuxSeccompArg) {
+		subsetKey := sortedArgsKey(subset)
+		conflict = conflict || t.exact[subsetKey].conflicts(next)
 
-		tracker, ok := trackers[name]
-		if !ok {
-			tracker = &conflictTracker{unconditional: nil, conditional: map[string]clause{}}
-			trackers[name] = tracker
-		}
-
-		if tracker.record(next) {
-			reported[name] = struct{}{}
-
-			errs = append(errs, fmt.Errorf(
-				"syscall entry %d: %w for %q", idx, ErrConflictingEntries, name,
-			))
-		}
+		recordResult(t.narrower, subsetKey, next)
 	})
 
-	return errors.Join(errs...)
+	recordResult(t.exact, key, next)
+
+	return conflict
+}
+
+// forEachProperSubset calls visit with every proper subset of args, keeping
+// their order. The slice passed to visit is reused between calls.
+func forEachProperSubset(
+	args []specs.LinuxSeccompArg, visit func(subset []specs.LinuxSeccompArg),
+) {
+	count := len(args)
+	if count > maxSyscallArgIndex+1 {
+		// Unreachable for a profile that passes Validate.
+		return
+	}
+
+	subset := make([]specs.LinuxSeccompArg, 0, count)
+
+	for mask := range (1 << count) - 1 {
+		subset = subset[:0]
+
+		for idx := range count {
+			if mask&(1<<idx) != 0 {
+				subset = append(subset, args[idx])
+			}
+		}
+
+		visit(subset)
+	}
+}
+
+// truncatedClause returns the rule libseccomp adds for a 32-bit
+// architecture, which compares only the lower 32 bits of each value and
+// therefore drops a masked comparison whose mask is empty there.
+func truncatedClause(current clause) clause {
+	args := make([]specs.LinuxSeccompArg, 0, len(current.args))
+
+	for _, arg := range current.args {
+		arg.Value &= lower32
+		arg.ValueTwo &= lower32
+
+		if !tautology(arg) {
+			args = append(args, arg)
+		}
+	}
+
+	current.args = args
+
+	return current
+}
+
+func hasWideValue(profile *specs.LinuxSeccomp) bool {
+	for idx := range profile.Syscalls {
+		for _, arg := range profile.Syscalls[idx].Args {
+			if arg.Value > lower32 || arg.ValueTwo > lower32 {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// syscallRuleState is what validateSyscallRules tracks for one syscall.
+type syscallRuleState struct {
+	// trackers find conflicts among the rules as written and as libseccomp
+	// adds them for a 32-bit architecture.
+	trackers [2]*conflictTracker
+	// conditional holds the conditional rules.
+	conditional []clause
+	// first is the first rule, and mixedAt the index of the first entry
+	// whose rule yields a different result, or -1.
+	first   clause
+	mixedAt int
+}
+
+// validateSyscallRules checks the rules each syscall loads: their count
+// (MaxArtifactClausesPerSyscall) and, for syscalls within that bound,
+// conflicts between them (see ValidateArtifact). Rules are expanded the way
+// a runtime adds them: entries equal to the profile default are skipped, an
+// entry with several conditions on one argument index adds one rule per
+// condition, and conditions libseccomp drops do not count. Each syscall is
+// reported once, at the first conflicting entry.
+func validateSyscallRules(profile *specs.LinuxSeccomp) error {
+	def := defaultClause(profile)
+	checker := &ruleChecker{
+		counts:   ruleCounts(profile, def),
+		truncate: hasWideValue(profile),
+		states:   make(map[string]*syscallRuleState),
+		reported: make(map[string]struct{}),
+		errs:     nil,
+	}
+
+	checker.checkCounts()
+	forEachClause(profile.Syscalls, def, checker.record)
+	checker.checkShapes()
+
+	return errors.Join(checker.errs...)
+}
+
+// ruleChecker carries the state of validateSyscallRules.
+type ruleChecker struct {
+	counts   map[string]int
+	truncate bool
+	states   map[string]*syscallRuleState
+	reported map[string]struct{}
+	errs     []error
+}
+
+func (c *ruleChecker) checkCounts() {
+	for _, name := range slices.Sorted(maps.Keys(c.counts)) {
+		if c.counts[name] > MaxArtifactClausesPerSyscall {
+			c.errs = append(c.errs, fmt.Errorf(
+				"syscall %q: %w (%d, max %d)",
+				name, ErrTooManyClauses, c.counts[name], MaxArtifactClausesPerSyscall,
+			))
+		}
+	}
+}
+
+func (c *ruleChecker) conflict(idx int, name string) {
+	c.reported[name] = struct{}{}
+
+	c.errs = append(c.errs, fmt.Errorf(
+		"syscall entry %d: %w for %q", idx, ErrConflictingEntries, name,
+	))
+}
+
+// record checks the rule an entry adds for a syscall against the rules
+// before it. Syscalls over the rule bound are reported by checkCounts and
+// skipped here.
+func (c *ruleChecker) record(idx int, name string, next clause) {
+	if _, done := c.reported[name]; done || c.counts[name] > MaxArtifactClausesPerSyscall {
+		return
+	}
+
+	state, ok := c.states[name]
+	if !ok {
+		state = &syscallRuleState{
+			trackers:    [2]*conflictTracker{newConflictTracker(), newConflictTracker()},
+			conditional: nil,
+			first:       next,
+			mixedAt:     -1,
+		}
+		c.states[name] = state
+	}
+
+	if state.mixedAt < 0 && !state.first.sameResult(next) {
+		state.mixedAt = idx
+	}
+
+	if !next.unconditional() {
+		state.conditional = append(state.conditional, next)
+	}
+
+	conflict := state.trackers[0].record(next)
+	if c.truncate {
+		conflict = state.trackers[1].record(truncatedClause(next)) || conflict
+	}
+
+	if conflict {
+		c.conflict(idx, name)
+	}
+}
+
+// checkShapes reports syscalls whose rules yield different results without
+// forming a safe shape: libseccomp evaluates those in its own order and
+// refuses many of them. A syscall with an unconditional rule gets here only
+// when every rule shares its result, since record reports any other rule as
+// conflicting with it.
+func (c *ruleChecker) checkShapes() {
+	for _, name := range slices.Sorted(maps.Keys(c.states)) {
+		state := c.states[name]
+		if _, done := c.reported[name]; done || state.mixedAt < 0 {
+			continue
+		}
+
+		if !safeShape(dedupeClauses(state.conditional)) {
+			c.conflict(state.mixedAt, name)
+		}
+	}
+}
+
+// ruleCounts returns how many rules a runtime adds per syscall name, without
+// expanding the entries.
+func ruleCounts(profile *specs.LinuxSeccomp, def *clause) map[string]int {
+	counts := make(map[string]int)
+
+	for idx := range profile.Syscalls {
+		entry := &profile.Syscalls[idx]
+
+		result := clause{
+			action:   canonicalAction(entry.Action),
+			errnoRet: runtimeErrno(entry.Action, entry.ErrnoRet),
+			args:     nil,
+		}
+		if result.sameResult(*def) {
+			continue
+		}
+
+		rules := 1
+		if hasRepeatedIndex(entry.Args) {
+			rules = len(entry.Args)
+		}
+
+		for _, name := range entry.Names {
+			counts[name] += rules
+		}
+	}
+
+	return counts
 }
 
 func validateNoNotify(profile *specs.LinuxSeccomp) error {

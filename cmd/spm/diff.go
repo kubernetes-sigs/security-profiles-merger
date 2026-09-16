@@ -19,9 +19,9 @@ package main
 import (
 	"bytes"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
+	"slices"
 )
 
 const (
@@ -41,14 +41,7 @@ Options:
 var errDiffRequiresTwo = errors.New("diff requires exactly 2 profiles")
 
 func runDiff(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("diff", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-
-	flags.Usage = func() {
-		_, _ = fmt.Fprint(stderr, diffUsage)
-
-		flags.PrintDefaults()
-	}
+	flags := newFlagSet(cmdDiff, stderr)
 
 	profileType := flags.String(
 		"type", "", "profile type: seccomp, apparmor, landlock (auto-detected if omitted)",
@@ -56,20 +49,15 @@ func runDiff(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	format := flags.String("format", formatJSON, "output format: json, human")
 	output := flags.String("output", "", "write output to file (default: stdout)")
 
-	err := flags.Parse(args)
-	if err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
-		}
-
-		return exitUsage
-	}
-
-	if code := validateFormat(*format, stderr); code != 0 {
+	if done, code := parseFlags(flags, diffUsage, args, stdout, stderr); done {
 		return code
 	}
 
-	if code := validateProfileType(*profileType, stderr); code != 0 {
+	if code := validateDiffFlags(flags.Args(), *format, *profileType, stderr); code != 0 {
+		return code
+	}
+
+	if code := checkStdin(flags, diffUsage, stdin, stderr); code != 0 {
 		return code
 	}
 
@@ -80,7 +68,9 @@ func runDiff(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	kind, code := resolveKind(*profileType, data, stderr)
+	// Exit code 1 means "different" for diff, so unparsable input is a
+	// usage error like every other diff failure.
+	kind, code := resolveKind(*profileType, data, exitUsage, stderr)
 	if code != 0 {
 		return code
 	}
@@ -101,6 +91,20 @@ func runDiff(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return code
 }
 
+// validateDiffFlags checks the flag order first, so that a flag after the
+// file arguments is reported as such, and then the flag values.
+func validateDiffFlags(args []string, format, profileType string, stderr io.Writer) int {
+	if code := checkFlagOrder(args, stderr); code != 0 {
+		return code
+	}
+
+	if code := validateFormat(format, stderr); code != 0 {
+		return code
+	}
+
+	return validateProfileType(profileType, stderr)
+}
+
 func readDiffInputs(
 	paths []string, stdin io.Reader,
 ) ([][]byte, error) {
@@ -112,16 +116,19 @@ func readDiffInputs(
 
 		if len(data) != diffProfileCount {
 			return nil, fmt.Errorf(
-				"got %d from stdin: %w", len(data), errDiffRequiresTwo,
+				"got %d %s from stdin: %w",
+				len(data), plural(len(data), "profile"), errDiffRequiresTwo,
 			)
 		}
 
 		return data, nil
 	}
 
-	if len(paths) != diffProfileCount {
+	// A "-" argument may expand to several profiles when stdin holds a JSON
+	// array, so only file arguments alone can be counted before reading.
+	if !slices.Contains(paths, "-") && len(paths) != diffProfileCount {
 		return nil, fmt.Errorf(
-			"got %d files: %w", len(paths), errDiffRequiresTwo,
+			"got %d %s: %w", len(paths), plural(len(paths), "file"), errDiffRequiresTwo,
 		)
 	}
 
@@ -130,11 +137,9 @@ func readDiffInputs(
 		return nil, err
 	}
 
-	// A "-" argument may expand to several profiles when stdin holds a
-	// JSON array.
 	if len(data) != diffProfileCount {
 		return nil, fmt.Errorf(
-			"got %d profiles: %w", len(data), errDiffRequiresTwo,
+			"got %d %s: %w", len(data), plural(len(data), "profile"), errDiffRequiresTwo,
 		)
 	}
 
@@ -152,7 +157,7 @@ func diffProfiles[T any, D equalChecker](
 	formatFn func(*D) string,
 	stdout, stderr io.Writer,
 ) int {
-	profiles, err := unmarshalAll[T](data, false, stderr)
+	profiles, err := unmarshalAll[T](data, lenientDecode(), stderr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 

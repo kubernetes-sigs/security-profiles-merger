@@ -558,7 +558,7 @@ func TestDiffNormalizesPathsBeforeComparing(t *testing.T) {
 			left: &apparmor.Profile{
 				Executable: nil,
 				Filesystem: &apparmor.FilesystemRules{
-					ReadOnlyPaths:  []string{"/foo/./bar"},
+					ReadOnlyPaths:  []string{"/foo//bar"},
 					WriteOnlyPaths: nil,
 					ReadWritePaths: nil,
 				},
@@ -582,7 +582,7 @@ func TestDiffNormalizesPathsBeforeComparing(t *testing.T) {
 				Executable: nil,
 				Filesystem: &apparmor.FilesystemRules{
 					ReadOnlyPaths:  nil,
-					WriteOnlyPaths: []string{"/tmp/../var/log"},
+					WriteOnlyPaths: []string{"/var//log"},
 					ReadWritePaths: nil,
 				},
 				Network:      nil,
@@ -606,7 +606,7 @@ func TestDiffNormalizesPathsBeforeComparing(t *testing.T) {
 				Filesystem: &apparmor.FilesystemRules{
 					ReadOnlyPaths:  nil,
 					WriteOnlyPaths: nil,
-					ReadWritePaths: []string{"/a/b/../c"},
+					ReadWritePaths: []string{"/a///c"},
 				},
 				Network:      nil,
 				Capabilities: nil,
@@ -626,7 +626,7 @@ func TestDiffNormalizesPathsBeforeComparing(t *testing.T) {
 			name: "AllowedExecutables",
 			left: &apparmor.Profile{
 				Executable: &apparmor.ExecutableRules{
-					AllowedExecutables: []string{"/usr/./bin/ls"},
+					AllowedExecutables: []string{"/usr//bin/ls"},
 					AllowedLibraries:   nil,
 				},
 				Filesystem:   nil,
@@ -648,7 +648,7 @@ func TestDiffNormalizesPathsBeforeComparing(t *testing.T) {
 			left: &apparmor.Profile{
 				Executable: &apparmor.ExecutableRules{
 					AllowedExecutables: nil,
-					AllowedLibraries:   []string{"/usr/lib/../lib/libc.so"},
+					AllowedLibraries:   []string{"/usr/lib//libc.so"},
 				},
 				Filesystem:   nil,
 				Network:      nil,
@@ -679,6 +679,41 @@ func TestDiffNormalizesPathsBeforeComparing(t *testing.T) {
 				t.Errorf("Diff should normalize %s, got non-equal", test.name)
 			}
 		})
+	}
+}
+
+// TestDiffKeepsDotComponents covers "." and ".." components, which AppArmor
+// does not resolve: a rule containing one matches nothing, so it differs
+// from the rule it seems to name.
+func TestDiffKeepsDotComponents(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{"/foo/./bar", "/tmp/../foo/bar", "/foo/bar/."} {
+		left := &apparmor.Profile{
+			Executable: nil,
+			Filesystem: &apparmor.FilesystemRules{
+				ReadOnlyPaths: []string{path}, WriteOnlyPaths: nil, ReadWritePaths: nil,
+			},
+			Network:      nil,
+			Capabilities: nil,
+		}
+		right := &apparmor.Profile{
+			Executable: nil,
+			Filesystem: &apparmor.FilesystemRules{
+				ReadOnlyPaths: []string{"/foo/bar"}, WriteOnlyPaths: nil, ReadWritePaths: nil,
+			},
+			Network:      nil,
+			Capabilities: nil,
+		}
+
+		diff, err := apparmor.Diff(left, right)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if diff.IsEqual() {
+			t.Errorf("Diff treats %q and /foo/bar as equal", path)
+		}
 	}
 }
 

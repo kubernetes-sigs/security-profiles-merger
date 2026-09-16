@@ -42,11 +42,32 @@ func TestValidateErrors(t *testing.T) {
 		wantStderr string
 	}{
 		{
-			name:       "validate help",
-			args:       []string{cmdValidate, flagHelp},
+			name:       "invalid JSON without type",
+			args:       []string{cmdValidate, invalidFile},
 			stdin:      nil,
-			wantCode:   0,
-			wantStderr: "[files...]",
+			wantCode:   1,
+			wantStderr: testParsingProfile0,
+		},
+		{
+			name:       "array of numbers without type",
+			args:       []string{cmdValidate},
+			stdin:      strings.NewReader("[1,2]"),
+			wantCode:   1,
+			wantStderr: testParsingProfile0,
+		},
+		{
+			name:       "array of numbers with type",
+			args:       []string{cmdValidate, flagType, typeSeccomp},
+			stdin:      strings.NewReader("[1,2]"),
+			wantCode:   1,
+			wantStderr: testParsingProfile0,
+		},
+		{
+			name:       "quiet with output",
+			args:       []string{cmdValidate, "--quiet", "--output", "out.json", invalidFile},
+			stdin:      nil,
+			wantCode:   exitUsage,
+			wantStderr: "--quiet cannot be combined with --output",
 		},
 		{
 			name:       "no type no input",
