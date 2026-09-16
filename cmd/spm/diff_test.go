@@ -34,6 +34,7 @@ func TestDiffErrors(t *testing.T) {
 	seccompFile2 := writeTemp(t, seccompJSON(t, testSyscallRead))
 	seccompFile3 := writeTemp(t, seccompJSON(t, testSyscallRead))
 	invalidFile := writeTemp(t, "not valid json")
+	stdinPair := "[" + seccompJSON(t, testSyscallRead) + "," + seccompJSON(t, "write") + "]"
 
 	tests := []struct {
 		name       string
@@ -43,11 +44,32 @@ func TestDiffErrors(t *testing.T) {
 		wantStderr string
 	}{
 		{
-			name:       "diff help",
-			args:       []string{cmdDiff, flagHelp},
+			name:       "invalid JSON without type",
+			args:       []string{cmdDiff, invalidFile, seccompFile},
 			stdin:      nil,
-			wantCode:   0,
-			wantStderr: "<file1>",
+			wantCode:   exitUsage,
+			wantStderr: testParsingProfile0,
+		},
+		{
+			name:       "stdin pair via dash",
+			args:       []string{cmdDiff, "-"},
+			stdin:      strings.NewReader(stdinPair),
+			wantCode:   exitDiff,
+			wantStderr: "auto-detected profile type: seccomp",
+		},
+		{
+			name:       "single file",
+			args:       []string{cmdDiff, seccompFile},
+			stdin:      nil,
+			wantCode:   exitUsage,
+			wantStderr: "got 1 file: ",
+		},
+		{
+			name:       "dash and stdin pair",
+			args:       []string{cmdDiff, seccompFile, "-"},
+			stdin:      strings.NewReader(stdinPair),
+			wantCode:   exitUsage,
+			wantStderr: "got 3 profiles: ",
 		},
 		{
 			name:       "auto-detect type",

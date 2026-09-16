@@ -559,7 +559,8 @@ func TestUnionDisjointPathRules(t *testing.T) {
 	t.Parallel()
 
 	// Each side handles only the right it grants. The union handles neither,
-	// so both rights become implicitly allowed and no rule is needed.
+	// so both rights become implicitly allowed and no rule is needed. Both
+	// sides still deny refer by default, so the union handles only refer.
 	left := &landlock.Profile{
 		HandledAccessFS: []landlock.FSAccessRight{
 			landlock.FSAccessReadFile,
@@ -595,8 +596,8 @@ func TestUnionDisjointPathRules(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(result.HandledAccessFS) != 0 || len(result.PathRules) != 0 {
-		t.Fatalf("expected no handled rights and no rules, got %s", landlock.FormatProfile(result))
+	if got, want := landlock.FormatProfile(result), "Profile{fs:refer}"; got != want {
+		t.Fatalf("Union = %s, want %s", got, want)
 	}
 
 	// When both sides handle both rights, the disjoint rules are kept.

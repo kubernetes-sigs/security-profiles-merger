@@ -17,6 +17,7 @@ limitations under the License.
 package apparmor_test
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -1199,12 +1200,20 @@ func TestGlobPatternTooLong(t *testing.T) {
 
 	long := "/" + strings.Repeat("a", 4096) + "/*"
 
-	assertGlobIntersect(
-		t,
-		[]string{long},
-		[]string{"/" + strings.Repeat("a", 4096) + "/foo"},
-		nil,
-	)
+	profile := &apparmor.Profile{
+		Executable: &apparmor.ExecutableRules{
+			AllowedExecutables: []string{long},
+			AllowedLibraries:   nil,
+		},
+		Filesystem:   nil,
+		Network:      nil,
+		Capabilities: nil,
+	}
+
+	_, err := apparmor.Intersect(profile, profile)
+	if !errors.Is(err, apparmor.ErrPathTooLong) {
+		t.Errorf("Intersect = %v, want ErrPathTooLong", err)
+	}
 }
 
 func TestGlobTooManyAlternatives(t *testing.T) {

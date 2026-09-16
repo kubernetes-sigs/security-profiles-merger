@@ -1437,7 +1437,7 @@ func TestIntersectNormalizedDuplicatePaths(t *testing.T) {
 	profile := &apparmor.Profile{
 		Executable: nil,
 		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{"/etc/./config", "/etc/config"},
+			ReadOnlyPaths:  []string{"/etc//config", "/etc/config"},
 			WriteOnlyPaths: nil,
 			ReadWritePaths: nil,
 		},
@@ -1461,7 +1461,7 @@ func TestNormalizeGlobPathPrefix(t *testing.T) {
 	profile := &apparmor.Profile{
 		Executable: nil,
 		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{"/etc/./data/*"},
+			ReadOnlyPaths:  []string{"/etc//data/*"},
 			WriteOnlyPaths: nil,
 			ReadWritePaths: nil,
 		},
@@ -1635,5 +1635,151 @@ func TestUnionIgnoresPathOrder(t *testing.T) {
 
 	if !slices.Equal(results[0], results[1]) {
 		t.Errorf("path order changed the union: %q vs %q", results[0], results[1])
+	}
+}
+
+// TestUnionIsCommutative covers literals a glob of the same profile covers,
+// which the union keeps, while the other profile's globs prune the literals
+// they match. Swapping the inputs must not change the result.
+func TestUnionIsCommutative(t *testing.T) {
+	t.Parallel()
+
+	fsRules := func(readOnly, writeOnly, readWrite []string) *apparmor.Profile {
+		return &apparmor.Profile{
+			Executable: &apparmor.ExecutableRules{
+				AllowedExecutables: slices.Concat(readOnly, writeOnly, readWrite),
+				AllowedLibraries:   nil,
+			},
+			Filesystem: &apparmor.FilesystemRules{
+				ReadOnlyPaths:  readOnly,
+				WriteOnlyPaths: writeOnly,
+				ReadWritePaths: readWrite,
+			},
+			Network:      nil,
+			Capabilities: nil,
+		}
+	}
+
+	for _, test := range []struct {
+		name        string
+		left, right *apparmor.Profile
+	}{
+		{
+			name:  "own glob after own literal",
+			left:  fsRules([]string{"/x"}, nil, nil),
+			right: fsRules([]string{"/etc/foo", "/etc/*"}, nil, nil),
+		},
+		{
+			name:  "own glob before own literal",
+			left:  fsRules([]string{"/x"}, nil, nil),
+			right: fsRules([]string{"/etc/*", "/etc/foo"}, nil, nil),
+		},
+		{
+			name:  "literal listed by both",
+			left:  fsRules([]string{"/etc/foo"}, nil, []string{"/etc/*"}),
+			right: fsRules(nil, nil, []string{"/etc/foo"}),
+		},
+		{
+			name:  "other glob promotes",
+			left:  fsRules(nil, []string{"/etc/foo", "/etc/*"}, nil),
+			right: fsRules([]string{"/etc/*"}, []string{"/etc/bar"}, nil),
+		},
+		{
+			name:  "globs of both categories",
+			left:  fsRules([]string{"/etc/*"}, []string{"/etc/**"}, nil),
+			right: fsRules([]string{"/etc/foo"}, []string{"/etc/bar"}, []string{"/etc/baz"}),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			forward, err := apparmor.Union(test.left, test.right)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			backward, err := apparmor.Union(test.right, test.left)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if !reflect.DeepEqual(forward, backward) {
+				t.Errorf("Union(a, b) = %s, Union(b, a) = %s",
+					apparmor.FormatProfile(forward), apparmor.FormatProfile(backward))
+			}
+		})
+	}
+}
+
+// TestUnionOtherGlobPrunesLiteral covers a literal the other profile's glob
+// matches: it is pruned whichever side lists it, while a literal its own
+// profile's glob matches is kept.
+func TestUnionOtherGlobPrunesLiteral(t *testing.T) {
+	t.Parallel()
+
+	withGlob := fsProfile(&apparmor.FilesystemRules{
+		ReadOnlyPaths:  []string{"/etc/foo", "/etc/*"},
+		WriteOnlyPaths: nil,
+		ReadWritePaths: nil,
+	})
+	other := fsProfile(&apparmor.FilesystemRules{
+		ReadOnlyPaths:  []string{"/x", "/etc/bar"},
+		WriteOnlyPaths: nil,
+		ReadWritePaths: nil,
+	})
+
+	want := []string{"/etc/*", "/etc/foo", "/x"}
+
+	for _, order := range [][]*apparmor.Profile{{other, withGlob}, {withGlob, other}} {
+		result, err := apparmor.Union(order...)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if got := result.Filesystem.ReadOnlyPaths; !slices.Equal(got, want) {
+			t.Errorf("Union = %q, want %q", got, want)
+		}
+	}
+}
+
+// TestUnionFoldIsDeterministic covers a fold over three profiles, whose
+// intermediate result feeds the next merge: repeating it gives the same
+// result every time.
+func TestUnionFoldIsDeterministic(t *testing.T) {
+	t.Parallel()
+
+	profiles := []*apparmor.Profile{
+		fsProfile(&apparmor.FilesystemRules{
+			ReadOnlyPaths:  []string{"/etc/b", "/etc/a", "/var/*"},
+			WriteOnlyPaths: []string{"/etc/c"},
+			ReadWritePaths: nil,
+		}),
+		fsProfile(&apparmor.FilesystemRules{
+			ReadOnlyPaths:  []string{"/var/log", "/etc/*"},
+			WriteOnlyPaths: []string{"/var/**", "/etc/a"},
+			ReadWritePaths: nil,
+		}),
+		fsProfile(&apparmor.FilesystemRules{
+			ReadOnlyPaths:  nil,
+			WriteOnlyPaths: []string{"/var/tmp"},
+			ReadWritePaths: []string{"/etc/c", "/etc/{a,b}"},
+		}),
+	}
+
+	first, err := apparmor.Union(profiles...)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for range 50 {
+		again, err := apparmor.Union(profiles...)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !reflect.DeepEqual(first, again) {
+			t.Fatalf("Union = %s, then %s",
+				apparmor.FormatProfile(first), apparmor.FormatProfile(again))
+		}
 	}
 }

@@ -15,6 +15,20 @@ dependencies:
       - path: .github/workflows/release.yml
         match: "syft-version: v"
 
+  - name: goreleaser
+    version: 2.18.1
+    refPaths:
+      - path: .github/workflows/ci.yml
+        match: "GORELEASER_VERSION: v"
+      - path: .github/workflows/release.yml
+        match: "GORELEASER_VERSION: v"
+
+  - name: cosign
+    version: 3.0.6
+    refPaths:
+      - path: .github/workflows/release.yml
+        match: "COSIGN_VERSION: v"
+
   - name: mdtoc
     version: 1.4.0
     refPaths:

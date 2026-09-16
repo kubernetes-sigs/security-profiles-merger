@@ -980,9 +980,11 @@ func TestValidateStrictUnusedErrnoRet(t *testing.T) {
 		}
 	}
 
+	// runc ignores the value, but crun refuses the profile, so an artifact
+	// must not carry it either.
 	err = seccomp.ValidateArtifact(unused)
-	if err != nil {
-		t.Errorf("ValidateArtifact should ignore an unused errnoRet: %v", err)
+	if !errors.Is(err, seccomp.ErrUnusedErrnoRet) {
+		t.Errorf("ValidateArtifact: expected ErrUnusedErrnoRet, got: %v", err)
 	}
 
 	used := &specs.LinuxSeccomp{
@@ -1077,10 +1079,19 @@ func TestValidateArtifactConflictingEntries(t *testing.T) {
 			conflict: false,
 		},
 		{
+			// libseccomp drops the conditional rule, whichever comes first.
 			name: "unconditional next to conditional",
 			def:  specs.ActErrno,
 			entries: []specs.LinuxSyscall{
 				entry(specs.ActAllow, nil), entry(specs.ActLog, nil, argOne),
+			},
+			conflict: true,
+		},
+		{
+			name: "unconditional next to conditional with the same result",
+			def:  specs.ActErrno,
+			entries: []specs.LinuxSyscall{
+				entry(specs.ActAllow, nil, argOne), entry(specs.ActAllow, nil),
 			},
 			conflict: false,
 		},

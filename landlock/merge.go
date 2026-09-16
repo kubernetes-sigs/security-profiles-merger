@@ -42,11 +42,22 @@ var (
 //
 // A right is granted for a path or port only if every profile permits it
 // there: either the profile does not handle the right, or one of its rules
-// grants it. Path rules apply to the whole hierarchy beneath their path, so a
-// rule on "/etc" is honored against a rule on "/" from the other profile and
-// the result carries the narrower path. Network rules match by exact port.
+// grants it. As in the kernel, a profile handling any filesystem right also
+// denies FSAccessRefer by default, whether or not it lists it. Path rules
+// apply to the whole hierarchy beneath their path, so a rule on "/etc" is
+// honored against a rule on "/" from the other profile and the result
+// carries the narrower path. Network rules match by exact port. A path rule
+// loses the rights that rules on its ancestors in the result already grant,
+// and is dropped when none remain, unless a rule of the result grants
+// FSAccessRefer, in which case the rules are kept as they are.
+//
+// Each input is validated as Validate does, except that duplicate rules and
+// rights are merged rather than rejected; errors name the input's own rule
+// indices. A result that handles and scopes nothing, which happens only when
+// no input handles or scopes anything, restricts nothing; the kernel refuses
+// to load it, and ValidateArtifact reports it with ErrEmptyRuleset.
 func Intersect(profiles ...*Profile) (*Profile, error) {
-	return foldProfiles(profiles, intersectStrategy{})
+	return foldProfiles(profiles, intersectTwo, true)
 }
 
 // Union merges multiple Landlock profiles via union: the resulting profile
@@ -54,65 +65,79 @@ func Intersect(profiles ...*Profile) (*Profile, error) {
 // HandledAccessNet are intersected (handling fewer rights makes the ruleset
 // less restrictive, because unhandled rights are implicitly allowed). Path and
 // network rules for entries present in both profiles have their access rights
-// unioned. Entries present in only one profile are kept.
+// unioned. Entries present in only one profile are kept, even where a rule
+// on an ancestor path grants the same rights: the kernel binds a rule to the
+// file the path resolves to, so a nested path that is a symlink covers a
+// different hierarchy, and dropping its rule would deny access an input
+// grants.
+//
+// Every profile handling a filesystem right denies FSAccessRefer by default,
+// so when all inputs handle filesystem rights the result denies it too: it
+// lists FSAccessRefer when every input lists it, when a rule grants it, or
+// when the inputs share no other handled filesystem right. In that last case the result needs Landlock
+// ABI version 2 even if the inputs did not, because no other handled right
+// is left to keep FSAccessRefer denied.
 //
 // Rights that end up outside the merged handled sets are pruned from rules,
 // since they are implicitly allowed anyway and the kernel rejects rules that
-// grant unhandled rights. Both Intersect and Union apply this, so their
-// results pass ValidateStrict when the inputs use absolute paths.
+// grant unhandled rights. Both Intersect and Union apply this. A result that
+// handles and scopes nothing, for example the union of a profile handling
+// only filesystem rights with one handling only network rights, restricts
+// nothing; the kernel refuses to load it, and ValidateArtifact reports it
+// with ErrEmptyRuleset.
 func Union(profiles ...*Profile) (*Profile, error) {
-	return foldProfiles(profiles, unionStrategy{})
+	return foldProfiles(profiles, unionTwo, false)
 }
 
-type strategy interface {
-	mergeHandledFS(left, right []FSAccessRight) []FSAccessRight
-	mergeHandledNet(left, right []NetAccessRight) []NetAccessRight
-	mergeScoped(left, right []ScopeRight) []ScopeRight
-	mergePathRules(left, right *Profile) []PathRule
-	mergeNetRules(left, right *Profile) []NetRule
-}
-
-func foldProfiles(profiles []*Profile, mergeOp strategy) (*Profile, error) {
-	for idx, profile := range profiles {
-		err := validateEmptyPathsBeforeNormalize(profile)
-		if err != nil {
-			return nil, fmt.Errorf("validate profile %d: %w", idx, err)
-		}
-	}
-
+// foldProfiles validates, normalizes and merges the profiles. minimize
+// drops rights that ancestor rules already grant, which only intersection
+// may do: it assumes no rule path is a symlink, and where one is, dropping
+// its rights removes access rather than adding it.
+func foldProfiles(
+	profiles []*Profile, mergeTwo func(left, right *Profile) *Profile, minimize bool,
+) (*Profile, error) {
 	normalized := make([]*Profile, len(profiles))
-	for idx, profile := range profiles {
-		normalized[idx] = normalizeProfile(profile)
-		deduplicatePathRules(normalized[idx])
-		deduplicateNetRules(normalized[idx])
-		deduplicateScoped(normalized[idx])
-		deduplicateHandledAccess(normalized[idx])
-	}
 
-	for idx, profile := range normalized {
-		err := Validate(profile)
+	for idx, profile := range profiles {
+		// Validate the caller's profile, so errors name its own indices
+		// and paths, then normalize using the paths validation cleaned.
+		cleaned, err := validateProfile(profile, false)
 		if err != nil {
 			return nil, fmt.Errorf("validate profile %d: %w", idx, err)
 		}
+
+		normalized[idx] = normalizeProfile(profile, cleaned)
+		pruneUnhandledRights(normalized[idx])
 	}
 
-	result, err := merge.Fold(normalized, cloneProfile, func(a, b *Profile) (*Profile, error) {
-		return mergeTwo(a, b, mergeOp), nil
+	// The normalized profiles are fresh copies owned by this call, so a
+	// single profile needs no further clone.
+	result, err := merge.Fold(normalized, ownedProfile, func(a, b *Profile) (*Profile, error) {
+		return mergeTwo(a, b), nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("merge: %w", err)
 	}
 
-	pruneUnhandledRights(result)
+	if minimize {
+		result.PathRules = minimizePathRules(result.PathRules)
+	}
+
 	sortProfile(result)
+	emptyToNil(result)
 
 	return result, nil
 }
 
+func ownedProfile(profile *Profile) *Profile { return profile }
+
 // pruneUnhandledRights drops rule rights outside the handled sets and rules
 // left without rights. Unhandled rights are implicitly allowed, so this does
 // not change what the profile permits, but the kernel rejects a rule whose
-// rights are not a subset of the ruleset's handled access.
+// rights are not a subset of the ruleset's handled access. The one exception
+// is FSAccessRefer, which a profile handling other filesystem rights denies
+// even when it does not list it: a rule granting it there is not loadable,
+// and the merge ignores the grant.
 func pruneUnhandledRights(profile *Profile) {
 	profile.PathRules = pruneRules(
 		profile.PathRules, profile.HandledAccessFS, pathRuleAccess, newPathRule, pathRuleKey,
@@ -179,72 +204,113 @@ func sortProfile(profile *Profile) {
 	}
 }
 
-func mergeTwo(
-	left, right *Profile, mergeStrategy strategy,
-) *Profile {
-	return &Profile{
-		HandledAccessFS: mergeStrategy.mergeHandledFS(
-			left.HandledAccessFS, right.HandledAccessFS,
-		),
-		HandledAccessNet: mergeStrategy.mergeHandledNet(
-			left.HandledAccessNet, right.HandledAccessNet,
-		),
-		Scoped:    mergeStrategy.mergeScoped(left.Scoped, right.Scoped),
-		PathRules: mergeStrategy.mergePathRules(left, right),
-		NetRules:  mergeStrategy.mergeNetRules(left, right),
+// emptyToNil replaces empty slices with nil, so a merge result looks the same
+// whatever number of inputs produced it.
+func emptyToNil(profile *Profile) {
+	profile.HandledAccessFS = nilIfEmpty(profile.HandledAccessFS)
+	profile.HandledAccessNet = nilIfEmpty(profile.HandledAccessNet)
+	profile.Scoped = nilIfEmpty(profile.Scoped)
+	profile.PathRules = nilIfEmpty(profile.PathRules)
+	profile.NetRules = nilIfEmpty(profile.NetRules)
+}
+
+func nilIfEmpty[T any](items []T) []T {
+	if len(items) == 0 {
+		return nil
 	}
+
+	return items
 }
 
-// intersectStrategy implements intersection semantics for Landlock profiles.
-type intersectStrategy struct{}
+// effectiveHandledFS returns the filesystem rights a ruleset denies unless a
+// rule grants them. The kernel denies FSAccessRefer in every ruleset that
+// handles at least one filesystem right, whether or not the ruleset lists it
+// (_LANDLOCK_ACCESS_FS_INITIALLY_DENIED). On Landlock ABI version 1, which
+// does not know the right, moving or linking a file to another directory is
+// always denied, so the rule holds there too.
+func effectiveHandledFS(handled []FSAccessRight) map[FSAccessRight]struct{} {
+	set := toSet(handled)
+	if len(set) > 0 {
+		set[FSAccessRefer] = struct{}{}
+	}
 
-func (intersectStrategy) mergeHandledFS(
-	left, right []FSAccessRight,
-) []FSAccessRight {
-	return merge.UnionSlice(left, right)
+	return set
 }
 
-func (intersectStrategy) mergeHandledNet(
-	left, right []NetAccessRight,
-) []NetAccessRight {
-	return merge.UnionSlice(left, right)
+func intersectTwo(left, right *Profile) *Profile {
+	result := &Profile{
+		HandledAccessFS:  merge.UnionSlice(left.HandledAccessFS, right.HandledAccessFS),
+		HandledAccessNet: merge.UnionSlice(left.HandledAccessNet, right.HandledAccessNet),
+		Scoped:           merge.UnionSlice(left.Scoped, right.Scoped),
+		PathRules: intersectRules(
+			left.PathRules, right.PathRules,
+			effectiveHandledFS(left.HandledAccessFS),
+			effectiveHandledFS(right.HandledAccessFS),
+			pathRuleKey, pathRuleAccess, newPathRule,
+			hierarchyAccess,
+		),
+		NetRules: intersectRules(
+			left.NetRules, right.NetRules,
+			toSet(left.HandledAccessNet), toSet(right.HandledAccessNet),
+			netRuleKey, netRuleAccess, newNetRule,
+			directAccess[uint16, NetAccessRight],
+		),
+	}
+
+	pruneUnhandledRights(result)
+
+	return result
 }
 
-func (intersectStrategy) mergeScoped(
-	left, right []ScopeRight,
-) []ScopeRight {
-	return merge.UnionSlice(left, right)
+func unionTwo(left, right *Profile) *Profile {
+	result := &Profile{
+		HandledAccessFS:  merge.IntersectSlice(left.HandledAccessFS, right.HandledAccessFS),
+		HandledAccessNet: merge.IntersectSlice(left.HandledAccessNet, right.HandledAccessNet),
+		Scoped:           merge.IntersectSlice(left.Scoped, right.Scoped),
+		PathRules: unionRules(
+			left.PathRules, right.PathRules,
+			pathRuleKey, pathRuleAccess, newPathRule,
+		),
+		NetRules: unionRules(
+			left.NetRules, right.NetRules,
+			netRuleKey, netRuleAccess, newNetRule,
+		),
+	}
+
+	// Both inputs deny refer unless a rule grants it, so the result must
+	// too. Listing refer is needed when a rule grants it, or the pruning
+	// below would drop the grant, and when no other handled right is left
+	// to make the kernel deny it. Otherwise it stays implicit, so the result
+	// does not need a newer ABI than necessary.
+	if len(left.HandledAccessFS) > 0 && len(right.HandledAccessFS) > 0 &&
+		!slices.Contains(result.HandledAccessFS, FSAccessRefer) &&
+		(len(result.HandledAccessFS) == 0 || rulesGrant(result.PathRules, FSAccessRefer)) {
+		result.HandledAccessFS = append(result.HandledAccessFS, FSAccessRefer)
+	}
+
+	pruneUnhandledRights(result)
+
+	return result
 }
 
-func (intersectStrategy) mergePathRules(
-	left, right *Profile,
-) []PathRule {
-	return intersectRules(
-		left.PathRules, right.PathRules,
-		left.HandledAccessFS, right.HandledAccessFS,
-		pathRuleKey, pathRuleAccess, newPathRule,
-		hierarchyAccess,
-	)
-}
+func rulesGrant(rules []PathRule, right FSAccessRight) bool {
+	for _, rule := range rules {
+		if slices.Contains(rule.AccessFS, right) {
+			return true
+		}
+	}
 
-func (intersectStrategy) mergeNetRules(
-	left, right *Profile,
-) []NetRule {
-	return intersectRules(
-		left.NetRules, right.NetRules,
-		left.HandledAccessNet, right.HandledAccessNet,
-		netRuleKey, netRuleAccess, newNetRule,
-		directAccess[uint16, NetAccessRight],
-	)
+	return false
 }
 
 // intersectRules is a generic intersection for keyed rule slices. For every
 // key present on either side it computes the rights each side effectively
 // grants there (via the effective function, which may consult ancestor
-// rules) and keeps the rights both sides permit.
+// rules) and keeps the rights both sides permit. The handled sets hold the
+// rights each side denies unless a rule grants them.
 func intersectRules[Rule any, Key cmp.Ordered, Right comparable](
 	leftRules, rightRules []Rule,
-	leftHandled, rightHandled []Right,
+	leftHandled, rightHandled map[Right]struct{},
 	key func(Rule) Key,
 	access func(Rule) []Right,
 	build func(Key, []Right) Rule,
@@ -252,8 +318,6 @@ func intersectRules[Rule any, Key cmp.Ordered, Right comparable](
 ) []Rule {
 	leftMap := ruleMap(leftRules, key, access)
 	rightMap := ruleMap(rightRules, key, access)
-	leftHandledSet := toSet(leftHandled)
-	rightHandledSet := toSet(rightHandled)
 
 	keys := slices.Collect(maps.Keys(leftMap))
 
@@ -270,7 +334,7 @@ func intersectRules[Rule any, Key cmp.Ordered, Right comparable](
 	for _, ruleKey := range keys {
 		granted := intersectAccess(
 			effective(ruleKey, leftMap), effective(ruleKey, rightMap),
-			leftHandledSet, rightHandledSet,
+			leftHandled, rightHandled,
 		)
 		if len(granted) > 0 {
 			result = append(result, build(ruleKey, granted))
@@ -330,9 +394,15 @@ func directAccess[Key comparable, Right comparable](
 func hierarchyAccess(
 	path string, rules map[string][]FSAccessRight,
 ) []FSAccessRight {
+	return ancestorAccess(pathAncestors(path), rules)
+}
+
+func ancestorAccess(
+	ancestors []string, rules map[string][]FSAccessRight,
+) []FSAccessRight {
 	var result []FSAccessRight
 
-	for _, ancestor := range pathAncestors(path) {
+	for _, ancestor := range ancestors {
 		if access, ok := rules[ancestor]; ok {
 			result = merge.UnionSlice(result, access)
 		}
@@ -344,6 +414,8 @@ func hierarchyAccess(
 // pathAncestors returns the path itself followed by each of its parent
 // directories, ending at "/" for an absolute path. Paths are expected to be
 // cleaned, so they carry no trailing slash except for the root itself.
+// Resolution is purely textual: the merge assumes no symlink or bind mount
+// crosses a rule boundary.
 func pathAncestors(path string) []string {
 	if path == "" {
 		return nil
@@ -366,59 +438,43 @@ func pathAncestors(path string) []string {
 	return result
 }
 
-// isAncestorOrSelf reports whether ancestor is path itself or one of its
-// parent directories. Paths are expected to be cleaned. This states the
-// hierarchy relation pathAncestors enumerates; the merge uses the
-// enumeration, and a test keeps the two in agreement.
-func isAncestorOrSelf(ancestor, path string) bool {
-	if ancestor == path {
-		return true
+// minimizePathRules drops from each rule the rights that rules on its
+// ancestors already grant, and rules left without rights. Rights accumulate
+// down the hierarchy, so this does not change what any path permits as long
+// as no rule path is a symlink. Where one is, the rule covers the symlink's
+// target instead, and dropping its rights only removes access, so
+// intersection may minimize but union must not.
+//
+// Rules are left as they are when any of them grants FSAccessRefer: the
+// kernel checks a move or link across directories by comparing the rights
+// each parent collects from rules up to its mount point, so a right a
+// descendant repeats can decide that check when its ancestor rule lies above
+// the mount point. Without a refer grant such a move is always denied.
+func minimizePathRules(rules []PathRule) []PathRule {
+	if len(rules) < 2 || rulesGrant(rules, FSAccessRefer) {
+		return rules
 	}
 
-	if ancestor == "/" {
-		return strings.HasPrefix(path, "/")
+	byPath := ruleMap(rules, pathRuleKey, pathRuleAccess)
+	result := make([]PathRule, 0, len(rules))
+
+	for _, rule := range rules {
+		inherited := toSet(ancestorAccess(pathAncestors(rule.Path)[1:], byPath))
+
+		kept := make([]FSAccessRight, 0, len(rule.AccessFS))
+
+		for _, right := range rule.AccessFS {
+			if _, ok := inherited[right]; !ok {
+				kept = append(kept, right)
+			}
+		}
+
+		if len(kept) > 0 {
+			result = append(result, newPathRule(rule.Path, kept))
+		}
 	}
 
-	return strings.HasPrefix(path, ancestor+"/")
-}
-
-// unionStrategy implements union semantics for Landlock profiles.
-type unionStrategy struct{}
-
-func (unionStrategy) mergeHandledFS(
-	left, right []FSAccessRight,
-) []FSAccessRight {
-	return merge.IntersectSlice(left, right)
-}
-
-func (unionStrategy) mergeHandledNet(
-	left, right []NetAccessRight,
-) []NetAccessRight {
-	return merge.IntersectSlice(left, right)
-}
-
-func (unionStrategy) mergeScoped(
-	left, right []ScopeRight,
-) []ScopeRight {
-	return merge.IntersectSlice(left, right)
-}
-
-func (unionStrategy) mergePathRules(
-	left, right *Profile,
-) []PathRule {
-	return unionRules(
-		left.PathRules, right.PathRules,
-		pathRuleKey, pathRuleAccess, newPathRule,
-	)
-}
-
-func (unionStrategy) mergeNetRules(
-	left, right *Profile,
-) []NetRule {
-	return unionRules(
-		left.NetRules, right.NetRules,
-		netRuleKey, netRuleAccess, newNetRule,
-	)
+	return result
 }
 
 // unionRules is a generic union for keyed rule slices.
@@ -503,113 +559,83 @@ func toSet[T comparable](items []T) map[T]struct{} {
 	return set
 }
 
-func cloneProfile(profile *Profile) *Profile {
+// normalizeProfile returns a copy of the profile in canonical form: paths
+// replaced by their cleaned form (cleaned is index aligned with PathRules),
+// rules for the same path or port merged, and duplicate rights removed from
+// every set and rule. It does not change what the profile permits.
+func normalizeProfile(profile *Profile, cleaned []string) *Profile {
 	return &Profile{
-		HandledAccessFS:  slices.Clone(profile.HandledAccessFS),
-		HandledAccessNet: slices.Clone(profile.HandledAccessNet),
-		Scoped:           slices.Clone(profile.Scoped),
-		PathRules:        clonePathRules(profile.PathRules),
-		NetRules:         cloneNetRules(profile.NetRules),
+		HandledAccessFS:  dedupRights(profile.HandledAccessFS),
+		HandledAccessNet: dedupRights(profile.HandledAccessNet),
+		Scoped:           dedupRights(profile.Scoped),
+		PathRules: mergeDuplicateRules(
+			profile.PathRules,
+			func(idx int, _ PathRule) string { return cleaned[idx] },
+			pathRuleAccess, newPathRule,
+		),
+		NetRules: mergeDuplicateRules(
+			profile.NetRules,
+			func(_ int, rule NetRule) uint16 { return rule.Port },
+			netRuleAccess, newNetRule,
+		),
 	}
 }
 
-func clonePathRules(rules []PathRule) []PathRule {
-	if rules == nil {
+// cleanPaths returns the cleaned path of every path rule, index aligned.
+func cleanPaths(rules []PathRule) []string {
+	cleaned := make([]string, len(rules))
+	for idx, rule := range rules {
+		cleaned[idx] = cleanPath(rule.Path)
+	}
+
+	return cleaned
+}
+
+// mergeDuplicateRules merges rules with the same key into the first one,
+// keeping their order, and removes duplicate rights. The result shares no
+// slices with the input.
+func mergeDuplicateRules[Rule any, Key comparable, Right comparable](
+	rules []Rule,
+	key func(int, Rule) Key,
+	access func(Rule) []Right,
+	build func(Key, []Right) Rule,
+) []Rule {
+	if len(rules) == 0 {
 		return nil
 	}
 
-	cloned := make([]PathRule, len(rules))
+	seen := make(map[Key]int, len(rules))
+	keys := make([]Key, 0, len(rules))
+	rights := make([][]Right, 0, len(rules))
 
 	for idx, rule := range rules {
-		cloned[idx] = PathRule{
-			Path:     rule.Path,
-			AccessFS: slices.Clone(rule.AccessFS),
+		ruleKey := key(idx, rule)
+
+		if pos, ok := seen[ruleKey]; ok {
+			rights[pos] = dedupRights(slices.Concat(rights[pos], access(rule)))
+
+			continue
 		}
+
+		seen[ruleKey] = len(keys)
+		keys = append(keys, ruleKey)
+		rights = append(rights, dedupRights(access(rule)))
 	}
 
-	return cloned
-}
-
-func deduplicatePathRules(profile *Profile) {
-	if len(profile.PathRules) == 0 {
-		return
+	result := make([]Rule, len(keys))
+	for idx, ruleKey := range keys {
+		result[idx] = build(ruleKey, rights[idx])
 	}
 
-	seen := make(map[string]int, len(profile.PathRules))
-
-	var result []PathRule
-
-	for _, rule := range profile.PathRules {
-		if idx, ok := seen[rule.Path]; ok {
-			result[idx].AccessFS = merge.UnionSlice(result[idx].AccessFS, rule.AccessFS)
-		} else {
-			seen[rule.Path] = len(result)
-			result = append(result, PathRule{
-				Path:     rule.Path,
-				AccessFS: slices.Clone(rule.AccessFS),
-			})
-		}
-	}
-
-	profile.PathRules = result
+	return result
 }
 
-func deduplicateHandledAccess(profile *Profile) {
-	profile.HandledAccessFS = merge.DeduplicateSlice(profile.HandledAccessFS)
-	profile.HandledAccessNet = merge.DeduplicateSlice(profile.HandledAccessNet)
-}
-
-func deduplicateNetRules(profile *Profile) {
-	if len(profile.NetRules) == 0 {
-		return
-	}
-
-	seen := make(map[uint16]int, len(profile.NetRules))
-
-	var result []NetRule
-
-	for _, rule := range profile.NetRules {
-		if idx, ok := seen[rule.Port]; ok {
-			result[idx].AccessNet = merge.UnionSlice(result[idx].AccessNet, rule.AccessNet)
-		} else {
-			seen[rule.Port] = len(result)
-			result = append(result, NetRule{
-				Port:      rule.Port,
-				AccessNet: slices.Clone(rule.AccessNet),
-			})
-		}
-	}
-
-	profile.NetRules = result
-}
-
-func deduplicateScoped(profile *Profile) {
-	profile.Scoped = merge.DeduplicateSlice(profile.Scoped)
-}
-
-func normalizeProfile(profile *Profile) *Profile {
-	clone := cloneProfile(profile)
-
-	for idx := range clone.PathRules {
-		clone.PathRules[idx].Path = merge.CleanPath(clone.PathRules[idx].Path)
-	}
-
-	return clone
-}
-
-func cloneNetRules(rules []NetRule) []NetRule {
-	if rules == nil {
+// dedupRights returns a new slice holding the rights in order of first
+// occurrence, or nil when there are none.
+func dedupRights[T comparable](rights []T) []T {
+	if len(rights) == 0 {
 		return nil
 	}
 
-	cloned := make([]NetRule, len(rules))
-
-	for idx, rule := range rules {
-		cloned[idx] = NetRule{
-			Port:      rule.Port,
-			AccessNet: slices.Clone(rule.AccessNet),
-		}
-	}
-
-	return cloned
+	return merge.DeduplicateSlice(rights)
 }

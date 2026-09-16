@@ -34,12 +34,18 @@ var (
 	ErrDuplicateRule = errors.New("duplicate rule")
 
 	// ErrEmptyPath is returned when a path rule has an empty path string
-	// or a path that cleans to ".", such as "a/..".
+	// or a path that cleans to ".", such as "./".
 	ErrEmptyPath = merge.ErrEmptyPath
 
 	// ErrInvalidPath is returned when a path rule contains a NUL byte,
 	// which no file system path can contain.
 	ErrInvalidPath = errors.New("invalid path")
+
+	// ErrParentPath is returned when a path rule contains a ".." component.
+	// The kernel resolves ".." against the file system, where a symlink can
+	// make "/srv/data/../public" name a directory other than "/srv/public",
+	// so such a path cannot be compared with other rule paths.
+	ErrParentPath = errors.New(`path contains a ".." component`)
 
 	// ErrUnhandledRight is returned when a rule grants an access right
 	// that is not listed in the profile's handled access set.
@@ -53,75 +59,139 @@ var (
 	// Landlock requires absolute paths for filesystem rules.
 	ErrRelativePath = errors.New("relative path (must be absolute)")
 
+	// ErrEmptyRule is returned when a path or network rule grants no access
+	// right. The kernel rejects such a rule with ENOMSG.
+	ErrEmptyRule = errors.New("rule grants no access right")
+
+	// ErrEmptyRuleset is returned when a profile handles no filesystem or
+	// network access right and scopes nothing. Such a ruleset restricts
+	// nothing, and the kernel refuses to create it with ENOMSG.
+	ErrEmptyRuleset = errors.New("ruleset handles no access right and scopes nothing")
+
 	// ErrUnsupportedABIRight is returned by ValidateForABI when a profile
 	// uses an access right the given Landlock ABI version does not know.
 	// The kernel rejects such a ruleset with EINVAL.
 	ErrUnsupportedABIRight = errors.New("access right needs a newer Landlock ABI")
+
+	// ErrUnknownABIVersion is returned by ValidateForABI for a version
+	// outside ABIV1 to LatestABIVersion.
+	ErrUnknownABIVersion = errors.New("unknown Landlock ABI version")
 )
 
+// fieldRef names a profile field, or an element of it when idx is not
+// negative, in error messages. It is formatted only when an error is
+// reported, so validating a large profile does not build a string per rule.
+type fieldRef struct {
+	field string
+	idx   int
+}
+
+const noIndex = -1
+
+func (r fieldRef) String() string {
+	if r.idx == noIndex {
+		return r.field
+	}
+
+	return fmt.Sprintf("%s[%d]", r.field, r.idx)
+}
+
+func handledFSRef() fieldRef       { return fieldRef{field: "HandledAccessFS", idx: noIndex} }
+func handledNetRef() fieldRef      { return fieldRef{field: "HandledAccessNet", idx: noIndex} }
+func scopedRef() fieldRef          { return fieldRef{field: "Scoped", idx: noIndex} }
+func pathRuleRef(idx int) fieldRef { return fieldRef{field: "PathRules", idx: idx} }
+func netRuleRef(idx int) fieldRef  { return fieldRef{field: "NetRules", idx: idx} }
+
 // Validate checks that a Landlock profile contains only known access right
-// values, valid paths, and no duplicate rules or rights. Duplicate rules are
-// detected on cleaned paths, so "/etc" and "/etc/" count as the same rule.
+// values, valid paths, and no duplicate rules or rights. Paths must not be
+// empty, contain NUL bytes, or contain ".." components. Duplicate rules are
+// detected on cleaned paths, so "/etc", "/etc/" and "//etc" count as the
+// same rule.
 //
-// Intersect and Union normalize and deduplicate each input before running
-// Validate on it, so duplicate rules and rights within one input are merged
+// Intersect and Union run the same checks on each input as given, except
+// for duplicates: duplicate rules and rights within one input are merged
 // rather than rejected there. Call Validate directly to catch them. All
 // validation failures are collected and returned together.
 func Validate(profile *Profile) error {
+	_, err := validateProfile(profile, true)
+
+	return err
+}
+
+// validateProfile runs the checks of Validate, skipping the duplicate checks
+// unless checkDuplicates is set. It returns the cleaned path of every path
+// rule, index aligned with PathRules, so callers need not clean again; the
+// entry of a rejected path is empty.
+func validateProfile(profile *Profile, checkDuplicates bool) ([]string, error) {
 	if profile == nil {
-		return ErrNilProfile
+		return nil, ErrNilProfile
 	}
 
 	var errs []error
 
-	err := validateRights("HandledAccessFS", profile.HandledAccessFS, isKnownFSRight)
-	if err != nil {
-		errs = append(errs, err)
+	errs = appendErr(errs, validateRights(handledFSRef(), profile.HandledAccessFS, isKnownFSRight))
+	errs = appendErr(
+		errs,
+		validateRights(handledNetRef(), profile.HandledAccessNet, isKnownNetRight),
+	)
+	errs = appendErr(errs, validateRights(scopedRef(), profile.Scoped, isKnownScopeRight))
+
+	cleaned := make([]string, len(profile.PathRules))
+
+	for idx, rule := range profile.PathRules {
+		clean, err := validatePath(rule.Path)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", pathRuleRef(idx), err))
+		}
+
+		cleaned[idx] = clean
+		errs = appendErr(errs, validateRights(pathRuleRef(idx), rule.AccessFS, isKnownFSRight))
 	}
 
-	err = validateRights("HandledAccessNet", profile.HandledAccessNet, isKnownNetRight)
-	if err != nil {
-		errs = append(errs, err)
+	for idx, rule := range profile.NetRules {
+		errs = appendErr(errs, validateRights(netRuleRef(idx), rule.AccessNet, isKnownNetRight))
 	}
 
-	err = validateDuplicateRights("HandledAccessFS", profile.HandledAccessFS)
-	if err != nil {
-		errs = append(errs, err)
+	if checkDuplicates {
+		errs = append(errs, validateDuplicates(profile, cleaned)...)
 	}
 
-	err = validateDuplicateRights("HandledAccessNet", profile.HandledAccessNet)
-	if err != nil {
-		errs = append(errs, err)
+	return cleaned, errors.Join(errs...)
+}
+
+// validateDuplicates reports duplicate rights in every set and rule, and
+// duplicate rules for the same cleaned path or port.
+func validateDuplicates(profile *Profile, cleaned []string) []error {
+	var errs []error
+
+	errs = appendErr(errs, validateDuplicateRights(handledFSRef(), profile.HandledAccessFS))
+	errs = appendErr(errs, validateDuplicateRights(handledNetRef(), profile.HandledAccessNet))
+	errs = appendErr(errs, validateDuplicateRights(scopedRef(), profile.Scoped))
+
+	for idx, rule := range profile.PathRules {
+		errs = appendErr(errs, validateDuplicateRights(pathRuleRef(idx), rule.AccessFS))
 	}
 
-	err = validateRights("Scoped", profile.Scoped, isKnownScopeRight)
-	if err != nil {
-		errs = append(errs, err)
+	for idx, rule := range profile.NetRules {
+		errs = appendErr(errs, validateDuplicateRights(netRuleRef(idx), rule.AccessNet))
 	}
 
-	err = validateDuplicateRights("Scoped", profile.Scoped)
-	if err != nil {
-		errs = append(errs, err)
+	errs = appendErr(errs, validateDuplicatePaths(profile.PathRules, cleaned))
+	errs = appendErr(errs, validateDuplicatePorts(profile.NetRules))
+
+	return errs
+}
+
+func appendErr(errs []error, err error) []error {
+	if err == nil {
+		return errs
 	}
 
-	errs = append(errs, validatePathRules(profile.PathRules)...)
-	errs = append(errs, validateNetRules(profile.NetRules)...)
-
-	err = validateDuplicatePaths(profile.PathRules)
-	if err != nil {
-		errs = append(errs, err)
-	}
-
-	err = validateDuplicatePorts(profile.NetRules)
-	if err != nil {
-		errs = append(errs, err)
-	}
-
-	return errors.Join(errs...)
+	return append(errs, err)
 }
 
 func validateRights[T ~string](
-	context string, rights []T, known func(T) bool,
+	context fieldRef, rights []T, known func(T) bool,
 ) error {
 	var errs []error
 
@@ -134,88 +204,98 @@ func validateRights[T ~string](
 	return errors.Join(errs...)
 }
 
-// validateEmptyPathsBeforeNormalize catches empty paths before cleaning
-// turns them into ".", so the error names the original path.
-func validateEmptyPathsBeforeNormalize(profile *Profile) error {
-	if profile == nil {
-		return ErrNilProfile
-	}
-
-	var errs []error
-
-	for idx, rule := range profile.PathRules {
-		err := validatePath(rule.Path)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("PathRules[%d]: %w", idx, err))
-		}
-	}
-
-	return errors.Join(errs...)
-}
-
-// validatePath rejects empty paths, paths that clean to ".", and paths with
-// NUL bytes.
-func validatePath(path string) error {
+// validatePath rejects empty paths, paths with NUL bytes, paths with ".."
+// components, and paths that clean to ".". It returns the cleaned path.
+func validatePath(path string) (string, error) {
 	if path == "" {
-		return ErrEmptyPath
+		return "", ErrEmptyPath
 	}
 
 	if strings.ContainsRune(path, 0) {
-		return fmt.Errorf("%q contains a NUL byte: %w", path, ErrInvalidPath)
+		return "", fmt.Errorf("%q contains a NUL byte: %w", path, ErrInvalidPath)
 	}
 
-	if merge.CleanPath(path) == "." {
-		return fmt.Errorf("%q resolves to %q: %w", path, ".", ErrEmptyPath)
+	if hasParentComponent(path) {
+		return "", fmt.Errorf("%q: %w", path, ErrParentPath)
 	}
 
-	return nil
+	cleaned := cleanPath(path)
+	if cleaned == "." {
+		return "", fmt.Errorf("%q resolves to %q: %w", path, ".", ErrEmptyPath)
+	}
+
+	return cleaned, nil
 }
 
-// validatePathRules checks path rules for invalid paths, unknown rights, and
-// duplicate rights.
-func validatePathRules(rules []PathRule) []error {
-	var errs []error
-
-	for idx, rule := range rules {
-		err := validatePath(rule.Path)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("PathRules[%d]: %w", idx, err))
-		}
-
-		context := fmt.Sprintf("PathRules[%d]", idx)
-
-		err = validateRights(context, rule.AccessFS, isKnownFSRight)
-		if err != nil {
-			errs = append(errs, err)
-		}
-
-		err = validateDuplicateRights(context, rule.AccessFS)
-		if err != nil {
-			errs = append(errs, err)
+func hasParentComponent(path string) bool {
+	for part := range strings.SplitSeq(path, "/") {
+		if part == ".." {
+			return true
 		}
 	}
 
-	return errs
+	return false
 }
 
-func validateNetRules(rules []NetRule) []error {
-	var errs []error
+// cleanPath returns the canonical form of a rule path: repeated slashes,
+// "." components and trailing slashes are removed. Unlike path.Clean it
+// keeps ".." components, because the kernel resolves them against the file
+// system, where a symlink can make "a/b/.." differ from "a". Profile paths
+// are Linux paths, so this uses slash semantics on every host. The empty
+// path and paths made only of "." components clean to ".".
+func cleanPath(path string) string {
+	if isCleanPath(path) {
+		return path
+	}
 
-	for idx, rule := range rules {
-		context := fmt.Sprintf("NetRules[%d]", idx)
+	var builder strings.Builder
 
-		err := validateRights(context, rule.AccessNet, isKnownNetRight)
-		if err != nil {
-			errs = append(errs, err)
+	builder.Grow(len(path))
+
+	if strings.HasPrefix(path, "/") {
+		builder.WriteByte('/')
+	}
+
+	first := true
+
+	for part := range strings.SplitSeq(path, "/") {
+		if part == "" || part == "." {
+			continue
 		}
 
-		err = validateDuplicateRights(context, rule.AccessNet)
-		if err != nil {
-			errs = append(errs, err)
+		if !first {
+			builder.WriteByte('/')
+		}
+
+		builder.WriteString(part)
+
+		first = false
+	}
+
+	if builder.Len() == 0 {
+		return "."
+	}
+
+	return builder.String()
+}
+
+// isCleanPath reports whether cleanPath would return the path unchanged,
+// without allocating.
+func isCleanPath(path string) bool {
+	switch {
+	case path == "/":
+		return true
+	case path == "" || strings.HasSuffix(path, "/"):
+		return false
+	}
+
+	for part := range strings.SplitSeq(strings.TrimPrefix(path, "/"), "/") {
+		if part == "" || part == "." {
+			return false
 		}
 	}
 
-	return errs
+	return true
 }
 
 func isKnownFSRight(right FSAccessRight) bool {
@@ -238,75 +318,67 @@ func isKnownNetRight(right NetAccessRight) bool {
 
 // validateDuplicatePaths detects rules for the same cleaned path, so that
 // "/etc" and "/etc/" are reported as duplicates just as the merge functions
-// would combine them.
-func validateDuplicatePaths(rules []PathRule) error {
+// would combine them. Rejected paths, whose cleaned entry is empty, are
+// skipped.
+func validateDuplicatePaths(rules []PathRule, cleaned []string) error {
 	seen := make(map[string]struct{}, len(rules))
 
 	var errs []error
 
-	for _, rule := range rules {
-		cleaned := merge.CleanPath(rule.Path)
-
-		if _, ok := seen[cleaned]; ok {
-			errs = append(errs, fmt.Errorf("path %q: %w", rule.Path, ErrDuplicateRule))
+	for idx, rule := range rules {
+		if cleaned[idx] == "" {
+			continue
 		}
 
-		seen[cleaned] = struct{}{}
+		if _, ok := seen[cleaned[idx]]; ok {
+			errs = append(errs, fmt.Errorf(
+				"%s: path %q: %w", pathRuleRef(idx), rule.Path, ErrDuplicateRule,
+			))
+		}
+
+		seen[cleaned[idx]] = struct{}{}
 	}
-
-	return errors.Join(errs...)
-}
-
-// ValidateStrict performs all checks from Validate and additionally verifies
-// that every path is absolute and that every rule's access rights are a
-// subset of the corresponding handled access set. In Landlock semantics,
-// unhandled rights are implicitly allowed everywhere, so granting an
-// unhandled right in a rule is a no-op that the kernel rejects with EINVAL
-// and likely a configuration error.
-//
-// Merge results never contain unhandled rights, since Intersect and Union
-// prune them. Use Validate for merge inputs and ValidateStrict for
-// user-authored profiles.
-func ValidateStrict(profile *Profile) error {
-	var errs []error
-
-	err := Validate(profile)
-	if err != nil {
-		errs = append(errs, err)
-	}
-
-	if profile == nil {
-		return errors.Join(errs...)
-	}
-
-	errs = append(errs, validateLoadable(profile)...)
 
 	return errors.Join(errs...)
 }
 
 // ValidateArtifact validates a profile received from an untrusted source,
-// such as an OCI artifact pulled by a container runtime. It performs all
-// checks from Validate and additionally rejects what a runtime could not
-// load: relative paths, which Landlock does not accept for filesystem rules,
-// and rules granting a right outside the profile's handled access set, which
-// the kernel rejects with EINVAL.
+// such as an OCI artifact pulled by a container runtime. It checks what the
+// merge needs, known rights and valid paths as in Validate, and rejects what
+// a runtime could not load: relative paths, which Landlock does not accept
+// for filesystem rules, rules granting a right outside the profile's
+// handled access set (EINVAL), rules granting no right (ENOMSG), and a
+// ruleset that handles and scopes nothing (ENOMSG).
 //
-// It does not check the profile against a kernel's ABI, since the artifact
-// does not know where it will run; call ValidateForABI with the node's ABI
-// version for that. It also does not compare the profile against a baseline;
-// callers intersect the result with their baseline afterwards.
+// Duplicate rules and rights are accepted, as the kernel and the merge fold
+// them. ValidateArtifact does not check the profile against a kernel's ABI,
+// since the artifact does not know where it will run; call ValidateForABI
+// with the node's ABI version for that. It also does not compare the
+// profile against a baseline; callers intersect the result with their
+// baseline afterwards.
 func ValidateArtifact(profile *Profile) error {
-	var errs []error
+	return validateLoadableProfile(profile, false)
+}
 
-	err := Validate(profile)
-	if err != nil {
-		errs = append(errs, err)
-	}
+// ValidateStrict is intended for user-authored profiles. It performs every
+// check from ValidateArtifact and additionally rejects duplicate rules and
+// rights, as Validate does: the kernel and the merge accept them, but in a
+// profile a person wrote they are likely mistakes.
+//
+// Merge results pass ValidateStrict when the inputs use absolute paths and
+// the result handles or scopes at least one right, since Intersect and
+// Union deduplicate, prune unhandled rights, and drop empty rules.
+func ValidateStrict(profile *Profile) error {
+	return validateLoadableProfile(profile, true)
+}
 
+func validateLoadableProfile(profile *Profile, checkDuplicates bool) error {
+	_, err := validateProfile(profile, checkDuplicates)
 	if profile == nil {
-		return errors.Join(errs...)
+		return err
 	}
 
+	errs := appendErr(nil, err)
 	errs = append(errs, validateLoadable(profile)...)
 
 	return errors.Join(errs...)
@@ -355,41 +427,41 @@ func highestABI[T ~string](rights []T, table map[T]ABIVersion) ABIVersion {
 // ValidateForABI performs all checks from Validate and additionally reports
 // every access right the given Landlock ABI version does not support. A
 // kernel rejects a ruleset carrying a right its ABI does not know, so a
-// profile passing this validates against a node reporting that ABI version.
+// profile passing this uses no right a node reporting that ABI version
+// rejects. It does not check that the kernel can load the profile otherwise;
+// combine it with ValidateArtifact or ValidateStrict for that.
+// A version outside ABIV1 to LatestABIVersion is reported with
+// ErrUnknownABIVersion.
 //
 // Use RequiredABIVersion to ask the same question the other way round: which
-// ABI version a profile needs. Merging profiles never raises the requirement
-// beyond the inputs, since neither Intersect nor Union invents a right.
+// ABI version a profile needs. Intersect never raises the requirement beyond
+// its inputs; Union raises it to ABIV2 only in the case its documentation
+// describes.
 func ValidateForABI(profile *Profile, abi ABIVersion) error {
-	var errs []error
+	errs := appendErr(nil, Validate(profile))
 
-	err := Validate(profile)
-	if err != nil {
-		errs = append(errs, err)
+	if abi < ABIV1 || abi > LatestABIVersion {
+		errs = append(errs, fmt.Errorf(
+			"%w: v%d (known: v%d to v%d)", ErrUnknownABIVersion, abi, ABIV1, LatestABIVersion,
+		))
+
+		return errors.Join(errs...)
 	}
 
 	if profile == nil {
 		return errors.Join(errs...)
 	}
 
-	errs = append(errs, abiErrors(
-		"HandledAccessFS", profile.HandledAccessFS, abi, fsAccessABI,
-	)...)
-	errs = append(errs, abiErrors(
-		"HandledAccessNet", profile.HandledAccessNet, abi, netAccessABI,
-	)...)
-	errs = append(errs, abiErrors("Scoped", profile.Scoped, abi, scopeABI)...)
+	errs = append(errs, abiErrors(handledFSRef(), profile.HandledAccessFS, abi, fsAccessABI)...)
+	errs = append(errs, abiErrors(handledNetRef(), profile.HandledAccessNet, abi, netAccessABI)...)
+	errs = append(errs, abiErrors(scopedRef(), profile.Scoped, abi, scopeABI)...)
 
 	for idx, rule := range profile.PathRules {
-		errs = append(errs, abiErrors(
-			fmt.Sprintf("PathRules[%d]", idx), rule.AccessFS, abi, fsAccessABI,
-		)...)
+		errs = append(errs, abiErrors(pathRuleRef(idx), rule.AccessFS, abi, fsAccessABI)...)
 	}
 
 	for idx, rule := range profile.NetRules {
-		errs = append(errs, abiErrors(
-			fmt.Sprintf("NetRules[%d]", idx), rule.AccessNet, abi, netAccessABI,
-		)...)
+		errs = append(errs, abiErrors(netRuleRef(idx), rule.AccessNet, abi, netAccessABI)...)
 	}
 
 	return errors.Join(errs...)
@@ -398,7 +470,7 @@ func ValidateForABI(profile *Profile, abi ABIVersion) error {
 // abiErrors reports every right of the list that needs a newer ABI version
 // than the given one. Rights outside the table are left to Validate.
 func abiErrors[T ~string](
-	context string, rights []T, abi ABIVersion, table map[T]ABIVersion,
+	context fieldRef, rights []T, abi ABIVersion, table map[T]ABIVersion,
 ) []error {
 	var errs []error
 
@@ -417,10 +489,17 @@ func abiErrors[T ~string](
 	return errs
 }
 
-// validateLoadable reports what a kernel would refuse: relative paths and
-// rules granting rights outside the handled access sets.
+// validateLoadable reports what a kernel would refuse: a ruleset handling
+// nothing, relative paths, rules granting no right, and rules granting
+// rights outside the handled access sets.
 func validateLoadable(profile *Profile) []error {
 	var errs []error
+
+	if len(profile.HandledAccessFS) == 0 &&
+		len(profile.HandledAccessNet) == 0 &&
+		len(profile.Scoped) == 0 {
+		errs = append(errs, ErrEmptyRuleset)
+	}
 
 	handledFS := toSet(profile.HandledAccessFS)
 	handledNet := toSet(profile.HandledAccessNet)
@@ -428,32 +507,34 @@ func validateLoadable(profile *Profile) []error {
 	for idx, rule := range profile.PathRules {
 		if rule.Path != "" && !merge.IsAbsPath(rule.Path) {
 			errs = append(errs, fmt.Errorf(
-				"PathRules[%d]: %q: %w", idx, rule.Path, ErrRelativePath,
+				"%s: %q: %w", pathRuleRef(idx), rule.Path, ErrRelativePath,
 			))
 		}
 
-		err := validateHandled(
-			fmt.Sprintf("PathRules[%d]", idx), rule.AccessFS, handledFS,
-		)
-		if err != nil {
-			errs = append(errs, err)
+		if len(rule.AccessFS) == 0 {
+			errs = append(errs, fmt.Errorf(
+				"%s: %q: %w", pathRuleRef(idx), rule.Path, ErrEmptyRule,
+			))
 		}
+
+		errs = appendErr(errs, validateHandled(pathRuleRef(idx), rule.AccessFS, handledFS))
 	}
 
 	for idx, rule := range profile.NetRules {
-		err := validateHandled(
-			fmt.Sprintf("NetRules[%d]", idx), rule.AccessNet, handledNet,
-		)
-		if err != nil {
-			errs = append(errs, err)
+		if len(rule.AccessNet) == 0 {
+			errs = append(errs, fmt.Errorf(
+				"%s: port %d: %w", netRuleRef(idx), rule.Port, ErrEmptyRule,
+			))
 		}
+
+		errs = appendErr(errs, validateHandled(netRuleRef(idx), rule.AccessNet, handledNet))
 	}
 
 	return errs
 }
 
 func validateHandled[T ~string](
-	context string, rights []T, handled map[T]struct{},
+	context fieldRef, rights []T, handled map[T]struct{},
 ) error {
 	var errs []error
 
@@ -468,7 +549,7 @@ func validateHandled[T ~string](
 	return errors.Join(errs...)
 }
 
-func validateDuplicateRights[T ~string](context string, rights []T) error {
+func validateDuplicateRights[T ~string](context fieldRef, rights []T) error {
 	seen := make(map[T]struct{}, len(rights))
 
 	var errs []error
@@ -491,9 +572,11 @@ func validateDuplicatePorts(rules []NetRule) error {
 
 	var errs []error
 
-	for _, rule := range rules {
+	for idx, rule := range rules {
 		if _, ok := seen[rule.Port]; ok {
-			errs = append(errs, fmt.Errorf("port %d: %w", rule.Port, ErrDuplicateRule))
+			errs = append(errs, fmt.Errorf(
+				"%s: port %d: %w", netRuleRef(idx), rule.Port, ErrDuplicateRule,
+			))
 		}
 
 		seen[rule.Port] = struct{}{}

@@ -266,6 +266,8 @@ func addFuzzSeeds(f *testing.F) {
 type fuzzMergeConfig struct {
 	merge       func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error)
 	pickDefault func(specs.LinuxSeccompAction, specs.LinuxSeccompAction) specs.LinuxSeccompAction
+	// bound is the action merging an input with itself yields for a call.
+	bound func(input verdict) specs.LinuxSeccompAction
 }
 
 func fuzzMerge(
@@ -324,7 +326,7 @@ func fuzzMerge(
 		t.Fatalf("commuted merge: %v", err)
 	}
 
-	if !equalModuloErrnoRet(result, commuted) {
+	if !equalModuloErrnoRet(t, result, commuted, cfg.bound) {
 		t.Errorf(
 			"Merge(L,R) != Merge(R,L) modulo ErrnoRet\n  L:   %s\n  R:   %s\n  L,R: %s\n  R,L: %s",
 			seccomp.FormatProfile(left),
@@ -339,9 +341,9 @@ func fuzzMerge(
 		t.Fatalf("idempotent merge: %v", err)
 	}
 
-	if !equalModuloErrnoRet(idempotent, left) {
+	if !equalModuloErrnoRet(t, idempotent, left, cfg.bound) {
 		t.Errorf(
-			"Merge(X,X) should equal X modulo ErrnoRet\n  got:  %s\n  want: %s",
+			"Merge(X,X) should equal the bound of X modulo ErrnoRet\n  got:  %s\n  X:    %s",
 			seccomp.FormatProfile(idempotent),
 			seccomp.FormatProfile(left),
 		)
@@ -355,12 +357,17 @@ func sameRestrictiveness(
 		seccomp.MoreRestrictive(actionB, actionA) == actionB
 }
 
-// equalModuloErrnoRet reports whether two profiles apply actions of the same
-// restrictiveness to every sampled call, ignoring errno values and the
-// structure of the syscall entries.
+// equalModuloErrnoRet reports whether the merge result first applies actions
+// of the same restrictiveness as second to every sampled call, ignoring
+// errno values and the structure of the syscall entries. Where second's
+// action is not exactly known, bound picks the one to compare against.
 func equalModuloErrnoRet(
+	t *testing.T,
 	first, second *specs.LinuxSeccomp,
+	bound func(input verdict) specs.LinuxSeccompAction,
 ) bool {
+	t.Helper()
+
 	if !sameRestrictiveness(first.DefaultAction, second.DefaultAction) {
 		return false
 	}
@@ -391,11 +398,15 @@ func equalModuloErrnoRet(
 	names := syscallNames(first, second)
 	values := sampleValues(first, second)
 
+	cache := judges{}
+
 	for _, name := range names {
 		for _, arg0 := range values {
 			for _, arg1 := range values {
 				call := []uint64{arg0, arg1}
-				if !sameRestrictiveness(evalCall(first, name, call), evalCall(second, name, call)) {
+
+				want := bound(cache.judgeCall(second, name, call))
+				if !sameRestrictiveness(cache.evalCall(t, first, name, call), want) {
 					return false
 				}
 			}
@@ -429,7 +440,11 @@ func syscallNames(profiles ...*specs.LinuxSeccomp) []string {
 func FuzzIntersect(f *testing.F) {
 	addFuzzSeeds(f)
 
-	cfg := fuzzMergeConfig{merge: seccomp.Intersect, pickDefault: seccomp.MoreRestrictive}
+	cfg := fuzzMergeConfig{
+		merge:       seccomp.Intersect,
+		pickDefault: seccomp.MoreRestrictive,
+		bound:       intersectSafety().bound,
+	}
 
 	f.Fuzz(func(
 		t *testing.T,
@@ -462,7 +477,11 @@ func FuzzIntersect(f *testing.F) {
 func FuzzUnion(f *testing.F) {
 	addFuzzSeeds(f)
 
-	cfg := fuzzMergeConfig{merge: seccomp.Union, pickDefault: seccomp.LessRestrictive}
+	cfg := fuzzMergeConfig{
+		merge:       seccomp.Union,
+		pickDefault: seccomp.LessRestrictive,
+		bound:       unionSafety().bound,
+	}
 
 	f.Fuzz(func(
 		t *testing.T,

@@ -18,6 +18,7 @@ package seccomp_test
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -79,12 +80,13 @@ func TestIntersectOverBudgetNeverPermitsMore(t *testing.T) {
 	}
 
 	inputs := []*specs.LinuxSeccomp{left, right}
+	cache := judges{}
 
 	forEachCall(inputs, func(name string, call []uint64) {
-		merged := evalCall(result, name, call)
+		merged := cache.evalCall(t, result, name, call)
 
 		for idx, input := range inputs {
-			if !atMostAsPermissive(merged, evalCall(input, name, call)) {
+			if !permitsAtMost(merged, cache.judgeCall(input, name, call)) {
 				t.Fatalf(
 					"intersect permits %s%v as %s, more than profile %d permits",
 					name, call, merged, idx,
@@ -114,15 +116,16 @@ func TestUnionOverBudgetNeverPermitsLess(t *testing.T) {
 	}
 
 	inputs := []*specs.LinuxSeccomp{left, right}
+	cache := judges{}
 
 	forEachCall(inputs, func(name string, call []uint64) {
-		merged := evalCall(result, name, call)
+		merged := cache.evalCall(t, result, name, call)
 
 		for idx, input := range inputs {
-			if !atMostAsPermissive(evalCall(input, name, call), merged) {
+			if !permitsAtLeast(merged, cache.judgeCall(input, name, call)) {
 				t.Fatalf(
-					"union denies %s%v that profile %d permits as %s",
-					name, call, idx, evalCall(input, name, call),
+					"union denies %s%v that profile %d may permit as %s",
+					name, call, idx, cache.judgeCall(input, name, call).loosest,
 				)
 			}
 		}
@@ -164,7 +167,9 @@ func TestIntersectArtifactSizedContestedProfile(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if elapsed := time.Since(start); elapsed > generousBudget {
+	// Coverage counters slow these loops several times over, so the bound
+	// is only checked without coverage.
+	if elapsed := time.Since(start); testing.CoverMode() == "" && elapsed > generousBudget {
 		t.Errorf("merge took %s, want well under %s", elapsed, generousBudget)
 	}
 
@@ -222,5 +227,89 @@ func TestUnionSyscallsOverBudgetKeepsFilters(t *testing.T) {
 
 	if len(result) != entries+1 {
 		t.Errorf("result has %d entries, want the %d filtered inputs", len(result), entries+1)
+	}
+}
+
+// ioctlEqualities returns count allow entries for ioctl, each matching one
+// value of argument 1.
+func ioctlEqualities(count int) []specs.LinuxSyscall {
+	entries := make([]specs.LinuxSyscall, 0, count)
+
+	for idx := range count {
+		entries = append(entries, specs.LinuxSyscall{
+			Names:    []string{"ioctl"},
+			Action:   specs.ActAllow,
+			ErrnoRet: nil,
+			Args: []specs.LinuxSeccompArg{{
+				Index: 1, Value: uint64(idx), Op: specs.OpEqualTo, ValueTwo: 0,
+			}},
+		})
+	}
+
+	return entries
+}
+
+// TestUnionBudgetCountsOneSidedClauses pins the second budget of union: it
+// bounds the filtered entries of both sides together, so a syscall with
+// many filtered entries collapses even when the other profile has none for
+// it. Intersection bounds only the pairwise product and keeps the filters.
+func TestUnionBudgetCountsOneSidedClauses(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name         string
+		merge        func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error)
+		rightDefault specs.LinuxSeccompAction
+		entries      int
+		collapsed    bool
+	}{
+		{
+			name: "union within budget", merge: seccomp.Union,
+			rightDefault: specs.ActErrno, entries: 500, collapsed: false,
+		},
+		{
+			name: "union over budget", merge: seccomp.Union,
+			rightDefault: specs.ActErrno, entries: 600, collapsed: true,
+		},
+		{
+			name: "intersect", merge: seccomp.Intersect,
+			rightDefault: specs.ActAllow, entries: 600, collapsed: false,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			left := &specs.LinuxSeccomp{
+				DefaultAction: specs.ActErrno,
+				Syscalls:      ioctlEqualities(test.entries),
+			}
+			// The right profile has no entry for ioctl.
+			right := &specs.LinuxSeccomp{DefaultAction: test.rightDefault}
+
+			result, err := test.merge(left, right)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			var ioctl []specs.LinuxSyscall
+
+			for _, entry := range result.Syscalls {
+				if slices.Contains(entry.Names, "ioctl") {
+					ioctl = append(ioctl, entry)
+				}
+			}
+
+			switch {
+			case test.collapsed:
+				if len(ioctl) != 1 || len(ioctl[0].Args) != 0 ||
+					ioctl[0].Action != specs.ActAllow {
+					t.Errorf("want ioctl collapsed to one unconditional allow, got %d entries",
+						len(ioctl))
+				}
+			case len(ioctl) != test.entries:
+				t.Errorf("result has %d ioctl entries, want the %d filtered inputs",
+					len(ioctl), test.entries)
+			}
+		})
 	}
 }

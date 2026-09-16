@@ -25,7 +25,10 @@ import (
 
 // ProfileDiff describes the differences between two AppArmor profiles.
 type ProfileDiff struct {
-	// Equal is true when the two profiles are identical.
+	// Equal is true when the two profiles are equivalent after
+	// normalization: paths normalized, capability names upper-cased,
+	// duplicates removed, and omitted sections compared as the empty
+	// sections they stand for (see Diff).
 	Equal bool `json:"equal"`
 
 	// Executables is set when the allowed executables differ.
@@ -75,12 +78,14 @@ type BoolPtrDiff struct {
 //
 // Profiles are compared by what AppArmor loads from them, so a profile and
 // its merge result compare equal unless the merge changed what the profile
-// permits. Paths are normalized and deduplicated, so non-canonical
-// representations (/foo/./bar and /foo/bar) compare equal, and an omitted
-// section or network boolean is compared as the explicit empty section or
-// false that it denies the same as, which is how Intersect writes it. A
-// profile that says nothing about raw sockets and one that forbids them are
-// therefore equal, and Diff(p, Intersect(p)) is always equal.
+// permits. Paths are normalized as apparmor_parser normalizes them and
+// deduplicated, so /foo//bar and /foo/bar compare equal (while /foo/./bar,
+// which matches nothing, does not), and an omitted section or network
+// boolean is compared as the explicit empty section or false that it denies
+// the same as, which is how Intersect writes it. A profile that says nothing
+// about raw sockets and one that forbids them are therefore equal, and
+// Diff(p, Intersect(p)) is equal unless p has glob patterns that match
+// nothing, which Intersect drops.
 // Returns ErrNilProfile if either profile is nil.
 func Diff(left, right *Profile) (*ProfileDiff, error) {
 	if left == nil || right == nil {
@@ -334,7 +339,7 @@ func appendFSDiffs(parts []string, diff *ProfileDiff) []string {
 }
 
 func formatStringSliceDiff(prefix string, sliceDiff *StringSliceDiff) string {
-	return merge.FormatDiffItems(prefix, sliceDiff.Removed, sliceDiff.Added)
+	return merge.FormatSliceDiff(prefix, *sliceDiff)
 }
 
 func formatNetworkDiff(networkDiff *NetworkDiff) string {

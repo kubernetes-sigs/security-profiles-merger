@@ -1,1 +1,1 @@
-Diff{fs:-write_file,+execute -/etc(read_file) +/tmp(execute) ~/var:[read_file]->[read_file,execute]}
+Diff{fs:-write_file,+execute -/etc(read_file) +/tmp(execute) ~/var:[read_file]->[execute,read_file]}

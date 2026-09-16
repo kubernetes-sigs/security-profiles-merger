@@ -66,15 +66,17 @@ func Fold[T any](
 	return result, nil
 }
 
-// FormatDiffItems formats added and removed items as a prefixed diff string.
-func FormatDiffItems[T ~string](prefix string, removed, added []T) string {
-	items := make([]string, 0, len(removed)+len(added))
+// FormatSliceDiff formats a SliceDiff as a prefixed diff string, listing the
+// removed items with a "-" and then the added items with a "+", as in
+// "caps:-CHOWN,+KILL".
+func FormatSliceDiff[T ~string](prefix string, diff SliceDiff[T]) string {
+	items := make([]string, 0, len(diff.Removed)+len(diff.Added))
 
-	for _, r := range removed {
+	for _, r := range diff.Removed {
 		items = append(items, "-"+string(r))
 	}
 
-	for _, a := range added {
+	for _, a := range diff.Added {
 		items = append(items, "+"+string(a))
 	}
 
@@ -83,8 +85,8 @@ func FormatDiffItems[T ~string](prefix string, removed, added []T) string {
 
 // DiffSlice compares two slices as sets and returns, in this order, the
 // elements only right has (added) and the elements only left has (removed).
-// Duplicates within a slice are ignored. Results are sorted. Returns nil,
-// nil when the sets are equal.
+// Duplicates within a slice are ignored. Results are sorted, which is why T
+// must be ordered. Returns nil, nil when the sets are equal.
 func DiffSlice[T cmp.Ordered](left, right []T) ([]T, []T) {
 	if len(left) == 0 && len(right) == 0 {
 		return nil, nil

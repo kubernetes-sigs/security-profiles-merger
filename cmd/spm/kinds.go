@@ -34,11 +34,21 @@ const (
 	// modeDefault runs the checks the merge path applies.
 	modeDefault validateMode = iota
 	// modeStrict adds the checks for user-authored profiles and rejects
-	// unknown JSON fields.
+	// unknown and repeated JSON members.
 	modeStrict
-	// modeArtifact runs the checks runtimes apply to untrusted artifacts.
+	// modeArtifact runs the checks runtimes apply to untrusted artifacts and
+	// rejects repeated JSON members, which other parsers may read
+	// differently.
 	modeArtifact
 )
+
+// decodePolicy returns the JSON ambiguities the mode rejects.
+func (mode validateMode) decodePolicy() decodePolicy {
+	return decodePolicy{
+		rejectUnknown:    mode == modeStrict,
+		rejectDuplicates: mode == modeStrict || mode == modeArtifact,
+	}
+}
 
 // profileKind wires one profile type into the merge, diff, and validate
 // commands.
@@ -88,7 +98,7 @@ func newKind[T any, D equalChecker](ops kindOps[T, D]) profileKind {
 			data [][]byte, mode validateMode, format string, stdout, stderr io.Writer,
 		) int {
 			return validateProfiles(
-				data, ops.checker(mode), mode == modeStrict,
+				data, ops.checker(mode), mode.decodePolicy(),
 				format, ops.format, stdout, stderr,
 			)
 		},
@@ -139,9 +149,22 @@ func kindByName(name string) (profileKind, bool) {
 }
 
 // resolveKind returns the profile kind named by --type, or the one detected
-// from the inputs when the flag is empty.
-func resolveKind(profileType string, data [][]byte, stderr io.Writer) (profileKind, int) {
+// from the inputs when the flag is empty. Input that is not a JSON object
+// cannot be detected; it is reported the way decoding it with --type would
+// report it, exiting with parseExit.
+func resolveKind(
+	profileType string, data [][]byte, parseExit int, stderr io.Writer,
+) (profileKind, int) {
 	if profileType == "" {
+		err := checkParsable(data)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+
+			var none profileKind
+
+			return none, parseExit
+		}
+
 		detected, conflict := detectProfileType(data)
 
 		if conflict != "" {

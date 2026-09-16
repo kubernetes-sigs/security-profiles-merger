@@ -146,6 +146,18 @@ func addAppArmorFuzzSeeds(f *testing.F) {
 		uint64(0x1000), "/etc/{config,data}", "/opt/**", false, false, false,
 	)
 
+	// Globs that match their own prefix, and patterns that match nothing.
+	f.Add(
+		uint64(0x1000), "/etc/{,**}", "/etc/{a}", true, true, true,
+		uint64(0x1000), "/etc/**", "/etc/[!a]", false, false, false,
+	)
+
+	// Escapes and byte-oriented matching.
+	f.Add(
+		uint64(0x1000), `/tmp/\x41*`, "/tmp/??", true, false, true,
+		uint64(0x1000), "/tmp/Abc", "/tmp/é", false, true, false,
+	)
+
 	// Unnormalized paths (e.g. /foo/./bar)
 	f.Add(
 		uint64(0x1000), "/foo/./bar", "/baz/../qux", false, false, false,
@@ -160,6 +172,9 @@ type fuzzAppArmorMergeConfig struct {
 	checkCap  fuzzAppArmorCheckFunc
 	checkNet  fuzzAppArmorCheckFunc
 	checkExec fuzzAppArmorCheckFunc
+	// globIdempotent enables the Merge(X,X) == Merge(X) check for profiles
+	// with globs.
+	globIdempotent bool
 }
 
 func fuzzAppArmorMerge(
@@ -262,6 +277,14 @@ func checkGlobSafeProperties(
 
 	if !reflect.DeepEqual(single.Network, idempotent.Network) {
 		t.Error("network not idempotent")
+	}
+
+	// An intersection with itself keeps exactly what a single profile's
+	// intersection keeps, globs included. A union may move a literal into
+	// another category a glob of the profile shares with it, so it is
+	// only checked for profiles without globs.
+	if cfg.globIdempotent && !reflect.DeepEqual(single, idempotent) {
+		t.Errorf("Merge(X,X) = %s, Merge(X) = %s", idempotent, single)
 	}
 }
 
@@ -504,10 +527,11 @@ func FuzzAppArmorIntersect(f *testing.F) {
 	addAppArmorFuzzSeeds(f)
 
 	cfg := fuzzAppArmorMergeConfig{
-		merge:     apparmor.Intersect,
-		checkCap:  assertCapsSubset,
-		checkNet:  assertNetIntersect,
-		checkExec: assertExecSubset,
+		merge:          apparmor.Intersect,
+		checkCap:       assertCapsSubset,
+		checkNet:       assertNetIntersect,
+		checkExec:      assertExecSubset,
+		globIdempotent: true,
 	}
 
 	f.Fuzz(func(
@@ -528,10 +552,11 @@ func FuzzAppArmorUnion(f *testing.F) {
 	addAppArmorFuzzSeeds(f)
 
 	cfg := fuzzAppArmorMergeConfig{
-		merge:     apparmor.Union,
-		checkCap:  assertCapsSuperset,
-		checkNet:  assertNetUnion,
-		checkExec: assertExecSuperset,
+		merge:          apparmor.Union,
+		checkCap:       assertCapsSuperset,
+		checkNet:       assertNetUnion,
+		checkExec:      assertExecSuperset,
+		globIdempotent: false,
 	}
 
 	f.Fuzz(func(

@@ -28,14 +28,25 @@ import (
 
 // canonicalArg returns the condition as a runtime evaluates it: libseccomp
 // reads valueTwo only for SCMP_CMP_MASKED_EQ, so it is cleared for every
-// other operator. Without this, conditions that differ only in an ignored
-// valueTwo would be treated as different filters.
+// other operator, and for SCMP_CMP_MASKED_EQ it masks valueTwo with the mask
+// in value before comparing, so bits outside the mask are cleared. Without
+// this, conditions that differ only in ignored bits would be treated as
+// different filters.
 func canonicalArg(arg specs.LinuxSeccompArg) specs.LinuxSeccompArg {
-	if arg.Op != specs.OpMaskedEqual {
+	if arg.Op == specs.OpMaskedEqual {
+		arg.ValueTwo &= arg.Value
+	} else {
 		arg.ValueTwo = 0
 	}
 
 	return arg
+}
+
+// tautology reports whether a canonical condition holds for every value.
+// libseccomp drops such a condition from its rule: a SCMP_CMP_MASKED_EQ
+// with an empty mask.
+func tautology(arg specs.LinuxSeccompArg) bool {
+	return arg.Op == specs.OpMaskedEqual && arg.Value == 0
 }
 
 // sortedArgs returns a sorted, canonical copy of the argument filters.
@@ -221,7 +232,8 @@ func condInterval(arg specs.LinuxSeccompArg) (uint64, uint64, bool) {
 	}
 }
 
-// condHolds evaluates a single argument condition against a concrete value.
+// condHolds evaluates a single argument condition against a concrete value
+// the way the program libseccomp compiles for a 64-bit architecture does.
 // Unknown operators never hold.
 func condHolds(arg specs.LinuxSeccompArg, value uint64) bool {
 	switch arg.Op {
@@ -238,7 +250,8 @@ func condHolds(arg specs.LinuxSeccompArg, value uint64) bool {
 	case specs.OpGreaterThan:
 		return value > arg.Value
 	case specs.OpMaskedEqual:
-		return value&arg.Value == arg.ValueTwo
+		// libseccomp masks the datum as well, see canonicalArg.
+		return value&arg.Value == arg.ValueTwo&arg.Value
 	default:
 		return false
 	}

@@ -23,16 +23,22 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 )
 
-var version = "dev"
+// version is set at build time through -ldflags. A binary built without it,
+// such as one installed with go install, reports its module version instead.
+var version = devVersion
 
 const (
 	exitUsage = 2
 
+	devVersion = "dev"
+
 	cmdMerge    = "merge"
 	cmdValidate = "validate"
 	cmdDiff     = "diff"
+	cmdVersion  = "version"
 
 	flagHelp = "--help"
 	cmdHelp  = "help"
@@ -56,7 +62,13 @@ Commands:
   diff       Compare two security profiles
   version    Print the version
 
-Run 'spm <command> --help' for details on each command.
+Flags must precede file arguments.
+Run 'spm help <command>' or 'spm <command> --help' for details on each command.
+`
+
+const versionUsage = `Usage: spm version
+
+Print the version.
 `
 
 func main() {
@@ -94,6 +106,22 @@ func detectProfileType(data [][]byte) (string, string) {
 	}
 
 	return detected, ""
+}
+
+// checkParsable decodes every input as a JSON object, the shape all profile
+// types share, so that malformed input is reported as a parse error rather
+// than as a type that cannot be detected.
+func checkParsable(data [][]byte) error {
+	for idx, raw := range data {
+		var fields map[string]json.RawMessage
+
+		err := json.Unmarshal(raw, &fields)
+		if err != nil {
+			return fmt.Errorf("parsing profile %d: %w", idx, err)
+		}
+	}
+
+	return nil
 }
 
 func detectOneProfileType(raw []byte) string {
@@ -192,11 +220,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runValidate(args[1:], stdin, stdout, stderr)
 	case cmdDiff:
 		return runDiff(args[1:], stdin, stdout, stderr)
-	case "version", "--version", "-v":
-		_, _ = fmt.Fprintf(stdout, "spm %s\n", version)
-
-		return 0
-	case flagHelp, "-h", cmdHelp:
+	case cmdVersion, "--version", "-v":
+		return runVersion(args[1:], stdout, stderr)
+	case cmdHelp:
+		return runHelp(args[1:], stdin, stdout, stderr)
+	case flagHelp, "-h":
 		_, _ = fmt.Fprint(stdout, usage)
 
 		return 0
@@ -204,5 +232,67 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "unknown command: %s\n\n%s", args[0], usage)
 
 		return exitUsage
+	}
+}
+
+// runHelp prints the usage of the named command, or the overview without
+// one.
+func runHelp(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		_, _ = fmt.Fprint(stdout, usage)
+
+		return 0
+	}
+
+	switch args[0] {
+	case cmdMerge, cmdValidate, cmdDiff, cmdVersion:
+		return run([]string{args[0], flagHelp}, stdin, stdout, stderr)
+	default:
+		_, _ = fmt.Fprintf(stderr, "unknown command: %s\n\n%s", args[0], usage)
+
+		return exitUsage
+	}
+}
+
+// runVersion prints the version. It takes no arguments besides the help
+// flags, which print its usage like those of the other commands.
+func runVersion(args []string, stdout, stderr io.Writer) int {
+	flags := newFlagSet(cmdVersion, stderr)
+
+	if done, code := parseFlags(flags, versionUsage, args, stdout, stderr); done {
+		return code
+	}
+
+	if flags.NArg() > 0 {
+		_, _ = fmt.Fprintf(stderr, "error: unexpected argument %q\n", flags.Arg(0))
+
+		printUsage(flags, versionUsage, stderr, stderr)
+
+		return exitUsage
+	}
+
+	_, _ = fmt.Fprintf(stdout, "spm %s\n", resolveVersion(version, debug.ReadBuildInfo))
+
+	return 0
+}
+
+// resolveVersion returns the version set at build time. Without one, it
+// falls back to the main module version recorded in the binary, which go
+// install sets to the requested version.
+func resolveVersion(linked string, readBuildInfo func() (*debug.BuildInfo, bool)) string {
+	if linked != devVersion {
+		return linked
+	}
+
+	info, ok := readBuildInfo()
+	if !ok || info == nil {
+		return linked
+	}
+
+	switch info.Main.Version {
+	case "", "(devel)":
+		return linked
+	default:
+		return info.Main.Version
 	}
 }

@@ -26,9 +26,17 @@ We have full documentation on how to get started contributing here:
 
 The codebase is organized in three layers:
 
-- `internal/merge/` contains generic merge primitives (`Fold`, `IntersectSlice`,
-  `UnionSlice`, `DiffSlice`) that work with any comparable type. All profile
-  packages build on these primitives.
+- `internal/merge/` contains generic merge primitives. `Fold` folds any
+  profile type pairwise, `IntersectSlice`, `UnionSlice` and
+  `DeduplicateSlice` work with any comparable element type, and `DiffSlice`
+  with ordered element types only, since it sorts its results; `SliceDiff`
+  holds such a result and `FormatSliceDiff` formats it for string-like types.
+  `ClonePtr` copies an optional value, `CleanPath` and `IsAbsPath` handle
+  Linux profile paths on any host, and `ErrNoProfiles`, `ErrNilProfile` and
+  `ErrEmptyPath` are the shared sentinel errors. The apparmor and landlock
+  packages merge through `Fold`; seccomp folds its profiles itself, since it
+  also normalizes a single profile. The profile packages use the other
+  primitives as they need them.
 - `seccomp/`, `apparmor/`, `landlock/` each expose the same public API surface:
   `Intersect`, `Union`, `Validate`, `ValidateStrict`, `ValidateArtifact`,
   `Diff`, `FormatDiff`, and `FormatProfile`. Each package defines its own types
@@ -36,7 +44,9 @@ The codebase is organized in three layers:
   and implements profile-specific normalization, deduplication, and merge logic
   on top of `internal/merge/`. The seccomp package merges syscalls through a
   clause model (`rules.go`, `args.go`) that reasons about argument filter
-  regions.
+  regions. It relies on libseccomp's evaluation only for the safe shapes
+  described in `shape.go`, reads every other rule set conservatively, and
+  only emits safe shapes.
 - `internal/libseccomp/` is a test aid, built only with the `libseccomp` build
   tag: it compiles a profile with libseccomp itself so that tests can check the
   seccomp evaluation model against the filter a kernel would run.
@@ -71,20 +81,28 @@ Every merge semantic rests on one claim: that a profile is loaded the way the
 runtime loads it. Three layers of test hold that claim up, and a change to the
 merge should keep all three passing:
 
-- The per-package unit and golden tests cover the documented behavior of each
-  function.
+- The per-package unit tests cover the documented behavior of each function,
+  and the golden tests in `cmd/spm/golden_test.go` cover the CLI output.
 - Each package has fuzz targets that assert the safety properties against an
   independent evaluator: `Intersect` never permits an operation any input
   denies, and `Union` never denies one any input permits. The evaluators live
-  in `seccomp/safety_fuzz_test.go`, `apparmor/evaluator_internal_test.go`, and
+  in `seccomp/evaluator_test.go`, `apparmor/evaluator_internal_test.go`, and
   `landlock/evaluator_test.go`, and decide concrete calls, paths, and access
-  rights rather than comparing the merged profile structurally.
-- `make test-libseccomp` checks the seccomp evaluator itself against
-  libseccomp: it compiles a filter the way runc does, runs the classic BPF
-  program libseccomp produces, and compares the action a kernel would take
-  with the one the model predicts. An evaluator written from a mistaken
-  reading of libseccomp would agree with the merge and still be wrong; this is
-  what catches that.
+  rights rather than comparing the merged profile structurally. The seccomp
+  evaluator only claims an exact action for the shapes libseccomp evaluates
+  exactly, and otherwise the set of actions a call may get, so the fuzzers
+  check the merge against whatever libseccomp does.
+- `make test-libseccomp` checks the seccomp evaluator and the merge against
+  libseccomp: it compiles filters the way runc does, in worker processes that
+  are killed if libseccomp does not return, and runs the classic BPF programs
+  libseccomp produces. It compares the action a kernel would take with the
+  evaluator's prediction for fixed profiles and enumerated rule shapes, and
+  checks sampled merges directly: every result compiles, `Intersect` never
+  permits more than an input libseccomp loads, and `Union` never less. An
+  evaluator written from a mistaken reading of libseccomp would agree with the
+  merge and still be wrong; this is what catches that. CI runs these tests
+  against the `libseccomp-dev` package of Ubuntu 24.04 (libseccomp 2.5.5),
+  and they were also run against libseccomp 2.6.1.
 
 ## Mentorship
 

@@ -17,6 +17,7 @@ limitations under the License.
 package landlock_test
 
 import (
+	"math/rand/v2"
 	"slices"
 	"strings"
 	"testing"
@@ -52,12 +53,16 @@ func evalCovers(rulePath, file string) bool {
 
 // evalPermits reports whether the profile permits the access at the file.
 // A right the ruleset does not handle is allowed everywhere; a handled one
-// needs a rule on the file or on one of its ancestors.
+// needs a rule on the file or on one of its ancestors. As in the kernel, a
+// ruleset handling any filesystem right denies refer even when it does not
+// list it, and then no rule can grant it.
 func evalPermits(
 	profile *landlock.Profile, file string, right landlock.FSAccessRight,
 ) bool {
-	if !slices.Contains(profile.HandledAccessFS, right) {
-		return true
+	listed := slices.Contains(profile.HandledAccessFS, right)
+
+	if !listed {
+		return right != landlock.FSAccessRefer || len(profile.HandledAccessFS) == 0
 	}
 
 	for _, rule := range profile.PathRules {
@@ -83,6 +88,7 @@ var (
 		landlock.FSAccessReadFile,
 		landlock.FSAccessWriteFile,
 		landlock.FSAccessReadDir,
+		landlock.FSAccessRefer,
 	}
 )
 
@@ -150,11 +156,17 @@ func addEvalSeeds(f *testing.F) {
 	// Read handled, granted on "/" only: every probe inherits it.
 	f.Add(uint8(0b1), uint32(0b1), uint8(0b1), uint32(0b1))
 	// One side grants at the root, the other only deep below it.
-	f.Add(uint8(0b1), uint32(0b1), uint8(0b1), uint32(1<<(2*3)))
+	f.Add(uint8(0b1), uint32(0b1), uint8(0b1), uint32(1<<(2*4)))
 	// Disjoint handled sets, so each side leaves the other's right open.
 	f.Add(uint8(0b1), uint32(0b1), uint8(0b10), uint32(0b10<<3))
 	// Everything handled and granted everywhere.
-	f.Add(uint8(0b111), uint32(0x3ffff), uint8(0b111), uint32(0x3ffff))
+	f.Add(uint8(0b1111), uint32(0xffffff), uint8(0b1111), uint32(0xffffff))
+	// One side handles read only and so denies refer; the other grants
+	// refer at the root.
+	f.Add(uint8(0b1), uint32(1<<(1*4)), uint8(0b1000), uint32(0b1000))
+	// One side lists refer and grants it with read at the root; the other
+	// handles read only and grants nothing.
+	f.Add(uint8(0b1001), uint32(0b1001), uint8(0b1), uint32(0))
 }
 
 // FuzzLandlockIntersectPermitsAt asserts the intersection safety property at
@@ -230,4 +242,60 @@ func FuzzLandlockUnionPermitsAt(f *testing.F) {
 			}
 		}
 	})
+}
+
+// TestMergeManyPermitsAt checks folds of three and more inputs at the probe
+// files, where the pairwise fold must still yield exactly the access every
+// input (Intersect) or any input (Union) permits.
+func TestMergeManyPermitsAt(t *testing.T) {
+	t.Parallel()
+
+	rng := rand.New(rand.NewPCG(1, 2))
+
+	for range 2000 {
+		profiles := make([]*landlock.Profile, 3+rng.IntN(2))
+		for idx := range profiles {
+			profiles[idx] = evalProfile(uint8(rng.UintN(16)), rng.Uint32())
+		}
+
+		intersected, err := landlock.Intersect(profiles...)
+		if err != nil {
+			t.Fatalf("Intersect: %v", err)
+		}
+
+		united, err := landlock.Union(profiles...)
+		if err != nil {
+			t.Fatalf("Union: %v", err)
+		}
+
+		assertManyPermitsAt(t, profiles, intersected, united)
+	}
+}
+
+func assertManyPermitsAt(
+	t *testing.T, profiles []*landlock.Profile, intersected, united *landlock.Profile,
+) {
+	t.Helper()
+
+	for _, probe := range evalProbes {
+		for _, access := range evalRights {
+			every, some := true, false
+
+			for _, profile := range profiles {
+				permitted := evalPermits(profile, probe, access)
+				every = every && permitted
+				some = some || permitted
+			}
+
+			if got := evalPermits(intersected, probe, access); got != every {
+				t.Fatalf("Intersect permits %q at %q = %v, want %v\ninputs=%v\nresult=%s",
+					access, probe, got, every, profiles, landlock.FormatProfile(intersected))
+			}
+
+			if got := evalPermits(united, probe, access); got != some {
+				t.Fatalf("Union permits %q at %q = %v, want %v\ninputs=%v\nresult=%s",
+					access, probe, got, some, profiles, landlock.FormatProfile(united))
+			}
+		}
+	}
 }

@@ -81,14 +81,17 @@ func foldProfiles(profiles []*Profile, mergeOp strategy) (*Profile, error) {
 	for idx, profile := range profiles {
 		normalized[idx] = normalizeProfile(profile)
 		deduplicateProfile(normalized[idx])
-		mergeOp.prepare(normalized[idx])
-	}
 
-	for idx, profile := range normalized {
-		err := Validate(profile)
+		err := Validate(normalized[idx])
 		if err != nil {
 			return nil, fmt.Errorf("validate profile %d: %w", idx, err)
 		}
+	}
+
+	// Preparing may drop paths, so it runs after validation, which must see
+	// every path the caller passed.
+	for _, profile := range normalized {
+		mergeOp.prepare(profile)
 	}
 
 	result, err := merge.Fold(normalized, cloneProfile, func(a, b *Profile) (*Profile, error) {
@@ -225,8 +228,18 @@ type intersectStrategy struct{}
 // prepare makes omitted sections explicit, since to AppArmor an absent
 // section denies everything it covers and the intersection must not permit
 // more than that input does.
+//
+// It also drops the glob patterns that match nothing, as a pairwise
+// intersection does, so that intersecting a single profile gives what
+// intersecting it with itself gives.
 func (intersectStrategy) prepare(profile *Profile) {
 	populateEmpty(profile)
+
+	profile.Executable.AllowedExecutables = dropUnusableGlobs(profile.Executable.AllowedExecutables)
+	profile.Executable.AllowedLibraries = dropUnusableGlobs(profile.Executable.AllowedLibraries)
+	profile.Filesystem.ReadOnlyPaths = dropUnusableGlobs(profile.Filesystem.ReadOnlyPaths)
+	profile.Filesystem.WriteOnlyPaths = dropUnusableGlobs(profile.Filesystem.WriteOnlyPaths)
+	profile.Filesystem.ReadWritePaths = dropUnusableGlobs(profile.Filesystem.ReadWritePaths)
 }
 
 // populateEmpty replaces every nil section of the profile with an explicit
@@ -276,7 +289,14 @@ func (intersectStrategy) mergePaths(left, right []string) []string {
 	return intersectPaths(left, right)
 }
 
+// mergeBool never sees nil, since prepare populated every boolean.
 func (intersectStrategy) mergeBool(left, right *bool) *bool {
+	return mergeBoolPtr(left, right, func(lhs, rhs bool) bool { return lhs && rhs })
+}
+
+// mergeBoolPtr combines two optional booleans, letting a nil one defer to
+// the other.
+func mergeBoolPtr(left, right *bool, combine func(lhs, rhs bool) bool) *bool {
 	if left == nil {
 		return merge.ClonePtr(right)
 	}
@@ -285,7 +305,7 @@ func (intersectStrategy) mergeBool(left, right *bool) *bool {
 		return merge.ClonePtr(left)
 	}
 
-	val := *left && *right
+	val := combine(*left, *right)
 
 	return &val
 }
@@ -345,11 +365,11 @@ func matchFsLiterals(
 	literals []fsPathEntry, other fsSide, merged map[string]fsPermission,
 ) {
 	for _, literal := range literals {
-		name := unescapeLiteral(literal.path)
+		name := literal.matcher.literal
 
 		other.byPrefix.candidates(name, func(pattern string) bool {
 			entry := other.globs[pattern]
-			if entry.expr.MatchString(name) {
+			if entry.matcher.matches(name) {
 				addFsMatch(merged, literal.path, literal.perm.intersect(entry.perm))
 			}
 
@@ -379,11 +399,14 @@ func matchFsGlobs(left, right fsSide, merged map[string]fsPermission) {
 }
 
 // narrowFsGlob intersects a glob with every "<prefix>**" pattern of the
-// other side that expands over it, keyed by the glob, which is the narrower
-// of the two.
+// other side that expands over it (see globMatcher.expandedBy), keyed by the
+// glob, which is the narrower of the two.
 func narrowFsGlob(entry fsPathEntry, other fsSide, merged map[string]fsPermission) {
-	other.starStar.candidates(globLiteralPrefix(entry.path), func(pattern string) bool {
-		addFsMatch(merged, entry.path, entry.perm.intersect(other.globs[pattern].perm))
+	other.starStar.candidates(entry.matcher.prefix, func(pattern string) bool {
+		base := other.globs[pattern]
+		if entry.matcher.expandedBy(base.matcher) {
+			addFsMatch(merged, entry.path, entry.perm.intersect(base.perm))
+		}
 
 		return false
 	})
@@ -401,146 +424,93 @@ func (unionStrategy) mergeStrings(left, right []string) []string {
 }
 
 func (unionStrategy) mergePaths(left, right []string) []string {
-	set := newPathSet(left)
-
-	for _, path := range right {
-		if !set.covers(path) {
-			set.add(path)
-		}
-	}
-
-	return set.patterns()
+	return permittedPaths(unionPerms(readPerms(left), readPerms(right)))
 }
 
 func (unionStrategy) mergeBool(left, right *bool) *bool {
-	if left == nil {
-		return merge.ClonePtr(right)
-	}
-
-	if right == nil {
-		return merge.ClonePtr(left)
-	}
-
-	val := *left || *right
-
-	return &val
+	return mergeBoolPtr(left, right, func(lhs, rhs bool) bool { return lhs || rhs })
 }
 
 func (unionStrategy) mergeFilesystem(left, right *FilesystemRules) *FilesystemRules {
-	readSet := newPathSet(left.ReadOnlyPaths)
-	writeSet := newPathSet(left.WriteOnlyPaths)
-	rwSet := newPathSet(left.ReadWritePaths)
-
-	addReadWritePaths(right.ReadWritePaths, &readSet, &writeSet, &rwSet)
-	addReadOnlyPaths(right.ReadOnlyPaths, &readSet, &writeSet, &rwSet)
-	addWriteOnlyPaths(right.WriteOnlyPaths, &readSet, &writeSet, &rwSet)
-
-	return &FilesystemRules{
-		ReadOnlyPaths:  readSet.patterns(),
-		WriteOnlyPaths: writeSet.patterns(),
-		ReadWritePaths: rwSet.patterns(),
-	}
+	return collapseFsPerms(unionPerms(expandFsPerms(left), expandFsPerms(right)))
 }
 
-func promoteCoveredLiterals(glob string, source, target *pathSet) {
-	for _, lit := range source.popCoveredLiterals(glob) {
-		target.add(lit)
+// readPerms maps every path of a list to the read permission, so that a
+// list without categories can be merged like filesystem rules.
+func readPerms(paths []string) map[string]fsPermission {
+	perms := make(map[string]fsPermission, len(paths))
+
+	for _, path := range paths {
+		perms[path] = fsPermission{read: true, write: false}
 	}
+
+	return perms
 }
 
-func addReadWritePaths(
-	additions []string,
-	readSet, writeSet, rwSet *pathSet,
+// permittedPaths returns the paths of a permission map, sorted.
+func permittedPaths(perms map[string]fsPermission) []string {
+	if len(perms) == 0 {
+		return nil
+	}
+
+	paths := make([]string, 0, len(perms))
+
+	for path := range perms {
+		paths = append(paths, path)
+	}
+
+	slices.Sort(paths)
+
+	return paths
+}
+
+// unionPerms merges the paths of two profiles. A glob keeps the permissions
+// either profile grants it; globs never prune globs. A literal both profiles
+// list keeps what they list. A literal only one profile lists is dropped when
+// the other profile's globs grant everything it grants, and otherwise also
+// takes what those globs grant it, so that a read-only literal under a
+// write-only glob becomes read-write. A profile's own globs never prune its
+// own literals. Each path's result depends only on the two profiles, not on
+// their order or on the order of the paths within them.
+func unionPerms(left, right map[string]fsPermission) map[string]fsPermission {
+	merged := make(map[string]fsPermission, len(left)+len(right))
+
+	leftSide := buildFsSide(left)
+	rightSide := buildFsSide(right)
+
+	addUnionLiterals(leftSide.literals, right, rightSide, merged)
+	addUnionLiterals(rightSide.literals, left, leftSide, merged)
+
+	for _, perms := range []map[string]fsPermission{left, right} {
+		for path, perm := range perms {
+			if IsGlobPattern(path) {
+				merged[path] = merged[path].union(perm)
+			}
+		}
+	}
+
+	return merged
+}
+
+// addUnionLiterals records the literals of one profile as unionPerms
+// describes, given the other profile's paths and globs.
+func addUnionLiterals(
+	literals []fsPathEntry, otherPerms map[string]fsPermission, other fsSide,
+	merged map[string]fsPermission,
 ) {
-	for _, path := range additions {
-		if rwSet.covers(path) {
-			continue
+	for _, literal := range literals {
+		perm := literal.perm
+
+		if _, listed := otherPerms[literal.path]; !listed {
+			granted := other.grants(literal.matcher.literal)
+			if granted.union(perm) == granted {
+				continue
+			}
+
+			perm = perm.union(granted)
 		}
 
-		if readSet.popExact(path) || writeSet.popExact(path) {
-			rwSet.add(path)
-
-			continue
-		}
-
-		isGlob := IsGlobPattern(path)
-
-		if !isGlob && (readSet.matches(path) || writeSet.matches(path)) {
-			rwSet.add(path)
-
-			continue
-		}
-
-		if isGlob {
-			promoteCoveredLiterals(path, readSet, rwSet)
-			promoteCoveredLiterals(path, writeSet, rwSet)
-		}
-
-		rwSet.add(path)
-	}
-}
-
-func addReadOnlyPaths(
-	additions []string,
-	readSet, writeSet, rwSet *pathSet,
-) {
-	for _, path := range additions {
-		if rwSet.covers(path) || readSet.covers(path) {
-			continue
-		}
-
-		if writeSet.popExact(path) {
-			rwSet.add(path)
-
-			continue
-		}
-
-		isGlob := IsGlobPattern(path)
-
-		if !isGlob && writeSet.matches(path) {
-			rwSet.add(path)
-
-			continue
-		}
-
-		if isGlob {
-			promoteCoveredLiterals(path, writeSet, rwSet)
-		}
-
-		readSet.add(path)
-	}
-}
-
-func addWriteOnlyPaths(
-	additions []string,
-	readSet, writeSet, rwSet *pathSet,
-) {
-	for _, path := range additions {
-		if rwSet.covers(path) {
-			continue
-		}
-
-		if readSet.popExact(path) {
-			rwSet.add(path)
-
-			continue
-		}
-
-		isGlob := IsGlobPattern(path)
-
-		if !isGlob && readSet.matches(path) {
-			rwSet.add(path)
-
-			continue
-		}
-
-		if isGlob {
-			promoteCoveredLiterals(path, readSet, rwSet)
-		}
-
-		if !writeSet.covers(path) {
-			writeSet.add(path)
-		}
+		merged[literal.path] = merged[literal.path].union(perm)
 	}
 }
 
@@ -744,37 +714,13 @@ func deduplicateProfile(profile *Profile) {
 	}
 }
 
-func normalizeGlobPath(path string) string {
-	prefix := globLiteralPrefix(path)
-	if prefix == "" {
-		return path
-	}
-
-	cleaned := merge.CleanPath(prefix)
-	if cleaned != "/" {
-		cleaned += "/"
-	}
-
-	return cleaned + path[len(prefix):]
-}
-
-// normalizeLiteralPath cleans a literal path but keeps a trailing slash,
-// which distinguishes a directory rule from a file rule in AppArmor.
-func normalizeLiteralPath(path string) string {
-	cleaned := merge.CleanPath(path)
-	if strings.HasSuffix(path, "/") && cleaned != "/" {
-		cleaned += "/"
-	}
-
-	return cleaned
-}
-
+// normalizePath collapses repeated slashes, as apparmor_parser does before
+// compiling a rule. It keeps a trailing slash, which distinguishes a
+// directory rule from a file rule, and leaves "." and ".." components alone:
+// the kernel hands AppArmor canonical paths, so a rule containing them
+// matches nothing, and resolving them would make the rule grant more.
 func normalizePath(path string) string {
-	if IsGlobPattern(path) {
-		return normalizeGlobPath(path)
-	}
-
-	return normalizeLiteralPath(path)
+	return filterSlashes(path)
 }
 
 func normalizePaths(paths []string) []string {

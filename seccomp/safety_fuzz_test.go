@@ -17,8 +17,6 @@ limitations under the License.
 package seccomp_test
 
 import (
-	"math"
-	"slices"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -26,19 +24,16 @@ import (
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
 
-// This file holds an independent evaluator for seccomp profiles and fuzz
-// targets asserting the core safety properties of the merge operations:
+// This file holds fuzz targets asserting the core safety properties of the
+// merge operations, judged by the evaluator in evaluator_test.go:
 //
-//   - Intersect never permits a call that any input denies.
-//   - Union never denies a call that any input permits.
-//   - Both are idempotent and commutative in effect.
-//
-// The evaluator implements the model documented on seccomp.Intersect, which
-// follows how runc and libseccomp load a profile: entries equal to the
-// default are skipped, the first unconditional entry overrides every
-// conditional entry for its syscall, otherwise the least restrictive action
-// among matching conditional entries applies, else the profile default.
-// Several conditions on one argument index within an entry are alternatives.
+//   - Intersect never permits more than any input, whatever libseccomp does
+//     with an input whose shape it does not evaluate exactly.
+//   - Union never permits less than any input, in the same sense.
+//   - Results only contain shapes libseccomp evaluates exactly.
+//   - Both are commutative in effect, and merging a profile with itself
+//     yields its exact effect, or its strictest (intersection) or loosest
+//     (union) possible action where the effect is not exact.
 
 var (
 	safetyNames = []string{"read", "write", "clone", "socket"}
@@ -138,170 +133,6 @@ func safetyProfile(reader *byteReader, errnos bool) *specs.LinuxSeccomp {
 	return profile
 }
 
-func entryMatches(entry specs.LinuxSyscall, call []uint64) bool {
-	if repeatsIndex(entry.Args) {
-		for _, arg := range entry.Args {
-			if int(arg.Index) < len(call) && seccomp.CondHolds(arg, call[arg.Index]) {
-				return true
-			}
-		}
-
-		return false
-	}
-
-	for _, arg := range entry.Args {
-		if int(arg.Index) >= len(call) || !seccomp.CondHolds(arg, call[arg.Index]) {
-			return false
-		}
-	}
-
-	return true
-}
-
-func repeatsIndex(args []specs.LinuxSeccompArg) bool {
-	seen := make(map[uint]struct{}, len(args))
-
-	for _, arg := range args {
-		if _, ok := seen[arg.Index]; ok {
-			return true
-		}
-
-		seen[arg.Index] = struct{}{}
-	}
-
-	return false
-}
-
-// eperm is the errno runc encodes into an ERRNO or TRACE action whose
-// errnoRet is unset.
-const eperm uint = 1
-
-// loadedErrno returns the errno runc encodes into an action: the explicit
-// value or EPERM for ERRNO and TRACE, and none for every other action.
-func loadedErrno(action specs.LinuxSeccompAction, ret *uint) uint {
-	if action != specs.ActErrno && action != specs.ActTrace {
-		return 0
-	}
-
-	if ret == nil {
-		return eperm
-	}
-
-	return *ret
-}
-
-// equalsDefault reports whether runc skips the entry because its loaded
-// action, errno included, equals the profile default.
-func equalsDefault(profile *specs.LinuxSeccomp, entry specs.LinuxSyscall) bool {
-	return sameRestrictiveness(entry.Action, profile.DefaultAction) &&
-		loadedErrno(entry.Action, entry.ErrnoRet) ==
-			loadedErrno(profile.DefaultAction, profile.DefaultErrnoRet)
-}
-
-// evalCall returns the action a profile applies to a call of the named
-// syscall with the given argument values.
-func evalCall(
-	profile *specs.LinuxSeccomp, name string, call []uint64,
-) specs.LinuxSeccompAction {
-	var (
-		conditional   specs.LinuxSeccompAction
-		unconditional specs.LinuxSeccompAction
-		hasCond       bool
-		hasUncond     bool
-	)
-
-	for _, entry := range relevantEntries(profile, name) {
-		if len(entry.Args) == 0 {
-			if !hasUncond {
-				unconditional = entry.Action
-				hasUncond = true
-			}
-
-			continue
-		}
-
-		if !entryMatches(entry, call) {
-			continue
-		}
-
-		if !hasCond {
-			conditional = entry.Action
-			hasCond = true
-		} else {
-			conditional = seccomp.LessRestrictive(conditional, entry.Action)
-		}
-	}
-
-	switch {
-	case hasUncond:
-		return unconditional
-	case hasCond:
-		return conditional
-	default:
-		return profile.DefaultAction
-	}
-}
-
-// relevantEntries returns the entries a runtime loads for the named syscall:
-// those naming it whose action differs from the profile default.
-func relevantEntries(profile *specs.LinuxSeccomp, name string) []specs.LinuxSyscall {
-	var entries []specs.LinuxSyscall
-
-	for _, entry := range profile.Syscalls {
-		if slices.Contains(entry.Names, name) && !equalsDefault(profile, entry) {
-			entries = append(entries, entry)
-		}
-	}
-
-	return entries
-}
-
-// atMostAsPermissive reports whether first is at most as permissive as
-// second.
-func atMostAsPermissive(first, second specs.LinuxSeccompAction) bool {
-	return seccomp.MoreRestrictive(first, second) == first
-}
-
-// sampleValues collects boundary values around every filter value in the
-// profiles so each argument condition is exercised on both sides.
-func sampleValues(profiles ...*specs.LinuxSeccomp) []uint64 {
-	values := []uint64{0, 1, math.MaxUint64}
-
-	for _, profile := range profiles {
-		for _, entry := range profile.Syscalls {
-			for _, arg := range entry.Args {
-				for _, base := range []uint64{arg.Value, arg.ValueTwo} {
-					values = append(values, base, base+1)
-
-					if base > 0 {
-						values = append(values, base-1)
-					}
-				}
-			}
-		}
-	}
-
-	slices.Sort(values)
-
-	return slices.Compact(values)
-}
-
-// forEachCall invokes fn for every syscall name and sampled argument vector.
-func forEachCall(
-	profiles []*specs.LinuxSeccomp,
-	visit func(name string, call []uint64),
-) {
-	values := sampleValues(profiles...)
-
-	for _, name := range safetyNames {
-		for _, first := range values {
-			for _, second := range values {
-				visit(name, []uint64{first, second})
-			}
-		}
-	}
-}
-
 // safetyInputs decodes two profiles. The first byte decides whether errno
 // values are generated at all. Commutativity is only asserted for errno-free
 // inputs: ErrnoRet ties resolve toward the leftmost profile, and whether a
@@ -361,64 +192,103 @@ func addSafetySeeds(f *testing.F) {
 	})
 }
 
+// safetyDirection describes one merge direction for checkMergeSafety.
+type safetyDirection struct {
+	name  string
+	merge func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error)
+	// safe reports whether the merged action is safe against an input.
+	safe func(got specs.LinuxSeccompAction, input verdict) bool
+	// bound is the action merging an input with itself yields.
+	bound func(input verdict) specs.LinuxSeccompAction
+}
+
+func intersectSafety() safetyDirection {
+	return safetyDirection{
+		name:  "intersect",
+		merge: seccomp.Intersect,
+		safe:  permitsAtMost,
+		bound: func(input verdict) specs.LinuxSeccompAction { return input.strictest },
+	}
+}
+
+func unionSafety() safetyDirection {
+	return safetyDirection{
+		name:  "union",
+		merge: seccomp.Union,
+		safe:  permitsAtLeast,
+		bound: func(input verdict) specs.LinuxSeccompAction { return input.loosest },
+	}
+}
+
+// checkMergeSafety merges two profiles in the given direction and checks the
+// safety properties listed at the top of this file for every sampled call.
+func checkMergeSafety(
+	t *testing.T, direction safetyDirection,
+	left, right *specs.LinuxSeccomp, commutative bool,
+) {
+	t.Helper()
+
+	merge := func(profiles ...*specs.LinuxSeccomp) *specs.LinuxSeccomp {
+		t.Helper()
+
+		result, err := direction.merge(profiles...)
+		if err != nil {
+			t.Fatalf("%s: %v", direction.name, err)
+		}
+
+		err = seccomp.Validate(result)
+		if err != nil {
+			t.Fatalf("%s result fails validation: %v", direction.name, err)
+		}
+
+		return result
+	}
+
+	result := merge(left, right)
+	reversed := merge(right, left)
+	self := merge(left, left)
+
+	cache := judges{}
+
+	forEachCall([]*specs.LinuxSeccomp{left, right}, func(name string, call []uint64) {
+		got := cache.evalCall(t, result, name, call)
+		leftVerdict := cache.judgeCall(left, name, call)
+		rightVerdict := cache.judgeCall(right, name, call)
+
+		if !direction.safe(got, leftVerdict) || !direction.safe(got, rightVerdict) {
+			t.Errorf(
+				"%s%v: %s yields %s, inputs may yield %v and %v\n"+
+					"  left:   %s\n  right:  %s\n  result: %s",
+				name, call, direction.name, got,
+				leftVerdict.possible, rightVerdict.possible,
+				seccomp.FormatProfile(left),
+				seccomp.FormatProfile(right),
+				seccomp.FormatProfile(result),
+			)
+		}
+
+		if commutative && !sameRestrictiveness(got, cache.evalCall(t, reversed, name, call)) {
+			t.Errorf("%s%v: %s is not commutative", name, call, direction.name)
+		}
+
+		want := direction.bound(leftVerdict)
+		if selfGot := cache.evalCall(t, self, name, call); !sameRestrictiveness(selfGot, want) {
+			t.Errorf(
+				"%s%v: %s(X,X) yields %s, want %s\n  input:  %s\n  result: %s",
+				name, call, direction.name, selfGot, want,
+				seccomp.FormatProfile(left),
+				seccomp.FormatProfile(self),
+			)
+		}
+	})
+}
+
 func FuzzIntersectSafety(f *testing.F) {
 	addSafetySeeds(f)
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		left, right, errnos := safetyInputs(t, data)
-
-		result, err := seccomp.Intersect(left, right)
-		if err != nil {
-			t.Fatalf("intersect: %v", err)
-		}
-
-		err = seccomp.Validate(result)
-		if err != nil {
-			t.Fatalf("result fails validation: %v", err)
-		}
-
-		reversed, err := seccomp.Intersect(right, left)
-		if err != nil {
-			t.Fatalf("reversed intersect: %v", err)
-		}
-
-		self, err := seccomp.Intersect(left, left)
-		if err != nil {
-			t.Fatalf("self intersect: %v", err)
-		}
-
-		forEachCall([]*specs.LinuxSeccomp{left, right}, func(name string, call []uint64) {
-			got := evalCall(result, name, call)
-			leftAction := evalCall(left, name, call)
-			rightAction := evalCall(right, name, call)
-
-			if !atMostAsPermissive(got, leftAction) || !atMostAsPermissive(got, rightAction) {
-				t.Errorf(
-					"%s%v: intersect yields %s, inputs yield %s and %s\n  left:   %s\n  right:  %s\n  result: %s",
-					name,
-					call,
-					got,
-					leftAction,
-					rightAction,
-					seccomp.FormatProfile(left),
-					seccomp.FormatProfile(right),
-					seccomp.FormatProfile(result),
-				)
-			}
-
-			if !errnos && !sameRestrictiveness(got, evalCall(reversed, name, call)) {
-				t.Errorf("%s%v: intersect is not commutative", name, call)
-			}
-
-			if !sameRestrictiveness(evalCall(self, name, call), leftAction) {
-				t.Errorf(
-					"%s%v: Intersect(X,X) yields %s, X yields %s\n  input:  %s\n  result: %s",
-					name, call, evalCall(self, name, call), leftAction,
-					seccomp.FormatProfile(left),
-					seccomp.FormatProfile(self),
-				)
-			}
-		})
+		checkMergeSafety(t, intersectSafety(), left, right, !errnos)
 	})
 }
 
@@ -427,58 +297,6 @@ func FuzzUnionSafety(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		left, right, errnos := safetyInputs(t, data)
-
-		result, err := seccomp.Union(left, right)
-		if err != nil {
-			t.Fatalf("union: %v", err)
-		}
-
-		err = seccomp.Validate(result)
-		if err != nil {
-			t.Fatalf("result fails validation: %v", err)
-		}
-
-		reversed, err := seccomp.Union(right, left)
-		if err != nil {
-			t.Fatalf("reversed union: %v", err)
-		}
-
-		self, err := seccomp.Union(left, left)
-		if err != nil {
-			t.Fatalf("self union: %v", err)
-		}
-
-		forEachCall([]*specs.LinuxSeccomp{left, right}, func(name string, call []uint64) {
-			got := evalCall(result, name, call)
-			leftAction := evalCall(left, name, call)
-			rightAction := evalCall(right, name, call)
-
-			if !atMostAsPermissive(leftAction, got) || !atMostAsPermissive(rightAction, got) {
-				t.Errorf(
-					"%s%v: union yields %s, inputs yield %s and %s\n  left:   %s\n  right:  %s\n  result: %s",
-					name,
-					call,
-					got,
-					leftAction,
-					rightAction,
-					seccomp.FormatProfile(left),
-					seccomp.FormatProfile(right),
-					seccomp.FormatProfile(result),
-				)
-			}
-
-			if !errnos && !sameRestrictiveness(got, evalCall(reversed, name, call)) {
-				t.Errorf("%s%v: union is not commutative", name, call)
-			}
-
-			if !sameRestrictiveness(evalCall(self, name, call), leftAction) {
-				t.Errorf(
-					"%s%v: Union(X,X) yields %s, X yields %s\n  input:  %s\n  result: %s",
-					name, call, evalCall(self, name, call), leftAction,
-					seccomp.FormatProfile(left),
-					seccomp.FormatProfile(self),
-				)
-			}
-		})
+		checkMergeSafety(t, unionSafety(), left, right, !errnos)
 	})
 }

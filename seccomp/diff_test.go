@@ -1223,3 +1223,84 @@ func TestDiffForArchNilProfile(t *testing.T) {
 		t.Errorf("expected ErrNilProfile, got: %v", err)
 	}
 }
+
+// neutralProfile returns a profile without syscall entries, with the
+// architectures of profile and those of its flags that the merge direction
+// combines with the other side: SECCOMP_FILTER_FLAG_SPEC_ALLOW for both
+// directions, and SECCOMP_FILTER_FLAG_LOG as well for union.
+func neutralProfile(
+	profile *specs.LinuxSeccomp, def specs.LinuxSeccompAction, keepLog bool,
+) *specs.LinuxSeccomp {
+	var flags []specs.LinuxSeccompFlag
+
+	for _, flag := range profile.Flags {
+		if flag == specs.LinuxSeccompFlagSpecAllow ||
+			(keepLog && flag == specs.LinuxSeccompFlagLog) {
+			flags = append(flags, flag)
+		}
+	}
+
+	return &specs.LinuxSeccomp{
+		DefaultAction: def,
+		Architectures: profile.Architectures,
+		Flags:         flags,
+	}
+}
+
+// TestMergeWithNeutralProfileIsIdentity checks the documented identity: a
+// profile in safe shapes compares equal to its intersection with an
+// allow-all profile, and to its union with a kill-all profile, when the
+// other side has the same architectures and the flags that direction
+// combines.
+func TestMergeWithNeutralProfileIsIdentity(t *testing.T) {
+	t.Parallel()
+
+	errno := uint(38)
+	profiles := []*specs.LinuxSeccomp{
+		profileOf(specs.ActErrno,
+			filtered("read", specs.ActAllow, arg(0, specs.OpEqualTo, 1)),
+			filtered("read", specs.ActLog, arg(0, specs.OpEqualTo, 2)),
+			filtered("write", specs.ActAllow),
+		),
+		profileOf(specs.ActAllow,
+			filtered("read", specs.ActKill, arg(0, specs.OpEqualTo, 1)),
+			filtered("write", specs.ActErrno),
+		),
+		{
+			DefaultAction: specs.ActLog,
+			Architectures: []specs.Arch{specs.ArchX86},
+			Flags: []specs.LinuxSeccompFlag{
+				specs.LinuxSeccompFlagLog, specs.LinuxSeccompFlagSpecAllow,
+			},
+			Syscalls: []specs.LinuxSyscall{{
+				Names: []string{"read"}, Action: specs.ActErrno, ErrnoRet: &errno, Args: nil,
+			}},
+		},
+	}
+
+	for idx, profile := range profiles {
+		intersected, err := seccomp.Intersect(profile,
+			neutralProfile(profile, specs.ActAllow, false))
+		if err != nil {
+			t.Fatalf("profile %d: intersect: %v", idx, err)
+		}
+
+		united, err := seccomp.Union(profile,
+			neutralProfile(profile, specs.ActKillProcess, true))
+		if err != nil {
+			t.Fatalf("profile %d: union: %v", idx, err)
+		}
+
+		for _, merged := range []*specs.LinuxSeccomp{intersected, united} {
+			diff, err := seccomp.Diff(profile, merged)
+			if err != nil {
+				t.Fatalf("profile %d: diff: %v", idx, err)
+			}
+
+			if !diff.IsEqual() {
+				t.Errorf("profile %d: merge with a neutral profile differs:\n%s",
+					idx, seccomp.FormatDiff(diff))
+			}
+		}
+	}
+}
