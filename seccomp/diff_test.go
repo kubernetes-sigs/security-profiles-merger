@@ -17,6 +17,7 @@ limitations under the License.
 package seccomp_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -1169,5 +1170,56 @@ func TestDiffSyscallsChanged(t *testing.T) {
 
 	if result.Changed[0].Name != "read" {
 		t.Errorf("changed name = %q, want read", result.Changed[0].Name)
+	}
+}
+
+// TestDiffForArchIsHostIndependent covers the reason DiffForArch exists:
+// Diff implies the architecture of the running program, so the same pair of
+// profiles compares differently depending on where the comparison runs.
+// Naming the target architecture removes that dependence.
+func TestDiffForArchIsHostIndependent(t *testing.T) {
+	t.Parallel()
+
+	listed := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Architectures: []specs.Arch{specs.ArchAARCH64},
+	}
+	unlisted := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
+
+	onTarget, err := seccomp.DiffForArch(specs.ArchAARCH64, listed, unlisted)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !onTarget.Equal {
+		t.Errorf("a node running aarch64 covers it either way, got %s",
+			seccomp.FormatDiff(onTarget))
+	}
+
+	elsewhere, err := seccomp.DiffForArch(specs.ArchX86_64, listed, unlisted)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if elsewhere.Equal {
+		t.Error("a node running x86_64 loses aarch64, want a difference")
+	}
+
+	none, err := seccomp.DiffForArch("", listed, unlisted)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if none.Equal {
+		t.Error("with no implied architecture the lists differ as written")
+	}
+}
+
+func TestDiffForArchNilProfile(t *testing.T) {
+	t.Parallel()
+
+	_, err := seccomp.DiffForArch(specs.ArchX86_64, nil, &specs.LinuxSeccomp{})
+	if !errors.Is(err, seccomp.ErrNilProfile) {
+		t.Errorf("expected ErrNilProfile, got: %v", err)
 	}
 }

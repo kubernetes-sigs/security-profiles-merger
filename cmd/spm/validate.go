@@ -29,6 +29,7 @@ const validateUsage = `Usage: spm validate [options] [files...]
 
 Validate one or more security profiles.
 Reads from stdin (as a JSON array) when no files are provided.
+Writes the validated profiles on success; use --quiet for the exit code alone.
 
 Options:
 `
@@ -52,10 +53,13 @@ func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	)
 	artifact := flags.Bool(
 		"artifact", false,
-		"validate as an untrusted OCI artifact the way container runtimes do (seccomp only)",
+		"validate as an untrusted OCI artifact the way container runtimes do",
 	)
 	format := flags.String("format", formatJSON, "output format: json, human")
 	output := flags.String("output", "", "write output to file (default: stdout)")
+	quiet := flags.Bool(
+		"quiet", false, "report only errors, writing no profile on success",
+	)
 
 	err := flags.Parse(args)
 	if err != nil {
@@ -70,26 +74,43 @@ func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	data, err := readInputs(flags.Args(), stdin)
+	return validateInputs(
+		flags.Args(), *profileType, modeFromFlags(*strict, *artifact),
+		*format, *output, *quiet, stdin, stdout, stderr,
+	)
+}
+
+// validateInputs reads, validates, and writes back the profiles named by
+// args, which may be empty to read from stdin.
+func validateInputs(
+	args []string, profileType string, mode validateMode,
+	format, output string, quiet bool,
+	stdin io.Reader, stdout, stderr io.Writer,
+) int {
+	data, err := readInputs(args, stdin)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 
 		return 1
 	}
 
-	kind, code := resolveKind(*profileType, data, stderr)
+	kind, code := resolveKind(profileType, data, stderr)
 	if code != 0 {
 		return code
 	}
 
 	var out bytes.Buffer
 
-	code = kind.validate(data, modeFromFlags(*strict, *artifact), *format, &out, stderr)
+	code = kind.validate(data, mode, format, &out, stderr)
 	if code != 0 {
 		return code
 	}
 
-	return flushOutput(*output, out.Bytes(), stdout, stderr)
+	if quiet {
+		return 0
+	}
+
+	return flushOutput(output, out.Bytes(), stdout, stderr)
 }
 
 // modeFromFlags maps the validate flags to a mode; the flags have already

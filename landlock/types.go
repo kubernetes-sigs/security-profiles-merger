@@ -157,58 +157,66 @@ type NetRule struct {
 	AccessNet []NetAccessRight `json:"accessNet,omitempty"`
 }
 
-// abiVersion is a Landlock ABI version, as reported by
-// landlock_create_ruleset(LANDLOCK_CREATE_RULESET_VERSION).
-type abiVersion int
+// ABIVersion is a Landlock ABI version, as reported by
+// landlock_create_ruleset(LANDLOCK_CREATE_RULESET_VERSION). A kernel rejects
+// an access right its ABI does not know, so a profile can only be loaded on
+// a kernel whose ABI is at least RequiredABIVersion.
+type ABIVersion int
 
+// Landlock ABI versions. The rights each one introduced are listed on the
+// access right constants.
 const (
-	abiV1 abiVersion = iota + 1
-	abiV2
-	abiV3
-	abiV4
-	abiV5
-	abiV6
-	abiV7
-	abiV8
-	abiV9
-	abiV10
+	ABIV1 ABIVersion = iota + 1
+	ABIV2
+	ABIV3
+	ABIV4
+	ABIV5
+	ABIV6
+	ABIV7
+	ABIV8
+	ABIV9
+	ABIV10
 )
+
+// LatestABIVersion is the newest Landlock ABI this package knows rights for.
+const LatestABIVersion = ABIV10
 
 // The tables below are the single source of the rights this package knows,
 // each with the Landlock ABI version that introduced it. Validate accepts
-// exactly the rights listed here, and tests enumerate them from here.
+// exactly the rights listed here, RequiredABIVersion and ValidateForABI read
+// the versions, and tests enumerate them from here.
 //
 //nolint:gochecknoglobals // immutable lookup tables
 var (
-	fsAccessABI = map[FSAccessRight]abiVersion{
-		FSAccessExecute:     abiV1,
-		FSAccessWriteFile:   abiV1,
-		FSAccessReadFile:    abiV1,
-		FSAccessReadDir:     abiV1,
-		FSAccessRemoveDir:   abiV1,
-		FSAccessRemoveFile:  abiV1,
-		FSAccessMakeChar:    abiV1,
-		FSAccessMakeDir:     abiV1,
-		FSAccessMakeReg:     abiV1,
-		FSAccessMakeSock:    abiV1,
-		FSAccessMakeFIFO:    abiV1,
-		FSAccessMakeSym:     abiV1,
-		FSAccessMakeBlock:   abiV1,
-		FSAccessRefer:       abiV2,
-		FSAccessTruncate:    abiV3,
-		FSAccessIOCTLDev:    abiV5,
-		FSAccessResolveUnix: abiV9,
+	fsAccessABI = map[FSAccessRight]ABIVersion{
+		FSAccessExecute:     ABIV1,
+		FSAccessWriteFile:   ABIV1,
+		FSAccessReadFile:    ABIV1,
+		FSAccessReadDir:     ABIV1,
+		FSAccessRemoveDir:   ABIV1,
+		FSAccessRemoveFile:  ABIV1,
+		FSAccessMakeChar:    ABIV1,
+		FSAccessMakeDir:     ABIV1,
+		FSAccessMakeReg:     ABIV1,
+		FSAccessMakeSock:    ABIV1,
+		FSAccessMakeFIFO:    ABIV1,
+		FSAccessMakeSym:     ABIV1,
+		FSAccessMakeBlock:   ABIV1,
+		FSAccessRefer:       ABIV2,
+		FSAccessTruncate:    ABIV3,
+		FSAccessIOCTLDev:    ABIV5,
+		FSAccessResolveUnix: ABIV9,
 	}
 
-	netAccessABI = map[NetAccessRight]abiVersion{
-		NetAccessBindTCP:        abiV4,
-		NetAccessConnectTCP:     abiV4,
-		NetAccessBindUDP:        abiV10,
-		NetAccessConnectSendUDP: abiV10,
+	netAccessABI = map[NetAccessRight]ABIVersion{
+		NetAccessBindTCP:        ABIV4,
+		NetAccessConnectTCP:     ABIV4,
+		NetAccessBindUDP:        ABIV10,
+		NetAccessConnectSendUDP: ABIV10,
 	}
 
-	scopeABI = map[ScopeRight]abiVersion{
-		ScopeAbstractUnixSocket: abiV6,
-		ScopeSignal:             abiV6,
+	scopeABI = map[ScopeRight]ABIVersion{
+		ScopeAbstractUnixSocket: ABIV6,
+		ScopeSignal:             ABIV6,
 	}
 )

@@ -22,6 +22,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	specs "github.com/opencontainers/runtime-spec/specs-go"
+
+	"sigs.k8s.io/security-profiles-merger/apparmor"
 )
 
 func TestReadFromStdinNilReader(t *testing.T) {
@@ -206,4 +210,78 @@ func TestErrorSentinels(t *testing.T) {
 			t.Fatal("errFileTooLarge should not be nil")
 		}
 	})
+}
+
+// TestDetectMixedProfileTypes covers the per-input detection: merging a
+// seccomp profile with an AppArmor one would drop whatever the chosen type
+// has no field for, so the mismatch is reported rather than resolved from
+// the first input alone.
+func TestDetectMixedProfileTypes(t *testing.T) {
+	t.Parallel()
+
+	seccompFile := writeTemp(t, marshal(t, &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+	}))
+	apparmorFile := writeTemp(t, marshal(t, &apparmor.Profile{
+		Executable: nil,
+		Filesystem: nil,
+		Network:    nil,
+		Capabilities: &apparmor.CapabilityRules{
+			AllowedCapabilities: []string{"CHOWN"},
+		},
+	}))
+
+	code, _, stderr := runCapture(t, []string{
+		cmdMerge, "--strategy", strategyIntersect, seccompFile, apparmorFile,
+	}, nil)
+
+	if code != exitUsage {
+		t.Fatalf("exit code = %d, want %d: %s", code, exitUsage, stderr)
+	}
+
+	if !strings.Contains(stderr, "mix profile types (seccomp and apparmor)") {
+		t.Errorf("stderr = %q, want both type names in the message", stderr)
+	}
+}
+
+func TestValidateQuietWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	file := writeTemp(t, marshal(t, &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+	}))
+
+	code, stdout, stderr := runCapture(t, []string{
+		cmdValidate, flagType, typeSeccomp, "--quiet", file,
+	}, nil)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0: %s", code, stderr)
+	}
+
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing", stdout)
+	}
+}
+
+func TestValidateQuietStillReportsErrors(t *testing.T) {
+	t.Parallel()
+
+	file := writeTemp(t, `{"defaultAction":"SCMP_ACT_BOGUS"}`)
+
+	code, stdout, stderr := runCapture(t, []string{
+		cmdValidate, flagType, typeSeccomp, "--quiet", file,
+	}, nil)
+
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing", stdout)
+	}
+
+	if !strings.Contains(stderr, "unknown seccomp action") {
+		t.Errorf("stderr = %q, want the validation error", stderr)
+	}
 }

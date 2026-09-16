@@ -323,13 +323,17 @@ func directAccess[Key comparable, Right comparable](
 // hierarchyAccess returns the rights granted for a path by every rule on the
 // path itself or one of its ancestors. Landlock rules cover the whole file
 // hierarchy beneath their path and rights from nested rules accumulate.
+//
+// It looks up the path's ancestors rather than scanning every rule, because
+// the caller runs it once per rule of either side and scanning would make a
+// profile with many rules quadratic to merge.
 func hierarchyAccess(
 	path string, rules map[string][]FSAccessRight,
 ) []FSAccessRight {
 	var result []FSAccessRight
 
-	for rulePath, access := range rules {
-		if isAncestorOrSelf(rulePath, path) {
+	for _, ancestor := range pathAncestors(path) {
+		if access, ok := rules[ancestor]; ok {
 			result = merge.UnionSlice(result, access)
 		}
 	}
@@ -337,8 +341,35 @@ func hierarchyAccess(
 	return result
 }
 
+// pathAncestors returns the path itself followed by each of its parent
+// directories, ending at "/" for an absolute path. Paths are expected to be
+// cleaned, so they carry no trailing slash except for the root itself.
+func pathAncestors(path string) []string {
+	if path == "" {
+		return nil
+	}
+
+	result := make([]string, 0, strings.Count(path, "/")+1)
+	result = append(result, path)
+
+	for idx := len(path) - 1; idx > 0; idx-- {
+		if path[idx] == '/' {
+			result = append(result, path[:idx])
+		}
+	}
+
+	// A relative path has no root ancestor, and "/" is already the path.
+	if len(path) > 1 && path[0] == '/' {
+		result = append(result, "/")
+	}
+
+	return result
+}
+
 // isAncestorOrSelf reports whether ancestor is path itself or one of its
-// parent directories. Paths are expected to be cleaned.
+// parent directories. Paths are expected to be cleaned. This states the
+// hierarchy relation pathAncestors enumerates; the merge uses the
+// enumeration, and a test keeps the two in agreement.
 func isAncestorOrSelf(ancestor, path string) bool {
 	if ancestor == path {
 		return true

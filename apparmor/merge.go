@@ -310,57 +310,83 @@ func (intersectStrategy) mergeFilesystem(left, right *FilesystemRules) *Filesyst
 		}
 	}
 
-	// Glob entries need pairwise matching against all entries on the other side.
-	leftEntries := buildFsEntries(leftPerms)
-	rightEntries := buildFsEntries(rightPerms)
+	// Glob entries need matching against the other side. Both directions go
+	// through a prefix index rather than a pairwise scan, so a profile with
+	// many paths does not turn the merge quadratic.
+	leftSide := buildFsSide(leftPerms)
+	rightSide := buildFsSide(rightPerms)
 
-	leftGlobs, leftLiterals := splitGlobEntries(leftEntries)
-	rightGlobs, _ := splitGlobEntries(rightEntries)
-
-	// Glob-vs-literal, glob-vs-glob, and literal-vs-glob.
-	matchFsEntries(leftGlobs, rightEntries, merged)
-	matchFsEntries(leftLiterals, rightGlobs, merged)
+	matchFsLiterals(leftSide.literals, rightSide, merged)
+	matchFsLiterals(rightSide.literals, leftSide, merged)
+	matchFsGlobs(leftSide, rightSide, merged)
 
 	return collapseFsPerms(merged)
 }
 
-func splitGlobEntries(entries []fsPathEntry) ([]fsPathEntry, []fsPathEntry) {
-	var globs, literals []fsPathEntry
-
-	for _, entry := range entries {
-		if entry.expr != nil {
-			globs = append(globs, entry)
-		} else {
-			literals = append(literals, entry)
-		}
+// addFsMatch records the permissions two matching entries share under key,
+// combining them with what an earlier match already granted there.
+func addFsMatch(merged map[string]fsPermission, key string, perm fsPermission) {
+	if !perm.read && !perm.write {
+		return
 	}
 
-	return globs, literals
+	if existing, ok := merged[key]; ok {
+		merged[key] = existing.union(perm)
+
+		return
+	}
+
+	merged[key] = perm
 }
 
-func matchFsEntries(
-	leftEntries, rightEntries []fsPathEntry,
-	merged map[string]fsPermission,
+// matchFsLiterals intersects every literal path with the globs of the other
+// side that match it, keyed by the literal, which is the narrower path.
+func matchFsLiterals(
+	literals []fsPathEntry, other fsSide, merged map[string]fsPermission,
 ) {
-	for _, leftEntry := range leftEntries {
-		for _, rightEntry := range rightEntries {
-			key := matchIntersectPaths(leftEntry, rightEntry)
-			if key == "" {
-				continue
+	for _, literal := range literals {
+		name := unescapeLiteral(literal.path)
+
+		other.byPrefix.candidates(name, func(pattern string) bool {
+			entry := other.globs[pattern]
+			if entry.expr.MatchString(name) {
+				addFsMatch(merged, literal.path, literal.perm.intersect(entry.perm))
 			}
 
-			intersected := leftEntry.perm.intersect(rightEntry.perm)
-			if !intersected.read && !intersected.write {
-				continue
-			}
-
-			if existing, ok := merged[key]; ok {
-				merged[key] = existing.union(intersected)
-			} else {
-				merged[key] = intersected
-			}
-		}
+			return false
+		})
 	}
+}
+
+// matchFsGlobs intersects globs present on both sides, and globs one side
+// covers with the "**" expansion of a containing prefix. The narrower of the
+// two patterns keys the result, as it is the one both sides permit.
+func matchFsGlobs(left, right fsSide, merged map[string]fsPermission) {
+	for pattern, entry := range left.globs {
+		if other, both := right.globs[pattern]; both {
+			addFsMatch(merged, pattern, entry.perm.intersect(other.perm))
+		}
+
+		narrowFsGlob(entry, right, merged)
+	}
+
+	// Both narrowing directions run for every glob, including one present on
+	// both sides: the loop above records what the right side expands over,
+	// which says nothing about what the left side expands over.
+	for _, entry := range right.globs {
+		narrowFsGlob(entry, left, merged)
+	}
+}
+
+// narrowFsGlob intersects a glob with every "<prefix>**" pattern of the
+// other side that expands over it, keyed by the glob, which is the narrower
+// of the two.
+func narrowFsGlob(entry fsPathEntry, other fsSide, merged map[string]fsPermission) {
+	other.starStar.candidates(globLiteralPrefix(entry.path), func(pattern string) bool {
+		addFsMatch(merged, entry.path, entry.perm.intersect(other.globs[pattern].perm))
+
+		return false
+	})
 }
 
 // unionStrategy implements union (OR) semantics.

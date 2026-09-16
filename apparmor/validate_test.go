@@ -18,6 +18,8 @@ package apparmor_test
 
 import (
 	"errors"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -521,7 +523,7 @@ func TestValidateStrictNoDuplicates(t *testing.T) {
 	}
 }
 
-func TestValidateUnknownCapability(t *testing.T) {
+func TestValidateStrictUnknownCapability(t *testing.T) {
 	t.Parallel()
 
 	profile := &apparmor.Profile{
@@ -533,7 +535,7 @@ func TestValidateUnknownCapability(t *testing.T) {
 		},
 	}
 
-	err := apparmor.Validate(profile)
+	err := apparmor.ValidateStrict(profile)
 	if err == nil {
 		t.Fatal("expected error for unknown capability")
 	}
@@ -544,6 +546,59 @@ func TestValidateUnknownCapability(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "BOGUS_CAP") {
 		t.Errorf("error should mention BOGUS_CAP: %v", err)
+	}
+}
+
+// TestValidateAllowsUnknownCapability covers the merge path: the kernel
+// gains capabilities over time, so a name this package does not know must
+// not fail a merge. It is opaque to the merge, which keeps it only where
+// every profile grants it.
+func TestValidateAllowsUnknownCapability(t *testing.T) {
+	t.Parallel()
+
+	withFuture := func() *apparmor.Profile {
+		return &apparmor.Profile{
+			Executable: nil,
+			Filesystem: nil,
+			Network:    nil,
+			Capabilities: &apparmor.CapabilityRules{
+				AllowedCapabilities: []string{capNetAdmin, "SOME_FUTURE_CAP"},
+			},
+		}
+	}
+
+	err := apparmor.Validate(withFuture())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	both, err := apparmor.Intersect(withFuture(), withFuture())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !slices.Contains(both.Capabilities.AllowedCapabilities, "SOME_FUTURE_CAP") {
+		t.Errorf("capability granted by both profiles should survive: %v",
+			both.Capabilities.AllowedCapabilities)
+	}
+
+	onlyKnown := &apparmor.Profile{
+		Executable: nil,
+		Filesystem: nil,
+		Network:    nil,
+		Capabilities: &apparmor.CapabilityRules{
+			AllowedCapabilities: []string{capNetAdmin},
+		},
+	}
+
+	one, err := apparmor.Intersect(withFuture(), onlyKnown)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if slices.Contains(one.Capabilities.AllowedCapabilities, "SOME_FUTURE_CAP") {
+		t.Errorf("capability granted by one profile should not survive: %v",
+			one.Capabilities.AllowedCapabilities)
 	}
 }
 
@@ -774,4 +829,123 @@ func TestValidateStrictEmptyPathReportedOnce(t *testing.T) {
 	if errors.Is(err, apparmor.ErrRelativePath) {
 		t.Errorf("empty path must not also be reported as relative: %v", err)
 	}
+}
+
+func TestValidateArtifact(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		profile *apparmor.Profile
+		wantErr error
+	}{
+		{
+			name: "accepts a well-formed profile",
+			profile: &apparmor.Profile{
+				Executable: &apparmor.ExecutableRules{
+					AllowedExecutables: []string{pathBinSh},
+					AllowedLibraries:   nil,
+				},
+				Filesystem:   nil,
+				Network:      nil,
+				Capabilities: nil,
+			},
+			wantErr: nil,
+		},
+		{
+			name: "rejects a relative path",
+			profile: &apparmor.Profile{
+				Executable: &apparmor.ExecutableRules{
+					AllowedExecutables: []string{"usr/bin/sh"},
+					AllowedLibraries:   nil,
+				},
+				Filesystem:   nil,
+				Network:      nil,
+				Capabilities: nil,
+			},
+			wantErr: apparmor.ErrRelativePath,
+		},
+		{
+			name: "rejects a variable",
+			profile: &apparmor.Profile{
+				Executable: nil,
+				Filesystem: &apparmor.FilesystemRules{
+					ReadOnlyPaths:  []string{"@{HOME}/x"},
+					WriteOnlyPaths: nil,
+					ReadWritePaths: nil,
+				},
+				Network:      nil,
+				Capabilities: nil,
+			},
+			wantErr: apparmor.ErrUnsupportedVariable,
+		},
+		{
+			name: "rejects a glob that never matches",
+			profile: &apparmor.Profile{
+				Executable: nil,
+				Filesystem: &apparmor.FilesystemRules{
+					ReadOnlyPaths:  []string{oversizeGlob()},
+					WriteOnlyPaths: nil,
+					ReadWritePaths: nil,
+				},
+				Network:      nil,
+				Capabilities: nil,
+			},
+			wantErr: apparmor.ErrGlobTooComplex,
+		},
+		{
+			// The kernel gains capabilities over time, so a name this
+			// package does not know must not fail an artifact either.
+			name: "accepts an unknown capability",
+			profile: &apparmor.Profile{
+				Executable: nil,
+				Filesystem: nil,
+				Network:    nil,
+				Capabilities: &apparmor.CapabilityRules{
+					AllowedCapabilities: []string{"SOME_FUTURE_CAP"},
+				},
+			},
+			wantErr: nil,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := apparmor.ValidateArtifact(test.profile)
+
+			if test.wantErr == nil {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+
+				return
+			}
+
+			if !errors.Is(err, test.wantErr) {
+				t.Errorf("expected %v, got: %v", test.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestValidateArtifactNil(t *testing.T) {
+	t.Parallel()
+
+	err := apparmor.ValidateArtifact(nil)
+	if !errors.Is(err, apparmor.ErrNilProfile) {
+		t.Errorf("expected ErrNilProfile, got: %v", err)
+	}
+}
+
+// oversizeGlob returns a pattern past the matcher's alternative limit, which
+// therefore never matches anything.
+func oversizeGlob() string {
+	alternatives := make([]string, 0, 200)
+	for idx := range 200 {
+		alternatives = append(alternatives, strconv.Itoa(idx))
+	}
+
+	return "/etc/{" + strings.Join(alternatives, ",") + "}"
 }

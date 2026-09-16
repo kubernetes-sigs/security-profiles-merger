@@ -43,14 +43,12 @@ const (
 // profileKind wires one profile type into the merge, diff, and validate
 // commands.
 type profileKind struct {
-	name     string
 	merge    func(data [][]byte, strategy, format string, stdout, stderr io.Writer) int
 	diff     func(data [][]byte, format string, stdout, stderr io.Writer) int
 	validate func(data [][]byte, mode validateMode, format string, stdout, stderr io.Writer) int
 }
 
-// kindOps holds the package functions of one profile type. validateArtifact
-// is nil for types without artifact validation.
+// kindOps holds the package functions of one profile type.
 type kindOps[T any, D equalChecker] struct {
 	intersect        func(...*T) (*T, error)
 	union            func(...*T) (*T, error)
@@ -62,24 +60,22 @@ type kindOps[T any, D equalChecker] struct {
 	formatDiff       func(*D) string
 }
 
-// checker returns the validation function for a mode. The second result is
-// false when the type has no validation for the mode.
-func (ops kindOps[T, D]) checker(mode validateMode) (func(*T) error, bool) {
+// checker returns the validation function for a mode.
+func (ops kindOps[T, D]) checker(mode validateMode) func(*T) error {
 	switch mode {
 	case modeStrict:
-		return ops.validateStrict, true
+		return ops.validateStrict
 	case modeArtifact:
-		return ops.validateArtifact, ops.validateArtifact != nil
+		return ops.validateArtifact
 	case modeDefault:
-		return ops.validate, true
+		return ops.validate
 	}
 
-	return ops.validate, true
+	return ops.validate
 }
 
-func newKind[T any, D equalChecker](name string, ops kindOps[T, D]) profileKind {
+func newKind[T any, D equalChecker](ops kindOps[T, D]) profileKind {
 	return profileKind{
-		name: name,
 		merge: func(data [][]byte, strategy, format string, stdout, stderr io.Writer) int {
 			return mergeProfiles(
 				data, strategy, format, ops.intersect, ops.union, ops.format, stdout, stderr,
@@ -91,17 +87,9 @@ func newKind[T any, D equalChecker](name string, ops kindOps[T, D]) profileKind 
 		validate: func(
 			data [][]byte, mode validateMode, format string, stdout, stderr io.Writer,
 		) int {
-			check, ok := ops.checker(mode)
-			if !ok {
-				_, _ = fmt.Fprintf(
-					stderr, "error: --artifact is not supported for %s profiles\n", name,
-				)
-
-				return exitUsage
-			}
-
 			return validateProfiles(
-				data, check, mode == modeStrict, format, ops.format, stdout, stderr,
+				data, ops.checker(mode), mode == modeStrict,
+				format, ops.format, stdout, stderr,
 			)
 		},
 	}
@@ -111,7 +99,7 @@ func newKind[T any, D equalChecker](name string, ops kindOps[T, D]) profileKind 
 func kindByName(name string) (profileKind, bool) {
 	switch name {
 	case typeSeccomp:
-		return newKind(name, kindOps[specs.LinuxSeccomp, seccomp.ProfileDiff]{
+		return newKind(kindOps[specs.LinuxSeccomp, seccomp.ProfileDiff]{
 			intersect:        seccomp.Intersect,
 			union:            seccomp.Union,
 			validate:         seccomp.Validate,
@@ -122,23 +110,23 @@ func kindByName(name string) (profileKind, bool) {
 			formatDiff:       seccomp.FormatDiff,
 		}), true
 	case typeAppArmor:
-		return newKind(name, kindOps[apparmor.Profile, apparmor.ProfileDiff]{
+		return newKind(kindOps[apparmor.Profile, apparmor.ProfileDiff]{
 			intersect:        apparmor.Intersect,
 			union:            apparmor.Union,
 			validate:         apparmor.Validate,
 			validateStrict:   apparmor.ValidateStrict,
-			validateArtifact: nil,
+			validateArtifact: apparmor.ValidateArtifact,
 			format:           apparmor.FormatProfile,
 			diff:             apparmor.Diff,
 			formatDiff:       apparmor.FormatDiff,
 		}), true
 	case typeLandlock:
-		return newKind(name, kindOps[landlock.Profile, landlock.ProfileDiff]{
+		return newKind(kindOps[landlock.Profile, landlock.ProfileDiff]{
 			intersect:        landlock.Intersect,
 			union:            landlock.Union,
 			validate:         landlock.Validate,
 			validateStrict:   landlock.ValidateStrict,
-			validateArtifact: nil,
+			validateArtifact: landlock.ValidateArtifact,
 			format:           landlock.FormatProfile,
 			diff:             landlock.Diff,
 			formatDiff:       landlock.FormatDiff,
@@ -151,11 +139,24 @@ func kindByName(name string) (profileKind, bool) {
 }
 
 // resolveKind returns the profile kind named by --type, or the one detected
-// from the first input when the flag is empty.
+// from the inputs when the flag is empty.
 func resolveKind(profileType string, data [][]byte, stderr io.Writer) (profileKind, int) {
 	if profileType == "" {
-		profileType = detectProfileType(data)
-		if profileType == "" {
+		detected, conflict := detectProfileType(data)
+
+		if conflict != "" {
+			_, _ = fmt.Fprintf(
+				stderr,
+				"error: inputs mix profile types (%s and %s), use --type\n",
+				detected, conflict,
+			)
+
+			var none profileKind
+
+			return none, exitUsage
+		}
+
+		if detected == "" {
 			_, _ = fmt.Fprintln(
 				stderr, "error: could not detect profile type from input, use --type",
 			)
@@ -164,6 +165,8 @@ func resolveKind(profileType string, data [][]byte, stderr io.Writer) (profileKi
 
 			return none, exitUsage
 		}
+
+		profileType = detected
 
 		_, _ = fmt.Fprintf(stderr, "auto-detected profile type: %s\n", profileType)
 	}

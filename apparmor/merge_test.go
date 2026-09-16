@@ -1587,3 +1587,53 @@ func TestNormalizeGlobPathEmptyPrefix(t *testing.T) {
 		)
 	}
 }
+
+// TestUnionIgnoresPathOrder covers literal paths a glob in the same list
+// covers: whether such a literal survives a union must not depend on whether
+// it comes before or after the glob.
+func TestUnionIgnoresPathOrder(t *testing.T) {
+	t.Parallel()
+
+	orders := [][]string{
+		{"/etc/foo", "/etc/*"},
+		{"/etc/*", "/etc/foo"},
+	}
+
+	results := make([][]string, 0, len(orders))
+
+	for _, paths := range orders {
+		profile := &apparmor.Profile{
+			Executable: &apparmor.ExecutableRules{
+				AllowedExecutables: paths,
+				AllowedLibraries:   nil,
+			},
+			Filesystem: &apparmor.FilesystemRules{
+				ReadOnlyPaths:  paths,
+				WriteOnlyPaths: nil,
+				ReadWritePaths: nil,
+			},
+			Network:      nil,
+			Capabilities: nil,
+		}
+
+		merged, err := apparmor.Union(profile, profile)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		diff, err := apparmor.Diff(profile, merged)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !diff.Equal {
+			t.Errorf("Union(p, p) for %q differs from p: %s", paths, apparmor.FormatDiff(diff))
+		}
+
+		results = append(results, merged.Filesystem.ReadOnlyPaths)
+	}
+
+	if !slices.Equal(results[0], results[1]) {
+		t.Errorf("path order changed the union: %q vs %q", results[0], results[1])
+	}
+}

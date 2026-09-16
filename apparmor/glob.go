@@ -19,6 +19,7 @@ package apparmor
 import (
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -32,12 +33,19 @@ var (
 
 	// globCacheEntries stores compiled glob regexes keyed by pattern.
 	globCacheEntries = make(map[string]*regexp.Regexp)
+
+	// globCacheBytes is the total pattern length globCacheEntries holds. A
+	// compiled program grows with its pattern, so bounding the patterns
+	// bounds what the cache retains, which an entry count alone does not:
+	// maxGlobCacheEntries patterns of maxGlobPatternLen would be megabytes.
+	globCacheBytes int
 )
 
 const (
 	maxGlobPatternLen     = 4096
 	maxGlobAlternatives   = 100
 	maxGlobCacheEntries   = 1024
+	maxGlobCacheBytes     = 256 << 10
 	globCacheEvictDivisor = 4
 	// escapedLen is the length of a backslash-escaped literal.
 	escapedLen = 2
@@ -224,22 +232,44 @@ func globToRegex(pattern string) *regexp.Regexp {
 		return cached
 	}
 
-	if len(globCacheEntries) >= maxGlobCacheEntries {
-		evictCount := maxGlobCacheEntries / globCacheEvictDivisor
-
-		for key := range globCacheEntries {
-			delete(globCacheEntries, key)
-
-			evictCount--
-			if evictCount == 0 {
-				break
-			}
-		}
-	}
+	evictGlobCache(len(pattern))
 
 	globCacheEntries[pattern] = compiled
+	globCacheBytes += len(pattern)
 
 	return compiled
+}
+
+// evictGlobCache makes room for a pattern of the given length, dropping
+// entries until the cache is under both its entry and byte bounds. Callers
+// hold globCacheMu.
+func evictGlobCache(incoming int) {
+	overCount := len(globCacheEntries) >= maxGlobCacheEntries
+	overBytes := globCacheBytes+incoming > maxGlobCacheBytes
+
+	if !overCount && !overBytes {
+		return
+	}
+
+	// An entry-count overflow evicts a quarter of the cache at once, so the
+	// next insertions do not overflow again. A byte overflow evicts only
+	// until the incoming pattern fits: the byte bound holds far fewer than a
+	// quarter of the entry bound's worth of long patterns, so a fixed quota
+	// would empty the cache every time.
+	quota := 0
+	if overCount {
+		quota = maxGlobCacheEntries / globCacheEvictDivisor
+	}
+
+	for key := range globCacheEntries {
+		if quota <= 0 && globCacheBytes+incoming <= maxGlobCacheBytes {
+			break
+		}
+
+		delete(globCacheEntries, key)
+		globCacheBytes -= len(key)
+		quota--
+	}
 }
 
 // globNeverMatches reports whether a glob pattern exceeds the size limits
@@ -391,51 +421,159 @@ func unescapeLiteral(path string) string {
 	return builder.String()
 }
 
+// neverMatchFragment is a regex fragment that matches nothing, used for a
+// character class left with no members.
+const neverMatchFragment = `(?:$.)`
+
+// classRange is one member of a character class: a single character when lo
+// and hi are equal, otherwise an inclusive range.
+type classRange struct {
+	lo, hi rune
+}
+
 // classFragment translates a "[...]" token into a regex character class.
-// Ranges ("a-z") are kept; every other member is escaped.
+// Ranges ("a-z") are kept; every other member is escaped. As in the AppArmor
+// parser, a class never matches "/", which separates path components, nor a
+// NUL byte, which no path can contain: a negated class excludes both, and a
+// positive class has them removed, splitting a range that spans them.
 func classFragment(token string) string {
 	inner := token[1 : len(token)-1]
 
-	var builder strings.Builder
-
-	builder.WriteByte('[')
+	negated := false
 
 	if inner != "" && (inner[0] == '^' || inner[0] == '!') {
-		builder.WriteByte('^')
-
+		negated = true
 		inner = inner[1:]
 	}
 
+	items := parseClassMembers(inner)
+
+	if negated {
+		items = append(items, classRange{lo: '/', hi: '/'}, classRange{lo: 0, hi: 0})
+
+		return "[^" + renderClassRanges(items) + "]"
+	}
+
+	items = withoutClassRune(items, '/')
+	items = withoutClassRune(items, 0)
+
+	if len(items) == 0 {
+		return neverMatchFragment
+	}
+
+	return "[" + renderClassRanges(items) + "]"
+}
+
+// parseClassMembers splits the inside of a character class into its members.
+// A backslash escapes the following character, so "\d" is a literal "d", and
+// a "-" between two members denotes a range.
+func parseClassMembers(inner string) []classRange {
 	members := []rune(inner)
+	items := make([]classRange, 0, len(members))
+	pos := 0
 
-	for idx := 0; idx < len(members); idx++ {
-		if members[idx] == '\\' && idx+1 < len(members) {
-			idx++
+	for pos < len(members) {
+		low, ok := readClassMember(members, &pos)
+		if !ok {
+			break
+		}
 
-			// Quote rather than re-escape: "\d" must stay a literal "d".
-			builder.WriteString(regexp.QuoteMeta(string(members[idx])))
+		// A "-" directly after a member and followed by another member is a
+		// range operator; anywhere else it is a literal dash.
+		if pos+1 < len(members) && members[pos] == '-' {
+			pos++
+			items = append(items, classRangeFrom(low, members, &pos)...)
 
 			continue
 		}
 
-		builder.WriteString(classMember(members, idx))
+		items = append(items, classRange{lo: low, hi: low})
 	}
 
-	builder.WriteByte(']')
+	return items
+}
+
+// classRangeFrom completes a range that started at low, or returns its parts
+// as literals when what follows the dash cannot close one.
+func classRangeFrom(low rune, members []rune, pos *int) []classRange {
+	high, closed := readClassMember(members, pos)
+	if closed && high >= low {
+		return []classRange{{lo: low, hi: high}}
+	}
+
+	items := []classRange{{lo: low, hi: low}, {lo: '-', hi: '-'}}
+	if closed {
+		items = append(items, classRange{lo: high, hi: high})
+	}
+
+	return items
+}
+
+// readClassMember reads the member at pos, resolving a backslash escape, and
+// advances pos past it.
+func readClassMember(members []rune, pos *int) (rune, bool) {
+	if *pos >= len(members) {
+		return 0, false
+	}
+
+	char := members[*pos]
+	if char == '\\' && *pos+1 < len(members) {
+		*pos++
+		char = members[*pos]
+	}
+
+	*pos++
+
+	return char, true
+}
+
+// withoutClassRune removes one character from a class, splitting any range
+// that contains it.
+func withoutClassRune(items []classRange, drop rune) []classRange {
+	result := make([]classRange, 0, len(items)+1)
+
+	for _, item := range items {
+		if drop < item.lo || drop > item.hi {
+			result = append(result, item)
+
+			continue
+		}
+
+		if item.lo <= drop-1 {
+			result = append(result, classRange{lo: item.lo, hi: drop - 1})
+		}
+
+		if drop+1 <= item.hi {
+			result = append(result, classRange{lo: drop + 1, hi: item.hi})
+		}
+	}
+
+	return result
+}
+
+func renderClassRanges(items []classRange) string {
+	var builder strings.Builder
+
+	for _, item := range items {
+		builder.WriteString(classRuneFragment(item.lo))
+
+		if item.hi != item.lo {
+			builder.WriteByte('-')
+			builder.WriteString(classRuneFragment(item.hi))
+		}
+	}
 
 	return builder.String()
 }
 
-// classMember renders the class member at idx, keeping "-" as a range
-// operator between two members and escaping regex metacharacters.
-func classMember(members []rune, idx int) string {
-	char := members[idx]
-
-	if char == '-' && idx > 0 && idx+1 < len(members) {
-		return "-"
+// classRuneFragment renders one character for use inside a character class,
+// escaping what regexp would otherwise read as syntax.
+func classRuneFragment(char rune) string {
+	if char < ' ' || char == 0x7f {
+		return `\x{` + strconv.FormatInt(int64(char), 16) + `}`
 	}
 
-	if strings.ContainsRune(`\][^-`, char) {
+	if strings.ContainsRune(`\]^-[`, char) {
 		return `\` + string(char)
 	}
 
@@ -447,36 +585,112 @@ type apparmorPath struct {
 	expr    *regexp.Regexp
 }
 
+// prefixAncestors returns every literal prefix a glob pattern could have and
+// still match name: the empty prefix, which belongs to patterns starting
+// with a glob token, and every directory prefix of name. A glob's literal
+// prefix is either empty or ends in "/" (see globLiteralPrefix), so this is
+// exactly the set of prefixes name starts with.
+func prefixAncestors(name string) []string {
+	result := make([]string, 0, strings.Count(name, "/")+1)
+	result = append(result, "")
+
+	for idx := range len(name) {
+		if name[idx] == '/' {
+			result = append(result, name[:idx+1])
+		}
+	}
+
+	return result
+}
+
+// globMatchPrefix returns the literal prefix a name must start with for the
+// pattern to match it. Escapes are resolved because the compiled regex
+// matches the unescaped form, which is what matches compares against.
+func globMatchPrefix(pattern string) string {
+	return unescapeLiteral(globLiteralPrefix(pattern))
+}
+
+// prefixIndex groups patterns by a literal prefix so that a candidate is
+// tested only against the patterns whose prefix it starts with, rather than
+// against every pattern. Without it, matching n paths against m globs costs
+// n*m regex evaluations, which a profile with many paths turns into the
+// dominant cost of a merge.
+type prefixIndex map[string][]string
+
+func (index prefixIndex) add(prefix, pattern string) {
+	index[prefix] = append(index[prefix], pattern)
+}
+
+func (index prefixIndex) remove(prefix, pattern string) {
+	bucket := index[prefix]
+
+	bucket = slices.DeleteFunc(bucket, func(existing string) bool {
+		return existing == pattern
+	})
+	if len(bucket) == 0 {
+		delete(index, prefix)
+
+		return
+	}
+
+	index[prefix] = bucket
+}
+
+// candidates calls visit for every pattern whose prefix name starts with,
+// stopping early when visit returns true, which it then reports.
+func (index prefixIndex) candidates(name string, visit func(pattern string) bool) bool {
+	if len(index) == 0 {
+		return false
+	}
+
+	for _, prefix := range prefixAncestors(name) {
+		if slices.ContainsFunc(index[prefix], visit) {
+			return true
+		}
+	}
+
+	return false
+}
+
 type pathSet struct {
-	globs    []apparmorPath
+	// globs holds every glob pattern of the set, by pattern. Order is not
+	// tracked: patterns() sorts, and every caller sorts again afterwards.
+	globs    map[string]apparmorPath
+	byPrefix prefixIndex
 	literals map[string]struct{}
 }
 
 func newPathSet(patterns []string) pathSet {
 	set := pathSet{
-		globs:    make([]apparmorPath, 0, len(patterns)),
+		globs:    make(map[string]apparmorPath, len(patterns)),
+		byPrefix: make(prefixIndex, len(patterns)),
 		literals: make(map[string]struct{}, len(patterns)),
 	}
 
-	seen := make(map[string]struct{}, len(patterns))
-
+	// Paths are inserted as given, without the pruning add applies: whether
+	// a literal survives would otherwise depend on whether it precedes a glob
+	// covering it in the list.
 	for _, pat := range patterns {
-		if _, ok := seen[pat]; ok {
-			continue
-		}
-
-		seen[pat] = struct{}{}
-
-		if IsGlobPattern(pat) {
-			set.globs = append(set.globs, apparmorPath{
-				pattern: pat, expr: globToRegex(pat),
-			})
-		} else {
-			set.literals[pat] = struct{}{}
-		}
+		set.insert(pat)
 	}
 
 	return set
+}
+
+// insert records a pattern without pruning literals it covers.
+func (set *pathSet) insert(pattern string) {
+	if !IsGlobPattern(pattern) {
+		set.literals[pattern] = struct{}{}
+
+		return
+	}
+
+	if _, ok := set.globs[pattern]; ok {
+		return
+	}
+
+	set.globs[pattern] = apparmorPath{pattern: pattern, expr: globToRegex(pattern)}
+	set.byPrefix.add(globMatchPrefix(pattern), pattern)
 }
 
 // matches reports whether a literal path is present or covered by a glob.
@@ -487,13 +701,9 @@ func (set *pathSet) matches(path string) bool {
 
 	name := unescapeLiteral(path)
 
-	for _, entry := range set.globs {
-		if entry.expr.MatchString(name) {
-			return true
-		}
-	}
-
-	return false
+	return set.byPrefix.candidates(name, func(pattern string) bool {
+		return set.globs[pattern].expr.MatchString(name)
+	})
 }
 
 // covers reports whether the set already grants everything the path grants:
@@ -502,39 +712,24 @@ func (set *pathSet) matches(path string) bool {
 // regex does not indicate language inclusion.
 func (set *pathSet) covers(path string) bool {
 	if IsGlobPattern(path) {
-		return slices.ContainsFunc(set.globs, func(existing apparmorPath) bool {
-			return existing.pattern == path
-		})
+		_, ok := set.globs[path]
+
+		return ok
 	}
 
 	return set.matches(path)
 }
 
+// add records a pattern, pruning the literals a new glob covers.
 func (set *pathSet) add(pattern string) {
-	if IsGlobPattern(pattern) {
-		expr := globToRegex(pattern)
-
-		// Remove exact duplicate glob.
-		set.globs = slices.DeleteFunc(set.globs, func(existing apparmorPath) bool {
-			return existing.pattern == pattern
-		})
-
-		// Prune literals subsumed by this glob. Glob-vs-glob
-		// subsumption is not attempted because matching a glob
-		// pattern string against another glob's regex does not
+	if _, ok := set.globs[pattern]; !ok && IsGlobPattern(pattern) {
+		// Glob-vs-glob subsumption is not attempted because matching a
+		// glob pattern string against another glob's regex does not
 		// reliably indicate language inclusion.
-		for lit := range set.literals {
-			if expr.MatchString(unescapeLiteral(lit)) {
-				delete(set.literals, lit)
-			}
-		}
-
-		set.globs = append(set.globs, apparmorPath{
-			pattern: pattern, expr: expr,
-		})
-	} else {
-		set.literals[pattern] = struct{}{}
+		set.popCoveredLiterals(pattern)
 	}
+
+	set.insert(pattern)
 }
 
 func (set *pathSet) popExact(path string) bool {
@@ -544,12 +739,11 @@ func (set *pathSet) popExact(path string) bool {
 		return true
 	}
 
-	for idx, entry := range set.globs {
-		if entry.pattern == path {
-			set.globs = slices.Delete(set.globs, idx, idx+1)
+	if _, ok := set.globs[path]; ok {
+		delete(set.globs, path)
+		set.byPrefix.remove(globMatchPrefix(path), path)
 
-			return true
-		}
+		return true
 	}
 
 	return false
@@ -573,6 +767,9 @@ func (set *pathSet) popCoveredLiterals(glob string) []string {
 	return popped
 }
 
+// patterns returns every path of the set, sorted. Both maps iterate in
+// random order, and merge results feed the next pairwise merge, so sorting
+// here is what keeps a fold over three or more profiles deterministic.
 func (set *pathSet) patterns() []string {
 	total := len(set.globs) + len(set.literals)
 	if total == 0 {
@@ -585,11 +782,40 @@ func (set *pathSet) patterns() []string {
 		ret = append(ret, lit)
 	}
 
-	for _, entry := range set.globs {
-		ret = append(ret, entry.pattern)
+	for pattern := range set.globs {
+		ret = append(ret, pattern)
 	}
 
+	slices.Sort(ret)
+
 	return ret
+}
+
+// starStarIndex indexes the patterns of a set that are the "**" expansion of
+// their own literal prefix, keyed by that prefix. Those are the only
+// patterns that can narrow another glob: "/etc/**" grants everything under
+// "/etc/", so intersecting it with a pattern rooted there leaves that
+// pattern.
+func starStarIndex(patterns []string) prefixIndex {
+	index := make(prefixIndex)
+
+	for _, pattern := range patterns {
+		prefix := globLiteralPrefix(pattern)
+		if pattern == prefix+"**" {
+			index.add(prefix, pattern)
+		}
+	}
+
+	return index
+}
+
+// narrowedBy reports whether some "<prefix>**" pattern in the index expands
+// over the given glob, so that the intersection of the two is the glob
+// itself.
+func narrowedBy(index prefixIndex, pattern string) bool {
+	return index.candidates(globLiteralPrefix(pattern), func(string) bool {
+		return true
+	})
 }
 
 // intersectPaths returns paths permitted by both sides, with glob awareness.
@@ -615,23 +841,58 @@ func intersectPaths(left, right []string) []string {
 	addMatchedLiterals(left, &rightSet, addPath)
 	addMatchedLiterals(right, &leftSet, addPath)
 
-	for _, leftPath := range left {
-		if !IsGlobPattern(leftPath) || globNeverMatches(leftPath) {
-			continue
-		}
+	addNarrowedGlobs(left, right, addPath)
 
-		for _, rightPath := range right {
-			if !IsGlobPattern(rightPath) || globNeverMatches(rightPath) {
-				continue
-			}
+	return result
+}
 
-			if narrowed := narrowGlobs(leftPath, rightPath); narrowed != "" {
-				addPath(narrowed)
-			}
+// addNarrowedGlobs keeps the globs both sides permit: those present on both
+// sides verbatim, and those the other side expands over with a "**" pattern
+// rooted at a containing prefix. It walks each glob's prefix ancestors
+// against the other side's "**" patterns rather than comparing every pair,
+// which would be quadratic in the number of globs.
+func addNarrowedGlobs(left, right []string, addPath func(string)) {
+	leftGlobs := usableGlobs(left)
+	rightGlobs := usableGlobs(right)
+
+	if len(leftGlobs) == 0 || len(rightGlobs) == 0 {
+		return
+	}
+
+	leftStarStar := starStarIndex(leftGlobs)
+	rightStarStar := starStarIndex(rightGlobs)
+	rightSeen := make(map[string]struct{}, len(rightGlobs))
+
+	for _, pattern := range rightGlobs {
+		rightSeen[pattern] = struct{}{}
+	}
+
+	for _, pattern := range leftGlobs {
+		if _, both := rightSeen[pattern]; both || narrowedBy(rightStarStar, pattern) {
+			addPath(pattern)
 		}
 	}
 
-	return result
+	for _, pattern := range rightGlobs {
+		if narrowedBy(leftStarStar, pattern) {
+			addPath(pattern)
+		}
+	}
+}
+
+// usableGlobs returns the glob patterns of a path list that match anything.
+// A pattern past the matcher's limits grants nothing, so it cannot
+// contribute to an intersection.
+func usableGlobs(paths []string) []string {
+	var globs []string
+
+	for _, path := range paths {
+		if IsGlobPattern(path) && !globNeverMatches(path) {
+			globs = append(globs, path)
+		}
+	}
+
+	return globs
 }
 
 func addMatchedLiterals(
@@ -650,54 +911,54 @@ type fsPathEntry struct {
 	expr *regexp.Regexp
 }
 
-func buildFsEntries(perms map[string]fsPermission) []fsPathEntry {
-	entries := make([]fsPathEntry, 0, len(perms))
-
-	for path, perm := range perms {
-		var expr *regexp.Regexp
-
-		if IsGlobPattern(path) {
-			expr = globToRegex(path)
-			if expr == neverMatchRe {
-				// An oversize pattern grants nothing, so it cannot
-				// contribute to an intersection.
-				continue
-			}
-		}
-
-		entries = append(entries, fsPathEntry{
-			path: path,
-			perm: perm,
-			expr: expr,
-		})
-	}
-
-	return entries
+// fsSide holds one side of a filesystem intersection, split into literal
+// entries and glob entries, with the glob entries indexed for matching.
+type fsSide struct {
+	literals []fsPathEntry
+	globs    map[string]fsPathEntry
+	// byPrefix indexes every glob by the literal prefix a path must start
+	// with to match it.
+	byPrefix prefixIndex
+	// starStar indexes the globs that are the "**" expansion of their own
+	// literal prefix, which are the only ones that can narrow another glob.
+	starStar prefixIndex
 }
 
-// matchIntersectPaths returns the narrower path when one covers the other
-// via glob matching, the path itself for exact matches, or empty string
-// when the paths don't interact. For glob-vs-glob, prefix-based narrowing
-// is used when possible, falling back to exact string match.
-func matchIntersectPaths(left, right fsPathEntry) string {
-	if left.path == right.path {
-		return left.path
+func buildFsSide(perms map[string]fsPermission) fsSide {
+	side := fsSide{
+		literals: make([]fsPathEntry, 0, len(perms)),
+		globs:    make(map[string]fsPathEntry, len(perms)),
+		byPrefix: make(prefixIndex),
+		starStar: make(prefixIndex),
 	}
 
-	switch {
-	case left.expr == nil && right.expr != nil:
-		if right.expr.MatchString(unescapeLiteral(left.path)) {
-			return left.path
+	for path, perm := range perms {
+		if !IsGlobPattern(path) {
+			side.literals = append(side.literals, fsPathEntry{
+				path: path, perm: perm, expr: nil,
+			})
+
+			continue
 		}
-	case left.expr != nil && right.expr == nil:
-		if left.expr.MatchString(unescapeLiteral(right.path)) {
-			return right.path
+
+		expr := globToRegex(path)
+		if expr == neverMatchRe {
+			// An oversize pattern grants nothing, so it cannot
+			// contribute to an intersection.
+			continue
 		}
-	case left.expr != nil && right.expr != nil:
-		return narrowGlobs(left.path, right.path)
+
+		side.globs[path] = fsPathEntry{path: path, perm: perm, expr: expr}
+
+		prefix := globLiteralPrefix(path)
+		side.byPrefix.add(unescapeLiteral(prefix), path)
+
+		if path == prefix+"**" {
+			side.starStar.add(prefix, path)
+		}
 	}
 
-	return ""
+	return side
 }
 
 // globLiteralPrefix extracts the leading literal path segments before the
@@ -714,30 +975,6 @@ func globLiteralPrefix(pattern string) string {
 	lastSlash := strings.LastIndex(prefix, "/")
 	if lastSlash >= 0 {
 		return prefix[:lastSlash+1]
-	}
-
-	return ""
-}
-
-// narrowGlobs returns the more specific glob when the other one is the
-// "**" expansion of a literal prefix that contains the specific glob's
-// prefix, so that "/etc/**" narrows to "/etc/*.conf" as well as to
-// "/etc/foo/*.conf". Exact string matches are kept as-is. If neither glob
-// contains the other in this way, returns empty string.
-func narrowGlobs(left, right string) string {
-	if left == right {
-		return left
-	}
-
-	leftPrefix := globLiteralPrefix(left)
-	rightPrefix := globLiteralPrefix(right)
-
-	if left == leftPrefix+"**" && strings.HasPrefix(rightPrefix, leftPrefix) {
-		return right
-	}
-
-	if right == rightPrefix+"**" && strings.HasPrefix(leftPrefix, rightPrefix) {
-		return left
 	}
 
 	return ""

@@ -10,6 +10,7 @@
   - [Functions](#functions-1)
   - [Types](#types-1)
   - [Errors](#errors-1)
+  - [Capability names](#capability-names)
   - [Glob patterns](#glob-patterns)
   - [Nil vs empty semantics](#nil-vs-empty-semantics)
   - [Filesystem merge](#filesystem-merge)
@@ -18,6 +19,7 @@
   - [Types](#types-2)
   - [Errors](#errors-2)
   - [Handled access semantics](#handled-access-semantics)
+  - [ABI versions](#abi-versions)
   - [IPC scoping](#ipc-scoping)
   - [Path and network rules](#path-and-network-rules)
 <!-- /toc -->
@@ -50,7 +52,8 @@ import "sigs.k8s.io/security-profiles-merger/seccomp"
 | `ValidateStrict` | All Validate checks plus duplicates (syscall names, reported once per name, architectures, flags), errno values above 4095 on actions that return them, `valueTwo` on operators that ignore it, and `errnoRet` on actions that ignore it |
 | `ValidateArtifact` | Validate plus the shape checks for untrusted OCI artifacts (duplicate architectures and flags, errno values above 4095 on actions that return them); rejects `SCMP_ACT_NOTIFY`, the listener settings (`listenerPath`, `listenerMetadata`, `SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV`), more than `MaxArtifactEntriesPerSyscall` entries per syscall, and conflicting entries for one syscall (same shape, different result); allows duplicate syscall names and ignores `valueTwo` and `errnoRet` where runtimes ignore them |
 | `FormatProfile` | Human-readable representation of a seccomp profile |
-| `Diff` | Structured diff between two profiles, compared by what a runtime loads from them (see merge semantics) |
+| `Diff` | Structured diff between two profiles, compared by what a runtime loads from them (see merge semantics), with the running program's architecture implied |
+| `DiffForArch` | `Diff` against a named native architecture, for profiles destined for a node that may not match the caller |
 | `FormatDiff` | Human-readable representation of a profile diff |
 
 See [pkg.go.dev](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp)
@@ -85,6 +88,10 @@ in the [package reference](https://pkg.go.dev/sigs.k8s.io/security-profiles-merg
   these", so intersection is the plain set intersection of the lists, which
   may be empty, and union combines them. A list need not name the native
   architecture, and a profile listing only foreign architectures is valid.
+  The merge needs no help from the caller here, but `Diff` does: it implies
+  the architecture of the running program, so the same two profiles compare
+  differently depending on where the comparison runs. Use `DiffForArch` to
+  name the target architecture, or the empty `specs.Arch` to imply none.
 - Flags are merged by what they do, so that a merged profile never loosens a
   baseline. `SECCOMP_FILTER_FLAG_SPEC_ALLOW` disables a mitigation: intersection
   keeps it only if every profile sets it, union if any does.
@@ -99,6 +106,23 @@ in the [package reference](https://pkg.go.dev/sigs.k8s.io/security-profiles-merg
 - A single profile is normalized without merging: `Intersect(p)` and
   `Union(p)` reduce it to what a runtime loads from it under the evaluation
   model below, in the same form `Diff` compares.
+- Merge cost is bounded. Intersection compares every argument-filtered entry
+  of a syscall against every entry for the same syscall on the other side,
+  which grows quadratically with the entry count, so past an internal
+  per-syscall clause budget the syscall collapses to a single unconditional
+  entry combining every action involved: the most restrictive for
+  intersection, the least restrictive for union. That is the same
+  conservative rewrite the merge already applies wherever the exact result is
+  not expressible, so `Intersect` still never permits more than any input and
+  `Union` never permits less. `IntersectSyscalls` collapses the same way,
+  emitting an unconditional entry that decides every call of the syscall.
+  `UnionSyscalls` never collapses: bare lists have no default to fall back
+  from, so an unconditional entry would decide calls neither input decides.
+  It keeps every filter instead, and since union emits no pairwise entries
+  its cost stays proportional to the product of the two entry counts.
+  Profiles of realistic shape stay well under the budget;
+  `MaxArtifactEntriesPerSyscall` bounds one syscall of an artifact, and the
+  budget bounds the merge as a whole.
 - Evaluation model: entries are evaluated the way runc and libseccomp load
   them. Entries whose action (and errno, for `ERRNO` and `TRACE`) equals the
   profile default are ignored. An unconditional entry applies to every call of
@@ -193,11 +217,12 @@ import "sigs.k8s.io/security-profiles-merger/apparmor"
 |----------|-------------|
 | `Intersect` | Merge via intersection; capabilities/paths intersected, network AND |
 | `Union` | Merge via union; all rules combined, network OR |
-| `Validate` | Check for cross-category path conflicts, known capabilities, and the absence of AppArmor variables |
-| `ValidateStrict` | All Validate checks plus duplicate executables/libraries, relative paths, and glob patterns over the matcher's limits |
+| `Validate` | Check for cross-category path conflicts and the absence of AppArmor variables |
+| `ValidateStrict` | All Validate checks plus unknown capability names, duplicate executables/libraries, relative paths, and glob patterns over the matcher's limits |
+| `ValidateArtifact` | Validate plus what a runtime could not load or would silently drop in an untrusted profile: relative paths and glob patterns over the matcher's limits |
 | `FormatProfile` | Human-readable representation of an AppArmor profile |
 | `IsGlobPattern` | Report whether a path contains AppArmor glob tokens |
-| `Diff` | Structured diff between two profiles |
+| `Diff` | Structured diff between two profiles, compared by what AppArmor loads from them (see nil vs empty semantics) |
 | `FormatDiff` | Human-readable representation of a profile diff |
 
 See [pkg.go.dev](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor)
@@ -221,6 +246,16 @@ Sentinel errors (`ErrNoProfiles`, `ErrNilProfile`, `ErrDuplicatePath`,
 `ErrUnsupportedVariable`, `ErrRelativePath`, etc.) are documented
 in the [package reference](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#pkg-variables).
 
+### Capability names
+
+Capability names are compared case-insensitively and are otherwise opaque to
+the merge: an intersection keeps one only when every profile grants it, and a
+union keeps every name either profile grants. `Validate` accepts any name,
+because the kernel gains capabilities over time and failing a merge because
+one input names a capability newer than this package would leave callers
+unable to merge at all. `ValidateStrict` reports names outside the known set
+with `ErrUnknownCapability`, for user-authored profiles where they are typos.
+
 ### Glob patterns
 
 Paths may use AppArmor glob syntax: `*` (any characters except `/`), `**`
@@ -228,7 +263,9 @@ Paths may use AppArmor glob syntax: `*` (any characters except `/`), `**`
 classes such as `[abc]`, `[a-z]`, and `[^a]`, and alternations such as
 `{a,b}`, which may nest and may contain further glob tokens. As in the
 AppArmor parser, `*` and `**` at the start of a path component match at least
-one character, so `/dir/**` does not match `/dir/` itself. A backslash escapes
+one character, so `/dir/**` does not match `/dir/` itself, and a character
+class never matches `/`: it is removed from a positive class, splitting a
+range that spans it, and excluded from a negated one. A backslash escapes
 the following character, and an escaped literal such as `/etc/\*` is matched
 against globs as the file name `/etc/*`. Literal paths are cleaned but keep a
 trailing slash, which distinguishes a directory rule from a file rule.
@@ -238,7 +275,9 @@ intersection a literal path survives when a glob on the other side matches
 it, and two globs survive only when they are identical or one is the `**`
 expansion of a literal prefix containing the other's prefix (so `/etc/**`
 narrows to `/etc/*.conf` and to `/etc/foo/*.conf`). On union a glob prunes
-literals it matches; globs never prune other globs. Patterns longer than 4096
+the literals of the other profile it matches, while the paths a single
+profile lists are kept as written whatever their order; globs never prune
+other globs. Patterns longer than 4096
 bytes or with more than 100 alternatives in total never match, so they are
 dropped on intersection and kept verbatim on union; `ValidateStrict` reports
 them with `ErrGlobTooComplex`. AppArmor variables such as `@{HOME}` are not
@@ -257,6 +296,12 @@ intersecting with `{caps: []}` does, and the result carries every section
 explicitly. `Union` lets a nil section defer to the other profile, which
 grants the same as an empty section would; only the shape of the result
 differs, as a section nil on both sides stays nil.
+
+`Diff` compares the same way, so a profile that says nothing about raw
+sockets and one that forbids them are equal, and `Diff(p, Intersect(p))` is
+always equal: the explicit sections an intersection writes are not reported
+as a change. A caller logging what a baseline took away from an artifact
+therefore sees only real constraints.
 
 ### Filesystem merge
 
@@ -285,6 +330,9 @@ import "sigs.k8s.io/security-profiles-merger/landlock"
 | `Union` | Merge via union; handled sets intersected, rules unioned |
 | `Validate` | Check for known rights, valid paths, and duplicate rules |
 | `ValidateStrict` | All Validate checks plus unhandled-right and relative path detection |
+| `ValidateArtifact` | Validate plus what a kernel could not load in an untrusted profile: relative paths and rules granting unhandled rights |
+| `ValidateForABI` | All Validate checks plus rights the given Landlock ABI version does not know |
+| `RequiredABIVersion` | The lowest Landlock ABI version supporting every right a profile uses |
 | `FormatProfile` | Human-readable representation of a Landlock profile |
 | `Diff` | Structured diff between two profiles |
 | `FormatDiff` | Human-readable representation of a profile diff |
@@ -312,7 +360,7 @@ formatting.
 
 Sentinel errors (`ErrNoProfiles`, `ErrNilProfile`, `ErrUnknownRight`,
 `ErrDuplicateRule`, `ErrEmptyPath`, `ErrInvalidPath`, `ErrUnhandledRight`,
-`ErrDuplicateRight`, `ErrRelativePath`, etc.) are documented in the
+`ErrDuplicateRight`, `ErrRelativePath`, `ErrUnsupportedABIRight`, etc.) are documented in the
 [package reference](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#pkg-variables).
 
 ### Handled access semantics
@@ -322,6 +370,18 @@ restrictions compared to rules. Unhandled access rights are implicitly allowed,
 so intersection unions the handled sets and scoped sets (handling more rights /
 scoping more makes the ruleset more restrictive), and union intersects them
 (handling fewer rights / scoping less makes it less restrictive).
+
+### ABI versions
+
+Landlock gained access rights over several kernel releases, and a kernel
+rejects a ruleset carrying a right its ABI does not know. `RequiredABIVersion`
+returns the lowest version a profile can be loaded on, and `ValidateForABI`
+asks the same question the other way round, reporting every right a given
+version does not support with `ErrUnsupportedABIRight`. `ABIVersion`
+constants run from `ABIV1` to `LatestABIVersion`, and the version each right
+needs is documented on the right itself. Merging never raises the
+requirement beyond its inputs, since neither `Intersect` nor `Union` invents
+a right.
 
 ### IPC scoping
 

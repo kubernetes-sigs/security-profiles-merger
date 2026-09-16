@@ -100,8 +100,14 @@ var (
 // every entry for a syscall against every entry for the same syscall in the
 // other profile, so the cost per syscall grows quadratically with the entry
 // count. Real profiles use a handful of argument-filtered entries per
-// syscall; the cap keeps a 1 MiB artifact from turning the merge into a
-// multi-second operation.
+// syscall.
+//
+// The cap bounds one syscall, not the profile: a profile spreading entries
+// over many syscalls stays under it while still costing the merge time
+// proportional to its total size. What bounds the merge as a whole is the
+// merge itself, which falls back to a conservative collapse past its own
+// per-syscall clause budget, so no profile of the size KEP-6061 recommends
+// runtimes accept can turn it into a multi-second operation.
 const MaxArtifactEntriesPerSyscall = 128
 
 // Validate checks that a seccomp profile contains only known actions and
@@ -500,7 +506,7 @@ func validateDuplicateSyscallNames(syscalls []specs.LinuxSyscall) error {
 	return errors.Join(errs...)
 }
 
-// formatEntries renders entry indices as "0 and 1" or "0, 1 and 2".
+// formatEntries renders entry indices as "0", "0 and 1", or "0, 1 and 2".
 func formatEntries(entries []int) string {
 	parts := make([]string, len(entries))
 	for idx, entry := range entries {
@@ -508,6 +514,9 @@ func formatEntries(entries []int) string {
 	}
 
 	last := len(parts) - 1
+	if last < 1 {
+		return strings.Join(parts, "")
+	}
 
 	return strings.Join(parts[:last], ", ") + " and " + parts[last]
 }

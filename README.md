@@ -54,8 +54,9 @@ go get sigs.k8s.io/security-profiles-merger
 ## Packages
 
 Each package provides `Intersect`, `Union`, `Validate`, `ValidateStrict`,
-`FormatProfile`, `Diff`, and `FormatDiff` functions. The seccomp package also
-provides `ValidateArtifact` for profiles pulled from OCI artifacts
+`ValidateArtifact`, `FormatProfile`, `Diff`, and `FormatDiff` functions.
+`ValidateArtifact` runs the checks a runtime applies to a profile it did not
+author, such as one pulled from an OCI artifact
 ([KEP-6061](https://github.com/kubernetes/enhancements/issues/6061)). For the
 full API reference (functions, errors, types, and merge semantics), see
 [docs/api.md](docs/api.md).
@@ -96,6 +97,8 @@ if err != nil {
 // from the artifact is visible in the diff, for logging or metrics. Diff
 // compares profiles by what a runtime loads from them, so it is equal when
 // the baseline changed nothing, even though the merge normalizes its output.
+// Diff implies the architecture of the running program; a caller comparing
+// profiles for another node names it with seccomp.DiffForArch instead.
 constrained, err := seccomp.Diff(ociPulledProfile, effective)
 if err != nil {
     return err
@@ -120,7 +123,8 @@ if err != nil {
 ```go
 // A section a profile omits denies everything it covers, as it does in
 // AppArmor, so a baseline without a capability section grants no
-// capability to the intersection.
+// capability to the intersection. Diff compares the same way, so
+// normalizing a profile is never reported as a constraint.
 aaEffective, err := apparmor.Intersect(baseProfile, ociProfile)
 aaCombined, err := apparmor.Union(recorded1, recorded2)
 ```
@@ -130,6 +134,12 @@ aaCombined, err := apparmor.Union(recorded1, recorded2)
 ```go
 llEffective, err := landlock.Intersect(baseRuleset, ociRuleset)
 llCombined, err := landlock.Union(recorded1, recorded2)
+
+// A kernel rejects a right its ABI does not know, so a caller targeting a
+// specific node can check the merged ruleset against that node's version.
+if err := landlock.ValidateForABI(llEffective, nodeABI); err != nil {
+    return err
+}
 ```
 
 ## Examples
@@ -196,6 +206,10 @@ spm merge --type seccomp --strategy intersect baseline.json oci.json
 spm merge --type apparmor --strategy union recording1.json recording2.json
 ```
 
+Without `--type`, the type is detected from the fields the profiles carry.
+Inputs that mix profile types are rejected, since merging them would drop
+whatever the chosen type has no field for.
+
 Profiles can also be read from stdin as a JSON array:
 
 ```sh
@@ -219,11 +233,11 @@ spm merge --type seccomp --strategy intersect --format human a.json b.json
 ```sh
 spm validate --type seccomp profile.json
 spm validate --type apparmor --strict user-profile.json
-spm validate --type seccomp --artifact pulled-profile.json
+spm validate --type landlock --artifact pulled-profile.json
 ```
 
-`--artifact` runs the checks container runtimes apply to a KEP-6061 artifact
-(seccomp only). It cannot be combined with `--strict`.
+`--artifact` runs the checks container runtimes apply to a profile they did
+not author. It cannot be combined with `--strict`.
 
 A field the profile type does not know, such as a misspelled key, would
 silently drop the rule it was meant to carry. All commands warn about such
@@ -243,7 +257,11 @@ spm validate --type seccomp --format human profile.json
 
 Validation outputs the profile on success (exit 0) or prints errors to
 stderr on failure (exit 1). Use `--strict` for stricter checks intended
-for user-authored profiles.
+for user-authored profiles, and `--quiet` to get the exit code alone:
+
+```sh
+spm validate --type seccomp --quiet profile.json
+```
 
 ### Diff profiles
 

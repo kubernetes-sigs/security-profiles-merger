@@ -46,7 +46,9 @@ var (
 // filters) are preserved. Where the exact intersection is not expressible,
 // for example conflicting conditions on the same argument index, the
 // affected calls fall back to the more restrictive surrounding action. The
-// result therefore never permits more than any input.
+// result therefore never permits more than any input. The same fallback
+// bounds the merge cost: past an internal per-syscall budget of filtered
+// entries, a syscall collapses to its most restrictive action.
 //
 // Within a single profile, entries are evaluated the way runc and libseccomp
 // load them: entries equal to the profile default are ignored, an
@@ -111,8 +113,9 @@ func Intersect(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 // kept, with its action raised to the least restrictive action any input
 // applies to calls matching the filter. Where the exact union is not
 // expressible the result over-approximates in the permissive direction, so
-// it never permits less than any input. The evaluation model within a
-// profile is the one described for Intersect.
+// it never permits less than any input. Past the same per-syscall budget as
+// Intersect, a syscall collapses to its least restrictive action. The
+// evaluation model within a profile is the one described for Intersect.
 //
 // ListenerPath and ListenerMetadata are taken from the first profile.
 // When two profiles share the same default or syscall action, DefaultErrnoRet
@@ -338,9 +341,11 @@ func groupKey(entry *specs.LinuxSyscall) string {
 // the less restrictive action is chosen per argument region, following the
 // same rules as Union, including how errno values are compared and spelled.
 // Unlike Union, this function operates on bare syscall
-// slices without a profile-level DefaultAction, so no entries are elided.
-// Entries sharing the same action, errno, and argument filters are grouped
-// into one multi-name entry, sorted by name.
+// slices without a profile-level DefaultAction, so no entries are elided,
+// and it never collapses a syscall the way Union does past its budget: with
+// no default to fall back from, an unconditional entry would decide calls
+// neither list decides. Entries sharing the same action, errno, and argument
+// filters are grouped into one multi-name entry, sorted by name.
 //
 // This function does not validate its inputs. Callers should ensure that
 // actions are known and that every entry has at least one name, or call
@@ -356,8 +361,10 @@ func UnionSyscalls(left, right []specs.LinuxSyscall) []specs.LinuxSyscall {
 // present in only one list are dropped. Unlike Intersect, this function
 // operates on bare syscall slices without a profile-level DefaultAction, so
 // a conditional entry survives only where the other list constrains the same
-// syscall. Entries sharing the same action, errno, and argument filters are
-// grouped into one multi-name entry, sorted by name.
+// syscall. Past the same per-syscall budget as Intersect, a syscall present
+// in both lists collapses to one unconditional entry with its most
+// restrictive action. Entries sharing the same action, errno, and argument
+// filters are grouped into one multi-name entry, sorted by name.
 //
 // This function does not validate its inputs. Callers should ensure that
 // actions are known and that every entry has at least one name, or call

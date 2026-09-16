@@ -704,3 +704,233 @@ func TestValidateRejectsRightsUnknownToKernel(t *testing.T) {
 		}
 	}
 }
+
+func TestRequiredABIVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		profile *landlock.Profile
+		want    landlock.ABIVersion
+	}{
+		{
+			name:    "nil profile",
+			profile: nil,
+			want:    landlock.ABIV1,
+		},
+		{
+			name: "only version 1 rights",
+			profile: &landlock.Profile{
+				HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessReadFile},
+				HandledAccessNet: nil,
+				Scoped:           nil,
+				PathRules:        nil,
+				NetRules:         nil,
+			},
+			want: landlock.ABIV1,
+		},
+		{
+			name: "truncate needs version 3",
+			profile: &landlock.Profile{
+				HandledAccessFS: []landlock.FSAccessRight{
+					landlock.FSAccessReadFile, landlock.FSAccessTruncate,
+				},
+				HandledAccessNet: nil,
+				Scoped:           nil,
+				PathRules:        nil,
+				NetRules:         nil,
+			},
+			want: landlock.ABIV3,
+		},
+		{
+			name: "scoping needs version 6",
+			profile: &landlock.Profile{
+				HandledAccessFS:  nil,
+				HandledAccessNet: nil,
+				Scoped:           []landlock.ScopeRight{landlock.ScopeSignal},
+				PathRules:        nil,
+				NetRules:         nil,
+			},
+			want: landlock.ABIV6,
+		},
+		{
+			name: "a rule raises it too",
+			profile: &landlock.Profile{
+				HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessIOCTLDev},
+				HandledAccessNet: nil,
+				Scoped:           nil,
+				PathRules: []landlock.PathRule{{
+					Path:     "/dev",
+					AccessFS: []landlock.FSAccessRight{landlock.FSAccessIOCTLDev},
+				}},
+				NetRules: nil,
+			},
+			want: landlock.ABIV5,
+		},
+		{
+			name: "UDP rules need version 10",
+			profile: &landlock.Profile{
+				HandledAccessFS:  nil,
+				HandledAccessNet: []landlock.NetAccessRight{landlock.NetAccessBindUDP},
+				Scoped:           nil,
+				PathRules:        nil,
+				NetRules:         nil,
+			},
+			want: landlock.ABIV10,
+		},
+		{
+			name: "unknown rights are left to Validate",
+			profile: &landlock.Profile{
+				HandledAccessFS:  []landlock.FSAccessRight{"not_a_right"},
+				HandledAccessNet: nil,
+				Scoped:           nil,
+				PathRules:        nil,
+				NetRules:         nil,
+			},
+			want: landlock.ABIV1,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := landlock.RequiredABIVersion(test.profile); got != test.want {
+				t.Errorf("RequiredABIVersion() = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
+func TestValidateForABI(t *testing.T) {
+	t.Parallel()
+
+	profile := &landlock.Profile{
+		HandledAccessFS: []landlock.FSAccessRight{
+			landlock.FSAccessReadFile, landlock.FSAccessTruncate,
+		},
+		HandledAccessNet: nil,
+		Scoped:           nil,
+		PathRules: []landlock.PathRule{{
+			Path: "/etc",
+			AccessFS: []landlock.FSAccessRight{
+				landlock.FSAccessReadFile, landlock.FSAccessTruncate,
+			},
+		}},
+		NetRules: nil,
+	}
+
+	err := landlock.ValidateForABI(profile, landlock.ABIV2)
+	if !errors.Is(err, landlock.ErrUnsupportedABIRight) {
+		t.Errorf("expected ErrUnsupportedABIRight on v2, got: %v", err)
+	}
+
+	if !strings.Contains(err.Error(), string(landlock.FSAccessTruncate)) {
+		t.Errorf("error should name the right: %v", err)
+	}
+
+	err = landlock.ValidateForABI(profile, landlock.ABIV3)
+	if err != nil {
+		t.Errorf("unexpected error on v3: %v", err)
+	}
+
+	err = landlock.ValidateForABI(profile, landlock.LatestABIVersion)
+	if err != nil {
+		t.Errorf("unexpected error on the latest version: %v", err)
+	}
+}
+
+// TestValidateForABIAgreesWithRequired ties the two together: a profile
+// validates against exactly the versions at or above what it requires.
+func TestValidateForABIAgreesWithRequired(t *testing.T) {
+	t.Parallel()
+
+	profile := &landlock.Profile{
+		HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessIOCTLDev},
+		HandledAccessNet: nil,
+		Scoped:           []landlock.ScopeRight{landlock.ScopeSignal},
+		PathRules:        nil,
+		NetRules:         nil,
+	}
+
+	required := landlock.RequiredABIVersion(profile)
+
+	for abi := landlock.ABIV1; abi <= landlock.LatestABIVersion; abi++ {
+		err := landlock.ValidateForABI(profile, abi)
+
+		if abi < required && err == nil {
+			t.Errorf("v%d is below the required v%d but validated", abi, required)
+		}
+
+		if abi >= required && err != nil {
+			t.Errorf("v%d is at or above the required v%d but failed: %v",
+				abi, required, err)
+		}
+	}
+}
+
+func TestValidateForABINil(t *testing.T) {
+	t.Parallel()
+
+	err := landlock.ValidateForABI(nil, landlock.ABIV1)
+	if !errors.Is(err, landlock.ErrNilProfile) {
+		t.Errorf("expected ErrNilProfile, got: %v", err)
+	}
+}
+
+func TestValidateArtifact(t *testing.T) {
+	t.Parallel()
+
+	loadable := &landlock.Profile{
+		HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessReadFile},
+		HandledAccessNet: nil,
+		Scoped:           nil,
+		PathRules: []landlock.PathRule{{
+			Path:     "/etc",
+			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
+		}},
+		NetRules: nil,
+	}
+
+	err := landlock.ValidateArtifact(loadable)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	unhandled := &landlock.Profile{
+		HandledAccessFS:  nil,
+		HandledAccessNet: nil,
+		Scoped:           nil,
+		PathRules: []landlock.PathRule{{
+			Path:     "/etc",
+			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
+		}},
+		NetRules: nil,
+	}
+
+	err = landlock.ValidateArtifact(unhandled)
+	if !errors.Is(err, landlock.ErrUnhandledRight) {
+		t.Errorf("expected ErrUnhandledRight, got: %v", err)
+	}
+
+	relative := &landlock.Profile{
+		HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessReadFile},
+		HandledAccessNet: nil,
+		Scoped:           nil,
+		PathRules: []landlock.PathRule{{
+			Path:     "etc",
+			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
+		}},
+		NetRules: nil,
+	}
+
+	err = landlock.ValidateArtifact(relative)
+	if !errors.Is(err, landlock.ErrRelativePath) {
+		t.Errorf("expected ErrRelativePath, got: %v", err)
+	}
+
+	err = landlock.ValidateArtifact(nil)
+	if !errors.Is(err, landlock.ErrNilProfile) {
+		t.Errorf("expected ErrNilProfile, got: %v", err)
+	}
+}
