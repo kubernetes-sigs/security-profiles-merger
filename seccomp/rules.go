@@ -166,19 +166,18 @@ func entryClauses(entry *specs.LinuxSyscall) []clause {
 	return clauses
 }
 
+// hasRepeatedIndex reports whether two conditions share an argument index.
+// Every index counts, including one beyond maxSyscallArgIndex: Validate
+// rejects those, but Diff and the bare syscall-list functions do not
+// validate, and a runtime would still load such an entry as alternatives.
+// Entries carry a handful of conditions, so a linear scan beats a map.
 func hasRepeatedIndex(args []specs.LinuxSeccompArg) bool {
-	var seen [maxSyscallArgIndex + 1]bool
-
-	for _, arg := range args {
-		if arg.Index > maxSyscallArgIndex {
-			continue
+	for idx, arg := range args {
+		for _, earlier := range args[:idx] {
+			if earlier.Index == arg.Index {
+				return true
+			}
 		}
-
-		if seen[arg.Index] {
-			return true
-		}
-
-		seen[arg.Index] = true
 	}
 
 	return false
@@ -219,6 +218,26 @@ func (r *syscallRules) conditionals() []clause {
 
 	return r.conditional
 }
+
+// maxSyscallClauses bounds how many conditional clauses one syscall may
+// carry through a merge. Intersection compares every conditional entry of a
+// syscall against every entry for the same syscall on the other side and
+// emits a clause per overlapping pair, so both the clause count and the work
+// per syscall grow quadratically with the entry count. Real profiles use a
+// handful of argument-filtered entries per syscall; past this bound the
+// syscall collapses to a single unconditional clause on the safe side of the
+// merge direction (see collapseAll), which is what the merge does anyway
+// wherever the exact result is not expressible.
+const maxSyscallClauses = 512
+
+// maxPruneClauses bounds the clause count for which pruneDominated runs.
+// Pruning compares every clause against every other one and only removes
+// clauses that can never decide a call, so skipping it past this bound
+// leaves the result less minimal but unchanged in what it permits. The merge
+// paths stay under maxSyscallClauses; normalization of a single profile,
+// which must preserve semantics exactly and therefore cannot collapse, is
+// what this bound protects.
+const maxPruneClauses = 512
 
 // ruleMerger describes one merge direction over the clause model.
 type ruleMerger struct {
@@ -267,6 +286,16 @@ func (m ruleMerger) mergeRules(
 	leftConds := left.conditionals()
 	rightConds := right.conditionals()
 
+	// Collapsing needs a fallback to fall back from, or intersection
+	// semantics: an unconditional clause replaces whatever the caller's
+	// default would have decided outside the filters, which only
+	// intersection may make stricter. A union of bare syscall lists has
+	// neither, so it keeps the exact clauses; it emits no pairwise clauses
+	// either, so its cost stays within the pairwise adjustment below.
+	if (fallback != nil || m.intersect) && m.exceedsClauseBudget(leftConds, rightConds) {
+		return m.collapseAll(fallback, leftConds, rightConds), nil
+	}
+
 	var conditional []clause
 
 	conditional = append(conditional, m.adjustClauses(leftConds, rightConds, rightFallback)...)
@@ -294,6 +323,60 @@ func (m ruleMerger) mergeRules(
 	}
 
 	return fallback, conditional
+}
+
+// exceedsClauseBudget reports whether merging the two clause sets would
+// carry more than maxSyscallClauses conditional clauses for one syscall.
+// Intersection also emits a clause per overlapping pair, so its budget
+// covers the product as well.
+func (m ruleMerger) exceedsClauseBudget(left, right []clause) bool {
+	if len(left) > maxSyscallClauses || len(right) > maxSyscallClauses ||
+		len(left)+len(right) > maxSyscallClauses {
+		return true
+	}
+
+	return m.intersect && len(left)*len(right) > maxSyscallClauses
+}
+
+// collapseAll reduces a syscall to one unconditional clause combining the
+// fallback with every conditional clause of both sides, using the merge
+// direction's preference. For intersection the result is at least as
+// restrictive as the exact merge everywhere, since no input applies an
+// action more restrictive than the one picked here; for union it is at
+// least as permissive, for the same reason, provided a fallback exists: it
+// then covers the calls no filter matches. It is the same conservative
+// rewrite resolveMixed applies when a mixed rule set is not expressible.
+func (m ruleMerger) collapseAll(fallback *clause, sides ...[]clause) *clause {
+	var collapsed *clause
+
+	combine := func(next clause) {
+		if collapsed == nil {
+			picked := next
+			picked.errnoRet = merge.ClonePtr(next.errnoRet)
+			collapsed = &picked
+
+			return
+		}
+
+		picked := m.pickClause(*collapsed, next)
+		collapsed = &picked
+	}
+
+	if fallback != nil {
+		combine(*fallback)
+	}
+
+	for _, side := range sides {
+		for _, current := range side {
+			combine(current)
+		}
+	}
+
+	if collapsed != nil {
+		collapsed.args = nil
+	}
+
+	return collapsed
 }
 
 // resolveMixed makes a merged rule set expressible: an unconditional entry
@@ -363,7 +446,7 @@ func (m ruleMerger) foldIntoFallback(fallback *clause, conditional []clause) []c
 	if !m.intersect {
 		raiseOverlapsOfRedundant(byArgs, func(current clause) bool {
 			return actionsEquivalent(current.action, fallback.action)
-		})
+		}, *fallback)
 	}
 
 	kept := make([]clause, 0, len(conditional))
@@ -572,7 +655,7 @@ func (m ruleMerger) collapseClauses(clauses []clause, fallback *clause) []clause
 	if fallback != nil && !m.intersect {
 		raiseOverlapsOfRedundant(byArgs, func(current clause) bool {
 			return current.sameResult(*fallback)
-		})
+		}, *fallback)
 	}
 
 	result := make([]clause, 0, len(order))
@@ -594,7 +677,16 @@ func (m ruleMerger) collapseClauses(clauses []clause, fallback *clause) []clause
 // other matches too, and since the least restrictive matching clause wins,
 // it is dead unless it is less restrictive than that other clause. Clauses
 // with the same result also collapse into the wider one.
+//
+// It compares every clause against every other one, so past maxPruneClauses
+// it is skipped. Pruning only removes clauses a runtime would never reach,
+// so skipping it leaves the result less minimal but unchanged in what it
+// permits.
 func pruneDominated(clauses []clause) []clause {
+	if len(clauses) > maxPruneClauses {
+		return clauses
+	}
+
 	kept := make([]clause, 0, len(clauses))
 
 	for idx, current := range clauses {
@@ -627,7 +719,14 @@ func pruneDominated(clauses []clause) []clause {
 // they equal the default, so without this the stricter clause would win
 // where both match and the union could deny a call an input permits. Raising
 // propagates until no such pair remains.
-func raiseOverlapsOfRedundant(byArgs map[string]clause, redundant func(clause) bool) {
+//
+// A raised clause takes raiseTo, which is what decides the region once the
+// redundant clause is gone. Redundant clauses may agree with raiseTo on the
+// action yet differ in errno, so taking the errno from whichever of them map
+// iteration reaches first would make the result depend on iteration order.
+func raiseOverlapsOfRedundant(
+	byArgs map[string]clause, redundant func(clause) bool, raiseTo clause,
+) {
 	for changed := true; changed; {
 		changed = false
 
@@ -642,7 +741,8 @@ func raiseOverlapsOfRedundant(byArgs map[string]clause, redundant func(clause) b
 					continue
 				}
 
-				raised := current
+				raised := raiseTo
+				raised.errnoRet = merge.ClonePtr(raiseTo.errnoRet)
 				raised.args = other.args
 				byArgs[otherKey] = raised
 				changed = true

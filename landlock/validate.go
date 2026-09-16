@@ -52,6 +52,11 @@ var (
 	// ErrRelativePath is returned when a path rule uses a relative path.
 	// Landlock requires absolute paths for filesystem rules.
 	ErrRelativePath = errors.New("relative path (must be absolute)")
+
+	// ErrUnsupportedABIRight is returned by ValidateForABI when a profile
+	// uses an access right the given Landlock ABI version does not know.
+	// The kernel rejects such a ruleset with EINVAL.
+	ErrUnsupportedABIRight = errors.New("access right needs a newer Landlock ABI")
 )
 
 // Validate checks that a Landlock profile contains only known access right
@@ -274,6 +279,149 @@ func ValidateStrict(profile *Profile) error {
 		return errors.Join(errs...)
 	}
 
+	errs = append(errs, validateLoadable(profile)...)
+
+	return errors.Join(errs...)
+}
+
+// ValidateArtifact validates a profile received from an untrusted source,
+// such as an OCI artifact pulled by a container runtime. It performs all
+// checks from Validate and additionally rejects what a runtime could not
+// load: relative paths, which Landlock does not accept for filesystem rules,
+// and rules granting a right outside the profile's handled access set, which
+// the kernel rejects with EINVAL.
+//
+// It does not check the profile against a kernel's ABI, since the artifact
+// does not know where it will run; call ValidateForABI with the node's ABI
+// version for that. It also does not compare the profile against a baseline;
+// callers intersect the result with their baseline afterwards.
+func ValidateArtifact(profile *Profile) error {
+	var errs []error
+
+	err := Validate(profile)
+	if err != nil {
+		errs = append(errs, err)
+	}
+
+	if profile == nil {
+		return errors.Join(errs...)
+	}
+
+	errs = append(errs, validateLoadable(profile)...)
+
+	return errors.Join(errs...)
+}
+
+// RequiredABIVersion returns the lowest Landlock ABI version supporting every
+// access right the profile uses, or ABIV1 for a profile that uses none.
+// Rights this package does not know are ignored; Validate reports them.
+func RequiredABIVersion(profile *Profile) ABIVersion {
+	if profile == nil {
+		return ABIV1
+	}
+
+	required := ABIV1
+
+	for _, rule := range profile.PathRules {
+		required = max(required, highestABI(rule.AccessFS, fsAccessABI))
+	}
+
+	for _, rule := range profile.NetRules {
+		required = max(required, highestABI(rule.AccessNet, netAccessABI))
+	}
+
+	return max(
+		required,
+		highestABI(profile.HandledAccessFS, fsAccessABI),
+		highestABI(profile.HandledAccessNet, netAccessABI),
+		highestABI(profile.Scoped, scopeABI),
+	)
+}
+
+// highestABI returns the newest ABI version any right of the list needs, or
+// ABIV1 when none is known.
+func highestABI[T ~string](rights []T, table map[T]ABIVersion) ABIVersion {
+	highest := ABIV1
+
+	for _, right := range rights {
+		if needed, known := table[right]; known {
+			highest = max(highest, needed)
+		}
+	}
+
+	return highest
+}
+
+// ValidateForABI performs all checks from Validate and additionally reports
+// every access right the given Landlock ABI version does not support. A
+// kernel rejects a ruleset carrying a right its ABI does not know, so a
+// profile passing this validates against a node reporting that ABI version.
+//
+// Use RequiredABIVersion to ask the same question the other way round: which
+// ABI version a profile needs. Merging profiles never raises the requirement
+// beyond the inputs, since neither Intersect nor Union invents a right.
+func ValidateForABI(profile *Profile, abi ABIVersion) error {
+	var errs []error
+
+	err := Validate(profile)
+	if err != nil {
+		errs = append(errs, err)
+	}
+
+	if profile == nil {
+		return errors.Join(errs...)
+	}
+
+	errs = append(errs, abiErrors(
+		"HandledAccessFS", profile.HandledAccessFS, abi, fsAccessABI,
+	)...)
+	errs = append(errs, abiErrors(
+		"HandledAccessNet", profile.HandledAccessNet, abi, netAccessABI,
+	)...)
+	errs = append(errs, abiErrors("Scoped", profile.Scoped, abi, scopeABI)...)
+
+	for idx, rule := range profile.PathRules {
+		errs = append(errs, abiErrors(
+			fmt.Sprintf("PathRules[%d]", idx), rule.AccessFS, abi, fsAccessABI,
+		)...)
+	}
+
+	for idx, rule := range profile.NetRules {
+		errs = append(errs, abiErrors(
+			fmt.Sprintf("NetRules[%d]", idx), rule.AccessNet, abi, netAccessABI,
+		)...)
+	}
+
+	return errors.Join(errs...)
+}
+
+// abiErrors reports every right of the list that needs a newer ABI version
+// than the given one. Rights outside the table are left to Validate.
+func abiErrors[T ~string](
+	context string, rights []T, abi ABIVersion, table map[T]ABIVersion,
+) []error {
+	var errs []error
+
+	for _, right := range rights {
+		needed, known := table[right]
+		if !known || needed <= abi {
+			continue
+		}
+
+		errs = append(errs, fmt.Errorf(
+			"%s: right %q: %w (needs v%d, have v%d)",
+			context, right, ErrUnsupportedABIRight, needed, abi,
+		))
+	}
+
+	return errs
+}
+
+// validateLoadable reports what a kernel would refuse: relative paths and
+// rules granting rights outside the handled access sets.
+func validateLoadable(profile *Profile) []error {
+	var errs []error
+
 	handledFS := toSet(profile.HandledAccessFS)
 	handledNet := toSet(profile.HandledAccessNet)
 
@@ -284,24 +432,24 @@ func ValidateStrict(profile *Profile) error {
 			))
 		}
 
-		e := validateHandled(
+		err := validateHandled(
 			fmt.Sprintf("PathRules[%d]", idx), rule.AccessFS, handledFS,
 		)
-		if e != nil {
-			errs = append(errs, e)
+		if err != nil {
+			errs = append(errs, err)
 		}
 	}
 
 	for idx, rule := range profile.NetRules {
-		e := validateHandled(
+		err := validateHandled(
 			fmt.Sprintf("NetRules[%d]", idx), rule.AccessNet, handledNet,
 		)
-		if e != nil {
-			errs = append(errs, e)
+		if err != nil {
+			errs = append(errs, err)
 		}
 	}
 
-	return errors.Join(errs...)
+	return errs
 }
 
 func validateHandled[T ~string](

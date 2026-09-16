@@ -173,6 +173,13 @@ linters:
       - linters:
           - paralleltest
         path: apparmor/glob_internal_test\.go
+      # cgo confuses these: dupImport reads the pseudo-package "C" as a
+      # second import of "unsafe", and nlreturn reports positions inside the
+      # code cgo generates rather than in the source.
+      - linters:
+          - gocritic
+          - nlreturn
+        path: internal/libseccomp/bridge\.go
 formatters:
   enable:
     - gci

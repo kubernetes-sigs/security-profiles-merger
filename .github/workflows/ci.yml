@@ -46,6 +46,19 @@ jobs:
           files: build/coverage.out
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  # The seccomp merge semantics are a claim about how runc and libseccomp load
+  # a profile. This job checks that claim against libseccomp itself, which
+  # needs cgo and the headers, so it is separate from the main test job.
+  test-libseccomp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: sudo apt-get update && sudo apt-get install -y libseccomp-dev
+      - run: make test-libseccomp
+
   # The library handles Linux profile paths on every host and binaries are
   # released for these platforms, so the packages are tested there too.
   test-cross:

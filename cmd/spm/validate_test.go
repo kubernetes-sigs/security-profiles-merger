@@ -519,7 +519,7 @@ func TestValidateSeccompArtifactAcceptsDuplicates(t *testing.T) {
 	}
 }
 
-func TestValidateArtifactRequiresSeccomp(t *testing.T) {
+func TestValidateArtifactAppArmor(t *testing.T) {
 	t.Parallel()
 
 	file := writeTemp(t, marshal(t, &apparmor.Profile{
@@ -530,12 +530,59 @@ func TestValidateArtifactRequiresSeccomp(t *testing.T) {
 		cmdValidate, flagType, typeAppArmor, "--artifact", file,
 	}, nil)
 
-	if code != exitUsage {
-		t.Fatalf("exit code = %d, want %d", code, exitUsage)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0: %s", code, stderr)
+	}
+}
+
+func TestValidateArtifactAppArmorRejectsRelativePath(t *testing.T) {
+	t.Parallel()
+
+	file := writeTemp(t, marshal(t, &apparmor.Profile{
+		Executable: &apparmor.ExecutableRules{
+			AllowedExecutables: []string{"usr/bin/sh"},
+			AllowedLibraries:   nil,
+		},
+		Filesystem: nil, Network: nil, Capabilities: nil,
+	}))
+
+	code, _, stderr := runCapture(t, []string{
+		cmdValidate, flagType, typeAppArmor, "--artifact", file,
+	}, nil)
+
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
 	}
 
-	if !strings.Contains(stderr, "--artifact is not supported for apparmor profiles") {
-		t.Errorf("stderr = %q, want the unsupported-type message", stderr)
+	if !strings.Contains(stderr, "relative path") {
+		t.Errorf("stderr = %q, want a relative-path error", stderr)
+	}
+}
+
+func TestValidateArtifactLandlockRejectsUnhandledRight(t *testing.T) {
+	t.Parallel()
+
+	file := writeTemp(t, marshal(t, &landlock.Profile{
+		HandledAccessFS:  nil,
+		HandledAccessNet: nil,
+		Scoped:           nil,
+		PathRules: []landlock.PathRule{{
+			Path:     "/etc",
+			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
+		}},
+		NetRules: nil,
+	}))
+
+	code, _, stderr := runCapture(t, []string{
+		cmdValidate, flagType, typeLandlock, "--artifact", file,
+	}, nil)
+
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+
+	if !strings.Contains(stderr, "unhandled access right") {
+		t.Errorf("stderr = %q, want an unhandled-right error", stderr)
 	}
 }
 

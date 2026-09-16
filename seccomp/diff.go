@@ -124,10 +124,35 @@ type SyscallDetail struct {
 // unset errnoRet on SCMP_ACT_ERRNO or SCMP_ACT_TRACE equals EPERM, and
 // errnoRet on any other action is ignored. The diff reports entries in that
 // form, with EPERM spelled as unset.
-// Architectures are compared with the native architecture (see
-// NativeArchitecture) implied on both sides, as runtimes always cover it.
+// Architectures are compared with the architecture of the running program
+// (see NativeArchitecture) implied on both sides, as runtimes always cover
+// the native one. A profile destined for another architecture therefore
+// compares differently here than it would on the target node; use
+// DiffForArch to name that architecture explicitly.
 // Returns ErrNilProfile if either profile is nil.
 func Diff(left, right *specs.LinuxSeccomp) (*ProfileDiff, error) {
+	native, ok := NativeArchitecture()
+	if !ok {
+		// No architecture is implied, so every listed one is compared.
+		native = ""
+	}
+
+	return DiffForArch(native, left, right)
+}
+
+// DiffForArch compares two seccomp profiles as a node running the given
+// native architecture would load them, and is otherwise identical to Diff.
+// Runtimes always cover the native architecture whether or not a profile
+// lists it, so it is implied on both sides and never reported as a
+// difference. Pass the empty Arch to imply none, which compares the
+// architecture lists as written.
+//
+// Use this rather than Diff whenever the profiles are destined for a node
+// that may not run the same architecture as the caller, as a control plane
+// comparing profiles for a mixed-architecture cluster does.
+func DiffForArch(
+	native specs.Arch, left, right *specs.LinuxSeccomp,
+) (*ProfileDiff, error) {
 	if left == nil || right == nil {
 		return nil, ErrNilProfile
 	}
@@ -145,7 +170,7 @@ func Diff(left, right *specs.LinuxSeccomp) (*ProfileDiff, error) {
 
 	diffDefaultAction(diff, left, right)
 	diffDefaultErrnoRet(diff, left, right)
-	diffArchitectures(diff, left, right)
+	diffArchitectures(diff, native, left, right)
 	diffFlags(diff, left, right)
 	diffListener(diff, left, right)
 	diffSyscallEntries(diff, left, right)
@@ -228,14 +253,15 @@ func equalUintPtr(first, second *uint) bool {
 	return *first == *second
 }
 
-// diffArchitectures compares the architecture lists with the native
+// diffArchitectures compares the architecture lists with the given native
 // architecture implied on both sides, as runtimes always cover it: a
 // profile that lists it and one that does not are the same to the runtime.
 func diffArchitectures(
-	diff *ProfileDiff, left, right *specs.LinuxSeccomp,
+	diff *ProfileDiff, native specs.Arch, left, right *specs.LinuxSeccomp,
 ) {
 	added, removed := merge.DiffSlice(
-		withoutNative(left.Architectures), withoutNative(right.Architectures),
+		withoutNative(native, left.Architectures),
+		withoutNative(native, right.Architectures),
 	)
 	if len(added) > 0 || len(removed) > 0 {
 		diff.Equal = false
@@ -243,9 +269,8 @@ func diffArchitectures(
 	}
 }
 
-func withoutNative(archs []specs.Arch) []specs.Arch {
-	native, ok := NativeArchitecture()
-	if !ok {
+func withoutNative(native specs.Arch, archs []specs.Arch) []specs.Arch {
+	if native == "" {
 		return archs
 	}
 
@@ -351,6 +376,9 @@ func buildSyscallMap(
 	syscalls []specs.LinuxSyscall, def *clause,
 ) map[string][]SyscallEntry {
 	result := make(map[string][]SyscallEntry)
+	// Deduplication by key rather than by scanning what a name already
+	// holds, so that a syscall carrying many entries stays linear.
+	seen := make(map[string]map[string]struct{})
 
 	for _, syscall := range normalizeSyscalls(syscalls, def) {
 		for _, name := range syscall.Names {
@@ -361,23 +389,42 @@ func buildSyscallMap(
 				Args:     syscall.Args,
 			}
 
-			if !containsSyscallEntry(result[name], entry) {
-				result[name] = append(result[name], entry)
+			byKey, ok := seen[name]
+			if !ok {
+				byKey = make(map[string]struct{})
+				seen[name] = byKey
 			}
+
+			key := syscallEntryKey(entry)
+			if _, dup := byKey[key]; dup {
+				continue
+			}
+
+			byKey[key] = struct{}{}
+
+			result[name] = append(result[name], entry)
 		}
 	}
 
 	return result
 }
 
-func containsSyscallEntry(entries []SyscallEntry, entry SyscallEntry) bool {
-	for _, existing := range entries {
-		if equalSyscallEntry(existing, entry) {
-			return true
-		}
+// syscallEntryKey formats the fields equalSyscallEntry compares, so that
+// entries compare equal exactly when their keys do.
+func syscallEntryKey(entry SyscallEntry) string {
+	var builder strings.Builder
+
+	builder.WriteString(string(entry.Action))
+	builder.WriteByte('|')
+
+	if entry.ErrnoRet != nil {
+		builder.WriteString(strconv.FormatUint(uint64(*entry.ErrnoRet), 10))
 	}
 
-	return false
+	builder.WriteByte('|')
+	builder.WriteString(sortedArgsKey(entry.Args))
+
+	return builder.String()
 }
 
 func entriesToDetails(entries []SyscallEntry) []SyscallDetail {

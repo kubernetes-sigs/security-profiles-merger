@@ -17,6 +17,7 @@ limitations under the License.
 package apparmor_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -681,7 +682,10 @@ func TestDiffNormalizesPathsBeforeComparing(t *testing.T) {
 	}
 }
 
-func TestDiffFormatNilBoolPtr(t *testing.T) {
+// TestDiffUnsetBoolComparesAsFalse covers the deny-equivalent comparison: an
+// unset network boolean forbids what it covers, exactly as false does, so
+// Diff reports the value AppArmor loads rather than the absence.
+func TestDiffUnsetBoolComparesAsFalse(t *testing.T) {
 	t.Parallel()
 
 	trueVal := true
@@ -718,9 +722,41 @@ func TestDiffFormatNilBoolPtr(t *testing.T) {
 
 	got := apparmor.FormatDiff(diff)
 
-	if !strings.Contains(got, "<nil>") {
-		t.Errorf("FormatDiff() = %q, expected <nil> for nil bool ptr", got)
+	if strings.Contains(got, "<nil>") {
+		t.Errorf("FormatDiff() = %q, expected no <nil> for an unset bool", got)
 	}
+
+	if !strings.Contains(got, "raw:false->true") {
+		t.Errorf("FormatDiff() = %q, missing raw:false->true", got)
+	}
+
+	// AllowUDP is unset on both sides, so it denies the same on both and is
+	// not a difference.
+	if strings.Contains(got, "udp") {
+		t.Errorf("FormatDiff() = %q, unset on both sides is not a difference", got)
+	}
+}
+
+// TestFormatDiffNilBoolPtr covers the formatter directly: BoolPtrDiff is
+// exported, so a caller can still hand it a nil side even though Diff no
+// longer produces one.
+func TestFormatDiffNilBoolPtr(t *testing.T) {
+	t.Parallel()
+
+	trueVal := true
+
+	got := apparmor.FormatDiff(&apparmor.ProfileDiff{
+		Equal:       false,
+		Executables: nil,
+		Libraries:   nil,
+		Filesystem:  nil,
+		Network: &apparmor.NetworkDiff{
+			AllowRaw: &apparmor.BoolPtrDiff{Left: nil, Right: &trueVal},
+			AllowTCP: nil,
+			AllowUDP: nil,
+		},
+		Capabilities: nil,
+	})
 
 	if !strings.Contains(got, "raw:<nil>->true") {
 		t.Errorf("FormatDiff() = %q, missing raw:<nil>->true", got)
@@ -756,5 +792,104 @@ func TestDiffBoolPtrIsolation(t *testing.T) {
 
 	if diff.Network.AllowRaw.Left == left.Network.AllowRaw {
 		t.Error("diff Left should not alias source pointer")
+	}
+}
+
+// TestDiffOfIntersectIsEqual covers the round-trip the merge documents:
+// Intersect writes every section explicitly, and Diff compares what AppArmor
+// loads, so normalizing a profile is not reported as a change. A caller
+// logging what a baseline took away from an artifact would otherwise see the
+// normalization as a constraint.
+func TestDiffOfIntersectIsEqual(t *testing.T) {
+	t.Parallel()
+
+	profiles := []*apparmor.Profile{
+		{
+			Executable: nil, Filesystem: nil, Network: nil,
+			Capabilities: &apparmor.CapabilityRules{
+				AllowedCapabilities: []string{capNetAdmin},
+			},
+		},
+		{
+			Executable: &apparmor.ExecutableRules{
+				AllowedExecutables: []string{pathBinSh},
+				AllowedLibraries:   nil,
+			},
+			Filesystem:   nil,
+			Network:      &apparmor.NetworkRules{AllowRaw: nil, Protocols: nil},
+			Capabilities: nil,
+		},
+		{
+			Executable: nil,
+			Filesystem: &apparmor.FilesystemRules{
+				ReadOnlyPaths:  []string{"/etc/hostname"},
+				WriteOnlyPaths: nil,
+				ReadWritePaths: nil,
+			},
+			Network:      nil,
+			Capabilities: nil,
+		},
+	}
+
+	for idx, profile := range profiles {
+		normalized, err := apparmor.Intersect(profile)
+		if err != nil {
+			t.Fatalf("profile %d: unexpected error: %v", idx, err)
+		}
+
+		diff, err := apparmor.Diff(profile, normalized)
+		if err != nil {
+			t.Fatalf("profile %d: unexpected error: %v", idx, err)
+		}
+
+		if !diff.Equal {
+			t.Errorf("profile %d: Diff(p, Intersect(p)) = %s, want equal",
+				idx, apparmor.FormatDiff(diff))
+		}
+	}
+}
+
+// TestDiffReportsRealConstraintOnly checks the other half: normalization is
+// invisible, but a capability the baseline withholds is not.
+func TestDiffReportsRealConstraintOnly(t *testing.T) {
+	t.Parallel()
+
+	baseline := &apparmor.Profile{
+		Executable: nil, Filesystem: nil,
+		Network: &apparmor.NetworkRules{AllowRaw: nil, Protocols: nil},
+		Capabilities: &apparmor.CapabilityRules{
+			AllowedCapabilities: []string{capNetAdmin},
+		},
+	}
+	artifact := &apparmor.Profile{
+		Executable: nil, Filesystem: nil,
+		Network: &apparmor.NetworkRules{AllowRaw: nil, Protocols: nil},
+		Capabilities: &apparmor.CapabilityRules{
+			AllowedCapabilities: []string{capNetAdmin, capChown},
+		},
+	}
+
+	effective, err := apparmor.Intersect(baseline, artifact)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	diff, err := apparmor.Diff(artifact, effective)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if diff.Equal {
+		t.Fatal("the baseline withheld a capability, want a difference")
+	}
+
+	if diff.Network != nil {
+		t.Errorf("network was not constrained, got %s", apparmor.FormatDiff(diff))
+	}
+
+	if diff.Capabilities == nil ||
+		!slices.Contains(diff.Capabilities.Removed, capChown) {
+		t.Errorf("expected %s to be removed, got %s",
+			capChown, apparmor.FormatDiff(diff))
 	}
 }

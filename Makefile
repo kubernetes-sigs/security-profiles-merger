@@ -59,6 +59,11 @@ test: ## Run tests with race detection and coverage report (set RACE= to skip th
 	$(GO) test -v $(RACE) -count=1 -coverprofile=$(BUILD_DIR)/coverage.out -covermode=atomic -coverpkg=./... ./...
 	$(GO) tool cover -html=$(BUILD_DIR)/coverage.out -o $(BUILD_DIR)/coverage.html
 
+.PHONY: test-libseccomp
+test-libseccomp: ## Check the seccomp evaluation model against libseccomp itself (needs cgo and the libseccomp headers)
+	CGO_ENABLED=1 $(GO) test -v -count=1 -tags libseccomp \
+		-run 'TestModelMatchesLibseccomp' ./seccomp/
+
 .PHONY: fuzz
 fuzz: ## Run all fuzz tests (use FUZZTIME to adjust, default 30s)
 	@for pkg in $(PACKAGES); do \

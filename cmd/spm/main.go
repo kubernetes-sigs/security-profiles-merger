@@ -63,14 +63,43 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
-func detectProfileType(data [][]byte) string {
-	if len(data) == 0 {
-		return ""
+// detectProfileType infers the profile type from the members the inputs
+// carry. Every input is inspected, not only the first: merging profiles of
+// different types would drop whatever the chosen type has no field for, so a
+// disagreement is reported rather than resolved. An input whose type cannot
+// be told apart, such as an empty object, defers to the others.
+//
+// The first result is the detected type, empty when no input reveals one.
+// The second names the type of a conflicting input, and is empty when the
+// inputs agree; when it is set, the first result is the type it conflicts
+// with.
+func detectProfileType(data [][]byte) (string, string) {
+	detected := ""
+
+	for _, raw := range data {
+		current := detectOneProfileType(raw)
+		if current == "" {
+			continue
+		}
+
+		if detected == "" {
+			detected = current
+
+			continue
+		}
+
+		if current != detected {
+			return detected, current
+		}
 	}
 
+	return detected, ""
+}
+
+func detectOneProfileType(raw []byte) string {
 	var fields map[string]json.RawMessage
 
-	err := json.Unmarshal(data[0], &fields)
+	err := json.Unmarshal(raw, &fields)
 	if err != nil {
 		return ""
 	}

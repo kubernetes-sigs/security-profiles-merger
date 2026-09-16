@@ -163,14 +163,20 @@ func mergeProfiles[T any](
 const (
 	maxInputFiles = 1000
 	maxInputSize  = 10 << 20
+	// maxTotalInputSize bounds every input together. Without it, the
+	// per-file bound still allows maxInputFiles * maxInputSize to be read
+	// into memory at once.
+	maxTotalInputSize = 64 << 20
 )
 
 var (
 	errDuplicateStdin = errors.New("stdin (\"-\") can only be specified once")
 	errTooManyFiles   = fmt.Errorf("too many input files (max %d)", maxInputFiles)
+	errTooManyStdin   = fmt.Errorf("too many profiles on stdin (max %d)", maxInputFiles)
 	errEmptyInput     = errors.New("no input provided")
 	errStdinTooLarge  = fmt.Errorf("stdin input exceeds %d bytes", maxInputSize)
 	errFileTooLarge   = fmt.Errorf("file exceeds %d byte limit", maxInputSize)
+	errInputTooLarge  = fmt.Errorf("inputs exceed %d bytes in total", maxTotalInputSize)
 	errUnknownField   = errors.New("unknown field")
 )
 
@@ -183,11 +189,16 @@ func readInputs(paths []string, stdin io.Reader) ([][]byte, error) {
 		return nil, errTooManyFiles
 	}
 
-	var result [][]byte
+	var (
+		result [][]byte
+		total  int
+	)
 
 	stdinUsed := false
 
 	for _, path := range paths {
+		added := 0
+
 		if path == "-" {
 			if stdinUsed {
 				return nil, errDuplicateStdin
@@ -200,17 +211,25 @@ func readInputs(paths []string, stdin io.Reader) ([][]byte, error) {
 				return nil, err
 			}
 
+			for _, item := range items {
+				added += len(item)
+			}
+
 			result = append(result, items...)
+		} else {
+			data, err := readFileWithLimit(filepath.Clean(path))
+			if err != nil {
+				return nil, fmt.Errorf("reading %s: %w", path, err)
+			}
 
-			continue
+			added = len(data)
+			result = append(result, data)
 		}
 
-		data, err := readFileWithLimit(filepath.Clean(path))
-		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", path, err)
+		total += added
+		if total > maxTotalInputSize {
+			return nil, errInputTooLarge
 		}
-
-		result = append(result, data)
 	}
 
 	return result, nil
@@ -262,6 +281,10 @@ func readFromStdin(reader io.Reader) ([][]byte, error) {
 			return nil, errEmptyInput
 		}
 
+		if len(array) > maxInputFiles {
+			return nil, errTooManyStdin
+		}
+
 		result := make([][]byte, len(array))
 		for idx, item := range array {
 			result[idx] = item
@@ -288,7 +311,7 @@ func unmarshalAll[T any](data [][]byte, rejectUnknown bool, stderr io.Writer) ([
 			return nil, fmt.Errorf("parsing profile %d: %w", idx, err)
 		}
 
-		if unknown := unknownFields(raw, reflect.TypeFor[T]()); len(unknown) > 0 {
+		if unknown := unknownFieldsOf[T](raw); len(unknown) > 0 {
 			err := unknownFieldError(unknown)
 			if rejectUnknown {
 				return nil, fmt.Errorf("parsing profile %d: %w", idx, err)
@@ -314,6 +337,24 @@ func unknownFieldError(paths []string) error {
 	}
 
 	return fmt.Errorf("%ws %s", errUnknownField, strings.Join(quoted, ", "))
+}
+
+// unknownFieldsOf reports the members of raw that T has no field for.
+//
+// Enumerating them needs the document decoded into interface values, which
+// costs more memory than the profile itself, so a strict decode runs first
+// to learn whether there is anything to report. The caller has already
+// decoded raw into a T, so the only thing a strict decode can still object
+// to is an unknown member.
+func unknownFieldsOf[T any](raw []byte) []string {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+
+	if decoder.Decode(new(T)) == nil {
+		return nil
+	}
+
+	return unknownFields(raw, reflect.TypeFor[T]())
 }
 
 // unknownFields returns the members of a JSON document that the target type

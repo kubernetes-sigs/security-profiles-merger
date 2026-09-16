@@ -37,8 +37,9 @@ var (
 	// more than once in AllowedCapabilities.
 	ErrDuplicateCapability = errors.New("duplicate capability")
 
-	// ErrUnknownCapability is returned when a profile contains a
-	// capability name not in the known set of Linux capabilities.
+	// ErrUnknownCapability is returned by ValidateStrict when a profile
+	// contains a capability name not in the known set of Linux
+	// capabilities.
 	ErrUnknownCapability = errors.New("unknown capability")
 
 	// ErrEmptyPath is returned when a path rule contains an empty string.
@@ -89,10 +90,16 @@ func isKnownCapability(name string) bool {
 }
 
 // Validate checks an AppArmor profile for structural issues.
-// Capability names are validated against the known set of Linux
-// capabilities. Filesystem paths and executable paths are not validated
+// Filesystem paths and executable paths are not validated
 // beyond being non-empty and free of AppArmor variables, which the merge
 // cannot interpret (ErrUnsupportedVariable).
+//
+// Capability names are not checked against the known set: the kernel gains
+// capabilities over time, and failing a merge because one input names a
+// capability newer than this package would leave callers unable to merge at
+// all. The merge treats capability names as opaque, so an unknown name
+// survives an intersection only when every profile grants it. ValidateStrict
+// reports unknown names for user-authored profiles, where they are typos.
 //
 // The checks catch issues that would produce confusing merge results:
 // duplicate paths across filesystem categories, which expand into
@@ -143,24 +150,19 @@ func Validate(profile *Profile) error {
 		if err != nil {
 			errs = append(errs, err)
 		}
-
-		err = validateCapabilityNames(
-			profile.Capabilities.AllowedCapabilities,
-		)
-		if err != nil {
-			errs = append(errs, err)
-		}
 	}
 
 	return errors.Join(errs...)
 }
 
 // ValidateStrict performs all checks from Validate and additionally detects
-// duplicate paths in AllowedExecutables and AllowedLibraries, compared in
+// capability names outside the known set of Linux capabilities, duplicate
+// paths in AllowedExecutables and AllowedLibraries, compared in
 // their normalized form, relative paths, which AppArmor file rules cannot
 // use, and glob patterns that exceed the matcher's limits and would never
-// match. The merge path handles duplicates by deduplication and drops
-// unmatchable globs on intersection, so Validate permits them.
+// match. The merge path handles duplicates by deduplication, drops
+// unmatchable globs on intersection, and treats capability names as opaque,
+// so Validate permits all of them.
 // ValidateStrict is intended for user-authored profiles where all of these
 // are likely mistakes.
 func ValidateStrict(profile *Profile) error {
@@ -173,6 +175,13 @@ func ValidateStrict(profile *Profile) error {
 
 	if profile == nil {
 		return errors.Join(errs...)
+	}
+
+	if profile.Capabilities != nil {
+		err := validateCapabilityNames(profile.Capabilities.AllowedCapabilities)
+		if err != nil {
+			errs = append(errs, err)
+		}
 	}
 
 	if profile.Executable != nil {
@@ -188,6 +197,45 @@ func ValidateStrict(profile *Profile) error {
 		)...)
 	}
 
+	errs = append(errs, validateLoadablePaths(profile)...)
+
+	return errors.Join(errs...)
+}
+
+// ValidateArtifact validates a profile received from an untrusted source,
+// such as an OCI artifact pulled by a container runtime. It performs all
+// checks from Validate and additionally rejects what a runtime could not
+// load or would silently drop: relative paths, which apparmor_parser does
+// not accept for a file rule, and glob patterns past the matcher's limits,
+// which never match and would vanish from an intersection without a trace.
+//
+// Duplicates are accepted, as the merge deduplicates them, and so are
+// capability names outside the known set, which the merge treats as opaque.
+// ValidateArtifact does not compare the profile against a baseline; callers
+// intersect the result with their baseline afterwards.
+func ValidateArtifact(profile *Profile) error {
+	var errs []error
+
+	err := Validate(profile)
+	if err != nil {
+		errs = append(errs, err)
+	}
+
+	if profile == nil {
+		return errors.Join(errs...)
+	}
+
+	errs = append(errs, validateLoadablePaths(profile)...)
+
+	return errors.Join(errs...)
+}
+
+// validateLoadablePaths reports the paths apparmor_parser would refuse and
+// the glob patterns the matcher drops, which ValidateStrict and
+// ValidateArtifact both check.
+func validateLoadablePaths(profile *Profile) []error {
+	var errs []error
+
 	visitPathLists(profile, func(context string, paths []string) {
 		// Cleaning never changes whether a path is absolute, so the raw
 		// paths are checked and reported as written. Glob limits apply to
@@ -196,7 +244,7 @@ func ValidateStrict(profile *Profile) error {
 		errs = append(errs, validateGlobLimits(context, normalizePaths(paths))...)
 	})
 
-	return errors.Join(errs...)
+	return errs
 }
 
 // rejectPaths reports every path for which reject holds, quoting the path
@@ -312,6 +360,8 @@ func validateFilesystemPaths(rules *FilesystemRules) error {
 				path, category, ErrDuplicatePath,
 			))
 		}
+
+		seen[path] = "ReadWritePaths"
 	}
 
 	return errors.Join(errs...)

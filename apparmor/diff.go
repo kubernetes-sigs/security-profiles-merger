@@ -72,8 +72,15 @@ type BoolPtrDiff struct {
 
 // Diff compares two AppArmor profiles and returns a structured diff.
 // Unlike Intersect and Union, Diff does not validate profiles before comparing.
-// Paths are normalized and deduplicated before comparison to avoid false
-// positives from non-canonical representations (e.g. /foo/./bar vs /foo/bar).
+//
+// Profiles are compared by what AppArmor loads from them, so a profile and
+// its merge result compare equal unless the merge changed what the profile
+// permits. Paths are normalized and deduplicated, so non-canonical
+// representations (/foo/./bar and /foo/bar) compare equal, and an omitted
+// section or network boolean is compared as the explicit empty section or
+// false that it denies the same as, which is how Intersect writes it. A
+// profile that says nothing about raw sockets and one that forbids them are
+// therefore equal, and Diff(p, Intersect(p)) is always equal.
 // Returns ErrNilProfile if either profile is nil.
 func Diff(left, right *Profile) (*ProfileDiff, error) {
 	if left == nil || right == nil {
@@ -82,9 +89,11 @@ func Diff(left, right *Profile) (*ProfileDiff, error) {
 
 	normLeft := normalizeProfile(left)
 	deduplicateProfile(normLeft)
+	populateEmpty(normLeft)
 
 	normRight := normalizeProfile(right)
 	deduplicateProfile(normRight)
+	populateEmpty(normRight)
 
 	diff := &ProfileDiff{
 		Equal:        true,

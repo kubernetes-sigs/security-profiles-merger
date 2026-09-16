@@ -27,6 +27,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -1013,5 +1014,44 @@ func TestUnknownFieldsPrefersShallowerField(t *testing.T) {
 	got := unknownFields([]byte(`{"values":{"k":{"bogus":1}}}`), reflect.TypeFor[walkShadowing]())
 	if len(got) != 0 {
 		t.Errorf("unknownFields = %v, want none", got)
+	}
+}
+
+// TestReadInputsBoundsTotalSize covers the aggregate bound: each file is
+// under the per-file limit, but together they are not, and without the bound
+// a thousand of them would all be read into memory first.
+func TestReadInputsBoundsTotalSize(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	const (
+		fileSize = 8 << 20
+		files    = maxTotalInputSize/fileSize + 2
+	)
+
+	filler := make([]byte, fileSize)
+	for idx := range filler {
+		filler[idx] = ' '
+	}
+
+	copy(filler, `{"defaultAction":"SCMP_ACT_ERRNO"}`)
+
+	paths := make([]string, 0, files)
+
+	for idx := range files {
+		path := filepath.Join(dir, "profile"+strconv.Itoa(idx)+".json")
+
+		err := os.WriteFile(path, filler, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		paths = append(paths, path)
+	}
+
+	_, err := readInputs(paths, nil)
+	if !errors.Is(err, errInputTooLarge) {
+		t.Errorf("error = %v, want %v", err, errInputTooLarge)
 	}
 }
