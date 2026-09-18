@@ -22,6 +22,11 @@ jobs:
           go-version-file: go.mod
       - run: make build
 
+  # .golangci.yml enables the libseccomp build tag, so this job also
+  # analyzes the cgo bridge and the tests that check the model against
+  # libseccomp. Loading those packages needs the headers, and the
+  # distribution's are enough: nothing here is executed, so which
+  # libseccomp answers is test-libseccomp's question, not this job's.
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -29,6 +34,10 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      - run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libseccomp-dev
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.13.2
@@ -41,10 +50,53 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make verify-coverage
+      # A pull request from a fork gets no secrets, so the upload has
+      # nothing to authenticate with. Coverage is a report, not a gate:
+      # the threshold in verify-coverage above is the gate.
       - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        continue-on-error: true
         with:
           files: build/coverage.out
           token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  # The algorithmic bounds in the suite only assert wall-clock limits when
+  # neither coverage nor the race detector is instrumenting the code, so the
+  # job above measures nothing. This one runs the same tests plain, which is
+  # the only place those bounds are a real assertion.
+  test-bounds:
+    name: test / bounds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go test -count=1 ./...
+
+  # The runners are all 64-bit, so a word-size mistake compiles here and
+  # breaks for whoever vendors the library into a 32-bit build. Nothing is
+  # executed, so no emulation is needed; these are the architectures
+  # Kubernetes ships and seccomp/arch.go maps.
+  vet-arch:
+    name: vet / linux-${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: ["386", "arm", "arm64", "s390x", "ppc64le"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          go build ./...
+          go vet ./...
 
   # The seccomp merge semantics are a claim about how runc and libseccomp load
   # a profile. This job checks that claim against libseccomp itself, which
@@ -127,31 +179,34 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: find
         run: |
+          set -euo pipefail
           tmp=$(mktemp)
           grep -rn '^func Fuzz' --include='*_test.go' . \
             | sed 's|^\./||' \
             | while IFS=: read -r file _ line; do
-                fn=$(echo "$line" | grep -oE 'Fuzz[A-Za-z0-9_]+')
+                fn=${line#func }
+                fn=${fn%%(*}
                 dir=$(dirname "$file")
-                echo "$dir $fn"
+                # The package path and the function name both go into the
+                # name, so a new target cannot quietly take the job, and the
+                # cache key, of an existing one.
+                name="${dir//\//-}-$(tr '[:upper:]' '[:lower:]' <<<"${fn#Fuzz}")"
+                echo "{\"name\":\"$name\",\"package\":\"./$dir/\",\"target\":\"$fn\"}"
               done > "$tmp"
-          matrix=$(cat "$tmp" | while read -r dir fn; do
-            count=$(grep -c "^$dir " "$tmp")
-            pkg="./$dir/"
-            leaf=$(basename "$dir")
-            if [ "$count" -eq 1 ]; then
-              name="$leaf"
-            else
-              suffix=$(echo "$fn" | sed 's/^Fuzz//' \
-                | sed 's/\([a-z]\)\([A-Z]\)/\1-\2/g' \
-                | tr '[:upper:]' '[:lower:]')
-              norm=$(echo "$suffix" | tr -d '-')
-              suffix=$(echo "$norm" | sed "s/^${leaf}//")
-              name="$leaf-$suffix"
-            fi
-            echo "{\"name\":\"$name\",\"package\":\"$pkg\",\"target\":\"$fn\"}"
-          done | jq -s -c '.')
+          matrix=$(jq -s -c '.' < "$tmp")
           rm -f "$tmp"
+          # A target dropped anywhere above would only shrink the matrix,
+          # and a shorter matrix still runs green. So the matrix is counted
+          # back against the declarations it was derived from.
+          want=$(grep -rc '^func Fuzz' --include='*_test.go' . \
+            | awk -F: '{ sum += $2 } END { print sum + 0 }')
+          got=$(jq -r 'length' <<<"$matrix")
+          names=$(jq -r '[.[].name] | unique | length' <<<"$matrix")
+          if [ "$want" -eq 0 ] || [ "$got" -ne "$want" ] || [ "$names" -ne "$want" ]; then
+            echo "::error::fuzz matrix has $got entries under $names names for $want targets"
+            jq -r '.[].name' <<<"$matrix" | sort | uniq -d
+            exit 1
+          fi
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   fuzz:
@@ -168,6 +223,10 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          # The corpus below lives inside the build cache, so leaving this
+          # on would store it twice and grow the setup-go entry without
+          # bound, once per target per commit.
+          cache: false
       # The corpus the fuzzing engine grows lives in the Go build cache, not
       # in testdata/fuzz, which only holds committed regression inputs.
       - run: echo "GOFUZZCACHE=$(go env GOCACHE)/fuzz" >> "$GITHUB_ENV"
@@ -208,6 +267,22 @@ jobs:
           path: ./cache
           key: benchmark-${{ matrix.name }}-${{ github.sha }}
           restore-keys: benchmark-${{ matrix.name }}-
+      # Recorded, not enforced. A doubling looked like a safe threshold
+      # until it was tried: the baseline is a cached measurement from
+      # another run on another shared runner, so the comparison carries
+      # that machine's contention as well as this one's. A run that
+      # changed no benchmark measurably against main still alerted on
+      # every landlock benchmark at 2.06x and on 60 seccomp benchmarks at
+      # 3.4x to 5.8x, including one that takes 45ns. Gating on that trains
+      # people to ignore a red run.
+      #
+      # What actually guards the cost is deterministic and lives
+      # elsewhere: the bound assertions the test / bounds job runs
+      # uninstrumented, and the budgets the merge enforces. This job
+      # tracks the trend and puts it in the job summary.
+      #
+      # comment-on-alert is left off on purpose: it writes to the pull
+      # request, which needs a token a fork does not get.
       - uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
         with:
           tool: go
@@ -215,6 +290,7 @@ jobs:
           external-data-json-path: ./cache/benchmark-data.json
           alert-threshold: "200%"
           summary-always: true
+          fail-on-alert: false
 
   govulncheck:
     runs-on: ubuntu-latest
@@ -253,6 +329,15 @@ jobs:
           go-version-file: go.mod
       - run: make verify-mdtoc
 
+  golden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make verify-golden
+
   dependencies:
     runs-on: ubuntu-latest
     steps:
@@ -260,7 +345,11 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      # zeitgeist, like govulncheck, needs a newer Go than the module's
+      # floor; let go run fetch the toolchain its module requires.
       - run: make verify-dependencies
+        env:
+          GOTOOLCHAIN: auto
 
   snapshot:
     runs-on: ubuntu-latest
@@ -281,3 +370,12 @@ jobs:
           distribution: goreleaser
           version: ${{ env.GORELEASER_VERSION }}
           args: release --snapshot --skip=sign --clean
+      # release.yml attests over these paths. goreleaser decides them, so a
+      # version bump that moves a binary or an SBOM has to break here rather
+      # than ship a release with nothing attested: attest-build-provenance
+      # only errors when no subject at all matches.
+      - name: Check the paths the release attests over
+        run: |
+          set -euo pipefail
+          ls -1 dist/spm_*/spm dist/spm_*/spm.exe \
+            dist/spm_*.sbom.json dist/checksums.txt

@@ -17,11 +17,18 @@ limitations under the License.
 package seccomp
 
 import (
+	"math/bits"
 	"testing"
 	"time"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
+
+// wideIndex is an argument index far past the bitmap indexSet keeps and past
+// anything a runtime loads. It is derived from the platform's word size
+// rather than written as a literal, so that the test also compiles for a
+// 32-bit GOARCH, where a constant such as 1 << 40 overflows a uint.
+const wideIndex uint = 1 << (bits.UintSize - 4)
 
 func indexArgs(indices ...uint) []specs.LinuxSeccompArg {
 	args := make([]specs.LinuxSeccompArg, 0, len(indices))
@@ -45,7 +52,8 @@ func TestHasRepeatedIndex(t *testing.T) {
 		{name: "empty", indices: nil, want: false},
 		{name: "distinct", indices: []uint{0, 1, 5}, want: false},
 		{name: "repeated", indices: []uint{2, 0, 2}, want: true},
-		{name: "distinct out of range", indices: []uint{63, 64, 1 << 40}, want: false},
+		{name: "distinct out of range", indices: []uint{63, 64, wideIndex}, want: false},
+		{name: "repeated out of the bitmap", indices: []uint{wideIndex, 2, wideIndex}, want: true},
 		{name: "repeated out of range", indices: []uint{70, 3, 70}, want: true},
 		{name: "repeated at the bitmap edge", indices: []uint{63, 63}, want: true},
 	} {

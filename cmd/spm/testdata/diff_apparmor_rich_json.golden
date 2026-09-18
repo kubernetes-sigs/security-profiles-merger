@@ -1,0 +1,59 @@
+{
+  "equal": false,
+  "executables": {
+    "added": [
+      "/usr/bin/python"
+    ],
+    "removed": [
+      "/usr/bin/bash",
+      "/usr/bin/tar"
+    ]
+  },
+  "libraries": {
+    "added": [
+      "/usr/lib/libssl.so"
+    ],
+    "removed": [
+      "/usr/lib/libz.so"
+    ]
+  },
+  "filesystem": {
+    "readOnly": {
+      "added": [
+        "/var/log"
+      ],
+      "removed": [
+        "/etc/config",
+        "/usr/share"
+      ]
+    },
+    "writeOnly": {
+      "added": [
+        "/var/log/audit.log"
+      ]
+    },
+    "readWrite": {
+      "removed": [
+        "/run/app"
+      ]
+    }
+  },
+  "network": {
+    "allowRaw": {
+      "left": false,
+      "right": true
+    },
+    "allowUdp": {
+      "left": false,
+      "right": true
+    }
+  },
+  "capabilities": {
+    "added": [
+      "SETUID"
+    ],
+    "removed": [
+      "SYS_TIME"
+    ]
+  }
+}

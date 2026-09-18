@@ -68,6 +68,10 @@ func (mode validateMode) decodePolicy() decodePolicy {
 	return decodePolicy{
 		rejectUnknown:    mode == modeStrict,
 		rejectDuplicates: mode == modeStrict || mode == modeArtifact,
+		// Bytes that are not valid UTF-8 make two different profiles decode
+		// alike, which is a hazard for a user-authored profile and a sign of
+		// a crafted one in an artifact.
+		rejectInvalidUTF8: mode == modeStrict || mode == modeArtifact,
 	}
 }
 
@@ -76,11 +80,15 @@ func (mode validateMode) decodePolicy() decodePolicy {
 // artifact can be checked the way each deserves in a single run.
 type profileKind struct {
 	merge func(
-		data [][]byte, strategy string, modes []validateMode,
+		inputs []profileInput, strategy string, modes []validateMode,
 		format string, stdout, stderr io.Writer,
 	) int
-	diff     func(data [][]byte, format string, stdout, stderr io.Writer) int
-	validate func(data [][]byte, mode validateMode, format string, stdout, stderr io.Writer) int
+	diff func(
+		inputs []profileInput, arch diffArch, format string, stdout, stderr io.Writer,
+	) int
+	validate func(
+		inputs []profileInput, mode validateMode, format string, stdout, stderr io.Writer,
+	) int
 }
 
 // kindOps holds the package functions of one profile type.
@@ -92,7 +100,36 @@ type kindOps[T any, D equalChecker] struct {
 	validateArtifact func(*T) error
 	format           func(*T) string
 	diff             func(*T, *T) (*D, error)
-	formatDiff       func(*D) string
+	// diffForArch compares as a node running the named architecture would,
+	// and is nil for a profile type that has no architectures.
+	diffForArch func(specs.Arch, *T, *T) (*D, error)
+	formatDiff  func(*D) string
+}
+
+// diffCommand compares two profiles, honouring --arch where the profile
+// type has architectures and rejecting it where it has none: a run that
+// names an architecture for a profile type that cannot have one asked for
+// something the answer would silently ignore.
+func (ops kindOps[T, D]) diffCommand(
+	inputs []profileInput, arch diffArch, format string, stdout, stderr io.Writer,
+) int {
+	diffFn := ops.diff
+
+	if arch.explicit {
+		if ops.diffForArch == nil {
+			_, _ = fmt.Fprintf(
+				stderr, "error: --arch only applies to %s profiles\n", typeSeccomp,
+			)
+
+			return exitUsage
+		}
+
+		diffFn = func(left, right *T) (*D, error) {
+			return ops.diffForArch(arch.value, left, right)
+		}
+	}
+
+	return diffProfiles(inputs, format, diffFn, ops.formatDiff, stdout, stderr)
 }
 
 // checker returns the validation function for a mode.
@@ -112,7 +149,7 @@ func (ops kindOps[T, D]) checker(mode validateMode) func(*T) error {
 func newKind[T any, D equalChecker](ops kindOps[T, D]) profileKind {
 	return profileKind{
 		merge: func(
-			data [][]byte, strategy string, modes []validateMode,
+			inputs []profileInput, strategy string, modes []validateMode,
 			format string, stdout, stderr io.Writer,
 		) int {
 			checks := make([]func(*T) error, len(modes))
@@ -131,7 +168,7 @@ func newKind[T any, D equalChecker](ops kindOps[T, D]) profileKind {
 
 			return mergeProfiles(
 				mergeRequest[T]{
-					data:      data,
+					inputs:    inputs,
 					strategy:  strategy,
 					format:    format,
 					checks:    checks,
@@ -143,14 +180,12 @@ func newKind[T any, D equalChecker](ops kindOps[T, D]) profileKind {
 				stdout, stderr,
 			)
 		},
-		diff: func(data [][]byte, format string, stdout, stderr io.Writer) int {
-			return diffProfiles(data, format, ops.diff, ops.formatDiff, stdout, stderr)
-		},
+		diff: ops.diffCommand,
 		validate: func(
-			data [][]byte, mode validateMode, format string, stdout, stderr io.Writer,
+			inputs []profileInput, mode validateMode, format string, stdout, stderr io.Writer,
 		) int {
 			return validateProfiles(
-				data, ops.checker(mode), mode.decodePolicy(),
+				inputs, ops.checker(mode), mode.decodePolicy(),
 				format, ops.format, stdout, stderr,
 			)
 		},
@@ -169,6 +204,7 @@ func kindByName(name string) (profileKind, bool) {
 			validateArtifact: seccomp.ValidateArtifact,
 			format:           seccomp.FormatProfile,
 			diff:             seccomp.Diff,
+			diffForArch:      seccomp.DiffForArch,
 			formatDiff:       seccomp.FormatDiff,
 		}), true
 	case typeAppArmor:
@@ -180,6 +216,7 @@ func kindByName(name string) (profileKind, bool) {
 			validateArtifact: apparmor.ValidateArtifact,
 			format:           apparmor.FormatProfile,
 			diff:             apparmor.Diff,
+			diffForArch:      nil,
 			formatDiff:       apparmor.FormatDiff,
 		}), true
 	case typeLandlock:
@@ -191,6 +228,7 @@ func kindByName(name string) (profileKind, bool) {
 			validateArtifact: landlock.ValidateArtifact,
 			format:           landlock.FormatProfile,
 			diff:             landlock.Diff,
+			diffForArch:      nil,
 			formatDiff:       landlock.FormatDiff,
 		}), true
 	default:
@@ -207,11 +245,11 @@ func kindByName(name string) (profileKind, bool) {
 // unless noDetectNote is set, so that a command in a pipeline can stay
 // silent about what it inferred.
 func resolveKind(
-	profileType string, data [][]byte, parseExit int, noDetectNote bool,
+	profileType string, inputs []profileInput, parseExit int, noDetectNote bool,
 	stderr io.Writer,
 ) (profileKind, int) {
 	if profileType == "" {
-		err := checkParsable(data)
+		err := checkParsable(inputs)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 
@@ -220,14 +258,10 @@ func resolveKind(
 			return none, parseExit
 		}
 
-		detected, conflict := detectProfileType(data)
+		detected, conflict := detectProfileType(inputs)
 
-		if conflict != "" {
-			_, _ = fmt.Fprintf(
-				stderr,
-				"error: inputs mix profile types (%s and %s), use --type\n",
-				detected, conflict,
-			)
+		if conflict != nil {
+			reportTypeConflict(conflict, stderr)
 
 			var none profileKind
 
@@ -257,6 +291,28 @@ func resolveKind(
 	}
 
 	return kind, 0
+}
+
+// reportTypeConflict explains why the profile type could not be resolved:
+// either the inputs are of different types, or one of them carries the
+// members of two. Both leave the command no type it could use without
+// dropping rules, so both ask for --type.
+func reportTypeConflict(conflict *typeConflict, stderr io.Writer) {
+	if conflict.input != "" {
+		_, _ = fmt.Fprintf(
+			stderr,
+			"error: %s mixes profile types (%s and %s), use --type\n",
+			conflict.input, conflict.first, conflict.second,
+		)
+
+		return
+	}
+
+	_, _ = fmt.Fprintf(
+		stderr,
+		"error: inputs mix profile types (%s and %s), use --type\n",
+		conflict.first, conflict.second,
+	)
 }
 
 // unknownType reports an unknown profile type and returns the usage exit

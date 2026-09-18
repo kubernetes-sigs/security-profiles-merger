@@ -18,6 +18,7 @@ package seccomp
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -35,6 +36,14 @@ var (
 	ErrNoProfiles = spm.ErrNoProfiles
 	// ErrNilProfile is returned when a nil profile is provided.
 	ErrNilProfile = spm.ErrNilProfile
+	// ErrNotifyWithoutListener is returned by Union when the result would
+	// keep SCMP_ACT_NOTIFY while no input names a listener to hand the
+	// notification to. runc sets SECCOMP_FILTER_FLAG_NEW_LISTENER for any
+	// such filter and then refuses to create the container without a
+	// listenerPath, so the result would not load at all. Intersect degrades
+	// the action to SCMP_ACT_ERRNO instead, which is more restrictive and
+	// therefore safe in its direction.
+	ErrNotifyWithoutListener = errors.New("SCMP_ACT_NOTIFY without a listener")
 )
 
 // Intersect merges multiple seccomp profiles via intersection: the resulting
@@ -86,11 +95,25 @@ var (
 // adds no work, and it admits MaxArtifactClausesPerSyscall rules against a
 // dozen on the other side.
 //
+// A second budget bounds how many rules a profile is read as at all. An
+// entry loads one rule per name it lists, so the rules of a profile grow as
+// the product of its name and condition counts rather than with its size,
+// and a profile past the budget is read with every syscall already
+// collapsed, which costs one pass over its entries. ValidateArtifact rejects
+// an artifact well below that budget (MaxArtifactClauses), so an accepted
+// artifact is always merged rule by rule.
+//
 // These guarantees hold for the program libseccomp compiles for a 64-bit
 // architecture. For a 32-bit architecture, libseccomp compares only the
 // lower 32 bits of each argument value, which the merge does not model.
 //
-// ListenerPath and ListenerMetadata are taken from the first profile.
+// ListenerPath and ListenerMetadata are taken from the first profile that
+// sets a ListenerPath, since SCMP_ACT_NOTIFY and the listener belong
+// together: the action the lattice carries into the result may come from
+// either side, and runc refuses to create a container whose filter notifies
+// without a listenerPath. Where the result would still hold
+// SCMP_ACT_NOTIFY without one, the action degrades to SCMP_ACT_ERRNO, which
+// is more restrictive and therefore safe here.
 // When two profiles share the same default or syscall action, DefaultErrnoRet
 // and per-syscall ErrnoRet are taken from the earlier (leftmost) profile.
 // Errno values are compared the way runtimes apply them: an unset errnoRet
@@ -111,8 +134,8 @@ var (
 // cannot disable a mitigation the baseline keeps. SECCOMP_FILTER_FLAG_LOG
 // hardens auditing and survives if any profile sets it, so a profile cannot
 // silence the baseline's logging. SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV
-// belongs to the listener and, like ListenerPath, is taken from the first
-// profile. Unknown flags are rejected by Validate. An empty Flags list means
+// belongs to the listener and comes from the same profile the listener does.
+// Unknown flags are rejected by Validate. An empty Flags list means
 // "no flags".
 //
 // Argument conditions are compared as libseccomp evaluates them: valueTwo is
@@ -157,16 +180,26 @@ func Intersect(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 // applies even when one side has no filtered entries for the syscall; past
 // either budget, a syscall collapses to its least restrictive action.
 //
-// ListenerPath and ListenerMetadata are taken from the first profile.
+// ListenerPath and ListenerMetadata are taken from the first profile that
+// sets a ListenerPath, for the reason given for Intersect. Union cannot
+// degrade SCMP_ACT_NOTIFY the way Intersect does, since every alternative
+// permits less, so a result that would notify while no input names a
+// listener is refused with ErrNotifyWithoutListener. Only an input that runc
+// would itself refuse to load can produce one.
 // When two profiles share the same default or syscall action, DefaultErrnoRet
 // and per-syscall ErrnoRet are taken from the earlier (leftmost) profile.
 // Errno values are compared and spelled as described for Intersect.
 //
 // Flags mirror Intersect: SECCOMP_FILTER_FLAG_SPEC_ALLOW survives if any
 // profile sets it, SECCOMP_FILTER_FLAG_LOG only if every profile does, and
-// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV comes from the first profile.
-// Architectures are combined, which under the runtime model described for
-// Intersect (native plus the listed architectures) is the exact union.
+// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV follows the listener.
+// Architectures are combined. The set the result covers is the union of the
+// sets the inputs cover, under the runtime model described for Intersect
+// (native plus the listed architectures), but the behaviour on an
+// architecture only one input lists is not: there the other input's filter
+// applies libseccomp's action for an unlisted architecture, SCMP_ACT_KILL,
+// while the result applies the merged rules. That is the permissive
+// direction the union promises, so the guarantee holds.
 //
 // Argument conditions, single profiles, and output ordering are handled as
 // described for Intersect.
@@ -217,6 +250,11 @@ func foldProfiles(
 		return nil, fmt.Errorf("merge: %w", err)
 	}
 
+	err = resolveListener(result, strategy.isIntersect)
+	if err != nil {
+		return nil, err
+	}
+
 	result.Syscalls = regroupSyscalls(result.Syscalls)
 
 	slices.Sort(result.Architectures)
@@ -253,14 +291,23 @@ func mergeTwo(
 	// survives.
 	mergedDefault := pickClause(*defaultClause(left), *defaultClause(right), strategy.pick)
 
+	// The listener comes from the first profile that provides one rather
+	// than from the left unconditionally: the action lattice can carry
+	// SCMP_ACT_NOTIFY in from the right, and a result that notifies without
+	// a listenerPath does not load, however loadable both inputs were.
+	listener := left
+	if left.ListenerPath == "" && right.ListenerPath != "" {
+		listener = right
+	}
+
 	merged := &specs.LinuxSeccomp{
 		DefaultAction:    mergedDefault.action,
 		DefaultErrnoRet:  outputErrno(mergedDefault.action, mergedDefault.errnoRet),
-		ListenerPath:     left.ListenerPath,
-		ListenerMetadata: left.ListenerMetadata,
+		ListenerPath:     listener.ListenerPath,
+		ListenerMetadata: listener.ListenerMetadata,
 	}
 
-	merged.Flags = mergeFlags(left.Flags, right.Flags, strategy.isIntersect)
+	merged.Flags = mergeFlags(left.Flags, right.Flags, strategy.isIntersect, listener == left)
 
 	if strategy.isIntersect {
 		merged.Architectures = merge.IntersectSlice(left.Architectures, right.Architectures)
@@ -271,6 +318,57 @@ func mergeTwo(
 	merged.Syscalls = strategy.rules().mergeProfileSyscalls(left, right, &mergedDefault)
 
 	return merged
+}
+
+// resolveListener keeps SCMP_ACT_NOTIFY and the listener together in the
+// result. Both are merged from the inputs independently, so a result can
+// hold entries that notify while no input set a listenerPath, and runc
+// refuses to create a container for such a filter. Intersection degrades the
+// action to SCMP_ACT_ERRNO, which is more restrictive than notifying and so
+// never permits more than an input; entries that then equal the merged
+// default are dropped, as every other entry equal to it is. Union has no
+// degradation that permits at least as much, so it refuses.
+//
+// The default action is never SCMP_ACT_NOTIFY here, since Validate rejects
+// it on every input and the merged default is one of theirs.
+func resolveListener(profile *specs.LinuxSeccomp, intersect bool) error {
+	if profile.ListenerPath != "" {
+		return nil
+	}
+
+	notifies := func(entry specs.LinuxSyscall) bool { return entry.Action == specs.ActNotify }
+	if !slices.ContainsFunc(profile.Syscalls, notifies) {
+		return nil
+	}
+
+	if !intersect {
+		return fmt.Errorf("merge: %w", ErrNotifyWithoutListener)
+	}
+
+	def := defaultClause(profile)
+	kept := make([]specs.LinuxSyscall, 0, len(profile.Syscalls))
+
+	for _, entry := range profile.Syscalls {
+		if notifies(entry) {
+			entry.Action = specs.ActErrno
+			entry.ErrnoRet = nil
+
+			degraded := clause{
+				action:   entry.Action,
+				errnoRet: runtimeErrno(entry.Action, entry.ErrnoRet),
+				args:     nil,
+			}
+			if degraded.sameResult(*def) {
+				continue
+			}
+		}
+
+		kept = append(kept, entry)
+	}
+
+	profile.Syscalls = kept
+
+	return nil
 }
 
 // regroupSyscalls drops entries without names, merges entries sharing the

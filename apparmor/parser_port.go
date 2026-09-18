@@ -298,8 +298,11 @@ type converter struct {
 //   - a class whose content is empty or a lone "^" (such as "[]" or "[^]"),
 //     whose closing bracket libapparmor_re takes as a member, so the class
 //     extends to a later bracket;
-//   - an escaped "," inside a class, which libapparmor_re's lexer does not
-//     accept.
+//   - an escaped "," inside a class, which libapparmor_re's lexer turns into
+//     a literal backslash class member rather than the comma it spells (on a
+//     bad escape parse.y sets the character to a backslash and returns it),
+//     and which loops on current upstream master, where strn_escseq restores
+//     the position on failure and regex_lex decrements it again.
 //
 // A pattern with such a construct matches nothing in this package, and
 // ValidateArtifact and ValidateStrict report it.

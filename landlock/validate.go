@@ -42,6 +42,12 @@ var (
 	// which no file system path can contain.
 	ErrInvalidPath = errors.New("invalid path")
 
+	// ErrPathTooLong is returned when a path rule is longer than
+	// MaxPathLen bytes. The length is checked before anything else, so an
+	// oversized path costs no further work: every other check, and the
+	// merge's hierarchy resolution, walks the path component by component.
+	ErrPathTooLong = errors.New("path exceeds 4096 bytes")
+
 	// ErrParentPath is returned when a path rule contains a ".." component.
 	// The kernel resolves ".." against the file system, where a symlink can
 	// make "/srv/data/../public" name a directory other than "/srv/public",
@@ -79,6 +85,13 @@ var (
 	ErrUnknownABIVersion = errors.New("unknown Landlock ABI version")
 )
 
+// MaxPathLen is the longest rule path this package accepts, following the
+// PATH_MAX of Linux and the limit the apparmor package applies to its
+// patterns. A rule path names a file the kernel opens, so nothing longer
+// can ever be loaded, while resolving one against the paths of the other
+// rules costs time in the length of the path for every rule.
+const MaxPathLen = 4096
+
 // fieldRef names a profile field, or an element of it when idx is not
 // negative, in error messages. It is formatted only when an error is
 // reported, so validating a large profile does not build a string per rule.
@@ -103,18 +116,19 @@ func scopedRef() fieldRef          { return fieldRef{field: "Scoped", idx: noInd
 func pathRuleRef(idx int) fieldRef { return fieldRef{field: "PathRules", idx: idx} }
 func netRuleRef(idx int) fieldRef  { return fieldRef{field: "NetRules", idx: idx} }
 
-// Validate checks that a Landlock profile contains only known access right
-// values, valid paths, and no duplicate rules or rights. Paths must not be
-// empty, contain NUL bytes, or contain ".." components. Duplicate rules are
-// detected on cleaned paths, so "/etc", "/etc/" and "//etc" count as the
-// same rule.
+// Validate checks what the merge needs: a profile must contain only known
+// access right values and valid paths. Paths must not be empty, longer than
+// MaxPathLen, contain NUL bytes, or contain ".." components.
 //
-// Intersect and Union run the same checks on each input as given, except
-// for duplicates: duplicate rules and rights within one input are merged
-// rather than rejected there. Call Validate directly to catch them. All
-// validation failures are collected and returned together.
+// Intersect and Union run exactly these checks on each input as given, so a
+// profile Validate accepts is one they merge. Duplicate rules and rights
+// pass: the kernel folds them and so does the merge. ValidateStrict rejects
+// them, and ValidateArtifact adds what a kernel could not load, so what
+// Validate rejects ValidateArtifact rejects, and what ValidateArtifact
+// rejects ValidateStrict rejects. All validation failures are collected and
+// returned together.
 func Validate(profile *Profile) error {
-	_, err := validateProfile(profile, true)
+	_, err := validateProfile(profile, false)
 
 	return err
 }
@@ -157,7 +171,7 @@ func validateProfile(profile *Profile, checkDuplicates bool) ([]string, error) {
 		errs = append(errs, validateDuplicates(profile, cleaned)...)
 	}
 
-	return cleaned, errors.Join(errs...)
+	return cleaned, joinLimited(errs...)
 }
 
 // validateDuplicates reports duplicate rights in every set and rule, and
@@ -198,31 +212,45 @@ func validateRights[T ~string](
 
 	for _, right := range rights {
 		if !known(right) {
-			errs = append(errs, fmt.Errorf("%s: %w %q", context, ErrUnknownRight, right))
+			errs = append(errs, fmt.Errorf(
+				"%s: %w %s", context, ErrUnknownRight, merge.QuoteBounded(string(right)),
+			))
 		}
 	}
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
 }
 
-// validatePath rejects empty paths, paths with NUL bytes, paths with ".."
-// components, and paths that clean to ".". It returns the cleaned path.
+// validatePath rejects empty paths, paths longer than MaxPathLen, paths
+// with NUL bytes, paths with ".." components, and paths that clean to ".".
+// It returns the cleaned path.
+//
+// The length is checked first, so a path no kernel could take is rejected
+// without scanning or cleaning it.
 func validatePath(path string) (string, error) {
 	if path == "" {
 		return "", ErrEmptyPath
 	}
 
+	if len(path) > MaxPathLen {
+		return "", fmt.Errorf("%d bytes: %w", len(path), ErrPathTooLong)
+	}
+
 	if strings.ContainsRune(path, 0) {
-		return "", fmt.Errorf("%q contains a NUL byte: %w", path, ErrInvalidPath)
+		return "", fmt.Errorf(
+			"%s contains a NUL byte: %w", merge.QuoteBounded(path), ErrInvalidPath,
+		)
 	}
 
 	if hasParentComponent(path) {
-		return "", fmt.Errorf("%q: %w", path, ErrParentPath)
+		return "", fmt.Errorf("%s: %w", merge.QuoteBounded(path), ErrParentPath)
 	}
 
 	cleaned := cleanPath(path)
 	if cleaned == "." {
-		return "", fmt.Errorf("%q resolves to %q: %w", path, ".", ErrEmptyPath)
+		return "", fmt.Errorf(
+			"%s resolves to %q: %w", merge.QuoteBounded(path), ".", ErrEmptyPath,
+		)
 	}
 
 	return cleaned, nil
@@ -284,7 +312,9 @@ func cleanPath(path string) string {
 // without allocating.
 func isCleanPath(path string) bool {
 	switch {
-	case path == "/":
+	// cleanPath returns "." for a path made only of "." components, so the
+	// bare "." is already its own canonical form.
+	case path == "/" || path == ".":
 		return true
 	case path == "" || strings.HasSuffix(path, "/"):
 		return false
@@ -333,14 +363,15 @@ func validateDuplicatePaths(rules []PathRule, cleaned []string) error {
 
 		if _, ok := seen[cleaned[idx]]; ok {
 			errs = append(errs, fmt.Errorf(
-				"%s: path %q: %w", pathRuleRef(idx), rule.Path, ErrDuplicateRule,
+				"%s: path %s: %w",
+				pathRuleRef(idx), merge.QuoteBounded(rule.Path), ErrDuplicateRule,
 			))
 		}
 
 		seen[cleaned[idx]] = struct{}{}
 	}
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
 }
 
 // ValidateArtifact validates a profile received from an untrusted source,
@@ -352,19 +383,31 @@ func validateDuplicatePaths(rules []PathRule, cleaned []string) error {
 // ruleset that handles and scopes nothing (ENOMSG).
 //
 // Duplicate rules and rights are accepted, as the kernel and the merge fold
-// them. ValidateArtifact does not check the profile against a kernel's ABI,
-// since the artifact does not know where it will run; call ValidateForABI
-// with the node's ABI version for that. It also does not compare the
-// profile against a baseline; callers intersect the result with their
-// baseline afterwards.
+// them; ValidateStrict adds those checks. ValidateArtifact does not check
+// the profile against a kernel's ABI, since the artifact does not know
+// where it will run; call ValidateForABI with the node's ABI version for
+// that. It also does not compare the profile against a baseline; callers
+// intersect the result with their baseline afterwards.
+//
+// A profile it accepts still chooses its own rule paths, and Intersect may
+// place a rule of the result on such a path while the access it carries
+// comes from the baseline's rule on an ancestor. The kernel binds a rule to
+// the file the path resolves to, so where that path is a symlink or a bind
+// mount leaving the baseline's hierarchy, the merged ruleset is more
+// permissive there than the baseline is. ValidateArtifact cannot see this,
+// since it looks at one profile and at path strings rather than at files:
+// see Intersect for what a runtime can do about it, and LoweredRulePaths
+// for which rules of a result carry such a grant.
 func ValidateArtifact(profile *Profile) error {
 	return validateLoadableProfile(profile, false)
 }
 
 // ValidateStrict is intended for user-authored profiles. It performs every
 // check from ValidateArtifact and additionally rejects duplicate rules and
-// rights, as Validate does: the kernel and the merge accept them, but in a
-// profile a person wrote they are likely mistakes.
+// rights: the kernel, the merge, Validate and ValidateArtifact accept them,
+// but in a profile a person wrote they are likely mistakes. Duplicate rules
+// are detected on cleaned paths, so "/etc", "/etc/" and "//etc" count as
+// the same rule.
 //
 // Merge results pass ValidateStrict when the inputs use absolute paths and
 // the result handles or scopes at least one right, since Intersect and
@@ -382,7 +425,7 @@ func validateLoadableProfile(profile *Profile, checkDuplicates bool) error {
 	errs := appendErr(nil, err)
 	errs = append(errs, validateLoadable(profile)...)
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
 }
 
 // RequiredABIVersion returns the lowest Landlock ABI version supporting every
@@ -431,8 +474,12 @@ func highestABI[T ~string](rights []T, table map[T]ABIVersion) ABIVersion {
 // profile passing this uses no right a node reporting that ABI version
 // rejects. It does not check that the kernel can load the profile otherwise;
 // combine it with ValidateArtifact or ValidateStrict for that.
-// A version outside ABIV1 to LatestABIVersion is reported with
-// ErrUnknownABIVersion.
+//
+// A version newer than LatestABIVersion is treated as LatestABIVersion.
+// Landlock ABI versions are cumulative, so a kernel reporting one supports
+// every right this package knows, and a node running ahead of this library
+// must not fail validation for profiles it can load. A version below ABIV1
+// names no kernel and is reported with ErrUnknownABIVersion.
 //
 // Use RequiredABIVersion to ask the same question the other way round: which
 // ABI version a profile needs. Intersect never raises the requirement beyond
@@ -441,16 +488,20 @@ func highestABI[T ~string](rights []T, table map[T]ABIVersion) ABIVersion {
 func ValidateForABI(profile *Profile, abi ABIVersion) error {
 	errs := appendErr(nil, Validate(profile))
 
-	if abi < ABIV1 || abi > LatestABIVersion {
+	if abi < ABIV1 {
 		errs = append(errs, fmt.Errorf(
 			"%w: v%d (known: v%d to v%d)", ErrUnknownABIVersion, abi, ABIV1, LatestABIVersion,
 		))
 
-		return errors.Join(errs...)
+		return joinLimited(errs...)
 	}
 
+	// Every right this package knows is supported from LatestABIVersion on,
+	// so there is nothing left to report beyond it.
+	abi = min(abi, LatestABIVersion)
+
 	if profile == nil {
-		return errors.Join(errs...)
+		return joinLimited(errs...)
 	}
 
 	errs = append(errs, abiErrors(handledFSRef(), profile.HandledAccessFS, abi, fsAccessABI)...)
@@ -465,7 +516,7 @@ func ValidateForABI(profile *Profile, abi ABIVersion) error {
 		errs = append(errs, abiErrors(netRuleRef(idx), rule.AccessNet, abi, netAccessABI)...)
 	}
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
 }
 
 // abiErrors reports every right of the list that needs a newer ABI version
@@ -482,8 +533,8 @@ func abiErrors[T ~string](
 		}
 
 		errs = append(errs, fmt.Errorf(
-			"%s: right %q: %w (needs v%d, have v%d)",
-			context, right, ErrUnsupportedABIRight, needed, abi,
+			"%s: right %s: %w (needs v%d, have v%d)",
+			context, merge.QuoteBounded(string(right)), ErrUnsupportedABIRight, needed, abi,
 		))
 	}
 
@@ -508,13 +559,13 @@ func validateLoadable(profile *Profile) []error {
 	for idx, rule := range profile.PathRules {
 		if rule.Path != "" && !merge.IsAbsPath(rule.Path) {
 			errs = append(errs, fmt.Errorf(
-				"%s: %q: %w", pathRuleRef(idx), rule.Path, ErrRelativePath,
+				"%s: %s: %w", pathRuleRef(idx), merge.QuoteBounded(rule.Path), ErrRelativePath,
 			))
 		}
 
 		if len(rule.AccessFS) == 0 {
 			errs = append(errs, fmt.Errorf(
-				"%s: %q: %w", pathRuleRef(idx), rule.Path, ErrEmptyRule,
+				"%s: %s: %w", pathRuleRef(idx), merge.QuoteBounded(rule.Path), ErrEmptyRule,
 			))
 		}
 
@@ -542,12 +593,12 @@ func validateHandled[T ~string](
 	for _, right := range rights {
 		if _, ok := handled[right]; !ok {
 			errs = append(errs, fmt.Errorf(
-				"%s: right %q: %w", context, right, ErrUnhandledRight,
+				"%s: right %s: %w", context, merge.QuoteBounded(string(right)), ErrUnhandledRight,
 			))
 		}
 	}
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
 }
 
 func validateDuplicateRights[T ~string](context fieldRef, rights []T) error {
@@ -558,14 +609,14 @@ func validateDuplicateRights[T ~string](context fieldRef, rights []T) error {
 	for _, right := range rights {
 		if _, ok := seen[right]; ok {
 			errs = append(errs, fmt.Errorf(
-				"%s: right %q: %w", context, right, ErrDuplicateRight,
+				"%s: right %s: %w", context, merge.QuoteBounded(string(right)), ErrDuplicateRight,
 			))
 		}
 
 		seen[right] = struct{}{}
 	}
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
 }
 
 func validateDuplicatePorts(rules []NetRule) error {
@@ -583,5 +634,15 @@ func validateDuplicatePorts(rules []NetRule) error {
 		seen[rule.Port] = struct{}{}
 	}
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
+}
+
+// joinLimited reports at most a bounded number of the failures it is given.
+// A profile holds as many failures as it holds rules, and an artifact
+// chooses that number, so the rejection a runtime logs needs a ceiling just
+// as the values it names do (see merge.QuoteBounded).
+//
+//nolint:wrapcheck // the joined failures are this package's own errors
+func joinLimited(errs ...error) error {
+	return merge.JoinLimited(errs...)
 }

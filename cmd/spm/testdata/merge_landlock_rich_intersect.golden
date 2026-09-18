@@ -1,0 +1,48 @@
+{
+  "handledAccessFs": [
+    "execute",
+    "read_dir",
+    "read_file",
+    "truncate",
+    "write_file"
+  ],
+  "handledAccessNet": [
+    "bind_tcp",
+    "bind_udp",
+    "connect_tcp"
+  ],
+  "scoped": [
+    "abstract_unix_socket",
+    "signal"
+  ],
+  "pathRules": [
+    {
+      "path": "/etc",
+      "accessFs": [
+        "read_dir",
+        "read_file"
+      ]
+    },
+    {
+      "path": "/opt/app",
+      "accessFs": [
+        "execute"
+      ]
+    },
+    {
+      "path": "/var/lib/app",
+      "accessFs": [
+        "read_file",
+        "write_file"
+      ]
+    }
+  ],
+  "netRules": [
+    {
+      "port": 443,
+      "accessNet": [
+        "connect_tcp"
+      ]
+    }
+  ]
+}

@@ -80,45 +80,82 @@ func lessRestrictiveClause(left, right clause) clause {
 }
 
 // syscallRules holds every clause of one profile for a single syscall name.
+// Past the collectRules budget it holds a summary of them instead, which
+// settleInputs turns into the one clause a collapse picks before any merge
+// reads the fallback or the conditional clauses.
 type syscallRules struct {
 	unconditional *clause
 	conditional   []clause
+	summary       *clauseSummary
 }
 
 // forEachClause expands syscall entries into clauses the way a runtime loads
 // them and calls visit once per entry index, syscall name, and clause.
 // Multi-name entries contribute one clause per name, and entries equal to
-// def are skipped when def is non-nil, as runtimes skip them.
+// def are skipped when def is non-nil, as runtimes skip them. Names for which
+// skip reports true are not visited at all, so a caller that has already
+// settled a syscall pays nothing for its remaining names. A nil skip visits
+// every name.
 func forEachClause(
 	syscalls []specs.LinuxSyscall, def *clause,
+	skip func(name string) bool,
 	visit func(idx int, name string, next clause),
 ) {
 	for idx := range syscalls {
 		entry := &syscalls[idx]
 
-		for _, next := range entryClauses(entry) {
-			if def != nil && next.sameResult(*def) {
+		clauses := entryClauses(entry)
+		if def != nil {
+			clauses = slices.DeleteFunc(clauses, func(next clause) bool {
+				return next.sameResult(*def)
+			})
+		}
+
+		for _, name := range entry.Names {
+			if skip != nil && skip(name) {
 				continue
 			}
 
-			for _, name := range entry.Names {
+			for _, next := range clauses {
 				visit(idx, name, next)
 			}
 		}
 	}
 }
 
+// maxLoadedClauses bounds how many clauses collectRules materializes for one
+// input. An entry contributes one clause per name, so the clauses of a
+// profile grow as the product of its name and condition counts rather than
+// with its size: 40000 names against 256 conditions fit in 441 KB of JSON and
+// expand to ten million clauses. Past this bound an input is read in
+// summarized form instead, which costs one pass over the entries and no
+// memory per clause (see summarizeRules).
+//
+// No profile a runtime should accept comes near the bound. ValidateArtifact
+// rejects an artifact loading more than MaxArtifactClauses rules, which is a
+// quarter of it, so an artifact is always read exactly.
+const maxLoadedClauses = 1 << 16
+
 // collectRules splits syscall entries into per-name clause sets as a runtime
 // loads them. Entries equal to the profile default are skipped when def is
 // non-nil, the first unconditional entry wins over later ones and hides the
 // conditional entries of its name, and exact duplicates are dropped.
+//
+// An input whose entries would load more than maxLoadedClauses rules in
+// total is summarized instead: every syscall of it is read as the clause a
+// collapse picks, which is at least as restrictive as the syscall's rules for
+// intersection and at least as permissive for union.
 func collectRules(syscalls []specs.LinuxSyscall, def *clause) map[string]*syscallRules {
+	if totalClauses(syscalls, def) > maxLoadedClauses {
+		return summarizeRules(syscalls, def)
+	}
+
 	rules := make(map[string]*syscallRules)
 
-	forEachClause(syscalls, def, func(_ int, name string, next clause) {
+	forEachClause(syscalls, def, nil, func(_ int, name string, next clause) {
 		current, ok := rules[name]
 		if !ok {
-			current = &syscallRules{unconditional: nil, conditional: nil}
+			current = &syscallRules{unconditional: nil, conditional: nil, summary: nil}
 			rules[name] = current
 		}
 
@@ -133,6 +170,145 @@ func collectRules(syscalls []specs.LinuxSyscall, def *clause) map[string]*syscal
 		}
 
 		current.conditional = dedupeClauses(current.conditional)
+	}
+
+	return rules
+}
+
+// entryClauses counts the clauses one entry loads for each of its names,
+// the way runtimes add them but without expanding the entry: none when the
+// entry equals the profile default, one per condition when it repeats an
+// argument index, and one otherwise.
+func entryClauseCount(entry *specs.LinuxSyscall, def *clause) uint64 {
+	result := clause{
+		action:   canonicalAction(entry.Action),
+		errnoRet: runtimeErrno(entry.Action, entry.ErrnoRet),
+		args:     nil,
+	}
+	if def != nil && result.sameResult(*def) {
+		return 0
+	}
+
+	if hasRepeatedIndex(entry.Args) {
+		return uint64(len(entry.Args))
+	}
+
+	return 1
+}
+
+// totalClauses returns how many clauses the entries load in total, so that a
+// caller can bound the expansion before paying for it.
+//
+// The count is a uint64 because it is the product of two counts an untrusted
+// profile chooses, which overflows an int on a 32-bit platform.
+func totalClauses(syscalls []specs.LinuxSyscall, def *clause) uint64 {
+	var total uint64
+
+	for idx := range syscalls {
+		total += entryClauseCount(&syscalls[idx], def) * uint64(len(syscalls[idx].Names))
+	}
+
+	return total
+}
+
+// clauseCounts returns how many clauses each syscall name loads and how many
+// they are in total, counted as totalClauses counts them.
+func clauseCounts(syscalls []specs.LinuxSyscall, def *clause) (map[string]uint64, uint64) {
+	counts := make(map[string]uint64)
+
+	var total uint64
+
+	for idx := range syscalls {
+		entry := &syscalls[idx]
+
+		rules := entryClauseCount(entry, def)
+		if rules == 0 {
+			continue
+		}
+
+		for _, name := range entry.Names {
+			counts[name] += rules
+			total += rules
+		}
+	}
+
+	return counts, total
+}
+
+// clauseSummary is how an over-budget input is read: the two clauses a
+// collapse can pick for one syscall. Folding every clause into the most and
+// the least restrictive one costs no memory per clause, and folds them with
+// the preference and tie-break collapseAll uses, so collapsing a summary
+// yields the clause collapsing the whole set would have yielded.
+type clauseSummary struct {
+	strictest clause
+	loosest   clause
+}
+
+// fold records one clause. Summaries stand for a collapse, which decides
+// every call of its syscall, so the argument filters are dropped here.
+func (s *clauseSummary) fold(next clause) *clauseSummary {
+	next.args = nil
+
+	if s == nil {
+		next.errnoRet = merge.ClonePtr(next.errnoRet)
+
+		return &clauseSummary{strictest: next, loosest: next}
+	}
+
+	s.strictest = pickClause(s.strictest, next, MoreRestrictive)
+	s.loosest = pickClause(s.loosest, next, LessRestrictive)
+
+	return s
+}
+
+func (s *clauseSummary) foldSummary(other *clauseSummary) *clauseSummary {
+	return s.fold(other.strictest).fold(other.loosest)
+}
+
+// pick returns the clause a collapse in the given direction takes.
+func (s *clauseSummary) pick(intersect bool) clause {
+	if intersect {
+		return s.strictest
+	}
+
+	return s.loosest
+}
+
+// summarizeRules reads entries into per-name summaries, which is what
+// collectRules falls back to past maxLoadedClauses. Every name of an entry
+// loads the same clauses, so each entry is folded once and its fold applied
+// per name, which keeps the pass linear in the size of the input instead of
+// in the clauses it would expand to.
+func summarizeRules(syscalls []specs.LinuxSyscall, def *clause) map[string]*syscallRules {
+	rules := make(map[string]*syscallRules)
+
+	for idx := range syscalls {
+		entry := &syscalls[idx]
+
+		var entrySummary *clauseSummary
+
+		for _, next := range entryClauses(entry) {
+			if def != nil && next.sameResult(*def) {
+				continue
+			}
+
+			entrySummary = entrySummary.fold(next)
+		}
+
+		if entrySummary == nil {
+			continue
+		}
+
+		for _, name := range entry.Names {
+			current, ok := rules[name]
+			if !ok {
+				current = &syscallRules{unconditional: nil, conditional: nil, summary: nil}
+				rules[name] = current
+			}
+
+			current.summary = current.summary.foldSummary(entrySummary)
+		}
 	}
 
 	return rules
@@ -290,10 +466,22 @@ func (m ruleMerger) collapse(def *clause, conditional []clause) *clause {
 }
 
 // settleInputs reads the rules of one input the way the merge can rely on:
-// a syscall whose conditional clauses do not form a safe shape is replaced
-// by the clause collapse returns, or removed when that is nil.
+// a syscall whose conditional clauses do not form a safe shape, or that was
+// summarized for exceeding the collectRules budget, is replaced by the clause
+// collapse returns, or removed when that is nil.
 func (m ruleMerger) settleInputs(rules map[string]*syscallRules, def *clause) {
 	for name, current := range rules {
+		if current.summary != nil {
+			current.unconditional = m.collapse(def, []clause{current.summary.pick(m.intersect)})
+			current.summary = nil
+
+			if current.unconditional == nil {
+				delete(rules, name)
+			}
+
+			continue
+		}
+
 		if current.unconditional != nil || safeShape(current.conditional) {
 			continue
 		}
@@ -397,12 +585,16 @@ func (m ruleMerger) mergeRules(
 // unconditional or absent rule never exceeds the budget. For union the
 // raising pass is quadratic in the combined clause count, so the combined
 // count is bounded as well, even when one side has no conditional clauses.
+//
+// The counts are widened to uint64 first: they come from untrusted profiles,
+// and their product overflows an int on a 32-bit platform, which would turn
+// the budget off exactly for the inputs it exists for.
 func (m ruleMerger) exceedsClauseBudget(left, right []clause) bool {
-	if len(left)*len(right) > maxPairwiseClauses {
+	if uint64(len(left))*uint64(len(right)) > maxPairwiseClauses {
 		return true
 	}
 
-	return !m.intersect && len(left)+len(right) > maxSyscallClauses
+	return !m.intersect && uint64(len(left))+uint64(len(right)) > maxSyscallClauses
 }
 
 // collapseAll reduces a syscall to one unconditional clause combining the
@@ -988,12 +1180,34 @@ func settledSyscalls(
 
 	for _, name := range slices.Sorted(maps.Keys(rules)) {
 		current := rules[name]
+		if current.summary != nil {
+			result = appendSummary(result, name, def, current.summary)
+
+			continue
+		}
+
 		result = appendRules(
 			result, name, def, current.unconditional, sortClauses(current.conditional),
 		)
 	}
 
 	return result
+}
+
+// appendSummary emits the rules of a syscall that was summarized for
+// exceeding the collectRules budget, for a caller without a merge direction:
+// both clauses a collapse could pick, so that two inputs differing in either
+// direction still differ here. A merge never gets this far, since
+// settleInputs resolves the summary to the clause its direction picks.
+func appendSummary(
+	result []specs.LinuxSyscall, name string, def *clause, summary *clauseSummary,
+) []specs.LinuxSyscall {
+	result = appendRules(result, name, def, &summary.strictest, nil)
+	if summary.loosest.sameResult(summary.strictest) {
+		return result
+	}
+
+	return appendRules(result, name, def, &summary.loosest, nil)
 }
 
 func clauseToSyscall(name string, current clause) specs.LinuxSyscall {

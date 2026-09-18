@@ -1,0 +1,71 @@
+{
+  "equal": false,
+  "handledAccessFs": {
+    "added": [
+      "execute"
+    ],
+    "removed": [
+      "read_dir"
+    ]
+  },
+  "handledAccessNet": {
+    "added": [
+      "bind_udp"
+    ]
+  },
+  "scoped": {
+    "removed": [
+      "abstract_unix_socket"
+    ]
+  },
+  "pathRules": {
+    "added": [
+      {
+        "path": "/opt/app",
+        "accessFs": [
+          "execute",
+          "read_file"
+        ]
+      }
+    ],
+    "removed": [
+      {
+        "path": "/usr/share",
+        "accessFs": [
+          "read_file"
+        ]
+      }
+    ],
+    "changed": [
+      {
+        "path": "/etc",
+        "left": [
+          "read_dir",
+          "read_file"
+        ],
+        "right": [
+          "read_file"
+        ]
+      }
+    ]
+  },
+  "netRules": {
+    "added": [
+      {
+        "port": 9090,
+        "accessNet": [
+          "bind_tcp"
+        ]
+      }
+    ],
+    "removed": [
+      {
+        "port": 8080,
+        "accessNet": [
+          "bind_tcp",
+          "connect_tcp"
+        ]
+      }
+    ]
+  }
+}

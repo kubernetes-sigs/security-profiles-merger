@@ -1,0 +1,66 @@
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "defaultErrnoRet": 13,
+  "architectures": [
+    "SCMP_ARCH_X86_64",
+    "SCMP_ARCH_S390X"
+  ],
+  "flags": [
+    "SECCOMP_FILTER_FLAG_LOG"
+  ],
+  "listenerPath": "/run/seccomp/other.sock",
+  "listenerMetadata": "artifact-v2",
+  "syscalls": [
+    {
+      "names": [
+        "read",
+        "write",
+        "fstat"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "names": [
+        "openat"
+      ],
+      "action": "SCMP_ACT_LOG"
+    },
+    {
+      "names": [
+        "socket"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        {
+          "index": 1,
+          "value": 2,
+          "op": "SCMP_CMP_EQ"
+        },
+        {
+          "index": 0,
+          "value": 1,
+          "op": "SCMP_CMP_EQ"
+        },
+        {
+          "index": 2,
+          "value": 0,
+          "valueTwo": 6,
+          "op": "SCMP_CMP_MASKED_EQ"
+        }
+      ]
+    },
+    {
+      "names": [
+        "clone"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "names": [
+        "kill"
+      ],
+      "action": "SCMP_ACT_KILL_PROCESS"
+    }
+  ]
+}

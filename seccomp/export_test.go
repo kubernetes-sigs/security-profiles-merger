@@ -22,10 +22,10 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
 
-// CondHolds exposes condHolds to external tests so the fuzz oracle evaluates
-// argument conditions exactly like the merge does. Operator semantics are
-// covered independently by the internal condHolds tests.
-var CondHolds = condHolds
+// NativeArchitectures exposes the GOARCH lookup table, so that the external
+// tests can assert all of it rather than only the entry for the platform
+// they happen to run on.
+var NativeArchitectures = nativeArchitectures
 
 // SafeShape exposes the classification the merge applies to the rules a
 // runtime loads for one syscall of a profile, so that the libseccomp tests

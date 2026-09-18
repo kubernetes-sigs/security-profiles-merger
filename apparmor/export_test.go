@@ -26,6 +26,19 @@ func MatcherUsable(path string) bool {
 	return matcherFor(path).usable()
 }
 
+// PathIdentity returns the rule a path spells, so that external tests can
+// tell two spellings of one rule apart from two different rules the way the
+// package does. A merge keeps one spelling per rule, which is not always the
+// one an input used.
+func PathIdentity(path string) string {
+	key := keyForPath(path)
+	if key.glob {
+		return "glob:" + key.text
+	}
+
+	return "literal:" + key.text
+}
+
 // uninstrumentedRun reports whether the test binary runs without coverage
 // counters and without the race detector. Both multiply the cost of a loop
 // several times over, so a wall-clock bound says nothing about the

@@ -176,16 +176,44 @@ func FuzzUnknownFields(f *testing.F) {
 }
 
 // FuzzDetectProfileType checks the type detection: it must terminate, answer
-// with a type the CLI knows or nothing at all, and never report a conflict
-// between an input and itself.
+// with types the CLI knows or nothing at all, and report a conflict for one
+// input only when that input really carries the members of two types.
 func FuzzDetectProfileType(f *testing.F) {
 	addJSONFuzzSeeds(f)
 
-	f.Fuzz(func(t *testing.T, raw string) {
-		detected, conflict := detectProfileType([][]byte{[]byte(raw)})
+	// Seeds mixing the key families of two profile types, which the seeds
+	// above never do: each is one document the CLI must call ambiguous
+	// rather than resolve by precedence.
+	for _, seed := range []string{
+		`{"defaultAction":"SCMP_ACT_ERRNO","capability":{}}`,
+		`{"defaultAction":"SCMP_ACT_ERRNO","pathRules":[]}`,
+		`{"pathRules":[],"network":{"allowRaw":true}}`,
+		`{"defaultAction":"SCMP_ACT_ERRNO","scoped":[],"executable":{}}`,
+		// The same member names nested one level down belong to no type:
+		// only the members of the document itself are looked at.
+		`{"syscalls":[{"names":["read"],"capability":{}}]}`,
+	} {
+		f.Add(seed)
+	}
 
-		if conflict != "" {
-			t.Errorf("detectProfileType of one input reports a conflict with %q", conflict)
+	f.Fuzz(func(t *testing.T, raw string) {
+		families := checkDetectedFamilies(t, raw)
+
+		detected, conflict := detectProfileType(rawInputs(raw))
+
+		// One input conflicts with itself exactly when it carries the
+		// members of more than one type.
+		if (conflict != nil) != (len(families) > 1) {
+			t.Errorf(
+				"detectProfileType(%q) conflict = %v, families = %v",
+				raw, conflict, families,
+			)
+		}
+
+		if conflict != nil {
+			checkConflict(t, conflict)
+
+			return
 		}
 
 		if detected == "" {
@@ -196,13 +224,48 @@ func FuzzDetectProfileType(f *testing.F) {
 			t.Errorf("detectProfileType returned the unknown type %q", detected)
 		}
 
-		// Detection is per input, so repeating one never conflicts.
-		again, conflict := detectProfileType([][]byte{[]byte(raw), []byte(raw)})
-		if conflict != "" || again != detected {
+		// Detection is per input, so repeating an unambiguous one never
+		// conflicts.
+		again, conflict := detectProfileType(rawInputs(raw, raw))
+		if conflict != nil || again != detected {
 			t.Errorf(
-				"detectProfileType of a repeated input = (%q, %q), want (%q, \"\")",
+				"detectProfileType of a repeated input = (%q, %v), want (%q, nil)",
 				again, conflict, detected,
 			)
 		}
 	})
+}
+
+// checkDetectedFamilies checks that every type the document reveals is one
+// the CLI knows, and that the answer does not change between calls.
+func checkDetectedFamilies(t *testing.T, raw string) []string {
+	t.Helper()
+
+	families := detectOneProfileType([]byte(raw))
+
+	for _, family := range families {
+		if _, ok := kindByName(family); !ok {
+			t.Errorf("detectOneProfileType returned the unknown type %q", family)
+		}
+	}
+
+	if !slices.Equal(families, detectOneProfileType([]byte(raw))) {
+		t.Errorf("detectOneProfileType(%q) is not reproducible", raw)
+	}
+
+	return families
+}
+
+// checkConflict checks the shape of a conflict found within a single input:
+// it names that input, and it names two different types.
+func checkConflict(t *testing.T, conflict *typeConflict) {
+	t.Helper()
+
+	if conflict.input == "" {
+		t.Errorf("a conflict within one input must name it: %+v", conflict)
+	}
+
+	if conflict.first == conflict.second {
+		t.Errorf("a conflict must name two types, got %+v", conflict)
+	}
 }

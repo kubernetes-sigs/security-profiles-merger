@@ -20,6 +20,8 @@ import (
 	"errors"
 	"testing"
 
+	specs "github.com/opencontainers/runtime-spec/specs-go"
+
 	"sigs.k8s.io/security-profiles-merger/apparmor"
 	"sigs.k8s.io/security-profiles-merger/landlock"
 	"sigs.k8s.io/security-profiles-merger/seccomp"
@@ -118,6 +120,116 @@ func TestSliceDiffIsTheSameType(t *testing.T) {
 	for name, get := range getters {
 		if got := get(shared); len(got) != 1 || got[0] != "a" {
 			t.Errorf("%s: Added = %v, want [a]", name, got)
+		}
+	}
+}
+
+// TestProfileDiffsSatisfyDiff checks the one method the three diff results
+// share. It is a compile-time claim as much as a test: if a package's
+// ProfileDiff lost IsEqual or changed its receiver, the assignments below
+// would not build, and code holding a diff whose type was decided elsewhere
+// could no longer ask for the verdict.
+func TestProfileDiffsSatisfyDiff(t *testing.T) {
+	t.Parallel()
+
+	var (
+		seccompDiff  seccomp.ProfileDiff
+		apparmorDiff apparmor.ProfileDiff
+		landlockDiff landlock.ProfileDiff
+	)
+
+	byValue := map[string]spm.Diff{
+		"seccomp":  seccompDiff,
+		"apparmor": apparmorDiff,
+		"landlock": landlockDiff,
+	}
+
+	byPointer := map[string]spm.Diff{
+		"seccomp":  &seccompDiff,
+		"apparmor": &apparmorDiff,
+		"landlock": &landlockDiff,
+	}
+
+	// The zero value of every ProfileDiff has Equal false, so IsEqual has to
+	// report false here; a method returning a constant would pass only one of
+	// the two halves of this test.
+	for name, diff := range byValue {
+		if diff.IsEqual() {
+			t.Errorf("%s: zero ProfileDiff reports equal", name)
+		}
+	}
+
+	seccompDiff.Equal = true
+	apparmorDiff.Equal = true
+	landlockDiff.Equal = true
+
+	for name, diff := range byPointer {
+		if !diff.IsEqual() {
+			t.Errorf("%s: ProfileDiff with Equal set reports not equal", name)
+		}
+	}
+}
+
+// TestDiffsFromTheAPISatisfyDiff checks the same through the API, so that the
+// interface holds for the values the packages actually hand out rather than
+// only for a literal written here.
+func TestDiffsFromTheAPISatisfyDiff(t *testing.T) {
+	t.Parallel()
+
+	seccompProfile := &specs.LinuxSeccomp{
+		DefaultAction:    specs.ActErrno,
+		DefaultErrnoRet:  nil,
+		Architectures:    nil,
+		Flags:            nil,
+		ListenerPath:     "",
+		ListenerMetadata: "",
+		Syscalls:         nil,
+	}
+
+	seccompDiff, err := seccomp.Diff(seccompProfile, seccompProfile)
+	if err != nil {
+		t.Fatalf("seccomp.Diff: %v", err)
+	}
+
+	apparmorProfile := &apparmor.Profile{
+		Executable: nil,
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths:  []string{"/etc"},
+			WriteOnlyPaths: nil,
+			ReadWritePaths: nil,
+		},
+		Network:      nil,
+		Capabilities: nil,
+	}
+
+	apparmorDiff, err := apparmor.Diff(apparmorProfile, apparmorProfile)
+	if err != nil {
+		t.Fatalf("apparmor.Diff: %v", err)
+	}
+
+	landlockProfile := &landlock.Profile{
+		HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessReadFile},
+		HandledAccessNet: nil,
+		Scoped:           nil,
+		PathRules: []landlock.PathRule{{
+			Path:     "/etc",
+			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
+		}},
+		NetRules: nil,
+	}
+
+	landlockDiff, err := landlock.Diff(landlockProfile, landlockProfile)
+	if err != nil {
+		t.Fatalf("landlock.Diff: %v", err)
+	}
+
+	for name, diff := range map[string]spm.Diff{
+		"seccomp":  seccompDiff,
+		"apparmor": apparmorDiff,
+		"landlock": landlockDiff,
+	} {
+		if !diff.IsEqual() {
+			t.Errorf("%s: diff of a profile with itself reports not equal", name)
 		}
 	}
 }

@@ -17,6 +17,7 @@ limitations under the License.
 package seccomp_test
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -346,5 +347,135 @@ func TestIntersectSyscallsOverBudgetDropsSyscall(t *testing.T) {
 			"IntersectSyscalls under budget returned %d entries, want %d",
 			len(got), underBudget,
 		)
+	}
+}
+
+// The per-syscall caps count the rules of one syscall name, so neither of
+// them sees how many names an entry carries. An entry loads one rule per
+// name, and one per condition per name when it repeats an argument index, so
+// the rules a profile loads are the product of its name and condition
+// counts: the profile below is 441 KB of JSON and ten million rules. These
+// tests cover both halves of that bound as well: the merge stays bounded,
+// and a runtime rejects such a profile before merging it at all.
+
+// multiNameEntry returns one entry naming count syscalls, with conditions
+// repeating argument index 0, which a runtime loads as one rule per
+// condition and name.
+func multiNameEntry(names, conditions int) specs.LinuxSyscall {
+	entry := specs.LinuxSyscall{
+		Names:    make([]string, 0, names),
+		Action:   specs.ActAllow,
+		ErrnoRet: nil,
+		Args:     make([]specs.LinuxSeccompArg, 0, conditions),
+	}
+
+	for idx := range names {
+		entry.Names = append(entry.Names, fmt.Sprintf("sys%d", idx))
+	}
+
+	for idx := range conditions {
+		entry.Args = append(entry.Args, specs.LinuxSeccompArg{
+			Index: 0, Value: uint64(idx), Op: specs.OpEqualTo, ValueTwo: 0,
+		})
+	}
+
+	return entry
+}
+
+// TestMergeBoundsMultiNameExpansion is the shape that cost the merge seconds
+// and gigabytes: the entries are never expanded per name past the budget, so
+// the work stays proportional to the profile rather than to the rules it
+// asks for, and the syscalls collapse in the safe direction of each merge.
+func TestMergeBoundsMultiNameExpansion(t *testing.T) {
+	t.Parallel()
+
+	const (
+		names          = 40000
+		conditions     = 256
+		generousBudget = 5 * time.Second
+	)
+
+	left := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls:      []specs.LinuxSyscall{multiNameEntry(names, conditions)},
+	}
+	right := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls: []specs.LinuxSyscall{{
+			Names:    []string{"sys0"},
+			Action:   specs.ActAllow,
+			ErrnoRet: nil,
+			Args: []specs.LinuxSeccompArg{{
+				Index: 0, Value: 1, Op: specs.OpEqualTo, ValueTwo: 0,
+			}},
+		}},
+	}
+
+	calls := [][]uint64{{0, 0}, {1, 0}, {uint64(conditions) + 1, 0}}
+
+	for _, direction := range []safetyDirection{intersectSafety(), unionSafety()} {
+		start := time.Now()
+
+		result, err := direction.merge(left, right)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", direction.name, err)
+		}
+
+		// Coverage counters and the race detector slow this several times
+		// over, so the bound is only checked without them.
+		if elapsed := time.Since(start); seccomp.UninstrumentedRun() &&
+			elapsed > generousBudget {
+			t.Errorf("%s took %s, want well under %s", direction.name, elapsed, generousBudget)
+		}
+
+		err = seccomp.Validate(result)
+		if err != nil {
+			t.Errorf("%s yields an invalid profile: %v", direction.name, err)
+		}
+
+		cache := judges{}
+
+		for _, call := range calls {
+			got := cache.evalCall(t, result, "sys0", call)
+			for idx, input := range []*specs.LinuxSeccomp{left, right} {
+				if !direction.safe(got, cache.judgeCall(input, "sys0", call)) {
+					t.Fatalf(
+						"%s of sys0%v yields %s, which is not safe against profile %d",
+						direction.name, call, got, idx,
+					)
+				}
+			}
+		}
+	}
+}
+
+// TestValidateArtifactRejectsMultiNameExpansion is the other half: a runtime
+// never merges such a profile in the first place, since the rules it loads
+// are past what an artifact may ask for.
+func TestValidateArtifactRejectsMultiNameExpansion(t *testing.T) {
+	t.Parallel()
+
+	const (
+		names          = 40000
+		conditions     = 256
+		generousBudget = 2 * time.Second
+	)
+
+	profile := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls:      []specs.LinuxSyscall{multiNameEntry(names, conditions)},
+	}
+
+	start := time.Now()
+	err := seccomp.ValidateArtifact(profile)
+
+	if elapsed := time.Since(start); seccomp.UninstrumentedRun() && elapsed > generousBudget {
+		t.Errorf("validation took %s, want well under %s", elapsed, generousBudget)
+	}
+
+	for _, want := range []error{seccomp.ErrTooManyNames, seccomp.ErrTooManyProfileClauses} {
+		if !errors.Is(err, want) {
+			t.Errorf("expected %v, got: %v", want, err)
+		}
 	}
 }
