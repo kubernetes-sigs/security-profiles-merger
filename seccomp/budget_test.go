@@ -169,7 +169,7 @@ func TestIntersectArtifactSizedContestedProfile(t *testing.T) {
 
 	// Coverage counters slow these loops several times over, so the bound
 	// is only checked without coverage.
-	if elapsed := time.Since(start); testing.CoverMode() == "" && elapsed > generousBudget {
+	if elapsed := time.Since(start); seccomp.UninstrumentedRun() && elapsed > generousBudget {
 		t.Errorf("merge took %s, want well under %s", elapsed, generousBudget)
 	}
 
@@ -311,5 +311,40 @@ func TestUnionBudgetCountsOneSidedClauses(t *testing.T) {
 					len(ioctl), test.entries)
 			}
 		})
+	}
+}
+
+// TestIntersectSyscallsOverBudgetDropsSyscall covers the intersection of
+// bare syscall lists past the clause budget. Without a profile default there
+// is no unconditional rule to collapse to, and the caller's default is
+// assumed to be at least as restrictive as every action in the lists, so the
+// syscall is left to that default by dropping it. Dropping never permits
+// more than either list, which is the guarantee IntersectSyscalls makes.
+func TestIntersectSyscallsOverBudgetDropsSyscall(t *testing.T) {
+	t.Parallel()
+
+	// The budget bounds the product of the two sides' filtered clauses, so
+	// each side needs enough entries for the product to exceed it.
+	const (
+		overBudget  = 70
+		underBudget = 4
+	)
+
+	if got := seccomp.IntersectSyscalls(
+		ioctlEqualities(overBudget), ioctlEqualities(overBudget),
+	); len(got) != 0 {
+		t.Errorf("IntersectSyscalls over budget returned %d entries, want none", len(got))
+	}
+
+	// The same shape under the budget keeps every filter, so the drop above
+	// is the budget's doing rather than the merge failing to intersect.
+	got := seccomp.IntersectSyscalls(
+		ioctlEqualities(underBudget), ioctlEqualities(underBudget),
+	)
+	if len(got) != underBudget {
+		t.Errorf(
+			"IntersectSyscalls under budget returned %d entries, want %d",
+			len(got), underBudget,
+		)
 	}
 }

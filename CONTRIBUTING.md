@@ -24,18 +24,22 @@ We have full documentation on how to get started contributing here:
 
 ## Architecture
 
-The codebase is organized in three layers:
+The codebase is organized in four layers:
 
+- `spm/` is the public home of what the three profile packages share:
+  `SliceDiff` and the sentinel errors `ErrNoProfiles`, `ErrNilProfile` and
+  `ErrEmptyPath`. Each profile package re-exports these under its own name,
+  so a caller need not import it, but code generic over the profile types
+  can name them once and pkg.go.dev can link them.
 - `internal/merge/` contains generic merge primitives. `Fold` folds any
   profile type pairwise, `IntersectSlice`, `UnionSlice` and
   `DeduplicateSlice` work with any comparable element type, and `DiffSlice`
-  with ordered element types only, since it sorts its results; `SliceDiff`
-  holds such a result and `FormatSliceDiff` formats it for string-like types.
-  `ClonePtr` copies an optional value, `CleanPath` and `IsAbsPath` handle
-  Linux profile paths on any host, and `ErrNoProfiles`, `ErrNilProfile` and
-  `ErrEmptyPath` are the shared sentinel errors. The apparmor and landlock
-  packages merge through `Fold`; seccomp folds its profiles itself, since it
-  also normalizes a single profile. The profile packages use the other
+  with ordered element types only, since it sorts its results;
+  `FormatSliceDiff` formats an `spm.SliceDiff` for string-like types.
+  `ClonePtr` copies an optional value and `IsAbsPath` handles Linux profile
+  paths on any host. All three profile packages merge through `Fold`;
+  seccomp passes it a clone function that normalizes, since a single profile
+  is normalized rather than merged. The profile packages use the other
   primitives as they need them.
 - `seccomp/`, `apparmor/`, `landlock/` each expose the same public API surface:
   `Intersect`, `Union`, `Validate`, `ValidateStrict`, `ValidateArtifact`,
@@ -53,7 +57,10 @@ The codebase is organized in three layers:
 - `cmd/spm/` is a thin CLI layer that wires the packages together using Go
   generics: `kinds.go` registers each profile type's functions once, and the
   merge, validate, and diff commands dispatch through that registry. It uses
-  the standard library `flag` package with manual subcommand dispatch.
+  the standard library `flag` package with manual subcommand dispatch. The
+  merge command takes one validation mode per input, so a single run can
+  check a baseline strictly and a pulled profile the way a runtime checks an
+  artifact.
 
 ## Local Development
 
@@ -64,9 +71,10 @@ make build               # build the spm binary (static)
 make test                # run tests with race detection and coverage (RACE= skips the race detector)
 make lint                # run golangci-lint
 make fuzz                # run all fuzz tests (default 30s, set FUZZTIME to adjust)
-make test-libseccomp     # check the seccomp model against libseccomp (needs cgo and libseccomp headers)
+make test-libseccomp     # check the seccomp model against libseccomp (needs cgo and libseccomp headers; set LIBSECCOMP_VERSION to require a particular one)
 make bench               # run benchmarks
-make verify-coverage     # verify test coverage meets threshold (default 90%)
+make verify              # run the Go-only verifications CI runs (rewrites the TOCs and go.mod in place)
+make verify-coverage     # verify test coverage meets threshold (default 95%)
 make verify-tidy         # verify go.mod is tidy
 make verify-mdtoc        # verify table of contents in markdown files
 make verify-dependencies # verify external dependencies
@@ -74,6 +82,11 @@ make govulncheck         # run govulncheck
 make tidy                # run go mod tidy
 make clean               # remove build artifacts
 ```
+
+`make verify` covers the verification jobs that need only the Go toolchain.
+Two CI jobs are not reproduced by it: the spell check, which uses
+[crate-ci/typos](https://github.com/crate-ci/typos), and the release snapshot
+build, which uses goreleaser and syft.
 
 ## How the merge semantics are checked
 
@@ -83,6 +96,9 @@ merge should keep all three passing:
 
 - The per-package unit tests cover the documented behavior of each function,
   and the golden tests in `cmd/spm/golden_test.go` cover the CLI output.
+- Each package has fuzz targets for `ValidateArtifact`, the entry point a
+  runtime points at a profile it did not author, and `cmd/spm` has targets
+  for the JSON walkers that see those bytes before any profile package does.
 - Each package has fuzz targets that assert the safety properties against an
   independent evaluator: `Intersect` never permits an operation any input
   denies, and `Union` never denies one any input permits. The evaluators live
@@ -101,8 +117,10 @@ merge should keep all three passing:
   permits more than an input libseccomp loads, and `Union` never less. An
   evaluator written from a mistaken reading of libseccomp would agree with the
   merge and still be wrong; this is what catches that. CI runs these tests
-  against the `libseccomp-dev` package of Ubuntu 24.04 (libseccomp 2.5.5),
-  and they were also run against libseccomp 2.6.1.
+  against libseccomp 2.5.5 and 2.6.1, each built from a checksum-pinned
+  release tarball, and `TestLibseccompVersion` reads the version out of the
+  loaded library and fails unless it is the one that was built, so a run
+  always names the version that answered.
 
 ## Mentorship
 

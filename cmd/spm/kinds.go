@@ -42,6 +42,27 @@ const (
 	modeArtifact
 )
 
+// The names --validate and the validate command's flags spell the modes.
+const (
+	modeNameDefault  = "default"
+	modeNameStrict   = "strict"
+	modeNameArtifact = "artifact"
+)
+
+// modeByName returns the mode a --validate value names.
+func modeByName(name string) (validateMode, bool) {
+	switch name {
+	case modeNameDefault:
+		return modeDefault, true
+	case modeNameStrict:
+		return modeStrict, true
+	case modeNameArtifact:
+		return modeArtifact, true
+	default:
+		return modeDefault, false
+	}
+}
+
 // decodePolicy returns the JSON ambiguities the mode rejects.
 func (mode validateMode) decodePolicy() decodePolicy {
 	return decodePolicy{
@@ -51,9 +72,13 @@ func (mode validateMode) decodePolicy() decodePolicy {
 }
 
 // profileKind wires one profile type into the merge, diff, and validate
-// commands.
+// commands. The merge takes one mode per input, so a baseline and an
+// artifact can be checked the way each deserves in a single run.
 type profileKind struct {
-	merge    func(data [][]byte, strategy, format string, stdout, stderr io.Writer) int
+	merge func(
+		data [][]byte, strategy string, modes []validateMode,
+		format string, stdout, stderr io.Writer,
+	) int
 	diff     func(data [][]byte, format string, stdout, stderr io.Writer) int
 	validate func(data [][]byte, mode validateMode, format string, stdout, stderr io.Writer) int
 }
@@ -86,9 +111,36 @@ func (ops kindOps[T, D]) checker(mode validateMode) func(*T) error {
 
 func newKind[T any, D equalChecker](ops kindOps[T, D]) profileKind {
 	return profileKind{
-		merge: func(data [][]byte, strategy, format string, stdout, stderr io.Writer) int {
+		merge: func(
+			data [][]byte, strategy string, modes []validateMode,
+			format string, stdout, stderr io.Writer,
+		) int {
+			checks := make([]func(*T) error, len(modes))
+			policies := make([]decodePolicy, len(modes))
+
+			for idx, mode := range modes {
+				// modeDefault is what the merge functions run on their own
+				// inputs, so running it here as well would only duplicate
+				// the work and report it with a different prefix.
+				if mode != modeDefault {
+					checks[idx] = ops.checker(mode)
+				}
+
+				policies[idx] = mode.decodePolicy()
+			}
+
 			return mergeProfiles(
-				data, strategy, format, ops.intersect, ops.union, ops.format, stdout, stderr,
+				mergeRequest[T]{
+					data:      data,
+					strategy:  strategy,
+					format:    format,
+					checks:    checks,
+					policies:  policies,
+					intersect: ops.intersect,
+					union:     ops.union,
+					formatFn:  ops.format,
+				},
+				stdout, stderr,
 			)
 		},
 		diff: func(data [][]byte, format string, stdout, stderr io.Writer) int {
@@ -151,9 +203,12 @@ func kindByName(name string) (profileKind, bool) {
 // resolveKind returns the profile kind named by --type, or the one detected
 // from the inputs when the flag is empty. Input that is not a JSON object
 // cannot be detected; it is reported the way decoding it with --type would
-// report it, exiting with parseExit.
+// report it, exiting with parseExit. A detected type is noted on stderr
+// unless noDetectNote is set, so that a command in a pipeline can stay
+// silent about what it inferred.
 func resolveKind(
-	profileType string, data [][]byte, parseExit int, stderr io.Writer,
+	profileType string, data [][]byte, parseExit int, noDetectNote bool,
+	stderr io.Writer,
 ) (profileKind, int) {
 	if profileType == "" {
 		err := checkParsable(data)
@@ -191,7 +246,9 @@ func resolveKind(
 
 		profileType = detected
 
-		_, _ = fmt.Fprintf(stderr, "auto-detected profile type: %s\n", profileType)
+		if !noDetectNote {
+			_, _ = fmt.Fprintf(stderr, "auto-detected profile type: %s\n", profileType)
+		}
 	}
 
 	kind, ok := kindByName(profileType)

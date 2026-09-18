@@ -19,19 +19,23 @@ package merge
 
 import (
 	"cmp"
-	"errors"
 	"path"
 	"slices"
 	"strings"
+
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
+// The sentinel errors every merge package returns. They live in the profile
+// package so that a caller working with more than one profile type matches
+// them once.
 var (
 	// ErrNoProfiles is returned when no profiles are provided.
-	ErrNoProfiles = errors.New("at least one profile is required")
+	ErrNoProfiles = spm.ErrNoProfiles
 	// ErrNilProfile is returned when a nil profile is provided.
-	ErrNilProfile = errors.New("profile must not be nil")
+	ErrNilProfile = spm.ErrNilProfile
 	// ErrEmptyPath is returned when a path rule contains an empty string.
-	ErrEmptyPath = errors.New("empty path")
+	ErrEmptyPath = spm.ErrEmptyPath
 )
 
 // Fold merges a slice of profiles using pairwise reduction. A single profile
@@ -123,10 +127,7 @@ func DiffSlice[T cmp.Ordered](left, right []T) ([]T, []T) {
 }
 
 // SliceDiff represents added and removed items in a set-like slice.
-type SliceDiff[T comparable] struct {
-	Added   []T `json:"added,omitempty"`
-	Removed []T `json:"removed,omitempty"`
-}
+type SliceDiff[T comparable] = spm.SliceDiff[T]
 
 const smallSliceThreshold = 16
 
@@ -230,15 +231,9 @@ func unionSliceLarge[T comparable](left, right []T) []T {
 	return result
 }
 
-// CleanPath returns the shortest equivalent form of a profile path. Profile
-// paths are Linux paths whatever the host is, so this uses slash semantics
-// rather than the host's path separator, and "" cleans to ".".
-func CleanPath(profilePath string) string {
-	return path.Clean(profilePath)
-}
-
-// IsAbsPath reports whether a profile path starts at the root, using the
-// same slash semantics as CleanPath.
+// IsAbsPath reports whether a profile path starts at the root. Profile paths
+// are Linux paths whatever the host is, so this uses slash semantics rather
+// than the host's path separator.
 func IsAbsPath(profilePath string) bool {
 	return path.IsAbs(profilePath)
 }

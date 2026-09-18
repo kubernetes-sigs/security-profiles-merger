@@ -265,14 +265,6 @@ func IsGlobPattern(path string) bool {
 	return strings.ContainsAny(path, patternSyntax) && matcherFor(path).kind != kindLiteral
 }
 
-// globLiteralPrefix returns the literal directory prefix every name the
-// pattern matches starts with, with escapes resolved. For example,
-// "/var/log/**" returns "/var/log/", "/var/*/foo" returns "/var/", and "**"
-// returns "".
-func globLiteralPrefix(pattern string) string {
-	return matcherFor(pattern).prefix
-}
-
 // literalName returns the file name a literal path denotes, with escape
 // sequences resolved, for matching against globs.
 func literalName(path string) string {

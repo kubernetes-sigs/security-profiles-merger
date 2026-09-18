@@ -49,17 +49,56 @@ jobs:
   # The seccomp merge semantics are a claim about how runc and libseccomp load
   # a profile. This job checks that claim against libseccomp itself, which
   # needs cgo and the headers, so it is separate from the main test job.
+  #
+  # The versions are built from their release tarballs rather than taken from
+  # the runner image: the whole safe-shape model rests on what libseccomp
+  # compiles, so which version answered has to be recorded, not inherited.
+  # Add a version here when libseccomp releases one.
   test-libseccomp:
+    name: test-libseccomp / ${{ matrix.version }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: "2.5.5"
+            sha256: 248a2c8a4d9b9858aa6baf52712c34afefcf9c9e94b76dce02c1c9aa25fb3375
+          - version: "2.6.1"
+            sha256: 501f66c667225d53791b97e1d7cf85ab764c297d04881f60f38f451c4b0ee1be
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - run: sudo apt-get update && sudo apt-get install -y libseccomp-dev
-      - name: Print the libseccomp version
-        run: pkg-config --modversion libseccomp
-      - run: make test-libseccomp
+      - name: Build libseccomp ${{ matrix.version }}
+        env:
+          LIBSECCOMP_VERSION: ${{ matrix.version }}
+          LIBSECCOMP_SHA256: ${{ matrix.sha256 }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y gperf
+          curl -sSfL -o libseccomp.tar.gz \
+            "https://github.com/seccomp/libseccomp/releases/download/v$LIBSECCOMP_VERSION/libseccomp-$LIBSECCOMP_VERSION.tar.gz"
+          # The model is only worth as much as the library it is checked
+          # against, so the tarball is pinned rather than merely fetched.
+          echo "$LIBSECCOMP_SHA256  libseccomp.tar.gz" | sha256sum --check --strict
+          tar xf libseccomp.tar.gz
+          cd "libseccomp-$LIBSECCOMP_VERSION"
+          # Install over the distribution's own copy rather than into
+          # /usr/lib, which the loader searches after the multiarch
+          # directory, so that the build and the run agree.
+          ./configure --prefix=/usr --libdir=/usr/lib/$(gcc -print-multiarch)
+          make -j"$(nproc)"
+          sudo make install
+          sudo ldconfig
+      # pkg-config only describes the build. TestLibseccompVersion reads the
+      # library the process loaded and fails when it is not this one, so a
+      # model checked here is checked against the version named here.
+      - name: Run the model against libseccomp ${{ matrix.version }}
+        env:
+          LIBSECCOMP_VERSION: ${{ matrix.version }}
+        run: make test-libseccomp
 
   # The library handles Linux profile paths on every host and binaries are
   # released for these platforms, so the packages are tested there too.

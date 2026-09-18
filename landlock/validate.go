@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 var (
@@ -35,7 +36,7 @@ var (
 
 	// ErrEmptyPath is returned when a path rule has an empty path string
 	// or a path that cleans to ".", such as "./".
-	ErrEmptyPath = merge.ErrEmptyPath
+	ErrEmptyPath = spm.ErrEmptyPath
 
 	// ErrInvalidPath is returned when a path rule contains a NUL byte,
 	// which no file system path can contain.

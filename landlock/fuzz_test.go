@@ -18,6 +18,7 @@ package landlock_test
 
 import (
 	"cmp"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -1149,4 +1150,127 @@ func assertNetRulesDiffSwapped(
 			len(fwd.Removed), len(rev.Added),
 		)
 	}
+}
+
+// FuzzLandlockValidateArtifact fuzzes the check a runtime applies to a
+// profile it did not author. Beyond crashes and hangs it pins the contract:
+// a profile ValidateArtifact accepts is one the kernel would take, with
+// absolute rule paths, no empty rule, no rule granting an unhandled right,
+// and something handled or scoped; and it merges into a result the runtime
+// can load. Unlike Validate it accepts duplicate rules and rights, which the
+// kernel and the merge fold, so the two do not nest; ValidateStrict is
+// ValidateArtifact plus those duplicate checks and therefore does.
+func FuzzLandlockValidateArtifact(f *testing.F) {
+	f.Add(
+		uint32(0x07), uint8(0x03), uint8(0x03), "/etc", "/home",
+		uint32(0x05), uint32(0x03), uint16(80), uint16(443),
+		uint8(0x01), uint8(0x02),
+	)
+	f.Add(
+		uint32(0x00), uint8(0x00), uint8(0x00), "/etc", "/home",
+		uint32(0x00), uint32(0x00), uint16(0), uint16(0),
+		uint8(0x00), uint8(0x00),
+	)
+	f.Add(
+		uint32(0x3FFFF), uint8(0x3F), uint8(0x03), "relative", "/b/../c",
+		uint32(0x01), uint32(0x02), uint16(80), uint16(443),
+		uint8(0x01), uint8(0x02),
+	)
+
+	f.Fuzz(func(
+		t *testing.T,
+		hfs uint32, hnet uint8, scope uint8,
+		path1, path2 string,
+		am1, am2 uint32,
+		port1, port2 uint16,
+		nm1, nm2 uint8,
+	) {
+		profile := fuzzLandlockProfile(
+			hfs, hnet, scope, path1, path2,
+			am1, am2, port1, port2, nm1, nm2,
+		)
+
+		err := landlock.ValidateArtifact(profile)
+		if err != nil {
+			// Everything ValidateStrict accepts, ValidateArtifact accepts.
+			if landlock.ValidateStrict(profile) == nil {
+				t.Fatalf("ValidateStrict accepted a profile ValidateArtifact rejects: %v", err)
+			}
+
+			return
+		}
+
+		assertLandlockLoadable(t, profile)
+
+		// A runtime intersects the artifact with its baseline next, so the
+		// merge must succeed and yield something it can load.
+		merged, err := landlock.Intersect(profile, profile)
+		if err != nil {
+			t.Fatalf("Intersect of an accepted artifact failed: %v", err)
+		}
+
+		err = landlock.Validate(merged)
+		if err != nil {
+			t.Fatalf("Intersect of an accepted artifact yields an invalid profile: %v", err)
+		}
+	})
+}
+
+// assertLandlockLoadable checks what the kernel requires of a ruleset it is
+// asked to create, which is what ValidateArtifact promises about a profile
+// it accepts.
+func assertLandlockLoadable(t *testing.T, profile *landlock.Profile) {
+	t.Helper()
+
+	if len(profile.HandledAccessFS) == 0 && len(profile.HandledAccessNet) == 0 &&
+		len(profile.Scoped) == 0 {
+		t.Error("ValidateArtifact accepted a ruleset that restricts nothing")
+	}
+
+	handledFS := rightSet(profile.HandledAccessFS)
+
+	for idx, rule := range profile.PathRules {
+		if !strings.HasPrefix(rule.Path, "/") {
+			t.Errorf("PathRules[%d]: accepted the relative path %q", idx, rule.Path)
+		}
+
+		assertLandlockRuleRights(
+			t, fmt.Sprintf("PathRules[%d]", idx), rule.AccessFS, handledFS,
+		)
+	}
+
+	handledNet := rightSet(profile.HandledAccessNet)
+
+	for idx, rule := range profile.NetRules {
+		assertLandlockRuleRights(
+			t, fmt.Sprintf("NetRules[%d]", idx), rule.AccessNet, handledNet,
+		)
+	}
+}
+
+// assertLandlockRuleRights checks that a rule grants at least one right and
+// only rights the ruleset handles, which the kernel rejects otherwise.
+func assertLandlockRuleRights[T comparable](
+	t *testing.T, context string, rights []T, handled map[T]struct{},
+) {
+	t.Helper()
+
+	if len(rights) == 0 {
+		t.Errorf("%s: accepted a rule granting no right", context)
+	}
+
+	for _, right := range rights {
+		if _, ok := handled[right]; !ok {
+			t.Errorf("%s: accepted the unhandled right %v", context, right)
+		}
+	}
+}
+
+func rightSet[T comparable](rights []T) map[T]struct{} {
+	set := make(map[T]struct{}, len(rights))
+	for _, right := range rights {
+		set[right] = struct{}{}
+	}
+
+	return set
 }

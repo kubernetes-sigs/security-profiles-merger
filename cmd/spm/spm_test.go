@@ -38,6 +38,8 @@ const (
 
 	flagStrict = "--strict"
 
+	flagNoDetectNote = "--no-detect-note"
+
 	testBogus       = "bogus"
 	testEtcPath     = "/etc"
 	testSyscallRead = "read"

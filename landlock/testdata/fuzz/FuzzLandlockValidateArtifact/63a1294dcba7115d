@@ -1,0 +1,12 @@
+go test fuzz v1
+uint32(7)
+byte('_')
+byte('\x03')
+string("//")
+string("/")
+uint32(5)
+uint32(93)
+uint16(78)
+uint16(443)
+byte('\x01')
+byte('\x02')

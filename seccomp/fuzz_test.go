@@ -687,3 +687,178 @@ func assertSyscallsDiffSwapped(
 		)
 	}
 }
+
+// FuzzValidateArtifact fuzzes the check a runtime applies to a profile it
+// did not author, which is the entry point KEP-6061 points at untrusted
+// input. Beyond crashes and hangs it pins the contract callers rely on: a
+// profile ValidateArtifact accepts is one Validate accepts, carries no
+// listener settings and no SCMP_ACT_NOTIFY, and merges without error into a
+// result a runtime can load.
+func FuzzValidateArtifact(f *testing.F) {
+	f.Add(
+		uint8(4), uint8(8), uint8(8),
+		"read", "write",
+		false, false, uint64(0), uint64(0),
+		uint32(0), uint8(0),
+		uint16(0), uint16(0), uint16(0),
+	)
+	f.Add(
+		uint8(4), uint8(8), uint8(3),
+		"read", "open",
+		true, true, uint64(65536), uint64(3),
+		uint32(0x02), uint8(0x01),
+		uint16(0), uint16(0), uint16(0),
+	)
+	f.Add(
+		uint8(6), uint8(6), uint8(6),
+		"read", "write",
+		true, false, uint64(0), uint64(0),
+		uint32(0x13), uint8(0x07),
+		uint16(4095), uint16(4096), uint16(1),
+	)
+
+	f.Fuzz(func(
+		t *testing.T,
+		defIdx, act1Idx, act2Idx uint8,
+		name1, name2 string,
+		hasArgs1, hasArgs2 bool,
+		argVal1, argVal2 uint64,
+		archMask uint32, flagMask uint8,
+		defErrno, errno1, errno2 uint16,
+	) {
+		profile := fuzzProfile(
+			defIdx, act1Idx, act2Idx,
+			name1, name2, hasArgs1, hasArgs2,
+			argVal1, argVal2,
+			archMask, flagMask,
+			defErrno, errno1, errno2,
+		)
+
+		if seccomp.ValidateArtifact(profile) != nil {
+			return
+		}
+
+		err := seccomp.Validate(profile)
+		if err != nil {
+			t.Fatalf("ValidateArtifact accepted a profile Validate rejects: %v", err)
+		}
+
+		if profile.ListenerPath != "" || profile.ListenerMetadata != "" {
+			t.Error("ValidateArtifact accepted listener settings")
+		}
+
+		if profile.DefaultAction == specs.ActNotify {
+			t.Error("ValidateArtifact accepted SCMP_ACT_NOTIFY as the default action")
+		}
+
+		for idx := range profile.Syscalls {
+			if profile.Syscalls[idx].Action == specs.ActNotify {
+				t.Errorf("ValidateArtifact accepted SCMP_ACT_NOTIFY in entry %d", idx)
+			}
+		}
+
+		// A runtime intersects the artifact with its baseline next, so the
+		// merge must succeed and yield something it can load.
+		merged, err := seccomp.Intersect(profile, profile)
+		if err != nil {
+			t.Fatalf("Intersect of an accepted artifact failed: %v", err)
+		}
+
+		err = seccomp.Validate(merged)
+		if err != nil {
+			t.Fatalf("Intersect of an accepted artifact yields an invalid profile: %v", err)
+		}
+	})
+}
+
+// FuzzSyscallListsMatchProfileMerge ties the bare syscall-list functions to
+// the profile merge. They carry no default of their own and assume the
+// caller loads them with one that is at least as restrictive as every action
+// in them, so under such a default they must decide every call the way the
+// profile merge decides it.
+//
+// The two do not produce identical entries: without a default the bare
+// functions cannot tell that an entry repeats it, so they emit entries the
+// profile merge elides. Running the bare result through a single-profile
+// merge, which normalizes against the default, removes exactly that
+// difference.
+func FuzzSyscallListsMatchProfileMerge(f *testing.F) {
+	f.Add(
+		uint8(4), uint8(8), uint8(8),
+		"read", "write",
+		false, false, uint64(0), uint64(0),
+		uint32(0), uint8(0),
+		uint16(0), uint16(0), uint16(0),
+	)
+	f.Add(
+		uint8(4), uint8(8), uint8(3),
+		"read", "open",
+		true, true, uint64(1), uint64(2),
+		uint32(0), uint8(0),
+		uint16(0), uint16(0), uint16(0),
+	)
+
+	f.Fuzz(func(
+		t *testing.T,
+		defIdx, act1Idx, act2Idx uint8,
+		name1, name2 string,
+		hasArgs1, hasArgs2 bool,
+		argVal1, argVal2 uint64,
+		archMask uint32, flagMask uint8,
+		defErrno, errno1, errno2 uint16,
+	) {
+		left := fuzzProfile(
+			defIdx, act1Idx, act2Idx, name1, name2, hasArgs1, hasArgs2,
+			argVal1, argVal2, archMask, flagMask, defErrno, errno1, errno2,
+		)
+		right := fuzzProfile(
+			act2Idx, defIdx, act1Idx, name2, name1, hasArgs2, hasArgs1,
+			argVal2, argVal1, archMask, flagMask, errno2, defErrno, errno1,
+		)
+
+		// SCMP_ACT_KILL_PROCESS is the most restrictive action, so it
+		// satisfies the assumption the bare-list functions make.
+		withDefault := func(syscalls []specs.LinuxSyscall) *specs.LinuxSeccomp {
+			return &specs.LinuxSeccomp{
+				DefaultAction: specs.ActKillProcess,
+				Syscalls:      syscalls,
+			}
+		}
+
+		leftProfile := withDefault(left.Syscalls)
+		rightProfile := withDefault(right.Syscalls)
+
+		if seccomp.Validate(leftProfile) != nil || seccomp.Validate(rightProfile) != nil {
+			return
+		}
+
+		for _, direction := range []struct {
+			name    string
+			profile func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error)
+			bare    func(left, right []specs.LinuxSyscall) []specs.LinuxSyscall
+		}{
+			{"Intersect", seccomp.Intersect, seccomp.IntersectSyscalls},
+			{"Union", seccomp.Union, seccomp.UnionSyscalls},
+		} {
+			merged, err := direction.profile(leftProfile, rightProfile)
+			if err != nil {
+				t.Fatalf("%s: %v", direction.name, err)
+			}
+
+			bare, err := direction.profile(
+				withDefault(direction.bare(left.Syscalls, right.Syscalls)),
+			)
+			if err != nil {
+				t.Fatalf("%s of the bare result: %v", direction.name, err)
+			}
+
+			want := seccomp.FormatProfile(merged)
+			if got := seccomp.FormatProfile(bare); got != want {
+				t.Errorf(
+					"%sSyscalls under the default = %s, %s of the same entries = %s",
+					direction.name, got, direction.name, want,
+				)
+			}
+		}
+	})
+}

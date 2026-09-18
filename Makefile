@@ -24,6 +24,9 @@ NOCOLOR := \033[0m
 
 PACKAGES := $(shell $(GO) list ./...)
 
+# verify is deliberately not part of all: verify-tidy and verify-mdtoc
+# rewrite tracked files in place before checking that nothing changed, which
+# a default target must not do to someone's working tree.
 .PHONY: all
 all: build lint test ## Build, lint, and test the project
 
@@ -59,10 +62,12 @@ test: ## Run tests with race detection and coverage report (set RACE= to skip th
 	$(GO) test -v $(RACE) -count=1 -coverprofile=$(BUILD_DIR)/coverage.out -covermode=atomic -coverpkg=./... ./...
 	$(GO) tool cover -html=$(BUILD_DIR)/coverage.out -o $(BUILD_DIR)/coverage.html
 
+# TestLibseccompVersion names the library that answered. Set
+# LIBSECCOMP_VERSION to require a particular one, as CI does.
 .PHONY: test-libseccomp
 test-libseccomp: ## Check the seccomp evaluation model against libseccomp itself (needs cgo and the libseccomp headers)
 	CGO_ENABLED=1 $(GO) test -v -count=1 -tags libseccomp \
-		-run 'TestModelMatchesLibseccomp' ./seccomp/
+		-run 'TestModelMatchesLibseccomp|TestLibseccompVersion' ./seccomp/
 
 .PHONY: fuzz
 fuzz: ## Run all fuzz tests (use FUZZTIME to adjust, default 30s)
@@ -79,7 +84,9 @@ bench: ## Run benchmarks
 		$(GO) test -bench=. -benchmem -count=5 -run='^$$' $$pkg; \
 	done
 
-COVERAGE_THRESHOLD ?= 90
+# The floor, not the target: the suite sits well above this, and the drift
+# codecov reports on a pull request is the tighter check.
+COVERAGE_THRESHOLD ?= 95
 
 .PHONY: verify-coverage
 verify-coverage: test ## Verify test coverage meets threshold
@@ -93,6 +100,16 @@ verify-coverage: test ## Verify test coverage meets threshold
 	fi
 
 ##@ Verification
+
+# The verification CI runs that needs only the Go toolchain, so that most of
+# a red CI run can be reproduced with one command. The typos scan and the
+# release snapshot build are not here: they need crate-ci/typos and
+# goreleaser, which this Makefile does not install.
+#
+# verify-mdtoc and verify-tidy rewrite files in place and then check that
+# nothing changed, which is why verify is not part of the default target.
+.PHONY: verify
+verify: lint verify-tidy verify-mdtoc verify-dependencies govulncheck ## Run the Go-only verifications CI runs (rewrites the TOCs and go.mod in place)
 
 .PHONY: lint
 lint: $(GOLANGCI_LINT) ## Run golangci-lint

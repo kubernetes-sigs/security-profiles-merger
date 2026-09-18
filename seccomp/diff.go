@@ -27,6 +27,7 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 // ProfileDiff describes the differences between two seccomp profiles.
@@ -77,8 +78,9 @@ type StringDiff struct {
 	Right string `json:"right"`
 }
 
-// SliceDiff represents added and removed items in a set-like slice.
-type SliceDiff[T comparable] = merge.SliceDiff[T]
+// SliceDiff represents added and removed items in a set-like slice. It is
+// [spm.SliceDiff], which the apparmor and landlock diffs name as well.
+type SliceDiff[T comparable] = spm.SliceDiff[T]
 
 // SyscallsDiff describes differences in the syscall entries.
 type SyscallsDiff struct {
@@ -137,6 +139,8 @@ func Diff(left, right *specs.LinuxSeccomp) (*ProfileDiff, error) {
 	native, ok := NativeArchitecture()
 	if !ok {
 		// No architecture is implied, so every listed one is compared.
+		// Only a GOARCH with no seccomp architecture constant gets here,
+		// which no platform this module builds for has.
 		native = ""
 	}
 
@@ -380,7 +384,10 @@ func buildSyscallMap(
 ) map[string][]SyscallEntry {
 	result := make(map[string][]SyscallEntry)
 	// Deduplication by key rather than by scanning what a name already
-	// holds, so that a syscall carrying many entries stays linear.
+	// holds, so that a syscall carrying many entries stays linear. Nothing
+	// reaches it today, since collectRules drops exact duplicates and an
+	// unconditional rule hides the conditional ones, but the diff must not
+	// list an entry twice if that ever changes.
 	seen := make(map[string]map[string]struct{})
 
 	for _, syscall := range settledSyscalls(nil, syscalls, def) {

@@ -779,6 +779,24 @@ func TestRequiredABIVersion(t *testing.T) {
 			want: landlock.ABIV10,
 		},
 		{
+			// A network rule may carry a right the handled set does not
+			// name, so the rules are read as well.
+			name: "a network rule raises it too",
+			profile: &landlock.Profile{
+				HandledAccessFS:  nil,
+				HandledAccessNet: []landlock.NetAccessRight{landlock.NetAccessConnectTCP},
+				Scoped:           nil,
+				PathRules:        nil,
+				NetRules: []landlock.NetRule{{
+					Port: 443,
+					AccessNet: []landlock.NetAccessRight{
+						landlock.NetAccessConnectTCP, landlock.NetAccessConnectSendUDP,
+					},
+				}},
+			},
+			want: landlock.ABIV10,
+		},
+		{
 			name: "unknown rights are left to Validate",
 			profile: &landlock.Profile{
 				HandledAccessFS:  []landlock.FSAccessRight{"not_a_right"},
@@ -932,5 +950,47 @@ func TestValidateArtifact(t *testing.T) {
 	err = landlock.ValidateArtifact(nil)
 	if !errors.Is(err, landlock.ErrNilProfile) {
 		t.Errorf("expected ErrNilProfile, got: %v", err)
+	}
+}
+
+// TestValidateForABIReportsNetworkRuleRights covers the network rules, which
+// carry their own rights and so have to be checked against the ABI just like
+// the handled sets and the path rules.
+func TestValidateForABIReportsNetworkRuleRights(t *testing.T) {
+	t.Parallel()
+
+	profile := &landlock.Profile{
+		HandledAccessFS: nil,
+		HandledAccessNet: []landlock.NetAccessRight{
+			landlock.NetAccessConnectTCP, landlock.NetAccessConnectSendUDP,
+		},
+		Scoped:    nil,
+		PathRules: nil,
+		NetRules: []landlock.NetRule{{
+			Port: 443,
+			AccessNet: []landlock.NetAccessRight{
+				landlock.NetAccessConnectTCP, landlock.NetAccessConnectSendUDP,
+			},
+		}},
+	}
+
+	err := landlock.ValidateForABI(profile, landlock.ABIV4)
+	if !errors.Is(err, landlock.ErrUnsupportedABIRight) {
+		t.Fatalf("ValidateForABI(v4) = %v, want %v", err, landlock.ErrUnsupportedABIRight)
+	}
+
+	// Both the handled set and the rule are reported, so a reader sees
+	// every place the right appears.
+	if got := strings.Count(err.Error(), string(landlock.NetAccessConnectSendUDP)); got != 2 {
+		t.Errorf("ValidateForABI(v4) names connect_send_udp %d times, want 2: %v", got, err)
+	}
+
+	if !strings.Contains(err.Error(), "NetRules[0]") {
+		t.Errorf("ValidateForABI(v4) does not name the network rule: %v", err)
+	}
+
+	err = landlock.ValidateForABI(profile, landlock.ABIV10)
+	if err != nil {
+		t.Errorf("ValidateForABI(v10) = %v, want nil", err)
 	}
 }

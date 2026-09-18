@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 // ProfileDiff describes the differences between two Landlock profiles.
@@ -52,7 +53,7 @@ type ProfileDiff struct {
 func (d ProfileDiff) IsEqual() bool { return d.Equal }
 
 // RightsDiff represents added and removed items in a rights set.
-type RightsDiff[T comparable] = merge.SliceDiff[T]
+type RightsDiff[T comparable] = spm.SliceDiff[T]
 
 // PathRulesDiff describes differences in path rules.
 type PathRulesDiff struct {

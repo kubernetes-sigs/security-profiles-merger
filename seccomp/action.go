@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package seccomp provides merge operations for seccomp profiles.
 package seccomp
 
 import (

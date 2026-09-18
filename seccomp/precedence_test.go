@@ -355,28 +355,34 @@ func TestIntersectKeepsLeftmostErrnoOverCollapsedConditional(t *testing.T) {
 	}
 }
 
+// TestUnionRaisesStricterOverlapOfRedundantClause pins the raising pass the
+// union runs before dropping the clauses that equal the merged default.
+//
+// Left permits NOTIFY for arg0 < 3 and kills everything else; right kills
+// harder for arg0 <= 2 and permits NOTIFY everywhere else. The merged default
+// is NOTIFY, so the left clause becomes redundant: a runtime skips an entry
+// that equals the profile default, which means it cannot shield arg0 < 3 from
+// the stricter right clause that overlaps it. Without raising that clause to
+// NOTIFY, the result would deny arg0 <= 2 as SCMP_ACT_KILL even though both
+// inputs permit those calls as NOTIFY.
 func TestUnionRaisesStricterOverlapOfRedundantClause(t *testing.T) {
 	t.Parallel()
 
 	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
+		DefaultAction: specs.ActKillProcess,
 		Syscalls: []specs.LinuxSyscall{
 			{
-				Names: []string{"read"}, Action: specs.ActAllow,
-				Args: []specs.LinuxSeccompArg{argEq(0, 1)},
+				Names: []string{"read"}, Action: specs.ActNotify,
+				Args: []specs.LinuxSeccompArg{{Index: 0, Value: 3, Op: specs.OpLessThan}},
 			},
 		},
 	}
 	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActAllow,
+		DefaultAction: specs.ActNotify,
 		Syscalls: []specs.LinuxSyscall{
 			{
-				Names: []string{"read"}, Action: specs.ActErrno,
-				Args: []specs.LinuxSeccompArg{{Index: 0, Value: 5, Op: specs.OpLessThan}},
-			},
-			{
-				Names: []string{"read"}, Action: specs.ActTrap,
-				Args: []specs.LinuxSeccompArg{argEq(1, 1)},
+				Names: []string{"read"}, Action: specs.ActKill,
+				Args: []specs.LinuxSeccompArg{{Index: 0, Value: 2, Op: specs.OpLessEqual}},
 			},
 		},
 	}
@@ -386,13 +392,109 @@ func TestUnionRaisesStricterOverlapOfRedundantClause(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// The merged default is ALLOW, which makes the left clause for arg0 == 1
-	// redundant. Runtimes skip such an entry, so it cannot shield arg0 == 1
-	// from the stricter right clauses that overlap it: those are raised to
-	// ALLOW as well and everything folds into the default. The exact union
-	// (deny arg0 in {0, 2, 3, 4}) is not expressible, so the result
-	// over-approximates in the permissive direction.
-	want := "Profile{default:SCMP_ACT_ALLOW}"
+	// Every clause ends up at the merged default, so none is emitted.
+	want := "Profile{default:SCMP_ACT_NOTIFY}"
+	if got := seccomp.FormatProfile(result); got != want {
+		t.Errorf("Union = %s, want %s", got, want)
+	}
+
+	// The property the raising protects, stated directly: no call either
+	// input permits may come out denied.
+	inputs := []*specs.LinuxSeccomp{left, right}
+	cache := judges{}
+
+	forEachCall(inputs, func(name string, call []uint64) {
+		merged := cache.evalCall(t, result, name, call)
+
+		for idx, input := range inputs {
+			if !permitsAtLeast(merged, cache.judgeCall(input, name, call)) {
+				t.Errorf(
+					"union denies %s%v as %s, which profile %d permits",
+					name, call, merged, idx,
+				)
+			}
+		}
+	})
+}
+
+// TestIntersectPrunesDominatedConjunction covers the clause pruning: the
+// intersection of two filters on different argument indices emits the
+// conjunction of both alongside each single filter. The conjunction matches
+// only calls the single filters match too, and yields the same result, so it
+// can never decide a call and is dropped.
+func TestIntersectPrunesDominatedConjunction(t *testing.T) {
+	t.Parallel()
+
+	left := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActAllow,
+		Syscalls: []specs.LinuxSyscall{
+			{
+				Names: []string{"read"}, Action: specs.ActErrno,
+				Args: []specs.LinuxSeccompArg{argEq(0, 1)},
+			},
+		},
+	}
+	right := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActAllow,
+		Syscalls: []specs.LinuxSyscall{
+			{
+				Names: []string{"read"}, Action: specs.ActErrno,
+				Args: []specs.LinuxSeccompArg{argEq(1, 2)},
+			},
+		},
+	}
+
+	result, err := seccomp.Intersect(left, right)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Each side's filter survives on its own; the arg0 == 1 && arg1 == 2
+	// conjunction the merge also forms is dominated by both and pruned.
+	want := "Profile{default:SCMP_ACT_ALLOW " +
+		"read([0]SCMP_CMP_EQ:1)->SCMP_ACT_ERRNO " +
+		"read([1]SCMP_CMP_EQ:2)->SCMP_ACT_ERRNO}"
+	if got := seccomp.FormatProfile(result); got != want {
+		t.Errorf("Intersect = %s, want %s", got, want)
+	}
+}
+
+// TestUnionDropsErrnoOnlyFallbackForConditional covers the case where the
+// merged unconditional rule differs from the merged default only by errno
+// and a conditional rule with a different action survives. Keeping the
+// unconditional rule would force the conditional one to collapse, so the
+// errno is given up instead and those calls get the default's errno.
+func TestUnionDropsErrnoOnlyFallbackForConditional(t *testing.T) {
+	t.Parallel()
+
+	eperm, enosys := uint(1), uint(38)
+	left := &specs.LinuxSeccomp{
+		DefaultAction:   specs.ActErrno,
+		DefaultErrnoRet: &eperm,
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{"read"}, Action: specs.ActErrno, ErrnoRet: &enosys},
+		},
+	}
+	right := &specs.LinuxSeccomp{
+		DefaultAction:   specs.ActErrno,
+		DefaultErrnoRet: &eperm,
+		Syscalls: []specs.LinuxSyscall{
+			{
+				Names: []string{"read"}, Action: specs.ActAllow,
+				Args: []specs.LinuxSeccompArg{argEq(0, 5)},
+			},
+		},
+	}
+
+	result, err := seccomp.Union(left, right)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// read(arg0 == 5) stays permitted, which the union must keep; the
+	// ENOSYS the left profile returned for every other call gives way to
+	// the default's EPERM, spelled as an unset errnoRet.
+	want := "Profile{default:SCMP_ACT_ERRNO read([0]SCMP_CMP_EQ:5)->SCMP_ACT_ALLOW}"
 	if got := seccomp.FormatProfile(result); got != want {
 		t.Errorf("Union = %s, want %s", got, want)
 	}

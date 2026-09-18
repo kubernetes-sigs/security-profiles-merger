@@ -618,24 +618,6 @@ func BenchmarkDeduplicateSlice(b *testing.B) {
 	}
 }
 
-func TestCleanPath(t *testing.T) {
-	t.Parallel()
-
-	// Profile paths are Linux paths on every host, so cleaning never
-	// switches to the host's separator.
-	for _, testCase := range []struct{ in, want string }{
-		{"/etc/", "/etc"},
-		{"/var/log/../data", "/var/data"},
-		{"/a//b/./c", "/a/b/c"},
-		{"", "."},
-		{"relative/x/..", "relative"},
-	} {
-		if got := merge.CleanPath(testCase.in); got != testCase.want {
-			t.Errorf("CleanPath(%q) = %q, want %q", testCase.in, got, testCase.want)
-		}
-	}
-}
-
 func TestIsAbsPath(t *testing.T) {
 	t.Parallel()
 

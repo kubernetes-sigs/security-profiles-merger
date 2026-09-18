@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package apparmor provides merge operations for AppArmor profiles.
 package apparmor
 
 import (
@@ -23,13 +22,14 @@ import (
 	"strings"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 var (
 	// ErrNoProfiles is returned when no profiles are provided.
-	ErrNoProfiles = merge.ErrNoProfiles
+	ErrNoProfiles = spm.ErrNoProfiles
 	// ErrNilProfile is returned when a nil profile is provided.
-	ErrNilProfile = merge.ErrNilProfile
+	ErrNilProfile = spm.ErrNilProfile
 )
 
 // Intersect merges multiple AppArmor profiles via intersection: the resulting

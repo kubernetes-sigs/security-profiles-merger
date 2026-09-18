@@ -39,18 +39,55 @@ A single profile is normalized without merging.
 Reads from stdin when no files are provided: a single profile, or a JSON
 array of profiles.
 
+--validate names the checks to run on the inputs before merging: one mode
+for all of them, or one mode per input, separated by commas. A container
+runtime merging a pulled profile into its node baseline uses
+--validate strict,artifact.
+
 Options:
 `
 
+// mergeOptions holds the parsed flags of the merge command.
+type mergeOptions struct {
+	profileType  string
+	strategy     string
+	format       string
+	output       string
+	validate     string
+	noDetectNote bool
+}
+
+// bindMergeFlags declares the merge flags on the set and returns the struct
+// they fill in.
+func bindMergeFlags(flags *flag.FlagSet) *mergeOptions {
+	opts := new(mergeOptions)
+
+	flags.StringVar(
+		&opts.profileType, "type", "",
+		"profile type: seccomp, apparmor, landlock (auto-detected if omitted)",
+	)
+	flags.StringVar(
+		&opts.strategy, "strategy", "", "merge strategy: intersect, union (required)",
+	)
+	flags.StringVar(&opts.format, "format", formatJSON, "output format: json, human")
+	flags.StringVar(&opts.output, "output", "", "write output to file (default: stdout)")
+	flags.StringVar(
+		&opts.validate, "validate", modeNameDefault,
+		"checks to run on the inputs before merging: default, strict, artifact; "+
+			"or one mode per input, comma separated",
+	)
+	flags.BoolVar(
+		&opts.noDetectNote, "no-detect-note", false,
+		"do not note an auto-detected profile type on stderr; the merged "+
+			"profile, errors and warnings still go to their usual streams",
+	)
+
+	return opts
+}
+
 func runMerge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := newFlagSet(cmdMerge, stderr)
-
-	profileType := flags.String(
-		"type", "", "profile type: seccomp, apparmor, landlock (auto-detected if omitted)",
-	)
-	strategy := flags.String("strategy", "", "merge strategy: intersect, union (required)")
-	format := flags.String("format", formatJSON, "output format: json, human")
-	output := flags.String("output", "", "write output to file (default: stdout)")
+	opts := bindMergeFlags(flags)
 
 	if done, code := parseFlags(flags, mergeUsage, args, stdout, stderr); done {
 		return code
@@ -60,8 +97,7 @@ func runMerge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	code := validateMergeFlags(*profileType, *strategy, *format, flags, stderr)
-	if code != 0 {
+	if code := validateMergeFlags(opts, flags, stderr); code != 0 {
 		return code
 	}
 
@@ -76,25 +112,89 @@ func runMerge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	kind, code := resolveKind(*profileType, data, 1, stderr)
+	return mergeInputs(opts, data, stdout, stderr)
+}
+
+// mergeInputs validates, merges and writes the profiles that were read.
+func mergeInputs(
+	opts *mergeOptions, data [][]byte, stdout, stderr io.Writer,
+) int {
+	// The mode count is checked against the inputs, which a "-" argument
+	// may expand into several, so this waits until they are read.
+	modes, err := parseValidateModes(opts.validate, len(data))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+
+		return exitUsage
+	}
+
+	kind, code := resolveKind(opts.profileType, data, 1, opts.noDetectNote, stderr)
 	if code != 0 {
 		return code
 	}
 
 	var out bytes.Buffer
 
-	code = kind.merge(data, *strategy, *format, &out, stderr)
+	code = kind.merge(data, opts.strategy, modes, opts.format, &out, stderr)
 	if code != 0 {
 		return code
 	}
 
-	return flushOutput(*output, out.Bytes(), stdout, stderr)
+	return flushOutput(opts.output, out.Bytes(), stdout, stderr)
+}
+
+var (
+	errUnknownValidateMode = errors.New("unknown validation mode")
+	errValidateModeCount   = errors.New("wrong number of validation modes")
+)
+
+// parseValidateModes turns a --validate value into one mode per input:
+// either a single mode for all of them, or exactly one each.
+func parseValidateModes(value string, inputs int) ([]validateMode, error) {
+	names := strings.Split(value, ",")
+
+	parsed := make([]validateMode, 0, len(names))
+
+	for _, name := range names {
+		mode, ok := modeByName(strings.TrimSpace(name))
+		if !ok {
+			return nil, fmt.Errorf(
+				"%w %q (use %s, %s, or %s)",
+				errUnknownValidateMode, name,
+				modeNameDefault, modeNameStrict, modeNameArtifact,
+			)
+		}
+
+		parsed = append(parsed, mode)
+	}
+
+	if len(parsed) == 1 {
+		return slices.Repeat(parsed, inputs), nil
+	}
+
+	if len(parsed) != inputs {
+		return nil, fmt.Errorf(
+			"%w: got %d for %d %s",
+			errValidateModeCount, len(parsed), inputs, plural(inputs, "profile"),
+		)
+	}
+
+	return parsed, nil
 }
 
 func validateMergeFlags(
-	profileType, strategy, format string,
-	flags *flag.FlagSet, stderr io.Writer,
+	opts *mergeOptions, flags *flag.FlagSet, stderr io.Writer,
 ) int {
+	// The modes are parsed again once the inputs are known; this reports a
+	// misspelled one before anything is read.
+	_, err := parseValidateModes(opts.validate, 1)
+	if err != nil && errors.Is(err, errUnknownValidateMode) {
+		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+
+		return exitUsage
+	}
+
+	strategy := opts.strategy
 	if strategy == "" {
 		_, _ = fmt.Fprintln(stderr, "error: --strategy is required")
 
@@ -113,38 +213,50 @@ func validateMergeFlags(
 		return exitUsage
 	}
 
-	if code := validateFormat(format, stderr); code != 0 {
+	if code := validateFormat(opts.format, stderr); code != 0 {
 		return code
 	}
 
-	return validateProfileType(profileType, stderr)
+	return validateProfileType(opts.profileType, stderr)
 }
 
-func mergeProfiles[T any](
-	data [][]byte,
-	strategy, format string,
-	intersect, union func(...*T) (*T, error),
-	formatFn func(*T) string,
-	stdout, stderr io.Writer,
-) int {
+// mergeRequest carries everything one merge run needs, so that the per-input
+// validation modes do not turn mergeProfiles into a long parameter list.
+type mergeRequest[T any] struct {
+	data     [][]byte
+	strategy string
+	format   string
+	// checks and policies hold one entry per input, in the same order.
+	checks    []func(*T) error
+	policies  []decodePolicy
+	intersect func(...*T) (*T, error)
+	union     func(...*T) (*T, error)
+	formatFn  func(*T) string
+}
+
+func mergeProfiles[T any](request mergeRequest[T], stdout, stderr io.Writer) int {
 	var mergeFn func(...*T) (*T, error)
 
-	switch strategy {
+	switch request.strategy {
 	case strategyIntersect:
-		mergeFn = intersect
+		mergeFn = request.intersect
 	case strategyUnion:
-		mergeFn = union
+		mergeFn = request.union
 	default:
 		// runMerge checks the strategy before reading any input.
-		_, _ = fmt.Fprintf(stderr, "error: unknown strategy %q\n", strategy)
+		_, _ = fmt.Fprintf(stderr, "error: unknown strategy %q\n", request.strategy)
 
 		return exitUsage
 	}
 
-	profiles, err := unmarshalAll[T](data, lenientDecode(), stderr)
+	profiles, err := unmarshalAll[T](request.data, request.policies, stderr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 
+		return 1
+	}
+
+	if failed := checkInputs(profiles, request.checks, stderr); failed {
 		return 1
 	}
 
@@ -155,7 +267,31 @@ func mergeProfiles[T any](
 		return 1
 	}
 
-	return writeOutput(result, formatFn(result), format, stdout, stderr)
+	return writeOutput(result, request.formatFn(result), request.format, stdout, stderr)
+}
+
+// checkInputs runs each input's own validation and reports whether any
+// failed. Every input is checked, so one run names every problem. A nil
+// check means the merge functions already run what this input asked for.
+func checkInputs[T any](
+	profiles []*T, checks []func(*T) error, stderr io.Writer,
+) bool {
+	failed := false
+
+	for idx, profile := range profiles {
+		if checks[idx] == nil {
+			continue
+		}
+
+		err := checks[idx](profile)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "error: profile %d: %v\n", idx, err)
+
+			failed = true
+		}
+	}
+
+	return failed
 }
 
 const (
@@ -188,9 +324,11 @@ type decodePolicy struct {
 }
 
 // lenientDecode returns the policy that warns about every ambiguity and
-// rejects none.
-func lenientDecode() decodePolicy {
-	return decodePolicy{rejectUnknown: false, rejectDuplicates: false}
+// rejects none, repeated once per input.
+func lenientDecode(inputs int) []decodePolicy {
+	return slices.Repeat(
+		[]decodePolicy{{rejectUnknown: false, rejectDuplicates: false}}, inputs,
+	)
 }
 
 func readInputs(paths []string, stdin io.Reader) ([][]byte, error) {
@@ -309,15 +447,17 @@ func readFromStdin(reader io.Reader) ([][]byte, error) {
 	return [][]byte{data}, nil
 }
 
-// unmarshalAll decodes every raw profile. A member the profile type has no
-// field for, such as a misspelled key, silently drops the rule it was meant
-// to carry, and a member repeated within one object is read differently by
-// different parsers. Each is an error when the policy rejects it and a
-// warning on stderr otherwise.
-func unmarshalAll[T any](data [][]byte, policy decodePolicy, stderr io.Writer) ([]*T, error) {
+// unmarshalAll decodes every raw profile under its own policy, given one per
+// input. A member the profile type has no field for, such as a misspelled
+// key, silently drops the rule it was meant to carry, and a member repeated
+// within one object is read differently by different parsers. Each is an
+// error when that input's policy rejects it and a warning on stderr
+// otherwise.
+func unmarshalAll[T any](data [][]byte, policies []decodePolicy, stderr io.Writer) ([]*T, error) {
 	profiles := make([]*T, len(data))
 
 	for idx, raw := range data {
+		policy := policies[idx]
 		profile := new(T)
 
 		err := json.Unmarshal(raw, profile)

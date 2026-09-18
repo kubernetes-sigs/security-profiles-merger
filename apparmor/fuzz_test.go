@@ -17,13 +17,13 @@ limitations under the License.
 package apparmor_test
 
 import (
+	"path"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
-	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
 func capsFromMask(mask uint64) []string {
@@ -92,7 +92,9 @@ func sanitizeFuzzPath(fuzzPath, fallback string) string {
 		return fallback
 	}
 
-	return merge.CleanPath(fuzzPath)
+	// Profile paths are Linux paths on every host, so the fuzz oracle
+	// cleans with slash semantics rather than the host separator.
+	return path.Clean(fuzzPath)
 }
 
 func addAppArmorFuzzSeeds(f *testing.F) {
@@ -676,5 +678,97 @@ func assertStringDiffSwapped(
 
 	if !slices.Equal(fwd.Removed, rev.Added) {
 		t.Errorf("%s: forward Removed != reverse Added", label)
+	}
+}
+
+// FuzzAppArmorValidateArtifact fuzzes the check a runtime applies to a
+// profile it did not author. Beyond crashes and hangs it pins the contract:
+// a profile ValidateArtifact accepts is one Validate accepts, holds only
+// absolute paths and patterns the matcher can use, and merges into a result
+// the runtime can load.
+func FuzzAppArmorValidateArtifact(f *testing.F) {
+	f.Add(uint64(0x2001000), "/etc/config", "/var/log", true, true, false)
+	f.Add(uint64(0x80001), "/etc/**", "/var/log/*.log", false, false, true)
+	f.Add(uint64(0x1001), "/etc/{a,b}/c", "/tmp/../x", true, true, true)
+	f.Add(uint64(0x80), "relative/path", "/y", true, false, true)
+
+	f.Fuzz(func(
+		t *testing.T,
+		capMask uint64, path1, path2 string,
+		allowRaw, allowTCP, allowUDP bool,
+	) {
+		profile := fuzzAppArmorProfile(
+			capMask, path1, path2,
+			allowRaw, allowTCP, allowUDP,
+		)
+
+		if apparmor.ValidateArtifact(profile) != nil {
+			return
+		}
+
+		err := apparmor.Validate(profile)
+		if err != nil {
+			t.Fatalf("ValidateArtifact accepted a profile Validate rejects: %v", err)
+		}
+
+		forEachFuzzPathList(profile, func(context string, paths []string) {
+			for _, path := range paths {
+				if !strings.HasPrefix(path, "/") {
+					t.Errorf(
+						"%s: ValidateArtifact accepted the relative path %q", context, path,
+					)
+				}
+
+				// An unusable pattern matches nothing, so an intersection
+				// would drop it without a trace.
+				if apparmor.IsGlobPattern(path) && !apparmor.MatcherUsable(path) {
+					t.Errorf(
+						"%s: ValidateArtifact accepted the unusable pattern %q", context, path,
+					)
+				}
+			}
+		})
+
+		// A runtime intersects the artifact with its baseline next, so the
+		// merge must succeed and yield something it can load.
+		merged, err := apparmor.Intersect(profile, profile)
+		if err != nil {
+			t.Fatalf("Intersect of an accepted artifact failed: %v", err)
+		}
+
+		err = apparmor.Validate(merged)
+		if err != nil {
+			t.Fatalf("Intersect of an accepted artifact yields an invalid profile: %v", err)
+		}
+	})
+}
+
+// fuzzPathList is one named list of paths in a profile.
+type fuzzPathList struct {
+	context string
+	paths   []string
+}
+
+// forEachFuzzPathList calls visit for every list of paths the profile holds.
+func forEachFuzzPathList(profile *apparmor.Profile, visit func(string, []string)) {
+	var lists []fuzzPathList
+
+	if profile.Executable != nil {
+		lists = append(lists,
+			fuzzPathList{"AllowedExecutables", profile.Executable.AllowedExecutables},
+			fuzzPathList{"AllowedLibraries", profile.Executable.AllowedLibraries},
+		)
+	}
+
+	if profile.Filesystem != nil {
+		lists = append(lists,
+			fuzzPathList{"ReadOnlyPaths", profile.Filesystem.ReadOnlyPaths},
+			fuzzPathList{"WriteOnlyPaths", profile.Filesystem.WriteOnlyPaths},
+			fuzzPathList{"ReadWritePaths", profile.Filesystem.ReadWritePaths},
+		)
+	}
+
+	for _, list := range lists {
+		visit(list.context, list.paths)
 	}
 }
