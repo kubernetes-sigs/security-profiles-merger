@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"strings"
 
-	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 var (
@@ -43,7 +43,7 @@ var (
 	ErrUnknownCapability = errors.New("unknown capability")
 
 	// ErrEmptyPath is returned when a path rule contains an empty string.
-	ErrEmptyPath = merge.ErrEmptyPath
+	ErrEmptyPath = spm.ErrEmptyPath
 
 	// ErrEmptyCapability is returned when a capability entry is an empty
 	// string.
@@ -145,11 +145,21 @@ func Validate(profile *Profile) error {
 		return ErrNilProfile
 	}
 
+	_, err := validateStructure(profile)
+
+	return err
+}
+
+// validateStructure runs the checks of Validate on a non-nil profile and
+// reports whether it stopped at an oversized path. ValidateStrict and
+// ValidateArtifact read that flag rather than measuring every path again:
+// their pattern checks have nothing to work on once a path is oversized.
+func validateStructure(profile *Profile) (bool, error) {
 	// Oversized paths are reported on their own: every other check scans
 	// the paths.
 	err := validatePathLengths(profile)
 	if err != nil {
-		return err
+		return true, err
 	}
 
 	var errs []error
@@ -193,7 +203,7 @@ func Validate(profile *Profile) error {
 		}
 	}
 
-	return errors.Join(errs...)
+	return false, errors.Join(errs...)
 }
 
 // ValidateStrict performs all checks from Validate and additionally detects
@@ -209,15 +219,16 @@ func Validate(profile *Profile) error {
 // ValidateStrict is intended for user-authored profiles where all of these
 // are likely mistakes.
 func ValidateStrict(profile *Profile) error {
-	var errs []error
-
-	err := Validate(profile)
-	if err != nil {
-		errs = append(errs, err)
+	if profile == nil {
+		return ErrNilProfile
 	}
 
-	if profile == nil {
-		return errors.Join(errs...)
+	oversized, err := validateStructure(profile)
+
+	var errs []error
+
+	if err != nil {
+		errs = append(errs, err)
 	}
 
 	if profile.Capabilities != nil {
@@ -240,7 +251,9 @@ func ValidateStrict(profile *Profile) error {
 		)...)
 	}
 
-	errs = append(errs, validateLoadablePaths(profile)...)
+	if !oversized {
+		errs = append(errs, validateLoadablePaths(profile)...)
+	}
 
 	return errors.Join(errs...)
 }
@@ -262,32 +275,31 @@ func ValidateStrict(profile *Profile) error {
 // ValidateArtifact does not compare the profile against a baseline; callers
 // intersect the result with their baseline afterwards.
 func ValidateArtifact(profile *Profile) error {
+	if profile == nil {
+		return ErrNilProfile
+	}
+
+	oversized, err := validateStructure(profile)
+
 	var errs []error
 
-	err := Validate(profile)
 	if err != nil {
 		errs = append(errs, err)
 	}
 
-	if profile == nil {
-		return errors.Join(errs...)
+	if !oversized {
+		errs = append(errs, validateLoadablePaths(profile)...)
 	}
-
-	errs = append(errs, validateLoadablePaths(profile)...)
 
 	return errors.Join(errs...)
 }
 
 // validateLoadablePaths reports the paths apparmor_parser would refuse and
 // the glob patterns the matcher drops, which ValidateStrict and
-// ValidateArtifact both check.
+// ValidateArtifact both check. Callers run it only when no path is
+// oversized, which validateStructure has already reported.
 func validateLoadablePaths(profile *Profile) []error {
 	var errs []error
-
-	if validatePathLengths(profile) != nil {
-		// Validate reported the oversized paths already.
-		return nil
-	}
 
 	visitPathLists(profile, func(context string, paths []string) {
 		// Normalizing never changes whether a path is absolute, so the raw

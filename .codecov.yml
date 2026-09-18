@@ -2,7 +2,12 @@ coverage:
   status:
     project:
       default:
-        target: 90%
+        # The suite covers far more than a fixed floor would ask for, so the
+        # check is on losing coverage rather than on a number: a patch may
+        # not drop the project below where it already is by more than a
+        # rounding error.
+        target: auto
+        threshold: 0.5%
     patch:
       default:
         target: 90%

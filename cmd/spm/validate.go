@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"slices"
 )
 
 const validateUsage = `Usage: spm validate [options] [files...]
@@ -27,8 +28,8 @@ const validateUsage = `Usage: spm validate [options] [files...]
 Validate one or more security profiles.
 Reads from stdin when no files are provided: a single profile, or a JSON
 array of profiles.
-Writes the validated profiles on success; --quiet writes no profile.
-Errors, warnings and notes always go to stderr.
+Writes the validated profiles on success; --quiet writes no profile and
+notes no auto-detected profile type. Errors and warnings always go to stderr.
 --quiet cannot be combined with --output, nor --strict with --artifact.
 
 Options:
@@ -56,8 +57,8 @@ func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	)
 	quiet := flags.Bool(
 		"quiet", false,
-		"write no profile on success; errors, warnings and notes still go to stderr "+
-			"(not with --output)",
+		"write no profile on success and note no auto-detected type; errors and "+
+			"warnings still go to stderr (not with --output)",
 	)
 
 	if done, code := parseFlags(flags, validateUsage, args, stdout, stderr); done {
@@ -104,7 +105,7 @@ func validateInputs(
 		return 1
 	}
 
-	kind, code := resolveKind(profileType, data, 1, stderr)
+	kind, code := resolveKind(profileType, data, 1, quiet, stderr)
 	if code != 0 {
 		return code
 	}
@@ -185,7 +186,7 @@ func validateProfiles[T any](
 	formatFn func(*T) string,
 	stdout, stderr io.Writer,
 ) int {
-	profiles, err := unmarshalAll[T](data, policy, stderr)
+	profiles, err := unmarshalAll[T](data, slices.Repeat([]decodePolicy{policy}, len(data)), stderr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 

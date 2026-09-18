@@ -1,6 +1,8 @@
 # API Reference
 
 <!-- toc -->
+- [Concurrency](#concurrency)
+- [spm](#spm)
 - [seccomp](#seccomp)
   - [Functions](#functions)
   - [Types](#types)
@@ -26,6 +28,40 @@
 
 For full Go documentation, see the
 [pkg.go.dev reference](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger).
+
+## Concurrency
+
+Every exported function of `seccomp`, `apparmor` and `landlock` is safe to
+call from several goroutines at once, so a CRI runtime may merge profiles for
+concurrent container starts without serializing them. The functions hold no
+state between calls and never modify their arguments; concurrent calls only
+need their profiles not to be written to at the same time from elsewhere.
+
+The one piece of state shared between calls is an internal cache of analyzed
+glob patterns in `apparmor`, guarded by its own lock. It holds no profile
+data and changes no result, only the work a repeated pattern costs.
+
+## spm
+
+The types and sentinel errors the three merge packages share.
+
+```go
+import "sigs.k8s.io/security-profiles-merger/spm"
+```
+
+Nothing needs to import it: each package re-exports what it uses under its own
+name, so `seccomp.SliceDiff`, `landlock.RightsDiff` and
+`apparmor.StringSliceDiff` all name `spm.SliceDiff`, and every package's
+`ErrNoProfiles` and `ErrNilProfile` are `spm`'s. Import it to write code that
+works with more than one profile type, or to match a sentinel error without
+picking one of the three packages arbitrarily.
+
+| Name | Description |
+|------|-------------|
+| `SliceDiff[T]` | Added and removed items in a set-like slice |
+| `ErrNoProfiles` | No profiles were provided to a merge |
+| `ErrNilProfile` | A nil profile was provided |
+| `ErrEmptyPath` | A path rule contained an empty string |
 
 ## seccomp
 

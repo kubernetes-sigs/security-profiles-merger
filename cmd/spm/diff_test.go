@@ -427,3 +427,24 @@ func TestDiffOutputFileWrittenWhenDifferent(t *testing.T) {
 		t.Errorf("output file = %q, want the diff", data)
 	}
 }
+
+// TestDiffNoDetectNoteSuppressesDetectionNote covers --no-detect-note on
+// diff: the exit code still carries the answer, and the note about the
+// inferred type stays out of stderr.
+func TestDiffNoDetectNoteSuppressesDetectionNote(t *testing.T) {
+	t.Parallel()
+
+	const note = "auto-detected profile type"
+
+	code, _, stderr := runCapture(t, []string{
+		cmdDiff, flagNoDetectNote, testdataSeccompA, testdataSeccompB,
+	}, nil)
+
+	if code != exitDiff {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitDiff, stderr)
+	}
+
+	if strings.Contains(stderr, note) {
+		t.Errorf("stderr = %q, want no detection note", stderr)
+	}
+}

@@ -27,13 +27,14 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 var (
 	// ErrNoProfiles is returned when no profiles are provided.
-	ErrNoProfiles = merge.ErrNoProfiles
+	ErrNoProfiles = spm.ErrNoProfiles
 	// ErrNilProfile is returned when a nil profile is provided.
-	ErrNilProfile = merge.ErrNilProfile
+	ErrNilProfile = spm.ErrNilProfile
 )
 
 // Intersect merges multiple seccomp profiles via intersection: the resulting
@@ -199,22 +200,21 @@ func foldProfiles(
 		}
 	}
 
-	if len(profiles) == 0 {
-		return nil, fmt.Errorf("merge: %w", ErrNoProfiles)
-	}
+	rules := strategy.rules()
 
-	var result *specs.LinuxSeccomp
-
-	// A single profile is normalized to the form a merge result takes, which
-	// is also the form Diff compares.
-	if len(profiles) == 1 {
-		result = normalizeProfile(profiles[0], strategy.rules())
-	} else {
-		result = mergeTwo(profiles[0], profiles[1], strategy)
-
-		for _, profile := range profiles[2:] {
-			result = mergeTwo(result, profile, strategy)
-		}
+	result, err := merge.Fold(
+		profiles,
+		// A single profile is normalized to the form a merge result takes,
+		// which is also the form Diff compares.
+		func(only *specs.LinuxSeccomp) *specs.LinuxSeccomp {
+			return normalizeProfile(only, rules)
+		},
+		func(left, right *specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
+			return mergeTwo(left, right, strategy), nil
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("merge: %w", err)
 	}
 
 	result.Syscalls = regroupSyscalls(result.Syscalls)
@@ -277,6 +277,9 @@ func mergeTwo(
 // same action, errno, and argument filters into one multi-name entry, and
 // sorts the result by first name, then by argument filter, action, and
 // errno, which is a total order over the result.
+//
+// Every entry it is given carries exactly one name, so the name check only
+// guards the sort below, which reads the first name of each group.
 func regroupSyscalls(syscalls []specs.LinuxSyscall) []specs.LinuxSyscall {
 	type group struct {
 		entry   specs.LinuxSyscall

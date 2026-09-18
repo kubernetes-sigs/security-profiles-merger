@@ -831,6 +831,25 @@ func defaultClause(profile *specs.LinuxSeccomp) *clause {
 	}
 }
 
+// mergedNames returns every syscall name of either side, sorted once over
+// the union rather than once per side.
+func mergedNames(left, right map[string]*syscallRules) []string {
+	names := make([]string, 0, len(left)+len(right))
+	for name := range left {
+		names = append(names, name)
+	}
+
+	for name := range right {
+		if _, ok := left[name]; !ok {
+			names = append(names, name)
+		}
+	}
+
+	slices.Sort(names)
+
+	return names
+}
+
 // mergeProfileSyscalls merges the syscall entries of two profiles given the
 // merged default clause. Entries equal to the merged default are elided.
 func (m ruleMerger) mergeProfileSyscalls(
@@ -845,15 +864,7 @@ func (m ruleMerger) mergeProfileSyscalls(
 	m.settleInputs(leftRules, leftDef)
 	m.settleInputs(rightRules, rightDef)
 
-	names := slices.Sorted(maps.Keys(leftRules))
-
-	for name := range rightRules {
-		if _, ok := leftRules[name]; !ok {
-			names = append(names, name)
-		}
-	}
-
-	slices.Sort(names)
+	names := mergedNames(leftRules, rightRules)
 
 	var result []specs.LinuxSyscall
 
@@ -930,16 +941,13 @@ func (m ruleMerger) mergeBareSyscalls(left, right []specs.LinuxSyscall) []specs.
 	m.settleInputs(leftRules, nil)
 	m.settleInputs(rightRules, nil)
 
-	names := slices.Sorted(maps.Keys(leftRules))
-
-	if !m.intersect {
-		for name := range rightRules {
-			if _, ok := leftRules[name]; !ok {
-				names = append(names, name)
-			}
-		}
-
-		slices.Sort(names)
+	// Intersection only visits names both sides carry, and the loop below
+	// skips the ones the right side lacks, so the left names suffice there.
+	var names []string
+	if m.intersect {
+		names = slices.Sorted(maps.Keys(leftRules))
+	} else {
+		names = mergedNames(leftRules, rightRules)
 	}
 
 	var result []specs.LinuxSyscall

@@ -81,7 +81,169 @@ func TestHasRepeatedIndexIsLinear(t *testing.T) {
 
 	// Coverage counters slow these loops several times over, so the bound
 	// is only checked without coverage.
-	if elapsed := time.Since(start); testing.CoverMode() == "" && elapsed > generousBudget {
+	if elapsed := time.Since(start); uninstrumentedRun() && elapsed > generousBudget {
 		t.Errorf("took %s for %d conditions, want well under %s", elapsed, count, generousBudget)
+	}
+}
+
+// clauseOn builds a conditional clause with one condition and the given
+// result, the only shape safeShape classifies beyond a single clause.
+func clauseOn(
+	action specs.LinuxSeccompAction,
+	index uint,
+	operator specs.LinuxSeccompOperator,
+	value uint64,
+) clause {
+	return clause{
+		action:   action,
+		errnoRet: nil,
+		args: []specs.LinuxSeccompArg{{
+			Index: index, Value: value, ValueTwo: 0, Op: operator,
+		}},
+	}
+}
+
+// TestSafeShapeDistinctEqualitiesComparesLower32 covers shape (c) on a
+// 32-bit architecture: libseccomp compares only the lower 32 bits there, so
+// two SCMP_CMP_EQ conditions whose values differ above bit 32 are the same
+// comparison to it and may both match one call. The clauses are only a safe
+// shape when the values differ in their lower 32 bits as well.
+func TestSafeShapeDistinctEqualitiesComparesLower32(t *testing.T) {
+	t.Parallel()
+
+	const aboveLower32 = uint64(1) << 32
+
+	for _, testCase := range []struct {
+		name   string
+		values []uint64
+		want   bool
+	}{
+		{name: "values differ in the lower 32 bits", values: []uint64{1, 2}, want: true},
+		{
+			name:   "values differ only above the lower 32 bits",
+			values: []uint64{5, aboveLower32 | 5},
+			want:   false,
+		},
+		{
+			name:   "wide values that still differ below",
+			values: []uint64{aboveLower32 | 5, aboveLower32 | 6},
+			want:   true,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			clauses := make([]clause, 0, len(testCase.values))
+			for idx, value := range testCase.values {
+				// Distinct actions, so only shape (c) can classify these.
+				action := specs.ActAllow
+				if idx%2 == 1 {
+					action = specs.ActLog
+				}
+
+				clauses = append(clauses, clauseOn(action, 0, specs.OpEqualTo, value))
+			}
+
+			if got := safeShape(clauses); got != testCase.want {
+				t.Errorf("safeShape(%v) = %t, want %t", testCase.values, got, testCase.want)
+			}
+		})
+	}
+}
+
+// TestSafeShapeUniformResultRejectsWideRange covers shape (d): clauses
+// sharing one result are safe whatever their order, except where libseccomp
+// miscompiles a range comparison against a value above 32 bits on an
+// argument index several of them use.
+func TestSafeShapeUniformResultRejectsWideRange(t *testing.T) {
+	t.Parallel()
+
+	const wide = (uint64(1) << 32) + 7
+
+	for _, testCase := range []struct {
+		name    string
+		clauses []clause
+		want    bool
+	}{
+		{
+			name: "narrow ranges on a shared index",
+			clauses: []clause{
+				clauseOn(specs.ActAllow, 0, specs.OpLessThan, 10),
+				clauseOn(specs.ActAllow, 0, specs.OpGreaterThan, 20),
+			},
+			want: true,
+		},
+		{
+			name: "wide range on a shared index",
+			clauses: []clause{
+				clauseOn(specs.ActAllow, 0, specs.OpLessThan, wide),
+				clauseOn(specs.ActAllow, 0, specs.OpGreaterThan, 20),
+			},
+			want: false,
+		},
+		{
+			name: "wide range on an index no other clause uses",
+			clauses: []clause{
+				clauseOn(specs.ActAllow, 0, specs.OpLessThan, wide),
+				clauseOn(specs.ActAllow, 1, specs.OpGreaterThan, 20),
+			},
+			want: true,
+		},
+		{
+			name: "wide equality is not a range comparison",
+			clauses: []clause{
+				clauseOn(specs.ActAllow, 0, specs.OpEqualTo, wide),
+				clauseOn(specs.ActAllow, 0, specs.OpGreaterThan, 20),
+			},
+			want: true,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := safeShape(testCase.clauses); got != testCase.want {
+				t.Errorf("safeShape() = %t, want %t", got, testCase.want)
+			}
+		})
+	}
+}
+
+// TestSafeShapeWideRangeOnOutOfRangeIndex reaches the overflow map of
+// indexSet, which holds the argument indices beyond the bitmap. Validate
+// rejects those, but Diff and the bare syscall-list functions do not
+// validate, so the shape classification still has to handle them.
+func TestSafeShapeWideRangeOnOutOfRangeIndex(t *testing.T) {
+	t.Parallel()
+
+	const (
+		wide      = (uint64(1) << 32) + 7
+		wideIndex = uint(70)
+	)
+
+	shared := []clause{
+		clauseOn(specs.ActAllow, wideIndex, specs.OpLessThan, wide),
+		clauseOn(specs.ActAllow, wideIndex, specs.OpGreaterThan, 20),
+	}
+	if safeShape(shared) {
+		t.Error("safeShape() = true for a wide range on a shared out-of-range index, want false")
+	}
+
+	apart := []clause{
+		clauseOn(specs.ActAllow, wideIndex, specs.OpLessThan, wide),
+		clauseOn(specs.ActAllow, wideIndex+1, specs.OpGreaterThan, 20),
+	}
+	if !safeShape(apart) {
+		t.Error("safeShape() = false for wide ranges on separate out-of-range indices, want true")
+	}
+}
+
+// TestIsRangeOpUnknownOperator pins the conservative answer for an operator
+// the package does not know. Validate rejects those, but Diff and the bare
+// syscall-list functions classify unvalidated rules.
+func TestIsRangeOpUnknownOperator(t *testing.T) {
+	t.Parallel()
+
+	if isRangeOp(specs.LinuxSeccompOperator("SCMP_CMP_FUTURE")) {
+		t.Error("isRangeOp(unknown) = true, want false")
 	}
 }

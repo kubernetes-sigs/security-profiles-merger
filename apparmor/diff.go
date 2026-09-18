@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 // ProfileDiff describes the differences between two AppArmor profiles.
@@ -51,7 +52,7 @@ type ProfileDiff struct {
 func (d ProfileDiff) IsEqual() bool { return d.Equal }
 
 // StringSliceDiff represents added and removed items in a string slice.
-type StringSliceDiff = merge.SliceDiff[string]
+type StringSliceDiff = spm.SliceDiff[string]
 
 // FilesystemDiff describes differences in filesystem rules.
 type FilesystemDiff struct {

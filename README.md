@@ -14,6 +14,7 @@ A standalone Go library for merging security profiles
 - [Overview](#overview)
 - [Installation](#installation)
 - [Packages](#packages)
+- [API stability](#api-stability)
 - [Usage](#usage)
   - [CRI runtime: merge OCI-pulled profile with node baseline (intersection)](#cri-runtime-merge-oci-pulled-profile-with-node-baseline-intersection)
   - [Security Profiles Operator: combine recorded profiles (union)](#security-profiles-operator-combine-recorded-profiles-union)
@@ -67,6 +68,27 @@ full API reference (functions, errors, types, and merge semantics), see
   in this package.
 - **[landlock](docs/api.md#landlock)** - Merges Linux unprivileged sandboxing
   rulesets.
+- **[spm](docs/api.md#spm)** - The types and sentinel errors the three share.
+  Nothing needs to import it: each package re-exports what it uses under its
+  own name. Import it to write code that works with more than one profile
+  type, or to match `ErrNilProfile` without picking one of the three
+  arbitrarily.
+
+All exported functions are safe to call from several goroutines at once, so a
+runtime may merge profiles for concurrent container starts without
+serializing them. See [Concurrency](docs/api.md#concurrency).
+
+## API stability
+
+The module is pre-1.0, so the API may still change. Until v1.0.0:
+
+- Breaking changes are confined to minor version bumps (`v0.X.0`) and called
+  out in the release notes; patch releases (`v0.X.Y`) never break callers.
+- Merge results may change within a minor version when a semantic turns out
+  to be wrong about what a runtime loads, since matching the runtime is the
+  point of the library. Such changes are called out in the release notes too.
+- The shape of the merge semantics themselves, that `Intersect` never permits
+  more than any input and `Union` never permits less, is not going to change.
 
 ## Usage
 
@@ -218,9 +240,25 @@ spm merge --type seccomp --strategy intersect baseline.json oci.json
 spm merge --type apparmor --strategy union recording1.json recording2.json
 ```
 
-Without `--type`, the type is detected from the fields the profiles carry.
-Inputs that mix profile types are rejected, since merging them would drop
-whatever the chosen type has no field for.
+Without `--type`, the type is detected from the fields the profiles carry and
+noted on stderr; `--no-detect-note` suppresses that note, and errors and
+warnings still go there. Inputs that mix profile types are rejected, since
+merging them would drop whatever the chosen type has no field for.
+
+`--validate` names the checks to run on the inputs before merging: `default`
+(what the merge itself applies), `strict`, or `artifact`. Give one mode for
+all inputs, or one mode per input separated by commas. A container runtime
+merging a pulled profile into its node baseline runs the whole KEP-6061 flow
+in one command:
+
+```sh
+spm merge --type seccomp --strategy intersect --validate strict,artifact \
+  baseline.json pulled.json
+```
+
+The baseline is checked the way a user-authored profile deserves and the
+pulled profile the way a runtime checks one it did not author; the merge only
+runs if both pass.
 
 Profiles can also be read from stdin, as a single profile or a JSON array of
 profiles:
@@ -235,10 +273,13 @@ Use `-` to read from stdin alongside file arguments:
 spm merge --type seccomp --strategy intersect baseline.json - < recording.json
 ```
 
-Use `--format=human` for human-readable output via `FormatProfile`:
+Use `--format=human` for human-readable output via `FormatProfile`, and
+`--output` to write the result to a file instead of stdout. The file is only
+written once the merge has succeeded, so a failed run never truncates it:
 
 ```sh
 spm merge --type seccomp --strategy intersect --format human a.json b.json
+spm merge --type seccomp --strategy intersect --output merged.json a.json b.json
 ```
 
 ### Validate profiles
@@ -287,8 +328,8 @@ success:
 spm validate --type seccomp --quiet profile.json
 ```
 
-`--quiet` only suppresses the profile output, so it cannot be combined with
-`--output`. Errors, warnings, and the note about an auto-detected profile type
+`--quiet` suppresses the profile output and the note about an auto-detected
+profile type, so it cannot be combined with `--output`. Errors and warnings
 still go to stderr.
 
 ### Diff profiles
@@ -305,6 +346,8 @@ cat profiles.json | spm diff --type landlock
 ```
 
 Exits 0 if profiles are equal, 1 if they differ, or 2 on error.
+`--no-detect-note` suppresses the note about an auto-detected profile type,
+and `--output` writes the diff to a file instead of stdout.
 
 ### Version
 

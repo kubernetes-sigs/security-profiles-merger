@@ -70,6 +70,23 @@ var ErrUnknownSyscall = errors.New("unknown syscall name")
 // compares against, or 0 when this architecture is not covered.
 func NativeAuditArch() uint32 { return uint32(C.nativeAuditArch()) }
 
+// Version returns the version of the libseccomp the process actually loaded,
+// as "major.minor.micro". It reads the shared library at run time rather
+// than the headers it was built against, so it names the library that
+// answers these tests even where the loader picks a different copy than the
+// build did.
+func Version() string {
+	version := C.seccomp_version()
+	if version == nil {
+		return ""
+	}
+
+	return fmt.Sprintf(
+		"%d.%d.%d",
+		uint(version.major), uint(version.minor), uint(version.micro),
+	)
+}
+
 // SyscallNumber resolves a syscall name the way libseccomp does.
 func SyscallNumber(name string) (int32, error) {
 	cname := C.CString(name)

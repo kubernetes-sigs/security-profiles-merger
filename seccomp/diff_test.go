@@ -18,6 +18,7 @@ package seccomp_test
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1302,5 +1303,120 @@ func TestMergeWithNeutralProfileIsIdentity(t *testing.T) {
 					idx, seccomp.FormatDiff(diff))
 			}
 		}
+	}
+}
+
+// TestDiffKeepsUnknownActionsApart covers the comparison of actions this
+// package does not know. Diff does not validate, so it is the entry point
+// that sees them: two distinct unknown actions must not be conflated, and
+// the same unknown action on both sides must compare equal.
+func TestDiffKeepsUnknownActionsApart(t *testing.T) {
+	t.Parallel()
+
+	profileWith := func(action specs.LinuxSeccompAction) *specs.LinuxSeccomp {
+		return &specs.LinuxSeccomp{
+			DefaultAction: specs.ActErrno,
+			Syscalls: []specs.LinuxSyscall{
+				{Names: []string{"read"}, Action: action},
+			},
+		}
+	}
+
+	first := specs.LinuxSeccompAction("SCMP_ACT_FUTURE_A")
+	second := specs.LinuxSeccompAction("SCMP_ACT_FUTURE_B")
+
+	differ, err := seccomp.Diff(profileWith(first), profileWith(second))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if differ.Equal {
+		t.Errorf("Diff of %q and %q reports equal, want a difference", first, second)
+	}
+
+	same, err := seccomp.Diff(profileWith(first), profileWith(first))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !same.Equal {
+		t.Errorf("Diff of %q with itself reports %s, want equal", first, seccomp.FormatDiff(same))
+	}
+}
+
+// TestDiffSyscallsIgnoresEntryOrder pins what makes a diff independent of
+// the order entries are written in: the entries of one syscall are sorted
+// before being compared, by action, then errno, then argument filter. Each
+// case below differs in exactly one of those keys, so each exercises a
+// different tie-break.
+func TestDiffSyscallsIgnoresEntryOrder(t *testing.T) {
+	t.Parallel()
+
+	eperm, enosys := uint(1), uint(38)
+
+	for _, testCase := range []struct {
+		name    string
+		entries []specs.LinuxSyscall
+	}{
+		{
+			name: "same action, different errno",
+			entries: []specs.LinuxSyscall{
+				{
+					Names: []string{"read"}, Action: specs.ActErrno, ErrnoRet: &eperm,
+					Args: []specs.LinuxSeccompArg{argEq(0, 1)},
+				},
+				{
+					Names: []string{"read"}, Action: specs.ActErrno, ErrnoRet: &enosys,
+					Args: []specs.LinuxSeccompArg{argEq(1, 2)},
+				},
+			},
+		},
+		{
+			name: "same result, filters on different argument indices",
+			entries: []specs.LinuxSyscall{
+				{
+					Names: []string{"read"}, Action: specs.ActAllow,
+					Args: []specs.LinuxSeccompArg{argEq(0, 5)},
+				},
+				{
+					Names: []string{"read"}, Action: specs.ActAllow,
+					Args: []specs.LinuxSeccompArg{argEq(1, 5)},
+				},
+			},
+		},
+		{
+			name: "same mask, different masked value",
+			entries: []specs.LinuxSyscall{
+				{
+					Names: []string{"read"}, Action: specs.ActAllow,
+					Args: []specs.LinuxSeccompArg{{
+						Index: 0, Value: 0xFF, ValueTwo: 0x0F, Op: specs.OpMaskedEqual,
+					}},
+				},
+				{
+					Names: []string{"read"}, Action: specs.ActAllow,
+					Args: []specs.LinuxSeccompArg{{
+						Index: 0, Value: 0xFF, ValueTwo: 0xF0, Op: specs.OpMaskedEqual,
+					}},
+				},
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			reversed := slices.Clone(testCase.entries)
+			slices.Reverse(reversed)
+
+			if got := seccomp.DiffSyscalls(testCase.entries, reversed); got != nil {
+				t.Errorf("DiffSyscalls of the same entries reordered = %+v, want nil", got)
+			}
+
+			// The entries really are distinct, so the nil above is the sort
+			// doing its job rather than the two lists collapsing to one.
+			if got := seccomp.DiffSyscalls(testCase.entries[:1], testCase.entries); got == nil {
+				t.Error("DiffSyscalls of one entry against two reports no difference")
+			}
+		})
 	}
 }

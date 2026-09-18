@@ -48,6 +48,11 @@ func runDiff(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	)
 	format := flags.String("format", formatJSON, "output format: json, human")
 	output := flags.String("output", "", "write output to file (default: stdout)")
+	noDetectNote := flags.Bool(
+		"no-detect-note", false,
+		"do not note an auto-detected profile type on stderr; the diff, "+
+			"errors and warnings still go to their usual streams",
+	)
 
 	if done, code := parseFlags(flags, diffUsage, args, stdout, stderr); done {
 		return code
@@ -70,7 +75,7 @@ func runDiff(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	// Exit code 1 means "different" for diff, so unparsable input is a
 	// usage error like every other diff failure.
-	kind, code := resolveKind(*profileType, data, exitUsage, stderr)
+	kind, code := resolveKind(*profileType, data, exitUsage, *noDetectNote, stderr)
 	if code != 0 {
 		return code
 	}
@@ -157,7 +162,7 @@ func diffProfiles[T any, D equalChecker](
 	formatFn func(*D) string,
 	stdout, stderr io.Writer,
 ) int {
-	profiles, err := unmarshalAll[T](data, lenientDecode(), stderr)
+	profiles, err := unmarshalAll[T](data, lenientDecode(len(data)), stderr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 

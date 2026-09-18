@@ -43,6 +43,7 @@ import (
 	"errors"
 	"math"
 	"math/rand/v2"
+	"os"
 	"runtime"
 	"slices"
 	"strconv"
@@ -558,6 +559,40 @@ func differentialValues() []uint64 {
 		0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 0x50, 0x51, 0xF0, 99, 100, 101,
 		199, 200, 201, math.MaxUint32, 1 << 32, wide - 1, wide, wide + 1, wide + 2,
 		math.MaxUint64,
+	}
+}
+
+// TestLibseccompVersion names the library that answers the tests in this
+// file. The model is a claim about what libseccomp compiles, so a run says
+// nothing unless the version that answered is known.
+//
+// It reads the version from the loaded shared library rather than from the
+// headers or from pkg-config, both of which describe the build: where a
+// distribution ships its own libseccomp in a directory the dynamic loader
+// searches first, a binary built against a newer one still runs against the
+// older copy. CI sets LIBSECCOMP_VERSION to the version it built and this
+// fails when something else answered.
+func TestLibseccompVersion(t *testing.T) {
+	t.Parallel()
+
+	got := libseccomp.Version()
+	if got == "" {
+		t.Fatal("libseccomp did not report a version")
+	}
+
+	t.Logf("libseccomp %s answered", got)
+
+	want := os.Getenv("LIBSECCOMP_VERSION")
+	if want == "" {
+		t.Skip("LIBSECCOMP_VERSION is unset, so no version is required")
+	}
+
+	if got != want {
+		t.Fatalf(
+			"libseccomp %s answered, but %s was built and expected; "+
+				"the loader resolved a different copy than the build linked",
+			got, want,
+		)
 	}
 }
 

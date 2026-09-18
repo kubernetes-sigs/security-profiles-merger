@@ -125,7 +125,7 @@ func TestOversizePatternLeavesCacheAlone(t *testing.T) {
 	}
 }
 
-func TestGlobLiteralPrefix(t *testing.T) {
+func TestMatcherLiteralPrefix(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -152,9 +152,9 @@ func TestGlobLiteralPrefix(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := globLiteralPrefix(test.pattern)
+			got := matcherFor(test.pattern).prefix
 			if got != test.want {
-				t.Errorf("globLiteralPrefix(%q) = %q, want %q",
+				t.Errorf("matcherFor(%q).prefix = %q, want %q",
 					test.pattern, got, test.want)
 			}
 		})
@@ -368,7 +368,7 @@ func TestUnbalancedPatternsScanInLinearTime(t *testing.T) {
 		analyzePattern(pattern, false)
 		hasDotComponent(pattern)
 
-		if elapsed := time.Since(start); testing.CoverMode() == "" && elapsed > 2*time.Second {
+		if elapsed := time.Since(start); uninstrumentedRun() && elapsed > 2*time.Second {
 			t.Errorf("analyzing %d bytes of %q took %v", size, char, elapsed)
 		}
 	}

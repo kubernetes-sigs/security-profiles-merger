@@ -70,8 +70,9 @@ import (
 // compile all pairs of single conditions and 20,000 sampled triples on
 // argument indices 0 and 1, with the actions SCMP_ACT_ALLOW and
 // SCMP_ACT_LOG, and check the clause sets classified as safe against the
-// program libseccomp compiles. CI runs them against libseccomp 2.5.5
-// (Ubuntu 24.04), and they were also run against 2.6.1.
+// program libseccomp compiles. CI runs them against libseccomp 2.5.5 and
+// 2.6.1, each built from its release tarball, and TestLibseccompVersion
+// fails unless the library that answered is the one built.
 //
 // Any other clause set is treated conservatively. Whatever libseccomp does
 // with it, the result of a call is the default or the action of one of the

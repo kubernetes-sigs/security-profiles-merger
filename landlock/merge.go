@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package landlock provides merge operations for Landlock profiles.
 package landlock
 
 import (
@@ -25,13 +24,14 @@ import (
 	"strings"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 var (
 	// ErrNoProfiles is returned when no profiles are provided.
-	ErrNoProfiles = merge.ErrNoProfiles
+	ErrNoProfiles = spm.ErrNoProfiles
 	// ErrNilProfile is returned when a nil profile is provided.
-	ErrNilProfile = merge.ErrNilProfile
+	ErrNilProfile = spm.ErrNilProfile
 )
 
 // Intersect merges multiple Landlock profiles via intersection: the resulting
@@ -417,6 +417,8 @@ func ancestorAccess(
 // Resolution is purely textual: the merge assumes no symlink or bind mount
 // crosses a rule boundary.
 func pathAncestors(path string) []string {
+	// Validate rejects an empty rule path before a merge sees it, so this
+	// only keeps the loop below from indexing an empty string.
 	if path == "" {
 		return nil
 	}

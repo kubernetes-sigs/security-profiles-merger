@@ -218,8 +218,8 @@ func TestMergeSeccompInvalidStrategy(t *testing.T) {
 	data := [][]byte{[]byte(seccompJSON(t, testSyscallRead))}
 
 	code := mergeProfiles(
-		data, testBogus, formatJSON,
-		seccomp.Intersect, seccomp.Union, seccomp.FormatProfile,
+		defaultMergeRequest(data, testBogus,
+			seccomp.Intersect, seccomp.Union, seccomp.FormatProfile),
 		&bytes.Buffer{}, &bytes.Buffer{},
 	)
 
@@ -232,8 +232,8 @@ func TestMergeSeccompNoProfiles(t *testing.T) {
 	t.Parallel()
 
 	code := mergeProfiles(
-		nil, strategyIntersect, formatJSON,
-		seccomp.Intersect, seccomp.Union, seccomp.FormatProfile,
+		defaultMergeRequest(nil, strategyIntersect,
+			seccomp.Intersect, seccomp.Union, seccomp.FormatProfile),
 		&bytes.Buffer{}, &bytes.Buffer{},
 	)
 
@@ -248,8 +248,8 @@ func TestMergeAppArmorInvalidStrategy(t *testing.T) {
 	data := [][]byte{[]byte(apparmorJSON(t, "NET_ADMIN"))}
 
 	code := mergeProfiles(
-		data, testBogus, formatJSON,
-		apparmor.Intersect, apparmor.Union, apparmor.FormatProfile,
+		defaultMergeRequest(data, testBogus,
+			apparmor.Intersect, apparmor.Union, apparmor.FormatProfile),
 		&bytes.Buffer{}, &bytes.Buffer{},
 	)
 
@@ -262,8 +262,8 @@ func TestMergeAppArmorNoProfiles(t *testing.T) {
 	t.Parallel()
 
 	code := mergeProfiles(
-		nil, strategyIntersect, formatJSON,
-		apparmor.Intersect, apparmor.Union, apparmor.FormatProfile,
+		defaultMergeRequest(nil, strategyIntersect,
+			apparmor.Intersect, apparmor.Union, apparmor.FormatProfile),
 		&bytes.Buffer{}, &bytes.Buffer{},
 	)
 
@@ -278,8 +278,8 @@ func TestMergeLandlockInvalidStrategy(t *testing.T) {
 	data := [][]byte{[]byte(landlockJSON(t, "read_file"))}
 
 	code := mergeProfiles(
-		data, testBogus, formatJSON,
-		landlock.Intersect, landlock.Union, landlock.FormatProfile,
+		defaultMergeRequest(data, testBogus,
+			landlock.Intersect, landlock.Union, landlock.FormatProfile),
 		&bytes.Buffer{}, &bytes.Buffer{},
 	)
 
@@ -292,8 +292,8 @@ func TestMergeLandlockNoProfiles(t *testing.T) {
 	t.Parallel()
 
 	code := mergeProfiles(
-		nil, strategyUnion, formatJSON,
-		landlock.Intersect, landlock.Union, landlock.FormatProfile,
+		defaultMergeRequest(nil, strategyUnion,
+			landlock.Intersect, landlock.Union, landlock.FormatProfile),
 		&bytes.Buffer{}, &bytes.Buffer{},
 	)
 
@@ -942,7 +942,7 @@ func TestUnmarshalAllReportsEveryUnknownField(t *testing.T) {
 	var stderr bytes.Buffer
 
 	profiles, err := unmarshalAll[specs.LinuxSeccomp](
-		[][]byte{[]byte(raw)}, lenientDecode(), &stderr,
+		[][]byte{[]byte(raw)}, lenientDecode(1), &stderr,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -960,7 +960,7 @@ func TestUnmarshalAllReportsEveryUnknownField(t *testing.T) {
 	}
 
 	_, err = unmarshalAll[specs.LinuxSeccomp](
-		[][]byte{[]byte(raw)}, modeStrict.decodePolicy(), &bytes.Buffer{},
+		[][]byte{[]byte(raw)}, []decodePolicy{modeStrict.decodePolicy()}, &bytes.Buffer{},
 	)
 	if !errors.Is(err, errUnknownField) {
 		t.Errorf("expected errUnknownField when rejecting, got: %v", err)
@@ -972,7 +972,7 @@ func TestUnmarshalAllRejectsTrailingData(t *testing.T) {
 
 	_, err := unmarshalAll[specs.LinuxSeccomp](
 		[][]byte{[]byte(`{"defaultAction":"SCMP_ACT_ERRNO"} trailing`)},
-		lenientDecode(), &bytes.Buffer{},
+		lenientDecode(1), &bytes.Buffer{},
 	)
 	if err == nil || !strings.Contains(err.Error(), "after top-level value") {
 		t.Errorf("expected a trailing data error, got: %v", err)
@@ -1066,5 +1066,185 @@ func TestReadInputsBoundsTotalSize(t *testing.T) {
 	_, err := readInputs(paths, nil)
 	if !errors.Is(err, errInputTooLarge) {
 		t.Errorf("error = %v, want %v", err, errInputTooLarge)
+	}
+}
+
+// defaultMergeRequest builds the request runMerge makes without --validate:
+// lenient decoding and no extra check per input, since the merge functions
+// validate their own inputs.
+func defaultMergeRequest[T any](
+	data [][]byte, strategy string,
+	intersect, union func(...*T) (*T, error),
+	formatFn func(*T) string,
+) mergeRequest[T] {
+	checks := make([]func(*T) error, len(data))
+	for idx := range checks {
+		checks[idx] = func(*T) error { return nil }
+	}
+
+	return mergeRequest[T]{
+		data:      data,
+		strategy:  strategy,
+		format:    formatJSON,
+		checks:    checks,
+		policies:  lenientDecode(len(data)),
+		intersect: intersect,
+		union:     union,
+		formatFn:  formatFn,
+	}
+}
+
+// TestMergeValidateModes covers --validate, which lets one run express the
+// KEP-6061 flow: a trusted baseline checked strictly, an untrusted artifact
+// checked the way a runtime checks one, and the intersection of both.
+func TestMergeValidateModes(t *testing.T) {
+	t.Parallel()
+
+	baseline := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[`+
+		`{"names":["read","write"],"action":"SCMP_ACT_ALLOW"}]}`)
+	// SCMP_ACT_NOTIFY needs a listener only the runtime can provide, so a
+	// runtime rejects it in a profile it did not author.
+	artifact := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[`+
+		`{"names":["read"],"action":"SCMP_ACT_NOTIFY"}]}`)
+
+	for _, testCase := range []struct {
+		name     string
+		validate string
+		files    []string
+		wantCode int
+		wantErr  string
+	}{
+		{
+			name:     "default accepts what the merge accepts",
+			validate: modeNameDefault, files: []string{baseline, artifact},
+			wantCode: 0, wantErr: "",
+		},
+		{
+			name:     "artifact rejects the pulled profile",
+			validate: modeNameArtifact, files: []string{baseline, artifact},
+			wantCode: 1, wantErr: "profile 1: syscall entry 0 action",
+		},
+		{
+			name:     "one mode per input checks each its own way",
+			validate: modeNameStrict + "," + modeNameArtifact,
+			files:    []string{baseline, artifact},
+			wantCode: 1, wantErr: "profile 1: syscall entry 0 action",
+		},
+		{
+			name:     "the baseline passes the strict half",
+			validate: modeNameStrict + "," + modeNameStrict,
+			files:    []string{baseline, baseline},
+			wantCode: 0, wantErr: "",
+		},
+		{
+			name:     "an unknown mode is a usage error",
+			validate: testBogus, files: []string{baseline, artifact},
+			wantCode: exitUsage, wantErr: "unknown validation mode",
+		},
+		{
+			name:     "a mode per input needs one per input",
+			validate: modeNameStrict + "," + modeNameArtifact + "," + modeNameDefault,
+			files:    []string{baseline, artifact},
+			wantCode: exitUsage, wantErr: "wrong number of validation modes",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			args := append([]string{
+				cmdMerge, flagStrategy, strategyIntersect, "--validate", testCase.validate,
+			}, testCase.files...)
+
+			code, _, stderr := runCapture(t, args, nil)
+
+			if code != testCase.wantCode {
+				t.Fatalf("exit code = %d, want %d (stderr: %s)", code, testCase.wantCode, stderr)
+			}
+
+			if testCase.wantErr != "" && !strings.Contains(stderr, testCase.wantErr) {
+				t.Errorf("stderr = %q, want it to contain %q", stderr, testCase.wantErr)
+			}
+		})
+	}
+}
+
+// TestMergeNoDetectNoteSuppressesDetectionNote covers --no-detect-note,
+// which keeps the note about an inferred profile type out of a pipeline's
+// stderr without hiding errors or the merged profile.
+func TestMergeNoDetectNoteSuppressesDetectionNote(t *testing.T) {
+	t.Parallel()
+
+	const note = "auto-detected profile type"
+
+	args := []string{cmdMerge, flagStrategy, strategyIntersect, testdataSeccompA}
+
+	code, _, stderr := runCapture(t, args, nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %s)", code, stderr)
+	}
+
+	if !strings.Contains(stderr, note) {
+		t.Errorf("stderr = %q, want it to note the detected type", stderr)
+	}
+
+	code, _, _ = runCapture(t, append(args, flagNoDetectNote), nil)
+	if code != exitUsage {
+		t.Fatalf("a flag after the files should be a usage error, got %d", code)
+	}
+
+	code, stdout, stderr := runCapture(t, []string{
+		cmdMerge, flagStrategy, strategyIntersect, flagNoDetectNote,
+		testdataSeccompA,
+	}, nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %s)", code, stderr)
+	}
+
+	if strings.Contains(stderr, note) {
+		t.Errorf("stderr = %q, want no detection note", stderr)
+	}
+
+	if stdout == "" {
+		t.Error("stdout is empty, want the merged profile")
+	}
+}
+
+// TestMergeDefaultModeReportsThroughTheMerge pins that --validate default,
+// which is what merge does without the flag, adds no validation pass of its
+// own: an invalid profile is reported by the merge function, with the prefix
+// it has always used.
+func TestMergeDefaultModeReportsThroughTheMerge(t *testing.T) {
+	t.Parallel()
+
+	invalid := writeTemp(t, `{"defaultAction":"SCMP_ACT_BOGUS"}`)
+
+	const want = "error: validate profile 0: default action:"
+
+	for _, args := range [][]string{
+		{cmdMerge, flagStrategy, strategyIntersect, invalid},
+		{cmdMerge, flagStrategy, strategyIntersect, "--validate", modeNameDefault, invalid},
+	} {
+		code, _, stderr := runCapture(t, args, nil)
+
+		if code != 1 {
+			t.Fatalf("exit code = %d, want 1 (stderr: %s)", code, stderr)
+		}
+
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+		}
+	}
+
+	// A mode the merge does not run itself reports through the CLI instead.
+	code, _, stderr := runCapture(t, []string{
+		cmdMerge, flagStrategy, strategyIntersect, "--validate", modeNameStrict, invalid,
+	}, nil)
+
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (stderr: %s)", code, stderr)
+	}
+
+	if !strings.Contains(stderr, "error: profile 0: default action:") {
+		t.Errorf("stderr = %q, want the CLI's own prefix", stderr)
 	}
 }
