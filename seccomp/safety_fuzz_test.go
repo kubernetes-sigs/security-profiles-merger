@@ -17,6 +17,7 @@ limitations under the License.
 package seccomp_test
 
 import (
+	"slices"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -35,8 +36,16 @@ import (
 //     yields its exact effect, or its strictest (intersection) or loosest
 //     (union) possible action where the effect is not exact.
 
+// safetyListener is the listener a generated profile names when it
+// notifies, and the one every profile these checks assemble names, since a
+// profile that answers SCMP_ACT_NOTIFY without one does not load.
+const safetyListener = "/run/safety-notify.sock"
+
 var (
-	safetyNames = []string{"read", "write", "clone", "socket"}
+	// writev rather than write: runc refuses SCMP_ACT_NOTIFY on write, so a
+	// profile naming it there never loads and Validate rejects it, which
+	// would skip the input instead of merging it.
+	safetyNames = []string{"read", "writev", "clone", "socket"}
 
 	safetyActions = []specs.LinuxSeccompAction{
 		specs.ActKillProcess,
@@ -61,6 +70,20 @@ var (
 	}
 )
 
+// safetyDefault picks the default action for a profile. runc refuses
+// SCMP_ACT_NOTIFY as a default, so no loadable profile carries one and
+// Validate rejects it; a draw of it becomes SCMP_ACT_TRACE, the next action
+// of the lattice, which keeps the index space the stored corpus was found
+// against.
+func safetyDefault(index int) specs.LinuxSeccompAction {
+	action := safetyActions[index%len(safetyActions)]
+	if action == specs.ActNotify {
+		return specs.ActTrace
+	}
+
+	return action
+}
+
 // byteReader hands out bytes from fuzz data, yielding zero once exhausted.
 type byteReader struct {
 	data []byte
@@ -83,7 +106,9 @@ func (r *byteReader) exhausted() bool { return r.pos >= len(r.data) }
 // safetyProfile decodes a profile from fuzz bytes. Entries may repeat
 // syscall names, mix unconditional and conditional rules, and carry up to
 // two argument filters on indices 0 and 1. With errnos disabled, no
-// ErrnoRet is set anywhere.
+// ErrnoRet is set anywhere. A profile that notifies names a listener, as a
+// loadable one must: without one, Intersect degrades the action and Union
+// refuses the merge.
 func safetyProfile(reader *byteReader, errnos bool) *specs.LinuxSeccomp {
 	const (
 		maxEntries = 6
@@ -92,7 +117,7 @@ func safetyProfile(reader *byteReader, errnos bool) *specs.LinuxSeccomp {
 	)
 
 	profile := &specs.LinuxSeccomp{
-		DefaultAction: safetyActions[int(reader.next())%len(safetyActions)],
+		DefaultAction: safetyDefault(int(reader.next())),
 	}
 
 	if reader.next()%2 == 1 && errnos {
@@ -125,6 +150,10 @@ func safetyProfile(reader *byteReader, errnos bool) *specs.LinuxSeccomp {
 				Op:       safetyOps[int(reader.next())%len(safetyOps)],
 			}
 			entry.Args = append(entry.Args, arg)
+		}
+
+		if entry.Action == specs.ActNotify {
+			profile.ListenerPath = safetyListener
 		}
 
 		profile.Syscalls = append(profile.Syscalls, entry)
@@ -196,6 +225,8 @@ func addSafetySeeds(f *testing.F) {
 type safetyDirection struct {
 	name  string
 	merge func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error)
+	// bare is the syscall-list function of the same direction.
+	bare func(left, right []specs.LinuxSyscall) []specs.LinuxSyscall
 	// safe reports whether the merged action is safe against an input.
 	safe func(got specs.LinuxSeccompAction, input verdict) bool
 	// bound is the action merging an input with itself yields.
@@ -206,6 +237,7 @@ func intersectSafety() safetyDirection {
 	return safetyDirection{
 		name:  "intersect",
 		merge: seccomp.Intersect,
+		bare:  seccomp.IntersectSyscalls,
 		safe:  permitsAtMost,
 		bound: func(input verdict) specs.LinuxSeccompAction { return input.strictest },
 	}
@@ -215,6 +247,7 @@ func unionSafety() safetyDirection {
 	return safetyDirection{
 		name:  "union",
 		merge: seccomp.Union,
+		bare:  seccomp.UnionSyscalls,
 		safe:  permitsAtLeast,
 		bound: func(input verdict) specs.LinuxSeccompAction { return input.loosest },
 	}
@@ -280,6 +313,99 @@ func checkMergeSafety(
 				seccomp.FormatProfile(self),
 			)
 		}
+	})
+}
+
+// checkBareMergeSafety applies the same oracle to the bare syscall-list
+// functions. They carry no default of their own and assume the caller loads
+// them with one that is at least as restrictive as every action in them, so
+// the result and both inputs are judged under SCMP_ACT_KILL_PROCESS, the
+// most restrictive action there is.
+//
+// Without this, the only thing checking those functions is the metamorphic
+// comparison against the profile merge, which says they agree with it rather
+// than that either is safe.
+func checkBareMergeSafety(
+	t *testing.T, direction safetyDirection,
+	left, right *specs.LinuxSeccomp,
+) {
+	t.Helper()
+
+	// The listener goes with the profile, not with the list: the bare
+	// functions carry no listener of their own, so a profile assembled
+	// around their result names one, as Validate requires of every profile
+	// that answers SCMP_ACT_NOTIFY.
+	withDefault := func(syscalls []specs.LinuxSyscall) *specs.LinuxSeccomp {
+		return &specs.LinuxSeccomp{
+			DefaultAction: specs.ActKillProcess,
+			ListenerPath:  safetyListener,
+			Syscalls:      syscalls,
+		}
+	}
+
+	leftList := underAssumedDefault(left.Syscalls)
+	rightList := underAssumedDefault(right.Syscalls)
+	result := withDefault(direction.bare(leftList, rightList))
+
+	err := seccomp.Validate(result)
+	if err != nil {
+		t.Fatalf("%sSyscalls result fails validation: %v", direction.name, err)
+	}
+
+	inputs := []*specs.LinuxSeccomp{withDefault(leftList), withDefault(rightList)}
+	cache := judges{}
+
+	forEachCall(inputs, func(name string, call []uint64) {
+		got := cache.evalCall(t, result, name, call)
+
+		for idx, input := range inputs {
+			if !direction.safe(got, cache.judgeCall(input, name, call)) {
+				t.Errorf(
+					"%s%v: %sSyscalls yields %s, which is not safe against list %d\n"+
+						"  left:   %s\n  right:  %s\n  result: %s",
+					name, call, direction.name, got, idx,
+					seccomp.FormatProfile(inputs[0]),
+					seccomp.FormatProfile(inputs[1]),
+					seccomp.FormatProfile(result),
+				)
+			}
+		}
+	})
+}
+
+// underAssumedDefault lowers SCMP_ACT_KILL_PROCESS entries to
+// SCMP_ACT_KILL, so that the default the check assumes is strictly more
+// restrictive than every action in the list, as the bare functions require.
+// A runtime skips an entry whose action equals the default and applies
+// whatever the next rule says instead, which a list without a default cannot
+// express and which these functions therefore exclude.
+func underAssumedDefault(syscalls []specs.LinuxSyscall) []specs.LinuxSyscall {
+	lowered := slices.Clone(syscalls)
+
+	for idx := range lowered {
+		if lowered[idx].Action == specs.ActKillProcess {
+			lowered[idx].Action = specs.ActKill
+		}
+	}
+
+	return lowered
+}
+
+func FuzzIntersectSyscallsSafety(f *testing.F) {
+	addSafetySeeds(f)
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		left, right, _ := safetyInputs(t, data)
+		checkBareMergeSafety(t, intersectSafety(), left, right)
+	})
+}
+
+func FuzzUnionSyscallsSafety(f *testing.F) {
+	addSafetySeeds(f)
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		left, right, _ := safetyInputs(t, data)
+		checkBareMergeSafety(t, unionSafety(), left, right)
 	})
 }
 

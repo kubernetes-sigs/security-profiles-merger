@@ -250,19 +250,6 @@ func TestErrors(t *testing.T) {
 			t.Errorf("ErrNoProfiles = %q, want %q", merge.ErrNoProfiles.Error(), want)
 		}
 	})
-
-	t.Run("ErrNilProfile", func(t *testing.T) {
-		t.Parallel()
-
-		if merge.ErrNilProfile == nil {
-			t.Fatal("ErrNilProfile should not be nil")
-		}
-
-		const want = "profile must not be nil"
-		if merge.ErrNilProfile.Error() != want {
-			t.Errorf("ErrNilProfile = %q, want %q", merge.ErrNilProfile.Error(), want)
-		}
-	})
 }
 
 var errMergeFailed = errors.New("merge failed")

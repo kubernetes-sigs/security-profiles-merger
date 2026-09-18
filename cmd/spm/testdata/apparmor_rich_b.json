@@ -1,0 +1,39 @@
+{
+  "executable": {
+    "allowedExecutables": [
+      "/usr/bin/python",
+      "/usr/bin/env"
+    ],
+    "allowedLibraries": [
+      "/usr/lib/libc.so",
+      "/usr/lib/libssl.so"
+    ]
+  },
+  "filesystem": {
+    "readOnlyPaths": [
+      "/var/log",
+      "/etc/ssl/certs"
+    ],
+    "writeOnlyPaths": [
+      "/var/log/app.log",
+      "/var/log/audit.log"
+    ],
+    "readWritePaths": [
+      "/tmp"
+    ]
+  },
+  "network": {
+    "allowRaw": true,
+    "allowedProtocols": {
+      "allowTcp": true,
+      "allowUdp": true
+    }
+  },
+  "capability": {
+    "allowedCapabilities": [
+      "NET_ADMIN",
+      "CHOWN",
+      "SETUID"
+    ]
+  }
+}

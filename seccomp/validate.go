@@ -25,10 +25,16 @@ import (
 	"strings"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
 const (
 	maxSyscallArgIndex = 5
+	// notifyWriteSyscall is the syscall runc refuses to put behind a
+	// notification listener, since the listener answers a request by writing
+	// to it.
+	notifyWriteSyscall = "write"
 	// maxErrno is the largest errno the kernel can return (MAX_ERRNO). runc
 	// narrows errnoRet to int16, so larger values wrap into a different
 	// errno than the profile author wrote.
@@ -65,16 +71,17 @@ var (
 	// ErrDuplicateFlag is returned when the same flag appears more than
 	// once.
 	ErrDuplicateFlag = errors.New("duplicate seccomp flag")
-	// ErrNotifyNotAllowed is returned by ValidateArtifact when a profile
-	// uses SCMP_ACT_NOTIFY, which needs a listener that an artifact cannot
-	// provide.
+	// ErrNotifyNotAllowed is returned by ValidateArtifact and ValidateStrict
+	// when a profile uses SCMP_ACT_NOTIFY, which needs a listener that an
+	// artifact cannot provide.
 	ErrNotifyNotAllowed = errors.New("SCMP_ACT_NOTIFY is not allowed")
-	// ErrListenerNotAllowed is returned by ValidateArtifact when a profile
-	// sets listenerPath or listenerMetadata, which name node-local
-	// resources that an artifact must not control.
+	// ErrListenerNotAllowed is returned by ValidateArtifact and
+	// ValidateStrict when a profile sets listenerPath or listenerMetadata,
+	// which name node-local resources that an artifact must not control.
 	ErrListenerNotAllowed = errors.New("listener settings are not allowed")
-	// ErrTooManyEntries is returned by ValidateArtifact when one syscall
-	// name appears in more than MaxArtifactEntriesPerSyscall entries.
+	// ErrTooManyEntries is returned by ValidateArtifact and ValidateStrict
+	// when one syscall name appears in more than
+	// MaxArtifactEntriesPerSyscall entries.
 	ErrTooManyEntries = errors.New("too many entries for syscall")
 	// ErrErrnoOutOfRange is returned when errnoRet or defaultErrnoRet
 	// exceeds the largest errno the kernel can return, on an action that
@@ -89,17 +96,30 @@ var (
 	// SCMP_ACT_ERRNO or SCMP_ACT_TRACE, the only ones that return it. runc
 	// ignores such a value, but crun refuses the profile.
 	ErrUnusedErrnoRet = errors.New("errnoRet is only used by SCMP_ACT_ERRNO and SCMP_ACT_TRACE")
-	// ErrConflictingEntries is returned by ValidateArtifact when entries for
-	// the same syscall yield different results and either the argument
-	// filter of one is equal to or wider than the other's (its conditions
-	// are a subset of the other's, which includes an unconditional entry),
-	// or they do not form one of the shapes libseccomp evaluates exactly. A
-	// runtime fails to load many such entries, and silently drops or
-	// reorders the others.
+	// ErrConflictingEntries is returned by ValidateArtifact and
+	// ValidateStrict when entries for the same syscall yield different
+	// results and either the argument filter of one is equal to or wider
+	// than the other's (its conditions are a subset of the other's, which
+	// includes an unconditional entry), or they do not form one of the
+	// shapes libseccomp evaluates exactly. A runtime fails to load many
+	// such entries, and silently drops or reorders the others.
 	ErrConflictingEntries = errors.New("conflicting entries")
-	// ErrTooManyClauses is returned by ValidateArtifact when one syscall
-	// loads more than MaxArtifactClausesPerSyscall rules.
+	// ErrTooManyClauses is returned by ValidateArtifact and ValidateStrict
+	// when one syscall loads more than MaxArtifactClausesPerSyscall rules.
 	ErrTooManyClauses = errors.New("too many rules for syscall")
+	// ErrTooManyNames is returned by ValidateArtifact and ValidateStrict
+	// when one syscall entry carries more than MaxArtifactNamesPerEntry
+	// names.
+	ErrTooManyNames = errors.New("too many syscall names in entry")
+	// ErrTooManyProfileClauses is returned by ValidateArtifact and
+	// ValidateStrict when the profile as a whole loads more than
+	// MaxArtifactClauses rules.
+	ErrTooManyProfileClauses = errors.New("too many rules in profile")
+	// ErrNotifyUnsupported is returned by Validate when SCMP_ACT_NOTIFY
+	// appears where runc refuses it outright: as the default action, or on
+	// the write syscall. libseccomp accepts both, so this is a runtime
+	// constraint rather than a kernel one.
+	ErrNotifyUnsupported = errors.New("SCMP_ACT_NOTIFY is not supported here")
 )
 
 // MaxArtifactEntriesPerSyscall bounds how many entries may name the same
@@ -108,11 +128,31 @@ var (
 //
 // The cap bounds one syscall, not the profile: a profile spreading entries
 // over many syscalls stays under it while still costing the merge time
-// proportional to its total size. What bounds the merge as a whole is the
-// merge itself, which falls back to a conservative collapse past its own
-// per-syscall work budget, so no profile of the size KEP-6061 recommends
+// proportional to its total size. MaxArtifactClauses bounds the profile as a
+// whole, and past its own per-syscall work budget the merge falls back to a
+// conservative collapse, so no profile of the size KEP-6061 recommends
 // runtimes accept can turn it into a multi-second operation.
 const MaxArtifactEntriesPerSyscall = 128
+
+// MaxArtifactNamesPerEntry bounds how many syscall names one entry may carry
+// in a profile accepted by ValidateArtifact. Linux has well under a thousand
+// syscalls, and a profile covering all of them names each one once.
+//
+// An entry loads one rule per name, so this bounds the expansion of a single
+// entry, which the per-syscall caps do not: they count per name.
+const MaxArtifactNamesPerEntry = 1024
+
+// MaxArtifactClauses bounds how many rules a profile accepted by
+// ValidateArtifact loads in total, counted the way
+// MaxArtifactClausesPerSyscall counts them for one syscall.
+//
+// The rules of a profile grow as the product of its name and condition
+// counts rather than with its size, and the per-syscall caps bound only one
+// factor each: 40000 names against 256 conditions fit in 441 KB of JSON,
+// pass both caps, and load ten million rules, which cost the merge seconds
+// and gigabytes. This cap is what keeps a merge of an accepted artifact
+// proportional to the size of the file it came in.
+const MaxArtifactClauses = 16384
 
 // MaxArtifactClausesPerSyscall bounds how many rules one syscall may load in
 // a profile accepted by ValidateArtifact, counted the way runtimes add them:
@@ -132,11 +172,20 @@ const MaxArtifactClausesPerSyscall = 256
 
 // Validate checks that a seccomp profile contains only known actions and
 // that every syscall entry has non-empty names, known argument operators,
-// argument indices in range, and known architectures and flags, which is
-// what a runtime needs to load the profile at all. Intersect and Union run
-// it on every input and fail on the first invalid profile, so callers that
-// want to report all problems up front can call it themselves. All
-// validation failures are collected and returned together.
+// argument indices in range, and known architectures and flags, and that
+// SCMP_ACT_NOTIFY appears only where runc loads it and only with the
+// listenerPath it needs, which is what a runtime needs to load the profile
+// at all. Intersect and Union run it on every
+// input and fail on the first invalid profile, so callers that want to
+// report all problems up front can call it themselves. All validation
+// failures are collected and returned together.
+//
+// Errno values are not range-checked here; ValidateStrict and
+// ValidateArtifact do that. runc narrows errnoRet to an int16 and skips an
+// entry whose action and errno equal the default, so an out-of-range value
+// such as 65537 against a default errno of 1 survives the merge as an entry
+// runc would have skipped. The entry is redundant rather than wrong: it
+// applies the same action and the same truncated errno the default applies.
 func Validate(profile *specs.LinuxSeccomp) error {
 	if profile == nil {
 		return ErrNilProfile
@@ -153,6 +202,7 @@ func Validate(profile *specs.LinuxSeccomp) error {
 		validateSyscallArgs(profile.Syscalls),
 		validateArchitectures(profile.Architectures),
 		validateFlags(profile.Flags),
+		validateNotifySupport(profile),
 	)
 
 	for idx := range profile.Syscalls {
@@ -177,26 +227,86 @@ func Validate(profile *specs.LinuxSeccomp) error {
 		}
 	}
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
 }
 
-// ValidateStrict performs all checks from Validate and additionally detects
-// duplicate syscall names across entries, duplicate architectures and
-// flags, out-of-range errno values, valueTwo set on an operator that
-// ignores it, and errnoRet set on an action that ignores it. The OCI
-// runtime-spec allows the same syscall to appear in multiple entries (for
-// example with different argument filters), so the merge path uses Validate
-// which permits this. ValidateStrict is intended for user-authored profiles
-// where duplicates are likely mistakes.
+// joinLimited reports at most a bounded number of the failures it is given.
+// A profile holds as many failures as it holds entries, and an artifact
+// chooses that number, so the rejection a runtime logs needs a ceiling just
+// as the values it names do (see merge.QuoteBounded).
+//
+//nolint:wrapcheck // the joined failures are this package's own errors
+func joinLimited(errs ...error) error {
+	return merge.JoinLimited(errs...)
+}
+
+// validateNotifySupport rejects SCMP_ACT_NOTIFY where runc refuses to load
+// it: as the default action ("SCMP_ACT_NOTIFY cannot be used as default
+// action"), on the write syscall, which the listener needs to answer a
+// notification, and without a listenerPath to hand the notification to.
+// libseccomp itself accepts all three, so these are runc constraints, and a
+// profile that hits one fails container creation rather than producing a
+// weaker filter.
+//
+// The listener is required here rather than left to the merge because a
+// profile that notifies into nothing is not loadable on its own, and the
+// merge would otherwise have to choose between rewriting the action, which
+// silently drops the caller's supervisor, and refusing a profile Validate
+// accepted. With the requirement, the listener travels with every input that
+// notifies, and the merge takes it from the first input that sets one, so no
+// result can notify without one (see resolveListener).
+func validateNotifySupport(profile *specs.LinuxSeccomp) error {
+	var errs []error
+
+	if profile.DefaultAction == specs.ActNotify {
+		errs = append(errs, fmt.Errorf(
+			"default action: %w", ErrNotifyUnsupported,
+		))
+	}
+
+	notifies := false
+
+	for idx := range profile.Syscalls {
+		entry := &profile.Syscalls[idx]
+		if entry.Action != specs.ActNotify {
+			continue
+		}
+
+		notifies = true
+
+		if slices.Contains(entry.Names, notifyWriteSyscall) {
+			errs = append(errs, fmt.Errorf(
+				"syscall entry %d action: %w (on %s)",
+				idx, ErrNotifyUnsupported, notifyWriteSyscall,
+			))
+		}
+	}
+
+	// Reported once for the profile: the listener is a profile-wide setting,
+	// so naming every entry that notifies would repeat one problem.
+	if notifies && profile.ListenerPath == "" {
+		errs = append(errs, fmt.Errorf("listenerPath: %w", ErrNotifyWithoutListener))
+	}
+
+	return joinLimited(errs...)
+}
+
+// ValidateStrict is the strictest of the three: it rejects everything
+// ValidateArtifact rejects and, on top of that, duplicate syscall names
+// across entries and valueTwo set on an operator that ignores it. A profile
+// that passes here therefore passes ValidateArtifact and Validate, which is
+// the same lattice the apparmor and landlock packages use.
+//
+// The OCI runtime-spec allows the same syscall to appear in multiple entries
+// (for example with different argument filters), so the merge path uses
+// Validate, which permits this. ValidateStrict is intended for user-authored
+// profiles, where a duplicate, a listener setting a node does not provide, or
+// a rule set libseccomp does not evaluate exactly is likely a mistake.
 func ValidateStrict(profile *specs.LinuxSeccomp) error {
 	return validateWith(
 		profile,
-		[]profileCheck{
-			validateDuplicateNames,
-			validateShape,
-			validateUnusedValueTwo,
-			validateUnusedErrnoRet,
-		},
+		append(artifactChecks(), validateDuplicateNames, validateUnusedValueTwo),
+		validateSyscallRules,
 	)
 }
 
@@ -217,11 +327,14 @@ func ValidateStrict(profile *specs.LinuxSeccomp) error {
 // Duplicate syscall names are allowed, as the OCI runtime-spec permits them
 // and Intersect handles them, but no syscall may appear in more than
 // MaxArtifactEntriesPerSyscall entries or load more than
-// MaxArtifactClausesPerSyscall rules, which bounds the merge cost, and the
-// rules of one syscall must not conflict (ErrConflictingEntries). Rules with
-// different results conflict when the filter of one is equal to or wider
-// than the other's, and when the conditional rules of the syscall do not
-// form one of the shapes libseccomp evaluates exactly (see Intersect).
+// MaxArtifactClausesPerSyscall rules, no entry may carry more than
+// MaxArtifactNamesPerEntry names, and the profile may not load more than
+// MaxArtifactClauses rules in total, which together bound the merge cost,
+// and the rules of one syscall must not conflict (ErrConflictingEntries).
+// Rules with different results conflict when the filter of one is equal to
+// or wider than the other's, and when the conditional rules of the syscall
+// do not form one of the shapes libseccomp evaluates exactly (see
+// Intersect).
 //
 // libseccomp refuses a rule with EEXIST, which runc and crun report as
 // a failure to load the profile, when its filter equals the filter of an
@@ -248,17 +361,21 @@ func ValidateStrict(profile *specs.LinuxSeccomp) error {
 // ValidateArtifact does not compare the profile against a baseline; callers
 // intersect the result with their baseline afterwards.
 func ValidateArtifact(profile *specs.LinuxSeccomp) error {
-	return validateWith(
-		profile,
-		[]profileCheck{
-			validateShape,
-			validateNoNotify,
-			validateNoListener,
-			validateEntryCount,
-			validateUnusedErrnoRet,
-		},
-		validateSyscallRules,
-	)
+	return validateWith(profile, artifactChecks(), validateSyscallRules)
+}
+
+// artifactChecks returns the checks ValidateArtifact runs besides Validate.
+// ValidateStrict runs them too, so that a profile it accepts is accepted by
+// ValidateArtifact as well.
+func artifactChecks() []profileCheck {
+	return []profileCheck{
+		validateShape,
+		validateNoNotify,
+		validateNoListener,
+		validateEntryCount,
+		validateProfileClauses,
+		validateUnusedErrnoRet,
+	}
 }
 
 type profileCheck func(profile *specs.LinuxSeccomp) error
@@ -326,7 +443,7 @@ func validateErrnoRange(profile *specs.LinuxSeccomp) error {
 		}
 	}
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
 }
 
 func validateUnusedValueTwo(profile *specs.LinuxSeccomp) error {
@@ -337,13 +454,13 @@ func validateUnusedValueTwo(profile *specs.LinuxSeccomp) error {
 			if arg.ValueTwo != 0 && arg.Op != specs.OpMaskedEqual {
 				errs = append(errs, fmt.Errorf(
 					"syscall entry %d arg %d: %w (%s)",
-					idx, argIdx, ErrUnusedValueTwo, arg.Op,
+					idx, argIdx, ErrUnusedValueTwo, merge.QuoteBounded(string(arg.Op)),
 				))
 			}
 		}
 	}
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
 }
 
 func validateUnusedErrnoRet(profile *specs.LinuxSeccomp) error {
@@ -351,7 +468,8 @@ func validateUnusedErrnoRet(profile *specs.LinuxSeccomp) error {
 
 	if profile.DefaultErrnoRet != nil && !errnoSignificant(profile.DefaultAction) {
 		errs = append(errs, fmt.Errorf(
-			"defaultErrnoRet: %w (%s)", ErrUnusedErrnoRet, profile.DefaultAction,
+			"defaultErrnoRet: %w (%s)",
+			ErrUnusedErrnoRet, merge.QuoteBounded(string(profile.DefaultAction)),
 		))
 	}
 
@@ -359,12 +477,13 @@ func validateUnusedErrnoRet(profile *specs.LinuxSeccomp) error {
 		entry := &profile.Syscalls[idx]
 		if entry.ErrnoRet != nil && !errnoSignificant(entry.Action) {
 			errs = append(errs, fmt.Errorf(
-				"syscall entry %d errnoRet: %w (%s)", idx, ErrUnusedErrnoRet, entry.Action,
+				"syscall entry %d errnoRet: %w (%s)",
+				idx, ErrUnusedErrnoRet, merge.QuoteBounded(string(entry.Action)),
 			))
 		}
 	}
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
 }
 
 func validateDuplicateNames(profile *specs.LinuxSeccomp) error {
@@ -509,8 +628,10 @@ type syscallRuleState struct {
 // reported once, at the first conflicting entry.
 func validateSyscallRules(profile *specs.LinuxSeccomp) error {
 	def := defaultClause(profile)
+
+	counts, total := clauseCounts(profile.Syscalls, def)
 	checker := &ruleChecker{
-		counts:   ruleCounts(profile, def),
+		counts:   counts,
 		truncate: hasWideValue(profile),
 		states:   make(map[string]*syscallRuleState),
 		reported: make(map[string]struct{}),
@@ -518,29 +639,78 @@ func validateSyscallRules(profile *specs.LinuxSeccomp) error {
 	}
 
 	checker.checkCounts()
-	forEachClause(profile.Syscalls, def, checker.record)
-	checker.checkShapes()
 
-	return errors.Join(checker.errs...)
+	// Past the profile-wide bound, expanding the entries is the very work
+	// that bound exists to prevent, and validateProfileClauses has already
+	// rejected the profile for exceeding it.
+	if total <= MaxArtifactClauses {
+		forEachClause(profile.Syscalls, def, checker.skip, checker.record)
+		checker.checkShapes()
+	}
+
+	return joinLimited(checker.errs...)
+}
+
+// validateProfileClauses bounds the profile as a whole: the names one entry
+// may carry and the rules the profile may load. The per-syscall caps count
+// per name, so neither of them bounds an entry that names a hundred thousand
+// syscalls, and the rules such a profile loads are the product of its name
+// and condition counts (see MaxArtifactClauses). It counts the rules without
+// expanding the entries, so it costs one pass over the profile.
+func validateProfileClauses(profile *specs.LinuxSeccomp) error {
+	var errs []error
+
+	for idx := range profile.Syscalls {
+		names := len(profile.Syscalls[idx].Names)
+		if names > MaxArtifactNamesPerEntry {
+			errs = append(errs, fmt.Errorf(
+				"syscall entry %d: %w (%d, max %d)",
+				idx, ErrTooManyNames, names, MaxArtifactNamesPerEntry,
+			))
+		}
+	}
+
+	total := totalClauses(profile.Syscalls, defaultClause(profile))
+	if total > MaxArtifactClauses {
+		errs = append(errs, fmt.Errorf(
+			"profile: %w (%d, max %d)",
+			ErrTooManyProfileClauses, total, MaxArtifactClauses,
+		))
+	}
+
+	return joinLimited(errs...)
 }
 
 // ruleChecker carries the state of validateSyscallRules.
 type ruleChecker struct {
-	counts   map[string]int
+	counts   map[string]uint64
 	truncate bool
 	states   map[string]*syscallRuleState
 	reported map[string]struct{}
 	errs     []error
 }
 
+// checkCounts reports every syscall over the rule bound, in name order.
+// Only the names it reports are sorted: a profile may name as many syscalls
+// as it has bytes for, while the ones it can put over the bound are limited
+// by the rules it loads.
 func (c *ruleChecker) checkCounts() {
-	for _, name := range slices.Sorted(maps.Keys(c.counts)) {
-		if c.counts[name] > MaxArtifactClausesPerSyscall {
-			c.errs = append(c.errs, fmt.Errorf(
-				"syscall %q: %w (%d, max %d)",
-				name, ErrTooManyClauses, c.counts[name], MaxArtifactClausesPerSyscall,
-			))
+	var over []string
+
+	for name, count := range c.counts {
+		if count > MaxArtifactClausesPerSyscall {
+			over = append(over, name)
 		}
+	}
+
+	slices.Sort(over)
+
+	for _, name := range over {
+		c.errs = append(c.errs, fmt.Errorf(
+			"syscall %s: %w (%d, max %d)",
+			merge.QuoteBounded(name), ErrTooManyClauses,
+			c.counts[name], MaxArtifactClausesPerSyscall,
+		))
 	}
 }
 
@@ -548,15 +718,28 @@ func (c *ruleChecker) conflict(idx int, name string) {
 	c.reported[name] = struct{}{}
 
 	c.errs = append(c.errs, fmt.Errorf(
-		"syscall entry %d: %w for %q", idx, ErrConflictingEntries, name,
+		"syscall entry %d: %w for %s",
+		idx, ErrConflictingEntries, merge.QuoteBounded(name),
 	))
 }
 
+// skip reports whether a syscall needs no further rules: it has been
+// reported already, or it is over the rule bound, which checkCounts reports
+// on its own. forEachClause consults it per name, so the rules of an
+// over-bound syscall are never expanded.
+func (c *ruleChecker) skip(name string) bool {
+	_, done := c.reported[name]
+
+	return done || c.counts[name] > MaxArtifactClausesPerSyscall
+}
+
 // record checks the rule an entry adds for a syscall against the rules
-// before it. Syscalls over the rule bound are reported by checkCounts and
-// skipped here.
+// before it. forEachClause consults skip once per entry and name, so a
+// conflict reported by an earlier clause of the same entry is caught here
+// instead, which keeps a syscall reported once however many rules one entry
+// loads for it.
 func (c *ruleChecker) record(idx int, name string, next clause) {
-	if _, done := c.reported[name]; done || c.counts[name] > MaxArtifactClausesPerSyscall {
+	if c.skip(name) {
 		return
 	}
 
@@ -607,36 +790,6 @@ func (c *ruleChecker) checkShapes() {
 	}
 }
 
-// ruleCounts returns how many rules a runtime adds per syscall name, without
-// expanding the entries.
-func ruleCounts(profile *specs.LinuxSeccomp, def *clause) map[string]int {
-	counts := make(map[string]int)
-
-	for idx := range profile.Syscalls {
-		entry := &profile.Syscalls[idx]
-
-		result := clause{
-			action:   canonicalAction(entry.Action),
-			errnoRet: runtimeErrno(entry.Action, entry.ErrnoRet),
-			args:     nil,
-		}
-		if result.sameResult(*def) {
-			continue
-		}
-
-		rules := 1
-		if hasRepeatedIndex(entry.Args) {
-			rules = len(entry.Args)
-		}
-
-		for _, name := range entry.Names {
-			counts[name] += rules
-		}
-	}
-
-	return counts
-}
-
 func validateNoNotify(profile *specs.LinuxSeccomp) error {
 	var errs []error
 
@@ -654,7 +807,7 @@ func validateNoNotify(profile *specs.LinuxSeccomp) error {
 		}
 	}
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
 }
 
 func validateEntryCount(profile *specs.LinuxSeccomp) error {
@@ -671,14 +824,14 @@ func validateEntryCount(profile *specs.LinuxSeccomp) error {
 	for _, name := range slices.Sorted(maps.Keys(counts)) {
 		if counts[name] > MaxArtifactEntriesPerSyscall {
 			errs = append(errs, fmt.Errorf(
-				"syscall %q: %w (%d, max %d)",
-				name, ErrTooManyEntries, counts[name],
+				"syscall %s: %w (%d, max %d)",
+				merge.QuoteBounded(name), ErrTooManyEntries, counts[name],
 				MaxArtifactEntriesPerSyscall,
 			))
 		}
 	}
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
 }
 
 func validateNoListener(profile *specs.LinuxSeccomp) error {
@@ -747,20 +900,21 @@ func validateDuplicateSyscallNames(syscalls []specs.LinuxSyscall) error {
 
 		if len(current.entries) > 1 {
 			errs = append(errs, fmt.Errorf(
-				"syscall %q in entries %s: %w",
-				name, formatEntries(current.entries), ErrDuplicateSyscallName,
+				"syscall %s in entries %s: %w",
+				merge.QuoteBounded(name), formatEntries(current.entries),
+				ErrDuplicateSyscallName,
 			))
 		}
 
 		for _, idx := range current.repeatedIn {
 			errs = append(errs, fmt.Errorf(
-				"syscall %q repeated within entry %d: %w",
-				name, idx, ErrDuplicateSyscallName,
+				"syscall %s repeated within entry %d: %w",
+				merge.QuoteBounded(name), idx, ErrDuplicateSyscallName,
 			))
 		}
 	}
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
 }
 
 // formatEntries renders entry indices as "0", "0 and 1", or "0, 1 and 2".
@@ -778,9 +932,14 @@ func formatEntries(entries []int) string {
 	return strings.Join(parts[:last], ", ") + " and " + parts[last]
 }
 
+// validateAction names the offending action, which an artifact chooses
+// freely and at any length, so the value is bounded before it reaches an
+// error a runtime may log.
 func validateAction(action specs.LinuxSeccompAction, context string) error {
 	if restrictiveness(action) == levelUnknown {
-		return fmt.Errorf("%s: %w %q", context, ErrUnknownAction, action)
+		return fmt.Errorf(
+			"%s: %w %s", context, ErrUnknownAction, merge.QuoteBounded(string(action)),
+		)
 	}
 
 	return nil
@@ -831,12 +990,12 @@ func validateArchitectures(archs []specs.Arch) error {
 	for _, arch := range archs {
 		if !isKnownArch(arch) {
 			errs = append(errs, fmt.Errorf(
-				"architecture: %w %q", ErrUnknownArch, arch,
+				"architecture: %w %s", ErrUnknownArch, merge.QuoteBounded(string(arch)),
 			))
 		}
 	}
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
 }
 
 func validateFlags(flags []specs.LinuxSeccompFlag) error {
@@ -845,12 +1004,12 @@ func validateFlags(flags []specs.LinuxSeccompFlag) error {
 	for _, flag := range flags {
 		if !isKnownFlag(flag) {
 			errs = append(errs, fmt.Errorf(
-				"flag: %w %q", ErrUnknownFlag, flag,
+				"flag: %w %s", ErrUnknownFlag, merge.QuoteBounded(string(flag)),
 			))
 		}
 	}
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
 }
 
 func validateDuplicateArchitectures(archs []specs.Arch) error {
@@ -861,14 +1020,14 @@ func validateDuplicateArchitectures(archs []specs.Arch) error {
 	for _, arch := range archs {
 		if _, ok := seen[arch]; ok {
 			errs = append(errs, fmt.Errorf(
-				"architecture: %w %q", ErrDuplicateArch, arch,
+				"architecture: %w %s", ErrDuplicateArch, merge.QuoteBounded(string(arch)),
 			))
 		} else {
 			seen[arch] = struct{}{}
 		}
 	}
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
 }
 
 func validateDuplicateFlags(flags []specs.LinuxSeccompFlag) error {
@@ -879,14 +1038,14 @@ func validateDuplicateFlags(flags []specs.LinuxSeccompFlag) error {
 	for _, flag := range flags {
 		if _, ok := seen[flag]; ok {
 			errs = append(errs, fmt.Errorf(
-				"flag: %w %q", ErrDuplicateFlag, flag,
+				"flag: %w %s", ErrDuplicateFlag, merge.QuoteBounded(string(flag)),
 			))
 		} else {
 			seen[flag] = struct{}{}
 		}
 	}
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
 }
 
 func validateSyscallArgs(syscalls []specs.LinuxSyscall) error {
@@ -896,8 +1055,8 @@ func validateSyscallArgs(syscalls []specs.LinuxSyscall) error {
 		for argIdx, arg := range sc.Args {
 			if !isKnownOperator(arg.Op) {
 				errs = append(errs, fmt.Errorf(
-					"syscall entry %d arg %d: %w %q",
-					idx, argIdx, ErrUnknownOperator, arg.Op,
+					"syscall entry %d arg %d: %w %s",
+					idx, argIdx, ErrUnknownOperator, merge.QuoteBounded(string(arg.Op)),
 				))
 			}
 
@@ -910,5 +1069,5 @@ func validateSyscallArgs(syscalls []specs.LinuxSyscall) error {
 		}
 	}
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
 }

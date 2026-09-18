@@ -17,6 +17,7 @@ limitations under the License.
 package landlock_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -35,18 +36,18 @@ func TestDiffNil(t *testing.T) {
 	}
 
 	_, err := landlock.Diff(nil, profile)
-	if err == nil {
-		t.Fatal("expected error for nil left profile")
+	if !errors.Is(err, landlock.ErrNilProfile) {
+		t.Fatalf("Diff(nil, profile) = %v, want ErrNilProfile", err)
 	}
 
 	_, err = landlock.Diff(profile, nil)
-	if err == nil {
-		t.Fatal("expected error for nil right profile")
+	if !errors.Is(err, landlock.ErrNilProfile) {
+		t.Fatalf("Diff(profile, nil) = %v, want ErrNilProfile", err)
 	}
 
 	_, err = landlock.Diff(nil, nil)
-	if err == nil {
-		t.Fatal("expected error for nil-nil profiles")
+	if !errors.Is(err, landlock.ErrNilProfile) {
+		t.Fatalf("Diff(nil, nil) = %v, want ErrNilProfile", err)
 	}
 }
 

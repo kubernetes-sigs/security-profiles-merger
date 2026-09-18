@@ -1,0 +1,2 @@
+auto-detected profile type: seccomp
+warning: testdata/seccomp_unknown_field.json: unknown fields "comment", "syscalls[0].arg"

@@ -50,10 +50,11 @@ func TestDiffNil(t *testing.T) {
 	}
 }
 
-func TestDiffEqual(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
+// equalDiffProfile builds the profile TestDiffEqual compares against itself.
+// Two calls give two profiles that are equal and share nothing, so that the
+// comparison is of their contents rather than of one pointer with itself.
+func equalDiffProfile() *apparmor.Profile {
+	return &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
 			AllowedExecutables: []string{pathBinBash},
 			AllowedLibraries:   []string{pathLibC},
@@ -68,8 +69,12 @@ func TestDiffEqual(t *testing.T) {
 			AllowedCapabilities: []string{capNetAdmin},
 		},
 	}
+}
 
-	diff, err := apparmor.Diff(profile, profile)
+func TestDiffEqual(t *testing.T) {
+	t.Parallel()
+
+	diff, err := apparmor.Diff(equalDiffProfile(), equalDiffProfile())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -159,16 +164,28 @@ func TestDiffFilesystem(t *testing.T) {
 		t.Fatal("expected ReadOnly diff")
 	}
 
-	if len(diff.Filesystem.ReadOnly.Removed) != 1 {
-		t.Errorf("ReadOnly removed = %v, want 1", diff.Filesystem.ReadOnly.Removed)
+	if got := diff.Filesystem.ReadOnly.Removed; !slices.Equal(got, []string{pathVarLog}) {
+		t.Errorf("ReadOnly removed = %v, want [%s]", got, pathVarLog)
+	}
+
+	if got := diff.Filesystem.ReadOnly.Added; len(got) != 0 {
+		t.Errorf("ReadOnly added = %v, want none", got)
 	}
 
 	if diff.Filesystem.WriteOnly == nil {
 		t.Fatal("expected WriteOnly diff")
 	}
 
-	if len(diff.Filesystem.WriteOnly.Added) != 1 {
-		t.Errorf("WriteOnly added = %v, want 1", diff.Filesystem.WriteOnly.Added)
+	if got := diff.Filesystem.WriteOnly.Added; !slices.Equal(got, []string{pathTmp}) {
+		t.Errorf("WriteOnly added = %v, want [%s]", got, pathTmp)
+	}
+
+	if got := diff.Filesystem.WriteOnly.Removed; len(got) != 0 {
+		t.Errorf("WriteOnly removed = %v, want none", got)
+	}
+
+	if diff.Filesystem.ReadWrite != nil {
+		t.Errorf("ReadWrite = %v, want nil", diff.Filesystem.ReadWrite)
 	}
 }
 
@@ -256,16 +273,24 @@ func TestDiffExecutables(t *testing.T) {
 		t.Fatal("expected Executables diff")
 	}
 
-	if len(diff.Executables.Removed) != 1 {
-		t.Errorf("removed executables = %v, want 1", diff.Executables.Removed)
+	if got := diff.Executables.Removed; !slices.Equal(got, []string{pathBinPython}) {
+		t.Errorf("removed executables = %v, want [%s]", got, pathBinPython)
+	}
+
+	if got := diff.Executables.Added; len(got) != 0 {
+		t.Errorf("added executables = %v, want none", got)
 	}
 
 	if diff.Libraries == nil {
 		t.Fatal("expected Libraries diff")
 	}
 
-	if len(diff.Libraries.Added) != 1 {
-		t.Errorf("added libraries = %v, want 1", diff.Libraries.Added)
+	if got := diff.Libraries.Added; !slices.Equal(got, []string{pathLibM}) {
+		t.Errorf("added libraries = %v, want [%s]", got, pathLibM)
+	}
+
+	if got := diff.Libraries.Removed; len(got) != 0 {
+		t.Errorf("removed libraries = %v, want none", got)
 	}
 }
 
@@ -496,16 +521,20 @@ func TestDiffNilVsNonNilNetwork(t *testing.T) {
 func TestDiffIsEqualTrue(t *testing.T) {
 	t.Parallel()
 
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin},
-		},
+	profile := func() *apparmor.Profile {
+		return &apparmor.Profile{
+			Executable: nil,
+			Filesystem: nil,
+			Network:    nil,
+			Capabilities: &apparmor.CapabilityRules{
+				AllowedCapabilities: []string{capNetAdmin},
+			},
+		}
 	}
 
-	diff, err := apparmor.Diff(profile, profile)
+	// Equal but distinct profiles: the same pointer twice would only catch a
+	// Diff that is not deterministic.
+	diff, err := apparmor.Diff(profile(), profile())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -142,9 +142,12 @@ func (s *indexSet) intersects(other *indexSet) bool {
 }
 
 // hasRepeatedIndex reports whether two conditions share an argument index.
-// Every index counts, including one beyond maxSyscallArgIndex: Validate
-// rejects those, but Diff and the bare syscall-list functions do not
-// validate, and a runtime would still load such an entry as alternatives.
+// Every index counts, including one beyond maxSyscallArgIndex, which no
+// runtime loads at all: runc indexes a fixed array of six argument counters
+// with it and panics, and libseccomp rejects index 6 with -EINVAL. Validate
+// rejects such an index, so only Diff and the bare syscall-list functions,
+// which validate nothing and load nothing, reach one here, and reading the
+// entry as alternatives costs them nothing.
 // It runs in linear time, since entries come from untrusted input.
 func hasRepeatedIndex(args []specs.LinuxSeccompArg) bool {
 	var seen indexSet

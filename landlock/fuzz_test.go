@@ -52,13 +52,11 @@ func fuzzLandlockProfile(
 	path1 = fuzzPath(path1, "/default1")
 	path2 = fuzzPath(path2, "/default2")
 
-	pathRules := buildFuzzPathRules(
-		path1, path2,
-		accessMask1&handledFSMask, accessMask2&handledFSMask,
-	)
-	netRules := buildFuzzNetRules(
-		port1, port2, netMask1&handledNetMask, netMask2&handledNetMask,
-	)
+	// The rule masks are used as generated: a rule granting a right the
+	// profile does not handle is what pruneUnhandledRights exists for and
+	// what the kernel rejects, so the generator must be able to produce it.
+	pathRules := buildFuzzPathRules(path1, path2, accessMask1, accessMask2)
+	netRules := buildFuzzNetRules(port1, port2, netMask1, netMask2)
 
 	return &landlock.Profile{
 		HandledAccessFS:  handledFS,
@@ -69,14 +67,46 @@ func fuzzLandlockProfile(
 	}
 }
 
+// oracleCleanPath canonicalizes a path the way the package documents it:
+// repeated slashes, "." components and trailing slashes are dropped, ".."
+// components are kept because the kernel resolves them against the file
+// system, and a path left with nothing is ".". It is written out here
+// rather than taken from the package, so a mutation of the package's own
+// cleaner shows up as a disagreement between the merge and this model
+// instead of being mirrored by it.
+func oracleCleanPath(path string) string {
+	parts := strings.Split(path, "/")
+	kept := make([]string, 0, len(parts))
+
+	for _, part := range parts {
+		if part != "" && part != "." {
+			kept = append(kept, part)
+		}
+	}
+
+	joined := strings.Join(kept, "/")
+
+	if strings.HasPrefix(path, "/") {
+		return "/" + joined
+	}
+
+	if joined == "" {
+		return "."
+	}
+
+	return joined
+}
+
 // fuzzPath substitutes the fallback for paths Validate rejects: empty paths,
-// paths with NUL bytes or ".." components, and paths that clean to ".".
-// Other paths reach the merge as generated, including repeated slashes, "."
-// components, trailing slashes, and relative paths.
+// paths with NUL bytes or ".." components, paths longer than the length
+// limit, and paths that clean to ".". Other paths reach the merge as
+// generated, including repeated slashes, "." components, trailing slashes,
+// and relative paths.
 func fuzzPath(path, fallback string) string {
-	if path == "" || strings.ContainsRune(path, 0) ||
+	if path == "" || len(path) > landlock.MaxPathLen ||
+		strings.ContainsRune(path, 0) ||
 		slices.Contains(strings.Split(path, "/"), "..") ||
-		landlock.CleanPath(path) == "." {
+		oracleCleanPath(path) == "." {
 		return fallback
 	}
 
@@ -412,7 +442,7 @@ func probePaths(profiles ...*landlock.Profile) []string {
 
 	for _, profile := range profiles {
 		for _, rule := range profile.PathRules {
-			path := landlock.CleanPath(rule.Path)
+			path := oracleCleanPath(rule.Path)
 			probes = append(probes, path, strings.TrimSuffix(path, "/")+"/probe")
 		}
 	}
@@ -499,7 +529,7 @@ func assertPathsFromInputs(
 
 	inputPaths := make(map[string]struct{})
 	for _, rule := range slices.Concat(left.PathRules, right.PathRules) {
-		inputPaths[landlock.CleanPath(rule.Path)] = struct{}{}
+		inputPaths[oracleCleanPath(rule.Path)] = struct{}{}
 	}
 
 	for _, rule := range result.PathRules {
@@ -656,6 +686,11 @@ func assertUnionScopedCoversCommon(
 // filesystem right. A denied right is permitted where a rule on the path or
 // one of its ancestors grants it; a rule can only grant a right the profile
 // lists as handled, since the kernel refuses any other grant.
+//
+// Refer does not inherit. The kernel decides a move or link from the rights
+// each directory collects up to its mount point, so an ancestor's grant
+// need not reach a descendant, and the merge reads refer from a rule on the
+// path itself.
 func fsPermits(profile *landlock.Profile, path string, right landlock.FSAccessRight) bool {
 	handled := fsRightSet(profile.HandledAccessFS)
 
@@ -671,8 +706,21 @@ func fsPermits(profile *landlock.Profile, path string, right landlock.FSAccessRi
 	}
 
 	for _, rule := range profile.PathRules {
-		if landlock.IsAncestorOrSelf(landlock.CleanPath(rule.Path), path) &&
-			slices.Contains(rule.AccessFS, right) {
+		if !slices.Contains(rule.AccessFS, right) {
+			continue
+		}
+
+		rulePath := oracleCleanPath(rule.Path)
+
+		if right == landlock.FSAccessRefer {
+			if rulePath == path {
+				return true
+			}
+
+			continue
+		}
+
+		if landlock.IsAncestorOrSelf(rulePath, path) {
 			return true
 		}
 	}
@@ -760,12 +808,73 @@ func assertUnionInvariants(
 
 	assertResultShape(t, result, left, right)
 	assertPathsFromInputs(t, result, left, right)
+	assertUnionKeepsInputPaths(t, result, left, right)
 	assertFSExact(t, "union", either, result, left, right)
 	assertNetExact(t, "union", either, result, left, right)
 	assertUnionHandledSubset(t, result, left, right)
 	assertUnionHandledCoversCommon(t, result, left, right)
 	assertUnionScopedSubset(t, result, left, right)
 	assertUnionScopedCoversCommon(t, result, left, right)
+}
+
+// assertUnionKeepsInputPaths checks that a union keeps a rule on every path
+// an input names, as long as one of its rights survives the merged handled
+// set. The kernel binds a rule to the file its path resolves to, so a
+// nested path may be a symlink covering a different hierarchy, and folding
+// it into an ancestor would deny access an input grants. The exactness
+// oracle cannot see this: it resolves paths textually, where the fold
+// changes nothing.
+func assertUnionKeepsInputPaths(
+	t *testing.T,
+	result, left, right *landlock.Profile,
+) {
+	t.Helper()
+
+	resultPaths := make(map[string]struct{}, len(result.PathRules))
+	for _, rule := range result.PathRules {
+		resultPaths[rule.Path] = struct{}{}
+	}
+
+	handled := fsRightSet(result.HandledAccessFS)
+
+	for _, input := range []*landlock.Profile{left, right} {
+		inputHandled := fsRightSet(input.HandledAccessFS)
+
+		for _, rule := range input.PathRules {
+			if !grantsAnyOf(rule.AccessFS, inputHandled, handled) {
+				continue
+			}
+
+			if _, ok := resultPaths[oracleCleanPath(rule.Path)]; !ok {
+				t.Errorf(
+					"union dropped the rule path %q\nleft=%s\nright=%s\nresult=%s",
+					rule.Path,
+					landlock.FormatProfile(left),
+					landlock.FormatProfile(right),
+					landlock.FormatProfile(result),
+				)
+			}
+		}
+	}
+}
+
+// grantsAnyOf reports whether the rule grants a right that both sets hold:
+// one the input itself handles, since the kernel refuses any other grant,
+// and one the merged ruleset still handles, since the rest is pruned.
+func grantsAnyOf(
+	access []landlock.FSAccessRight,
+	inputHandled, resultHandled map[landlock.FSAccessRight]struct{},
+) bool {
+	for _, right := range access {
+		_, inInput := inputHandled[right]
+		_, inResult := resultHandled[right]
+
+		if inInput && inResult {
+			return true
+		}
+	}
+
+	return false
 }
 
 // assertUnionHandledSubset checks that the union handles only rights both
@@ -993,7 +1102,7 @@ func FuzzLandlockDiff(f *testing.F) {
 			t.Fatal(err)
 		}
 
-		landlock.FormatDiff(diff)
+		assertDiffFormat(t, diff, left, right)
 
 		reverse, err := landlock.Diff(right, left)
 		if err != nil {
@@ -1049,7 +1158,7 @@ func FuzzLandlockValidateStrict(f *testing.F) {
 	)
 
 	f.Fuzz(func(
-		_ *testing.T,
+		t *testing.T,
 		hfs uint32, hnet uint8, scope uint8,
 		path1, path2 string,
 		am1, am2 uint32,
@@ -1061,7 +1170,29 @@ func FuzzLandlockValidateStrict(f *testing.F) {
 			am1, am2, port1, port2, nm1, nm2,
 		)
 
-		_ = landlock.ValidateStrict(profile)
+		strict := landlock.ValidateStrict(profile)
+		if strict != nil {
+			return
+		}
+
+		// ValidateStrict is ValidateArtifact plus the duplicate checks, and
+		// ValidateArtifact is Validate plus what a kernel could not load,
+		// so a profile strict accepts is accepted by both.
+		err := landlock.Validate(profile)
+		if err != nil {
+			t.Fatalf(
+				"ValidateStrict accepted a profile Validate rejects: %v\nprofile=%s",
+				err, landlock.FormatProfile(profile),
+			)
+		}
+
+		err = landlock.ValidateArtifact(profile)
+		if err != nil {
+			t.Fatalf(
+				"ValidateStrict accepted a profile ValidateArtifact rejects: %v\nprofile=%s",
+				err, landlock.FormatProfile(profile),
+			)
+		}
 	})
 }
 
@@ -1090,6 +1221,48 @@ func assertRightsDiffSwapped[T comparable](
 	}
 }
 
+// assertDiffFormat checks the rendered diff, which a caller reads to learn
+// what changed: it must say so when the profiles differ, and name every
+// path and port the diff carries.
+func assertDiffFormat(t *testing.T, diff *landlock.ProfileDiff, left, right *landlock.Profile) {
+	t.Helper()
+
+	formatted := landlock.FormatDiff(diff)
+
+	if diff.Equal {
+		if formatted != "Diff{equal}" {
+			t.Errorf("FormatDiff of an equal diff = %q, want %q", formatted, "Diff{equal}")
+		}
+
+		return
+	}
+
+	if formatted == "Diff{}" || formatted == "Diff{equal}" {
+		t.Errorf(
+			"FormatDiff = %q for differing profiles\nleft=%s\nright=%s",
+			formatted, landlock.FormatProfile(left), landlock.FormatProfile(right),
+		)
+	}
+
+	if diff.PathRules == nil {
+		return
+	}
+
+	for _, rule := range slices.Concat(diff.PathRules.Added, diff.PathRules.Removed) {
+		if !strings.Contains(formatted, rule.Path) {
+			t.Errorf("FormatDiff = %q, missing the path %q", formatted, rule.Path)
+		}
+	}
+
+	for _, change := range diff.PathRules.Changed {
+		if !strings.Contains(formatted, change.Path) {
+			t.Errorf("FormatDiff = %q, missing the changed path %q", formatted, change.Path)
+		}
+	}
+}
+
+// assertRulesDiffSwapped compares the two directions rule by rule, not by
+// count: a diff naming other paths with the same counts is a wrong diff.
 func assertRulesDiffSwapped(
 	t *testing.T, label string,
 	fwd, rev *landlock.PathRulesDiff,
@@ -1106,18 +1279,31 @@ func assertRulesDiffSwapped(
 		return
 	}
 
-	if len(fwd.Added) != len(rev.Removed) {
-		t.Errorf(
-			"%s: forward Added count %d != reverse Removed count %d",
-			label, len(fwd.Added), len(rev.Removed),
-		)
+	if !pathRulesEqual(fwd.Added, rev.Removed) {
+		t.Errorf("%s: forward Added %v != reverse Removed %v", label, fwd.Added, rev.Removed)
 	}
 
-	if len(fwd.Removed) != len(rev.Added) {
+	if !pathRulesEqual(fwd.Removed, rev.Added) {
+		t.Errorf("%s: forward Removed %v != reverse Added %v", label, fwd.Removed, rev.Added)
+	}
+
+	if len(fwd.Changed) != len(rev.Changed) {
 		t.Errorf(
-			"%s: forward Removed count %d != reverse Added count %d",
-			label, len(fwd.Removed), len(rev.Added),
+			"%s: forward Changed count %d != reverse Changed count %d",
+			label, len(fwd.Changed), len(rev.Changed),
 		)
+
+		return
+	}
+
+	for idx, change := range fwd.Changed {
+		reverse := rev.Changed[idx]
+
+		if change.Path != reverse.Path ||
+			!slices.Equal(change.Left, reverse.Right) ||
+			!slices.Equal(change.Right, reverse.Left) {
+			t.Errorf("%s: change %v is not the reverse of %v", label, change, reverse)
+		}
 	}
 }
 
@@ -1137,18 +1323,31 @@ func assertNetRulesDiffSwapped(
 		return
 	}
 
-	if len(fwd.Added) != len(rev.Removed) {
-		t.Errorf(
-			"NetRules: forward Added count %d != reverse Removed count %d",
-			len(fwd.Added), len(rev.Removed),
-		)
+	if !netRulesEqual(fwd.Added, rev.Removed) {
+		t.Errorf("NetRules: forward Added %v != reverse Removed %v", fwd.Added, rev.Removed)
 	}
 
-	if len(fwd.Removed) != len(rev.Added) {
+	if !netRulesEqual(fwd.Removed, rev.Added) {
+		t.Errorf("NetRules: forward Removed %v != reverse Added %v", fwd.Removed, rev.Added)
+	}
+
+	if len(fwd.Changed) != len(rev.Changed) {
 		t.Errorf(
-			"NetRules: forward Removed count %d != reverse Added count %d",
-			len(fwd.Removed), len(rev.Added),
+			"NetRules: forward Changed count %d != reverse Changed count %d",
+			len(fwd.Changed), len(rev.Changed),
 		)
+
+		return
+	}
+
+	for idx, change := range fwd.Changed {
+		reverse := rev.Changed[idx]
+
+		if change.Port != reverse.Port ||
+			!slices.Equal(change.Left, reverse.Right) ||
+			!slices.Equal(change.Right, reverse.Left) {
+			t.Errorf("NetRules: change %v is not the reverse of %v", change, reverse)
+		}
 	}
 }
 
@@ -1157,9 +1356,10 @@ func assertNetRulesDiffSwapped(
 // a profile ValidateArtifact accepts is one the kernel would take, with
 // absolute rule paths, no empty rule, no rule granting an unhandled right,
 // and something handled or scoped; and it merges into a result the runtime
-// can load. Unlike Validate it accepts duplicate rules and rights, which the
-// kernel and the merge fold, so the two do not nest; ValidateStrict is
-// ValidateArtifact plus those duplicate checks and therefore does.
+// can load. It also pins the lattice: Validate checks what the merge needs,
+// ValidateArtifact adds what a kernel could not load, and ValidateStrict
+// adds the duplicate rule and right checks, so each rejects everything the
+// one before it rejects.
 func FuzzLandlockValidateArtifact(f *testing.F) {
 	f.Add(
 		uint32(0x07), uint8(0x03), uint8(0x03), "/etc", "/home",
@@ -1198,6 +1398,12 @@ func FuzzLandlockValidateArtifact(f *testing.F) {
 			}
 
 			return
+		}
+
+		// Everything ValidateArtifact accepts, Validate accepts.
+		err = landlock.Validate(profile)
+		if err != nil {
+			t.Fatalf("ValidateArtifact accepted a profile Validate rejects: %v", err)
 		}
 
 		assertLandlockLoadable(t, profile)

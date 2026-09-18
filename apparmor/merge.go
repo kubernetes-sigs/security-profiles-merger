@@ -18,6 +18,7 @@ package apparmor
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -42,6 +43,24 @@ var (
 // and the result carries it explicitly. Intersecting against a profile that
 // omits a section therefore permits nothing in that section.
 //
+// More than two profiles are folded from left to right, and with patterns
+// involved the result depends on that order: a pattern survives only where
+// the other side spells it alike, which two spellings of one pattern count
+// as, or expands over it with a "**" rooted above it, so a pattern an
+// intermediate result has already dropped can no longer narrow a literal a
+// later profile brings. Intersect(a, b, c) may therefore
+// permit more or less than Intersect(a, Intersect(b, c)) does. Every
+// grouping is safe: whatever the order, the result permits only what every
+// input permits, and the difference is which of the permitted paths survive
+// as rules.
+//
+// The cost of matching paths against patterns is bounded: past an internal
+// budget on the product of the literal and pattern counts of the two sides,
+// a category keeps only the paths both sides spell alike, which permits no
+// more than the exact intersection would. ValidateArtifact bounds the number
+// of paths a profile may hold (MaxArtifactPaths) so that a profile a runtime
+// accepts stays inside the budget.
+//
 // This implements the profile merging semantics defined in KEP-6061 for CRI
 // runtimes merging OCI-pulled profiles with node baselines.
 func Intersect(profiles ...*Profile) (*Profile, error) {
@@ -53,6 +72,13 @@ func Intersect(profiles ...*Profile) (*Profile, error) {
 // combined, file access rules are combined, and network permissions use OR
 // semantics. A nil section defers to the other profile, which for a union
 // grants the same as an empty one would.
+//
+// The cost of matching paths against patterns is bounded as it is for
+// Intersect. Past the budget a category keeps every path of both sides with
+// the permissions its own side grants it, which permits exactly what the
+// reduced union permits: the literals the reduction drops or raises are the
+// ones a pattern of the other side already covers, and that pattern is kept
+// either way.
 //
 // This implements the merge semantics used by the Security Profiles Operator
 // for combining recorded profiles.
@@ -81,12 +107,17 @@ func foldProfiles(profiles []*Profile, mergeOp strategy) (*Profile, error) {
 	for idx, profile := range profiles {
 		normalized[idx] = normalizeProfile(profile)
 		deduplicateProfile(normalized[idx])
+		canonicalizeAliases(normalized[idx], false)
 
 		err := Validate(normalized[idx])
 		if err != nil {
 			return nil, fmt.Errorf("validate profile %d: %w", idx, err)
 		}
 	}
+
+	// Each profile now holds one spelling per rule, but two profiles may
+	// hold different ones, and the merge compares paths as text.
+	unifyAliasSpellings(normalized)
 
 	// Preparing may drop paths, so it runs after validation, which must see
 	// every path the caller passed.
@@ -101,9 +132,208 @@ func foldProfiles(profiles []*Profile, mergeOp strategy) (*Profile, error) {
 		return nil, fmt.Errorf("merge: %w", err)
 	}
 
+	// Each input holds one spelling per rule and category, but two inputs may
+	// spell one rule differently and the result then holds both.
+	canonicalizeAliases(result, true)
 	sortProfile(result)
 
 	return result, nil
+}
+
+// canonicalizeAliases folds the paths of a profile that spell the same rule
+// into one entry, keeping the shorter spelling. Two such spellings differ
+// only in escapes or repeated slashes the parser resolves, so they are one
+// rule for one file, and the merge would otherwise carry both and match only
+// one of them. Lists holding no such pair, which is every list of a profile
+// written by hand, are left as they are.
+//
+// crossCategory says whether two spellings in different filesystem
+// categories are folded as well, granting the file what both entries grant
+// it. A merge result needs that: two inputs may spell one rule differently,
+// and the result would otherwise hold the pair Validate reports as a
+// duplicate. An input does not get it, so that a profile naming one file in
+// two categories fails a merge whether or not the two spellings agree, which
+// is what it does for an exact duplicate.
+func canonicalizeAliases(profile *Profile, crossCategory bool) {
+	if profile.Executable != nil {
+		profile.Executable.AllowedExecutables = foldAliasList(
+			profile.Executable.AllowedExecutables,
+		)
+		profile.Executable.AllowedLibraries = foldAliasList(
+			profile.Executable.AllowedLibraries,
+		)
+	}
+
+	if profile.Filesystem == nil {
+		return
+	}
+
+	if crossCategory {
+		profile.Filesystem = foldAliasPerms(profile.Filesystem)
+
+		return
+	}
+
+	profile.Filesystem.ReadOnlyPaths = foldAliasList(profile.Filesystem.ReadOnlyPaths)
+	profile.Filesystem.WriteOnlyPaths = foldAliasList(profile.Filesystem.WriteOnlyPaths)
+	profile.Filesystem.ReadWritePaths = foldAliasList(profile.Filesystem.ReadWritePaths)
+}
+
+// unifyAliasSpellings gives every profile the same spelling for a rule any
+// of them holds, so that two profiles naming one file differently name it
+// alike from here on. canonicalizeAliases folds the aliases within a
+// profile, but it keeps a spelling that profile happens to hold, and the
+// merge compares literal paths and glob patterns as text: without this, an
+// intersection of "/etc/passwd" with an escaped spelling of the same file
+// would drop a path both profiles grant, in the direction that silently
+// costs a workload its access.
+//
+// The spelling kept is the simplest one some input holds (simplestSpelling),
+// never one derived from the decoded name: a decoded name may hold a
+// character a profile must escape, which ValidateArtifact rejects
+// (ErrUnquotablePath), so deriving it could turn a loadable input into a
+// result no consumer can spell. Rewriting a path to another input's spelling
+// of the same rule cannot: it is a path an input already carried.
+//
+// It cannot make a profile hold one rule twice. Within a list, each profile
+// holds one path per key already, and rewriting maps equal keys to one
+// spelling, so the rewritten list has one path per key as well. Across the
+// categories of one profile, Validate has just rejected two paths sharing a
+// key, so no two categories can collapse onto one spelling here.
+func unifyAliasSpellings(profiles []*Profile) {
+	simplest := make(map[pathKey]string)
+
+	for _, profile := range profiles {
+		eachPathList(profile, func(paths []string) {
+			for _, path := range paths {
+				key := keyForPath(path)
+
+				kept, ok := simplest[key]
+				if !ok || simplestSpelling(path, kept) < 0 {
+					simplest[key] = path
+				}
+			}
+		})
+	}
+
+	for _, profile := range profiles {
+		eachPathList(profile, func(paths []string) {
+			for idx, path := range paths {
+				paths[idx] = simplest[keyForPath(path)]
+			}
+		})
+	}
+}
+
+// eachPathList calls visit with every list of paths a profile holds. The
+// slices are visited in place, so a visitor may rewrite their elements.
+func eachPathList(profile *Profile, visit func(paths []string)) {
+	if profile.Executable != nil {
+		visit(profile.Executable.AllowedExecutables)
+		visit(profile.Executable.AllowedLibraries)
+	}
+
+	if profile.Filesystem != nil {
+		visit(profile.Filesystem.ReadOnlyPaths)
+		visit(profile.Filesystem.WriteOnlyPaths)
+		visit(profile.Filesystem.ReadWritePaths)
+	}
+}
+
+// hasAliases reports whether two different paths of a list spell one rule.
+func hasAliases(paths []string) bool {
+	seen := make(map[pathKey]string, len(paths))
+
+	for _, path := range paths {
+		key := keyForPath(path)
+
+		if earlier, ok := seen[key]; ok && earlier != path {
+			return true
+		}
+
+		seen[key] = path
+	}
+
+	return false
+}
+
+// foldAliasList returns the list with one spelling per rule.
+func foldAliasList(paths []string) []string {
+	if !hasAliases(paths) {
+		return paths
+	}
+
+	sorted := slices.Clone(paths)
+	slices.SortFunc(sorted, simplestSpelling)
+
+	seen := make(map[pathKey]struct{}, len(sorted))
+	folded := make([]string, 0, len(sorted))
+
+	for _, path := range sorted {
+		key := keyForPath(path)
+
+		if _, ok := seen[key]; ok {
+			continue
+		}
+
+		seen[key] = struct{}{}
+
+		folded = append(folded, path)
+	}
+
+	return folded
+}
+
+// simplestSpelling orders two spellings of one rule: a spelling a consumer
+// can render as a rule first, since one of the spellings may leave a
+// character escaped that must stay escaped (ErrUnquotablePath), then the
+// shorter one, which is the one written without escapes the parser only has
+// to resolve, and spellings of one length by text, so that which one a merge
+// keeps never depends on the order the paths arrive in.
+func simplestSpelling(left, right string) int {
+	if leftBad, rightBad := hasUnquotableChar(left), hasUnquotableChar(right); leftBad != rightBad {
+		if rightBad {
+			return -1
+		}
+
+		return 1
+	}
+
+	if len(left) != len(right) {
+		return len(left) - len(right)
+	}
+
+	return strings.Compare(left, right)
+}
+
+// foldAliasPerms returns the filesystem rules with one spelling per rule,
+// granting it what its spellings grant together across the categories.
+func foldAliasPerms(rules *FilesystemRules) *FilesystemRules {
+	perms := expandFsPerms(rules)
+
+	paths := slices.Collect(maps.Keys(perms))
+	slices.SortFunc(paths, simplestSpelling)
+
+	if !hasAliases(paths) {
+		return rules
+	}
+
+	canonical := make(map[pathKey]string, len(paths))
+	folded := make(map[string]fsPermission, len(paths))
+
+	for _, path := range paths {
+		key := keyForPath(path)
+
+		name, ok := canonical[key]
+		if !ok {
+			name = path
+			canonical[key] = path
+		}
+
+		folded[name] = folded[name].union(perms[path])
+	}
+
+	return collapseFsPerms(folded)
 }
 
 func sortProfile(profile *Profile) {
@@ -332,9 +562,22 @@ func (intersectStrategy) mergeFilesystem(left, right *FilesystemRules) *Filesyst
 
 	// Glob entries need matching against the other side. Both directions go
 	// through a prefix index rather than a pairwise scan, so a profile with
-	// many paths does not turn the merge quadratic.
+	// many paths does not turn the merge quadratic. Patterns sharing one
+	// prefix land in one bucket, though, which the index cannot split, so
+	// the work is bounded as well: past the budget only the patterns both
+	// sides list alike are kept, next to the literals both sides list, which
+	// permits no more than matching them would.
 	leftSide := buildFsSide(leftPerms)
 	rightSide := buildFsSide(rightPerms)
+
+	if exceedsPairBudget(
+		len(leftSide.literals), len(leftSide.globs),
+		len(rightSide.literals), len(rightSide.globs),
+	) {
+		addVerbatimGlobs(leftSide, rightSide, merged)
+
+		return collapseFsPerms(merged)
+	}
 
 	matchFsLiterals(leftSide.literals, rightSide, merged)
 	matchFsLiterals(rightSide.literals, leftSide, merged)
@@ -382,11 +625,9 @@ func matchFsLiterals(
 // covers with the "**" expansion of a containing prefix. The narrower of the
 // two patterns keys the result, as it is the one both sides permit.
 func matchFsGlobs(left, right fsSide, merged map[string]fsPermission) {
-	for pattern, entry := range left.globs {
-		if other, both := right.globs[pattern]; both {
-			addFsMatch(merged, pattern, entry.perm.intersect(other.perm))
-		}
+	addVerbatimGlobs(left, right, merged)
 
+	for _, entry := range left.globs {
 		narrowFsGlob(entry, right, merged)
 	}
 
@@ -395,6 +636,17 @@ func matchFsGlobs(left, right fsSide, merged map[string]fsPermission) {
 	// which says nothing about what the left side expands over.
 	for _, entry := range right.globs {
 		narrowFsGlob(entry, left, merged)
+	}
+}
+
+// addVerbatimGlobs intersects the patterns both sides list alike, which
+// needs no matching: a pattern both sides list is permitted by both whatever
+// it matches.
+func addVerbatimGlobs(left, right fsSide, merged map[string]fsPermission) {
+	for pattern, entry := range left.globs {
+		if other, both := right.globs[pattern]; both {
+			addFsMatch(merged, pattern, entry.perm.intersect(other.perm))
+		}
 	}
 }
 
@@ -478,6 +730,13 @@ func unionPerms(left, right map[string]fsPermission) map[string]fsPermission {
 	leftSide := buildFsSide(left)
 	rightSide := buildFsSide(right)
 
+	if exceedsPairBudget(
+		len(leftSide.literals), len(leftSide.globs),
+		len(rightSide.literals), len(rightSide.globs),
+	) {
+		return unionVerbatim(left, right)
+	}
+
 	addUnionLiterals(leftSide.literals, right, rightSide, merged)
 	addUnionLiterals(rightSide.literals, left, leftSide, merged)
 
@@ -486,6 +745,24 @@ func unionPerms(left, right map[string]fsPermission) map[string]fsPermission {
 			if IsGlobPattern(path) {
 				merged[path] = merged[path].union(perm)
 			}
+		}
+	}
+
+	return merged
+}
+
+// unionVerbatim returns every path of both sides with the permissions they
+// grant it, the result a union falls back to past its pair budget. It
+// permits what the reduced union permits: a literal the reduction drops
+// grants no more than a pattern of the other side grants, and one the
+// reduction raises is raised by such a pattern, and either way that pattern
+// is kept here too.
+func unionVerbatim(left, right map[string]fsPermission) map[string]fsPermission {
+	merged := make(map[string]fsPermission, len(left)+len(right))
+
+	for _, perms := range []map[string]fsPermission{left, right} {
+		for path, perm := range perms {
+			merged[path] = merged[path].union(perm)
 		}
 	}
 

@@ -1,0 +1,41 @@
+{
+  "executable": {
+    "allowedExecutables": [
+      "/usr/bin/bash",
+      "/usr/bin/env",
+      "/usr/bin/tar"
+    ],
+    "allowedLibraries": [
+      "/usr/lib/libc.so",
+      "/usr/lib/libz.so"
+    ]
+  },
+  "filesystem": {
+    "readOnlyPaths": [
+      "/etc/config",
+      "/etc/ssl/certs",
+      "/usr/share"
+    ],
+    "writeOnlyPaths": [
+      "/var/log/app.log"
+    ],
+    "readWritePaths": [
+      "/tmp",
+      "/run/app"
+    ]
+  },
+  "network": {
+    "allowRaw": false,
+    "allowedProtocols": {
+      "allowTcp": true,
+      "allowUdp": false
+    }
+  },
+  "capability": {
+    "allowedCapabilities": [
+      "NET_ADMIN",
+      "SYS_TIME",
+      "CHOWN"
+    ]
+  }
+}

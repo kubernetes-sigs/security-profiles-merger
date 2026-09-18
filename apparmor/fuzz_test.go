@@ -201,6 +201,7 @@ func fuzzAppArmorMerge(
 		t.Fatal("result must not be nil")
 	}
 
+	assertSectionsPresent(t, result)
 	cfg.checkCap(t, result, left, right)
 	cfg.checkNet(t, result, left, right)
 	checkGlobSafeProperties(t, cfg, left, right, result)
@@ -209,6 +210,26 @@ func fuzzAppArmorMerge(
 	if !profileHasGlobs(left) && !profileHasGlobs(right) {
 		cfg.checkExec(t, result, left, right)
 		checkStructuralProperties(t, cfg, left, right, result)
+	}
+}
+
+// assertSectionsPresent checks that the merge kept every section. Both
+// inputs carry all of them, so a nil section in the result is a merge that
+// lost one, and every assertion below it would pass vacuously.
+func assertSectionsPresent(t *testing.T, result *apparmor.Profile) {
+	t.Helper()
+
+	switch {
+	case result.Executable == nil:
+		t.Fatal("result has no Executable section")
+	case result.Filesystem == nil:
+		t.Fatal("result has no Filesystem section")
+	case result.Capabilities == nil:
+		t.Fatal("result has no Capabilities section")
+	case result.Network == nil:
+		t.Fatal("result has no Network section")
+	case result.Network.Protocols == nil:
+		t.Fatal("result has no Protocols section")
 	}
 }
 
@@ -250,9 +271,12 @@ func checkGlobSafeProperties(
 ) {
 	t.Helper()
 
+	// The merge of the same two profiles succeeded a moment ago, so an
+	// error here is the asymmetry the check exists to find rather than a
+	// reason to stop checking.
 	commuted, err := cfg.merge(right, left)
 	if err != nil {
-		return
+		t.Fatalf("merge(L,R) succeeded but merge(R,L) failed: %v", err)
 	}
 
 	if !reflect.DeepEqual(result.Capabilities, commuted.Capabilities) {
@@ -265,12 +289,12 @@ func checkGlobSafeProperties(
 
 	single, err := cfg.merge(left)
 	if err != nil {
-		return
+		t.Fatalf("merge(L,R) succeeded but merge(L) failed: %v", err)
 	}
 
 	idempotent, err := cfg.merge(left, left)
 	if err != nil {
-		return
+		t.Fatalf("merge(L,R) succeeded but merge(L,L) failed: %v", err)
 	}
 
 	if !reflect.DeepEqual(single.Capabilities, idempotent.Capabilities) {
@@ -295,10 +319,6 @@ func assertCapsSubset(
 ) {
 	t.Helper()
 
-	if result.Capabilities == nil {
-		return
-	}
-
 	leftCaps := stringSet(left.Capabilities.AllowedCapabilities)
 	rightCaps := stringSet(right.Capabilities.AllowedCapabilities)
 
@@ -317,17 +337,9 @@ func assertCapsSuperset(
 ) {
 	t.Helper()
 
-	if result.Capabilities == nil {
-		return
-	}
-
 	resultCaps := stringSet(result.Capabilities.AllowedCapabilities)
 
 	for _, profiles := range []*apparmor.Profile{left, right} {
-		if profiles.Capabilities == nil {
-			continue
-		}
-
 		for _, cap := range profiles.Capabilities.AllowedCapabilities {
 			if _, ok := resultCaps[cap]; !ok {
 				t.Errorf("union result missing cap %q from input", cap)
@@ -341,19 +353,9 @@ func assertNetIntersect(
 ) {
 	t.Helper()
 
-	if result.Network == nil || left.Network == nil || right.Network == nil {
-		return
-	}
-
 	checkBoolAnd(t, "AllowRaw",
 		result.Network.AllowRaw, left.Network.AllowRaw, right.Network.AllowRaw,
 	)
-
-	if result.Network.Protocols == nil ||
-		left.Network.Protocols == nil ||
-		right.Network.Protocols == nil {
-		return
-	}
 
 	checkBoolAnd(t, "AllowTCP",
 		result.Network.Protocols.AllowTCP,
@@ -372,19 +374,9 @@ func assertNetUnion(
 ) {
 	t.Helper()
 
-	if result.Network == nil || left.Network == nil || right.Network == nil {
-		return
-	}
-
 	checkBoolOr(t, "AllowRaw",
 		result.Network.AllowRaw, left.Network.AllowRaw, right.Network.AllowRaw,
 	)
-
-	if result.Network.Protocols == nil ||
-		left.Network.Protocols == nil ||
-		right.Network.Protocols == nil {
-		return
-	}
 
 	checkBoolOr(t, "AllowTCP",
 		result.Network.Protocols.AllowTCP,
@@ -398,11 +390,15 @@ func assertNetUnion(
 	)
 }
 
+// checkBoolAnd compares one merged network permission against the AND of the
+// inputs. Every input sets all three, so an unset one in the result is a
+// permission the merge lost track of rather than a case to skip.
 func checkBoolAnd(t *testing.T, name string, result, left, right *bool) {
 	t.Helper()
 
 	if left == nil || right == nil || result == nil {
-		return
+		t.Fatalf("intersect %s: result=%v left=%v right=%v, want all three set",
+			name, result, left, right)
 	}
 
 	expected := *left && *right
@@ -414,11 +410,14 @@ func checkBoolAnd(t *testing.T, name string, result, left, right *bool) {
 	}
 }
 
+// checkBoolOr compares one merged network permission against the OR of the
+// inputs, and fails on an unset one for the reason checkBoolAnd does.
 func checkBoolOr(t *testing.T, name string, result, left, right *bool) {
 	t.Helper()
 
 	if left == nil || right == nil || result == nil {
-		return
+		t.Fatalf("union %s: result=%v left=%v right=%v, want all three set",
+			name, result, left, right)
 	}
 
 	expected := *left || *right
@@ -435,28 +434,24 @@ func assertExecSubset(
 ) {
 	t.Helper()
 
-	if result.Executable == nil {
-		return
-	}
-
-	leftExecs := stringSet(left.Executable.AllowedExecutables)
-	rightExecs := stringSet(right.Executable.AllowedExecutables)
+	leftExecs := pathIdentitySet(left.Executable.AllowedExecutables)
+	rightExecs := pathIdentitySet(right.Executable.AllowedExecutables)
 
 	for _, path := range result.Executable.AllowedExecutables {
-		_, inLeft := leftExecs[path]
-		_, inRight := rightExecs[path]
+		_, inLeft := leftExecs[apparmor.PathIdentity(path)]
+		_, inRight := rightExecs[apparmor.PathIdentity(path)]
 
 		if !inLeft || !inRight {
 			t.Errorf("intersect result has executable %q not in both inputs", path)
 		}
 	}
 
-	leftLibs := stringSet(left.Executable.AllowedLibraries)
-	rightLibs := stringSet(right.Executable.AllowedLibraries)
+	leftLibs := pathIdentitySet(left.Executable.AllowedLibraries)
+	rightLibs := pathIdentitySet(right.Executable.AllowedLibraries)
 
 	for _, path := range result.Executable.AllowedLibraries {
-		_, inLeft := leftLibs[path]
-		_, inRight := rightLibs[path]
+		_, inLeft := leftLibs[apparmor.PathIdentity(path)]
+		_, inRight := rightLibs[apparmor.PathIdentity(path)]
 
 		if !inLeft || !inRight {
 			t.Errorf("intersect result has library %q not in both inputs", path)
@@ -469,30 +464,33 @@ func assertExecSuperset(
 ) {
 	t.Helper()
 
-	if result.Executable == nil {
-		return
-	}
-
-	resultExecs := stringSet(result.Executable.AllowedExecutables)
-	resultLibs := stringSet(result.Executable.AllowedLibraries)
+	resultExecs := pathIdentitySet(result.Executable.AllowedExecutables)
+	resultLibs := pathIdentitySet(result.Executable.AllowedLibraries)
 
 	for _, input := range []*apparmor.Profile{left, right} {
-		if input.Executable == nil {
-			continue
-		}
-
 		for _, path := range input.Executable.AllowedExecutables {
-			if _, ok := resultExecs[path]; !ok {
+			if _, ok := resultExecs[apparmor.PathIdentity(path)]; !ok {
 				t.Errorf("union result missing executable %q from input", path)
 			}
 		}
 
 		for _, path := range input.Executable.AllowedLibraries {
-			if _, ok := resultLibs[path]; !ok {
+			if _, ok := resultLibs[apparmor.PathIdentity(path)]; !ok {
 				t.Errorf("union result missing library %q from input", path)
 			}
 		}
 	}
+}
+
+// pathSet renders a list of paths as the rules they spell, since a merge
+// keeps one spelling per rule and it need not be the one an input used.
+func pathIdentitySet(paths []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		set[apparmor.PathIdentity(path)] = struct{}{}
+	}
+
+	return set
 }
 
 func stringSet(items []string) map[string]struct{} {
@@ -606,25 +604,37 @@ func FuzzAppArmorDiff(f *testing.F) {
 
 		assertDiffSymmetry(t, diff, reverse)
 
-		selfDiff, err := apparmor.Diff(left, left)
+		// An equal but distinct profile, rather than the same pointer,
+		// which would only catch a Diff that is not deterministic.
+		same := fuzzAppArmorProfile(capMaskL, path1L, path2L, rawL, tcpL, udpL)
+
+		selfDiff, err := apparmor.Diff(left, same)
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		if !selfDiff.Equal {
-			t.Error("Diff(X, X) must be equal")
+			t.Errorf("Diff of equal profiles reports %s", apparmor.FormatDiff(selfDiff))
 		}
 	})
 }
 
+// FuzzAppArmorValidateStrict fuzzes the check made on a profile a person
+// wrote. Beyond crashes it pins the ordering of the three: strict rejects
+// everything Validate rejects, since it runs those checks too, and everything
+// ValidateArtifact rejects, since the artifact checks are the loadability
+// ones plus a cap on the number of paths, which the five paths of a fuzzed
+// profile never reach.
 func FuzzAppArmorValidateStrict(f *testing.F) {
 	f.Add(uint64(0x2001000), "/etc/config", "/var/log", true, true, false)
 	f.Add(uint64(0x80001), "/etc/config", "/var/log", false, false, true)
 	f.Add(uint64(0x1001), "/etc/config", "/tmp", true, true, true)
 	f.Add(uint64(0x80), "/x", "/y", true, false, true)
+	f.Add(uint64(0x80), "/tmp/a b", "/tmp/c,", false, false, false)
+	f.Add(uint64(0x80), `/tmp/\000`, "/tmp/[!a]", false, false, false)
 
 	f.Fuzz(func(
-		_ *testing.T,
+		t *testing.T,
 		capMask uint64, path1, path2 string,
 		allowRaw, allowTCP, allowUDP bool,
 	) {
@@ -633,7 +643,21 @@ func FuzzAppArmorValidateStrict(f *testing.F) {
 			allowRaw, allowTCP, allowUDP,
 		)
 
-		_ = apparmor.ValidateStrict(profile)
+		if apparmor.ValidateStrict(profile) != nil {
+			return
+		}
+
+		err := apparmor.Validate(profile)
+		if err != nil {
+			t.Fatalf("ValidateStrict accepted a profile Validate rejects: %v", err)
+		}
+
+		err = apparmor.ValidateArtifact(profile)
+		if err != nil {
+			t.Fatalf(
+				"ValidateStrict accepted a profile ValidateArtifact rejects: %v", err,
+			)
+		}
 	})
 }
 

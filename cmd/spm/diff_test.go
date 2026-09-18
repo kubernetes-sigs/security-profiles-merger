@@ -18,11 +18,14 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
@@ -48,7 +51,7 @@ func TestDiffErrors(t *testing.T) {
 			args:       []string{cmdDiff, invalidFile, seccompFile},
 			stdin:      nil,
 			wantCode:   exitUsage,
-			wantStderr: testParsingProfile0,
+			wantStderr: parsingError(invalidFile),
 		},
 		{
 			name:       "stdin pair via dash",
@@ -227,15 +230,19 @@ func TestDiffSeccompHuman(t *testing.T) {
 	fileB := writeTemp(t, seccompJSON(t, "write"))
 
 	code, stdout, _ := runCapture(t, []string{
-		cmdDiff, flagType, typeSeccomp, flagFormat, formatHuman, fileA, fileB,
+		cmdDiff, flagType, typeSeccomp, flagArch, archNone,
+		flagFormat, formatHuman, fileA, fileB,
 	}, nil)
 
 	if code != exitDiff {
 		t.Fatalf("exit code = %d, want %d", code, exitDiff)
 	}
 
-	if !strings.Contains(stdout, "Diff{") {
-		t.Errorf("expected Diff{...} output, got: %s", stdout)
+	// The whole line is pinned: a prefix check passes for any diff at all,
+	// the empty one included.
+	const want = "Diff{-read->SCMP_ACT_ALLOW +write->SCMP_ACT_ALLOW}\n"
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
 	}
 }
 
@@ -307,8 +314,9 @@ func TestDiffAppArmorHuman(t *testing.T) {
 		t.Fatalf("exit code = %d, want %d", code, exitDiff)
 	}
 
-	if !strings.Contains(stdout, "Diff{") {
-		t.Errorf("expected Diff{...} output, got: %s", stdout)
+	const want = "Diff{caps:-NET_ADMIN,+CHOWN}\n"
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
 	}
 }
 
@@ -379,8 +387,9 @@ func TestDiffLandlockHuman(t *testing.T) {
 		t.Fatalf("exit code = %d, want %d", code, exitDiff)
 	}
 
-	if !strings.Contains(stdout, "Diff{") {
-		t.Errorf("expected Diff{...} output, got: %s", stdout)
+	const want = "Diff{fs:-read_file,+write_file ~/etc:[read_file]->[write_file]}\n"
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
 	}
 }
 
@@ -446,5 +455,214 @@ func TestDiffNoDetectNoteSuppressesDetectionNote(t *testing.T) {
 
 	if strings.Contains(stderr, note) {
 		t.Errorf("stderr = %q, want no detection note", stderr)
+	}
+}
+
+// TestDiffArch covers --arch, without which a seccomp comparison depends on
+// the architecture the CLI happens to run on: seccomp.Diff implies the
+// native one on both sides, so the same two files answer "equal" on amd64
+// and "different" on arm64, and spm diff exits 0 or 1 accordingly.
+func TestDiffArch(t *testing.T) {
+	t.Parallel()
+
+	// The two differ only in an architecture list, which is exactly what a
+	// native-architecture diff is allowed to ignore.
+	listed := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO",`+
+		`"architectures":["SCMP_ARCH_X86_64"]}`)
+	unlisted := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO"}`)
+
+	native, hasNative := seccomp.NativeArchitecture()
+
+	for _, testCase := range []struct {
+		name     string
+		arch     []string
+		wantCode int
+		skip     bool
+	}{
+		{
+			// Without --arch nothing changes: the native architecture is
+			// implied, as it always was.
+			name:     "the default implies the native architecture",
+			arch:     nil,
+			wantCode: 0,
+			skip:     !hasNative || native != specs.ArchX86_64,
+		},
+		{
+			name:     "none compares the lists as written",
+			arch:     []string{flagArch, archNone},
+			wantCode: exitDiff,
+			skip:     false,
+		},
+		{
+			name:     "native is spelled out",
+			arch:     []string{flagArch, archNative},
+			wantCode: 0,
+			skip:     !hasNative || native != specs.ArchX86_64,
+		},
+		{
+			name:     "a named architecture the profile lists",
+			arch:     []string{flagArch, string(specs.ArchX86_64)},
+			wantCode: 0,
+			skip:     false,
+		},
+		{
+			name:     "a named architecture the profile does not list",
+			arch:     []string{flagArch, string(specs.ArchAARCH64)},
+			wantCode: exitDiff,
+			skip:     false,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			if testCase.skip {
+				t.Skip("the outcome depends on the architecture the test runs on")
+			}
+
+			args := append(
+				append([]string{cmdDiff, flagType, typeSeccomp}, testCase.arch...),
+				listed, unlisted,
+			)
+
+			code, stdout, stderr := runCapture(t, args, nil)
+
+			if code != testCase.wantCode {
+				t.Fatalf(
+					"exit code = %d, want %d (stdout: %s, stderr: %s)",
+					code, testCase.wantCode, stdout, stderr,
+				)
+			}
+		})
+	}
+}
+
+// TestDiffArchIsReproducible pins the point of the flag: a named
+// architecture gives the same verdict wherever the CLI runs, which is what a
+// control plane comparing profiles for a mixed-architecture cluster needs.
+func TestDiffArchIsReproducible(t *testing.T) {
+	t.Parallel()
+
+	listed := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO",`+
+		`"architectures":["SCMP_ARCH_S390X"]}`)
+	unlisted := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO"}`)
+
+	for _, arch := range []string{archNone, string(specs.ArchS390X), string(specs.ArchPPC64LE)} {
+		want := exitDiff
+		if arch == string(specs.ArchS390X) {
+			want = 0
+		}
+
+		code, _, stderr := runCapture(t, []string{
+			cmdDiff, flagType, typeSeccomp, flagArch, arch, listed, unlisted,
+		}, nil)
+
+		if code != want {
+			t.Errorf("--arch %s: exit code = %d, want %d: %s", arch, code, want, stderr)
+		}
+	}
+}
+
+func TestDiffArchErrors(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "an unknown value",
+			args: []string{
+				cmdDiff, flagType, typeSeccomp, flagArch, testBogus,
+				testdataSeccompA, testdataSeccompB,
+			},
+			want: "unknown architecture",
+		},
+		{
+			// Only seccomp profiles carry architectures, so asking for one
+			// anywhere else is a mistake worth reporting rather than
+			// ignoring.
+			name: "on an apparmor diff",
+			args: []string{
+				cmdDiff, flagType, typeAppArmor, flagArch, archNone,
+				"testdata/apparmor_a.json", "testdata/apparmor_b.json",
+			},
+			want: "--arch only applies to " + typeSeccomp,
+		},
+		{
+			name: "on a landlock diff",
+			args: []string{
+				cmdDiff, flagType, typeLandlock, flagArch, string(specs.ArchX86_64),
+				"testdata/landlock_a.json", "testdata/landlock_b.json",
+			},
+			want: "--arch only applies to " + typeSeccomp,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			code, stdout, stderr := runCapture(t, testCase.args, nil)
+
+			if code != exitUsage {
+				t.Fatalf("exit code = %d, want %d: %s", code, exitUsage, stderr)
+			}
+
+			if stdout != "" {
+				t.Errorf("stdout = %q, want no diff", stdout)
+			}
+
+			if !strings.Contains(stderr, testCase.want) {
+				t.Errorf("stderr = %q, want it to mention %q", stderr, testCase.want)
+			}
+		})
+	}
+}
+
+// TestParseDiffArch covers the values --arch takes, including the one that
+// tells a native comparison from an explicit one.
+func TestParseDiffArch(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		value        string
+		wantArch     specs.Arch
+		wantExplicit bool
+		wantErr      bool
+	}{
+		{archNative, "", false, false},
+		{archNone, "", true, false},
+		{string(specs.ArchX86_64), specs.ArchX86_64, true, false},
+		{string(specs.ArchLOONGARCH64), specs.ArchLOONGARCH64, true, false},
+		{"", "", false, true},
+		{"x86_64", "", false, true},
+		{testBogus, "", false, true},
+		// Spelled like an architecture but naming none: implied by neither
+		// profile, so accepting it would silently compare as --arch none
+		// does rather than as the node the caller named.
+		{archPrefix + "ARM64", "", false, true},
+	} {
+		got, err := parseDiffArch(testCase.value)
+
+		if testCase.wantErr {
+			if !errors.Is(err, errUnknownArchName) {
+				t.Errorf("%q: error = %v, want %v", testCase.value, err, errUnknownArchName)
+			}
+
+			continue
+		}
+
+		if err != nil {
+			t.Errorf("%q: unexpected error: %v", testCase.value, err)
+
+			continue
+		}
+
+		if got.value != testCase.wantArch || got.explicit != testCase.wantExplicit {
+			t.Errorf(
+				"%q = {%q, %t}, want {%q, %t}",
+				testCase.value, got.value, got.explicit,
+				testCase.wantArch, testCase.wantExplicit,
+			)
+		}
 	}
 }

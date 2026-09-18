@@ -46,21 +46,21 @@ func TestValidateErrors(t *testing.T) {
 			args:       []string{cmdValidate, invalidFile},
 			stdin:      nil,
 			wantCode:   1,
-			wantStderr: testParsingProfile0,
+			wantStderr: parsingError(invalidFile),
 		},
 		{
 			name:       "array of numbers without type",
 			args:       []string{cmdValidate},
 			stdin:      strings.NewReader("[1,2]"),
 			wantCode:   1,
-			wantStderr: testParsingProfile0,
+			wantStderr: parsingError(stdinName + "[0]"),
 		},
 		{
 			name:       "array of numbers with type",
 			args:       []string{cmdValidate, flagType, typeSeccomp},
 			stdin:      strings.NewReader("[1,2]"),
 			wantCode:   1,
-			wantStderr: testParsingProfile0,
+			wantStderr: parsingError(stdinName + "[0]"),
 		},
 		{
 			name:       "quiet with output",
@@ -151,11 +151,21 @@ func TestValidateErrors(t *testing.T) {
 	}
 }
 
+// TestValidateLandlockInvalid covers both validation levels the CLI wires
+// for landlock: the default one, which rejects a right no kernel knows, and
+// --strict, which also rejects a rule repeated for one path.
 func TestValidateLandlockInvalid(t *testing.T) {
 	t.Parallel()
 
-	profile := &landlock.Profile{
-		HandledAccessFS:  []landlock.FSAccessRight{"read_file"},
+	unknownRight := writeTemp(t, marshal(t, &landlock.Profile{
+		HandledAccessFS:  []landlock.FSAccessRight{"read_file", testBogus},
+		HandledAccessNet: nil,
+		Scoped:           nil,
+		PathRules:        nil,
+		NetRules:         nil,
+	}))
+	duplicatePath := writeTemp(t, marshal(t, &landlock.Profile{
+		HandledAccessFS:  []landlock.FSAccessRight{"read_file", "write_file"},
 		HandledAccessNet: nil,
 		Scoped:           nil,
 		PathRules: []landlock.PathRule{
@@ -163,20 +173,41 @@ func TestValidateLandlockInvalid(t *testing.T) {
 			{Path: testEtcPath, AccessFS: []landlock.FSAccessRight{"write_file"}},
 		},
 		NetRules: nil,
-	}
+	}))
 
-	file := writeTemp(t, marshal(t, profile))
+	for _, testCase := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "an unknown access right",
+			args: []string{cmdValidate, flagType, typeLandlock, unknownRight},
+			want: "unknown access right",
+		},
+		{
+			name: "a repeated path rule under --strict",
+			args: []string{cmdValidate, flagType, typeLandlock, flagStrict, duplicatePath},
+			want: "duplicate",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 
-	code, _, stderr := runCapture(t, []string{
-		cmdValidate, flagType, typeLandlock, file,
-	}, nil)
+			code, stdout, stderr := runCapture(t, testCase.args, nil)
 
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1", code)
-	}
+			if code != 1 {
+				t.Fatalf("exit code = %d, want 1: %s", code, stderr)
+			}
 
-	if !strings.Contains(stderr, "duplicate") {
-		t.Errorf("stderr = %q, want mention of duplicate", stderr)
+			if stdout != "" {
+				t.Errorf("stdout = %q, want no profile", stdout)
+			}
+
+			if !strings.Contains(stderr, testCase.want) {
+				t.Errorf("stderr = %q, want it to mention %q", stderr, testCase.want)
+			}
+		})
 	}
 }
 
@@ -462,8 +493,19 @@ func TestValidateOutputFlag(t *testing.T) {
 		t.Fatalf("reading output file: %v", err)
 	}
 
-	if len(data) == 0 {
-		t.Error("output file is empty")
+	// The file must hold the profile itself, not merely something: a
+	// non-empty file that is not a profile is the failure worth catching.
+	var written specs.LinuxSeccomp
+
+	unmarshalOutput(t, string(data), &written)
+
+	if written.DefaultAction != specs.ActErrno {
+		t.Errorf("output file default action = %q, want %q", written.DefaultAction, specs.ActErrno)
+	}
+
+	if len(written.Syscalls) != 1 || len(written.Syscalls[0].Names) != 1 ||
+		written.Syscalls[0].Names[0] != testSyscallRead {
+		t.Errorf("output file syscalls = %+v, want the one read rule", written.Syscalls)
 	}
 }
 
@@ -622,7 +664,7 @@ func TestValidateStrictRejectsUnknownFields(t *testing.T) {
 		t.Fatalf("exit code = %d, want 1: %s", code, stderr)
 	}
 
-	if !strings.Contains(stderr, `error: parsing profile 0: unknown field "syscalls[0].arg"`) {
+	if !strings.Contains(stderr, `error: parsing `+file+`: unknown field "syscalls[0].arg"`) {
 		t.Errorf("stderr = %q, want the unknown field named", stderr)
 	}
 }
@@ -640,7 +682,7 @@ func TestValidateWarnsAboutUnknownFields(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0: %s", code, stderr)
 	}
 
-	if !strings.Contains(stderr, `warning: profile 0: unknown field "defaultErrnoRett"`) {
+	if !strings.Contains(stderr, `warning: `+file+`: unknown field "defaultErrnoRett"`) {
 		t.Errorf("stderr = %q, want a warning about the unknown field", stderr)
 	}
 

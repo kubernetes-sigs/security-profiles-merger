@@ -5,3 +5,6 @@ approvers:
 
 reviewers:
   - saschagrunert
+
+labels:
+  - sig/node

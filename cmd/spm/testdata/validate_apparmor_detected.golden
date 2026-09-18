@@ -1,0 +1,21 @@
+{
+  "executable": {
+    "allowedExecutables": [
+      "/usr/bin/bash"
+    ],
+    "allowedLibraries": [
+      "/usr/lib/libc.so"
+    ]
+  },
+  "filesystem": {
+    "readOnlyPaths": [
+      "/etc/config"
+    ]
+  },
+  "capability": {
+    "allowedCapabilities": [
+      "NET_ADMIN",
+      "SYS_TIME"
+    ]
+  }
+}

@@ -23,6 +23,12 @@ import (
 	"sigs.k8s.io/security-profiles-merger/apparmor"
 )
 
+// benchPathCounts are the profile sizes every benchmark runs at. The two
+// largest sit past maxGlobCacheEntries, where a merge of distinct patterns
+// evicts entries it still needs, and past the merge's pair budget, where it
+// stops matching altogether: both are cliffs the smaller sizes hide.
+var benchPathCounts = []int{10, 50, 200, 1024, 2000}
+
 func buildAppArmorProfile(numPaths int) *apparmor.Profile {
 	allCaps := allKnownTestCaps()
 	numCaps := min(numPaths, len(allCaps))
@@ -64,11 +70,13 @@ func buildAppArmorProfile(numPaths int) *apparmor.Profile {
 }
 
 func BenchmarkAppArmorIntersect(b *testing.B) {
-	for _, numPaths := range []int{10, 50, 200} {
+	for _, numPaths := range benchPathCounts {
 		left := buildAppArmorProfile(numPaths)
 		right := buildAppArmorProfile(numPaths)
 
 		b.Run(fmt.Sprintf("paths=%d", numPaths), func(b *testing.B) {
+			b.ReportAllocs()
+
 			for range b.N {
 				result, err := apparmor.Intersect(left, right)
 				if err != nil {
@@ -82,11 +90,13 @@ func BenchmarkAppArmorIntersect(b *testing.B) {
 }
 
 func BenchmarkAppArmorUnion(b *testing.B) {
-	for _, numPaths := range []int{10, 50, 200} {
+	for _, numPaths := range benchPathCounts {
 		left := buildAppArmorProfile(numPaths)
 		right := buildAppArmorProfile(numPaths)
 
 		b.Run(fmt.Sprintf("paths=%d", numPaths), func(b *testing.B) {
+			b.ReportAllocs()
+
 			for range b.N {
 				result, err := apparmor.Union(left, right)
 				if err != nil {
@@ -100,10 +110,12 @@ func BenchmarkAppArmorUnion(b *testing.B) {
 }
 
 func BenchmarkAppArmorValidate(b *testing.B) {
-	for _, numPaths := range []int{10, 50, 200} {
+	for _, numPaths := range benchPathCounts {
 		profile := buildAppArmorProfile(numPaths)
 
 		b.Run(fmt.Sprintf("paths=%d", numPaths), func(b *testing.B) {
+			b.ReportAllocs()
+
 			for range b.N {
 				err := apparmor.Validate(profile)
 				if err != nil {
@@ -115,10 +127,12 @@ func BenchmarkAppArmorValidate(b *testing.B) {
 }
 
 func BenchmarkAppArmorValidateStrict(b *testing.B) {
-	for _, numPaths := range []int{10, 50, 200} {
+	for _, numPaths := range benchPathCounts {
 		profile := buildAppArmorProfile(numPaths)
 
 		b.Run(fmt.Sprintf("paths=%d", numPaths), func(b *testing.B) {
+			b.ReportAllocs()
+
 			for range b.N {
 				err := apparmor.ValidateStrict(profile)
 				if err != nil {
@@ -130,11 +144,13 @@ func BenchmarkAppArmorValidateStrict(b *testing.B) {
 }
 
 func BenchmarkAppArmorDiff(b *testing.B) {
-	for _, numPaths := range []int{10, 50, 200} {
+	for _, numPaths := range benchPathCounts {
 		left := buildAppArmorProfile(numPaths)
 		right := buildAppArmorProfile(numPaths)
 
 		b.Run(fmt.Sprintf("paths=%d", numPaths), func(b *testing.B) {
+			b.ReportAllocs()
+
 			for range b.N {
 				result, err := apparmor.Diff(left, right)
 				if err != nil {
@@ -148,7 +164,7 @@ func BenchmarkAppArmorDiff(b *testing.B) {
 }
 
 func BenchmarkAppArmorFormatDiff(b *testing.B) {
-	for _, numPaths := range []int{10, 50, 200} {
+	for _, numPaths := range benchPathCounts {
 		left := buildAppArmorProfile(numPaths)
 		right := buildAppArmorDisjointProfile(numPaths, "right")
 
@@ -158,6 +174,8 @@ func BenchmarkAppArmorFormatDiff(b *testing.B) {
 		}
 
 		b.Run(fmt.Sprintf("paths=%d", numPaths), func(b *testing.B) {
+			b.ReportAllocs()
+
 			for range b.N {
 				_ = apparmor.FormatDiff(diff)
 			}
@@ -166,10 +184,12 @@ func BenchmarkAppArmorFormatDiff(b *testing.B) {
 }
 
 func BenchmarkAppArmorFormatProfile(b *testing.B) {
-	for _, numPaths := range []int{10, 50, 200} {
+	for _, numPaths := range benchPathCounts {
 		profile := buildAppArmorProfile(numPaths)
 
 		b.Run(fmt.Sprintf("paths=%d", numPaths), func(b *testing.B) {
+			b.ReportAllocs()
+
 			for range b.N {
 				_ = apparmor.FormatProfile(profile)
 			}
@@ -178,11 +198,13 @@ func BenchmarkAppArmorFormatProfile(b *testing.B) {
 }
 
 func BenchmarkAppArmorIntersectDisjoint(b *testing.B) {
-	for _, numPaths := range []int{10, 50, 200} {
+	for _, numPaths := range benchPathCounts {
 		left := buildAppArmorDisjointProfile(numPaths, "left")
 		right := buildAppArmorDisjointProfile(numPaths, "right")
 
 		b.Run(fmt.Sprintf("paths=%d", numPaths), func(b *testing.B) {
+			b.ReportAllocs()
+
 			for range b.N {
 				result, err := apparmor.Intersect(left, right)
 				if err != nil {
@@ -267,11 +289,13 @@ func buildAppArmorGlobProfile(numPaths int) *apparmor.Profile {
 }
 
 func BenchmarkAppArmorIntersectGlob(b *testing.B) {
-	for _, numPaths := range []int{10, 50, 200} {
+	for _, numPaths := range benchPathCounts {
 		left := buildAppArmorGlobProfile(numPaths)
 		right := buildAppArmorGlobProfile(numPaths)
 
 		b.Run(fmt.Sprintf("paths=%d", numPaths), func(b *testing.B) {
+			b.ReportAllocs()
+
 			for range b.N {
 				result, err := apparmor.Intersect(left, right)
 				if err != nil {
@@ -284,12 +308,82 @@ func BenchmarkAppArmorIntersectGlob(b *testing.B) {
 	}
 }
 
+// buildAppArmorSharedPrefixProfile builds the shape the prefix index cannot
+// help with: every pattern is rooted in one directory, so every literal is a
+// candidate for every pattern and the index degenerates to a linear scan.
+// buildAppArmorGlobProfile gives each pattern its own prefix, which leaves
+// one pattern per bucket and never measures this.
+func buildAppArmorSharedPrefixProfile(numPaths int, literals bool) *apparmor.Profile {
+	paths := make([]string, 0, numPaths)
+
+	for idx := range numPaths {
+		if literals {
+			paths = append(paths, fmt.Sprintf("/shared/f%d", idx))
+		} else {
+			paths = append(paths, fmt.Sprintf("/shared/*%d", idx))
+		}
+	}
+
+	return &apparmor.Profile{
+		Executable: nil,
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths:  paths,
+			WriteOnlyPaths: nil,
+			ReadWritePaths: nil,
+		},
+		Network:      nil,
+		Capabilities: nil,
+	}
+}
+
+func BenchmarkAppArmorIntersectSharedPrefix(b *testing.B) {
+	for _, numPaths := range benchPathCounts {
+		left := buildAppArmorSharedPrefixProfile(numPaths, true)
+		right := buildAppArmorSharedPrefixProfile(numPaths, false)
+
+		b.Run(fmt.Sprintf("paths=%d", numPaths), func(b *testing.B) {
+			b.ReportAllocs()
+
+			for range b.N {
+				result, err := apparmor.Intersect(left, right)
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				_ = result
+			}
+		})
+	}
+}
+
+func BenchmarkAppArmorUnionSharedPrefix(b *testing.B) {
+	for _, numPaths := range benchPathCounts {
+		left := buildAppArmorSharedPrefixProfile(numPaths, true)
+		right := buildAppArmorSharedPrefixProfile(numPaths, false)
+
+		b.Run(fmt.Sprintf("paths=%d", numPaths), func(b *testing.B) {
+			b.ReportAllocs()
+
+			for range b.N {
+				result, err := apparmor.Union(left, right)
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				_ = result
+			}
+		})
+	}
+}
+
 func BenchmarkAppArmorUnionGlob(b *testing.B) {
-	for _, numPaths := range []int{10, 50, 200} {
+	for _, numPaths := range benchPathCounts {
 		left := buildAppArmorGlobProfile(numPaths)
 		right := buildAppArmorGlobProfile(numPaths)
 
 		b.Run(fmt.Sprintf("paths=%d", numPaths), func(b *testing.B) {
+			b.ReportAllocs()
+
 			for range b.N {
 				result, err := apparmor.Union(left, right)
 				if err != nil {

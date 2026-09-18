@@ -30,6 +30,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 const mergeUsage = `Usage: spm merge [options] [files...]
@@ -43,6 +44,9 @@ array of profiles.
 for all of them, or one mode per input, separated by commas. A container
 runtime merging a pulled profile into its node baseline uses
 --validate strict,artifact.
+
+Input order decides tie-breaks: a value only one profile can carry, such as
+errnoRet, listenerPath or listenerMetadata, is taken from the earlier input.
 
 Options:
 `
@@ -105,37 +109,37 @@ func runMerge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	data, err := readInputs(flags.Args(), stdin)
+	inputs, err := readInputs(flags.Args(), stdin)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 
-		return 1
+		return readErrorExit(err)
 	}
 
-	return mergeInputs(opts, data, stdout, stderr)
+	return mergeInputs(opts, inputs, stdout, stderr)
 }
 
 // mergeInputs validates, merges and writes the profiles that were read.
 func mergeInputs(
-	opts *mergeOptions, data [][]byte, stdout, stderr io.Writer,
+	opts *mergeOptions, inputs []profileInput, stdout, stderr io.Writer,
 ) int {
 	// The mode count is checked against the inputs, which a "-" argument
 	// may expand into several, so this waits until they are read.
-	modes, err := parseValidateModes(opts.validate, len(data))
+	modes, err := parseValidateModes(opts.validate, len(inputs))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 
 		return exitUsage
 	}
 
-	kind, code := resolveKind(opts.profileType, data, 1, opts.noDetectNote, stderr)
+	kind, code := resolveKind(opts.profileType, inputs, 1, opts.noDetectNote, stderr)
 	if code != 0 {
 		return code
 	}
 
 	var out bytes.Buffer
 
-	code = kind.merge(data, opts.strategy, modes, opts.format, &out, stderr)
+	code = kind.merge(inputs, opts.strategy, modes, opts.format, &out, stderr)
 	if code != 0 {
 		return code
 	}
@@ -223,7 +227,7 @@ func validateMergeFlags(
 // mergeRequest carries everything one merge run needs, so that the per-input
 // validation modes do not turn mergeProfiles into a long parameter list.
 type mergeRequest[T any] struct {
-	data     [][]byte
+	inputs   []profileInput
 	strategy string
 	format   string
 	// checks and policies hold one entry per input, in the same order.
@@ -249,14 +253,14 @@ func mergeProfiles[T any](request mergeRequest[T], stdout, stderr io.Writer) int
 		return exitUsage
 	}
 
-	profiles, err := unmarshalAll[T](request.data, request.policies, stderr)
+	profiles, err := unmarshalAll[T](request.inputs, request.policies, stderr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 
 		return 1
 	}
 
-	if failed := checkInputs(profiles, request.checks, stderr); failed {
+	if failed := checkInputs(profiles, request.checks, request.inputs, stderr); failed {
 		return 1
 	}
 
@@ -274,7 +278,7 @@ func mergeProfiles[T any](request mergeRequest[T], stdout, stderr io.Writer) int
 // failed. Every input is checked, so one run names every problem. A nil
 // check means the merge functions already run what this input asked for.
 func checkInputs[T any](
-	profiles []*T, checks []func(*T) error, stderr io.Writer,
+	profiles []*T, checks []func(*T) error, inputs []profileInput, stderr io.Writer,
 ) bool {
 	failed := false
 
@@ -285,7 +289,7 @@ func checkInputs[T any](
 
 		err := checks[idx](profile)
 		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "error: profile %d: %v\n", idx, err)
+			_, _ = fmt.Fprintf(stderr, "error: %s: %v\n", inputs[idx].name, err)
 
 			failed = true
 		}
@@ -312,7 +316,41 @@ var (
 	errFileTooLarge   = fmt.Errorf("file exceeds %d byte limit", maxInputSize)
 	errInputTooLarge  = fmt.Errorf("inputs exceed %d bytes in total", maxTotalInputSize)
 	errUnknownField   = errors.New("unknown field")
+	errInvalidUTF8    = errors.New(
+		"invalid UTF-8, which the JSON decoder replaces with U+FFFD, " +
+			"so distinct profiles can decode alike",
+	)
 )
+
+// stdinName is how an input read from stdin is named in errors and
+// warnings. Elements of a JSON array read from stdin get an index appended.
+const stdinName = "stdin"
+
+// profileInput is one profile document together with the name of where it
+// came from, so that errors and warnings can name the file rather than a
+// position in an argument list that may hold up to maxInputFiles entries.
+type profileInput struct {
+	// name is a file path, stdinName, or "stdin[i]" for an element of a
+	// JSON array read from stdin.
+	name string
+	// data holds the profile's raw JSON.
+	data []byte
+}
+
+// readErrorExit returns the exit code for a readInputs failure. The three
+// sentinels below report an invocation mistake rather than a bad profile,
+// so they exit like every other usage error.
+func readErrorExit(err error) int {
+	for _, sentinel := range []error{
+		errDuplicateStdin, errTooManyFiles, errTooManyStdin,
+	} {
+		if errors.Is(err, sentinel) {
+			return exitUsage
+		}
+	}
+
+	return 1
+}
 
 // decodePolicy selects which ambiguities in a profile's JSON are errors
 // rather than warnings.
@@ -321,17 +359,21 @@ type decodePolicy struct {
 	rejectUnknown bool
 	// rejectDuplicates rejects members repeated within one object.
 	rejectDuplicates bool
+	// rejectInvalidUTF8 rejects bytes that are not valid UTF-8.
+	rejectInvalidUTF8 bool
 }
 
 // lenientDecode returns the policy that warns about every ambiguity and
 // rejects none, repeated once per input.
 func lenientDecode(inputs int) []decodePolicy {
-	return slices.Repeat(
-		[]decodePolicy{{rejectUnknown: false, rejectDuplicates: false}}, inputs,
-	)
+	return slices.Repeat([]decodePolicy{{
+		rejectUnknown:     false,
+		rejectDuplicates:  false,
+		rejectInvalidUTF8: false,
+	}}, inputs)
 }
 
-func readInputs(paths []string, stdin io.Reader) ([][]byte, error) {
+func readInputs(paths []string, stdin io.Reader) ([]profileInput, error) {
 	if len(paths) == 0 {
 		return readFromStdin(stdin)
 	}
@@ -341,7 +383,7 @@ func readInputs(paths []string, stdin io.Reader) ([][]byte, error) {
 	}
 
 	var (
-		result [][]byte
+		result []profileInput
 		total  int
 	)
 
@@ -363,7 +405,7 @@ func readInputs(paths []string, stdin io.Reader) ([][]byte, error) {
 			}
 
 			for _, item := range items {
-				added += len(item)
+				added += len(item.data)
 			}
 
 			result = append(result, items...)
@@ -374,7 +416,7 @@ func readInputs(paths []string, stdin io.Reader) ([][]byte, error) {
 			}
 
 			added = len(data)
-			result = append(result, data)
+			result = append(result, profileInput{name: path, data: data})
 		}
 
 		total += added
@@ -403,10 +445,16 @@ func readFileWithLimit(path string) ([]byte, error) {
 		return nil, errFileTooLarge
 	}
 
+	// An empty file is reported the way empty stdin is, rather than left to
+	// the decoder, which would call it a truncated document.
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, errEmptyInput
+	}
+
 	return data, nil
 }
 
-func readFromStdin(reader io.Reader) ([][]byte, error) {
+func readFromStdin(reader io.Reader) ([]profileInput, error) {
 	if reader == nil {
 		return nil, errEmptyInput
 	}
@@ -436,61 +484,106 @@ func readFromStdin(reader io.Reader) ([][]byte, error) {
 			return nil, errTooManyStdin
 		}
 
-		result := make([][]byte, len(array))
+		result := make([]profileInput, len(array))
 		for idx, item := range array {
-			result[idx] = item
+			result[idx] = profileInput{
+				name: stdinName + "[" + strconv.Itoa(idx) + "]",
+				data: item,
+			}
 		}
 
 		return result, nil
 	}
 
-	return [][]byte{data}, nil
+	return []profileInput{{name: stdinName, data: data}}, nil
 }
 
 // unmarshalAll decodes every raw profile under its own policy, given one per
 // input. A member the profile type has no field for, such as a misspelled
-// key, silently drops the rule it was meant to carry, and a member repeated
-// within one object is read differently by different parsers. Each is an
-// error when that input's policy rejects it and a warning on stderr
-// otherwise.
-func unmarshalAll[T any](data [][]byte, policies []decodePolicy, stderr io.Writer) ([]*T, error) {
-	profiles := make([]*T, len(data))
+// key, silently drops the rule it was meant to carry; a member repeated
+// within one object is read differently by different parsers; and a byte
+// that is not valid UTF-8 is replaced with U+FFFD, which makes profiles that
+// differ in their bytes decode to the same rules. Each is an error when that
+// input's policy rejects it and a warning on stderr otherwise.
+func unmarshalAll[T any](
+	inputs []profileInput, policies []decodePolicy, stderr io.Writer,
+) ([]*T, error) {
+	profiles := make([]*T, len(inputs))
 
-	for idx, raw := range data {
+	for idx, input := range inputs {
 		policy := policies[idx]
 		profile := new(T)
 
-		err := json.Unmarshal(raw, profile)
+		err := json.Unmarshal(input.data, profile)
 		if err != nil {
-			return nil, fmt.Errorf("parsing profile %d: %w", idx, err)
+			return nil, fmt.Errorf("parsing %s: %w", input.name, err)
 		}
 
 		checks := []struct {
-			paths  []string
-			kind   error
+			err    error
 			reject bool
 		}{
-			{duplicateKeys(raw), errDuplicateKey, policy.rejectDuplicates},
-			{unknownFieldsOf[T](raw), errUnknownField, policy.rejectUnknown},
+			{
+				pathsError(errDuplicateKey, duplicateKeys(input.data)),
+				policy.rejectDuplicates,
+			},
+			{
+				pathsError(errUnknownField, unknownFieldsOf[T](input.data)),
+				policy.rejectUnknown,
+			},
+			{invalidUTF8Error(input.data), policy.rejectInvalidUTF8},
 		}
 
 		for _, check := range checks {
-			if len(check.paths) == 0 {
+			if check.err == nil {
 				continue
 			}
 
-			err := fieldPathsError(check.kind, check.paths)
 			if check.reject {
-				return nil, fmt.Errorf("parsing profile %d: %w", idx, err)
+				return nil, fmt.Errorf("parsing %s: %w", input.name, check.err)
 			}
 
-			_, _ = fmt.Fprintf(stderr, "warning: profile %d: %v\n", idx, err)
+			_, _ = fmt.Fprintf(stderr, "warning: %s: %v\n", input.name, check.err)
 		}
 
 		profiles[idx] = profile
 	}
 
 	return profiles, nil
+}
+
+// pathsError wraps kind with the given field paths, or returns nil when
+// there are none.
+func pathsError(kind error, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+
+	return fieldPathsError(kind, paths)
+}
+
+// invalidUTF8Error reports the first byte of raw that does not start a valid
+// UTF-8 sequence, or nil when every byte does. encoding/json replaces such
+// bytes with U+FFFD, so two profiles whose syscall names differ only in
+// those bytes decode to the same name and merge into one rule; in an
+// artifact, a name spelled that way is a sign the bytes were crafted.
+func invalidUTF8Error(raw []byte) error {
+	if utf8.Valid(raw) {
+		return nil
+	}
+
+	offset := 0
+
+	for offset < len(raw) {
+		_, size := utf8.DecodeRune(raw[offset:])
+		if size == 1 && raw[offset] >= utf8.RuneSelf {
+			break
+		}
+
+		offset += size
+	}
+
+	return fmt.Errorf("%w (first at byte %d)", errInvalidUTF8, offset)
 }
 
 // unknownFieldsOf reports the members of raw that T has no field for.
