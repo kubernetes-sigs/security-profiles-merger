@@ -67,6 +67,8 @@ func BenchmarkLandlockValidate(b *testing.B) {
 		profile := buildLandlockProfile(numPaths)
 
 		b.Run(fmt.Sprintf("paths=%d", numPaths), func(b *testing.B) {
+			b.ReportAllocs()
+
 			for range b.N {
 				err := landlock.Validate(profile)
 				if err != nil {
@@ -82,6 +84,8 @@ func BenchmarkLandlockValidateStrict(b *testing.B) {
 		profile := buildLandlockProfile(numPaths)
 
 		b.Run(fmt.Sprintf("paths=%d", numPaths), func(b *testing.B) {
+			b.ReportAllocs()
+
 			for range b.N {
 				err := landlock.ValidateStrict(profile)
 				if err != nil {
@@ -92,12 +96,53 @@ func BenchmarkLandlockValidateStrict(b *testing.B) {
 	}
 }
 
+// buildDeepLandlockProfile builds rules along one hierarchy, each nested a
+// level below the one before, which is what makes ancestor resolution and
+// the redundancy pruning work: both walk a path's ancestors once per rule.
+// The offset shifts the component names, so two profiles can be built that
+// share their upper levels but not their leaves.
+func buildDeepLandlockProfile(depth, offset int) *landlock.Profile {
+	pathRules := make([]landlock.PathRule, 0, depth)
+	path := ""
+
+	for idx := range depth {
+		path += fmt.Sprintf("/level%d", idx+offset)
+
+		access := []landlock.FSAccessRight{landlock.FSAccessReadFile}
+		if idx%2 == 0 {
+			access = append(access, landlock.FSAccessWriteFile)
+		}
+
+		pathRules = append(pathRules, landlock.PathRule{Path: path, AccessFS: access})
+	}
+
+	return &landlock.Profile{
+		HandledAccessFS: []landlock.FSAccessRight{
+			landlock.FSAccessReadFile,
+			landlock.FSAccessWriteFile,
+			landlock.FSAccessExecute,
+		},
+		HandledAccessNet: nil,
+		Scoped:           nil,
+		PathRules:        pathRules,
+		NetRules:         nil,
+	}
+}
+
 func BenchmarkLandlockIntersect(b *testing.B) {
 	for _, numPaths := range []int{10, 50, 200} {
 		left := buildLandlockProfile(numPaths)
-		right := buildLandlockProfile(numPaths)
+		// The right profile differs from the left, so the intersection has
+		// something to decide rather than copying one side.
+		right := buildLandlockProfile(numPaths / 2)
+		right.HandledAccessFS = []landlock.FSAccessRight{
+			landlock.FSAccessReadFile,
+			landlock.FSAccessExecute,
+		}
 
 		b.Run(fmt.Sprintf("paths=%d", numPaths), func(b *testing.B) {
+			b.ReportAllocs()
+
 			for range b.N {
 				result, err := landlock.Intersect(left, right)
 				if err != nil {
@@ -105,6 +150,66 @@ func BenchmarkLandlockIntersect(b *testing.B) {
 				}
 
 				_ = result
+			}
+		})
+	}
+}
+
+// BenchmarkLandlockIntersectDeep stresses the hierarchy: every rule path has
+// every other rule path above it, so ancestor resolution and the redundancy
+// pruning see their worst case, which the flat benchmarks above never reach.
+func BenchmarkLandlockIntersectDeep(b *testing.B) {
+	for _, depth := range []int{10, 50, 200} {
+		left := buildDeepLandlockProfile(depth, 0)
+		right := buildDeepLandlockProfile(depth, 1)
+
+		b.Run(fmt.Sprintf("depth=%d", depth), func(b *testing.B) {
+			b.ReportAllocs()
+
+			for range b.N {
+				result, err := landlock.Intersect(left, right)
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				_ = result
+			}
+		})
+	}
+}
+
+func BenchmarkLandlockUnionDeep(b *testing.B) {
+	for _, depth := range []int{10, 50, 200} {
+		left := buildDeepLandlockProfile(depth, 0)
+		right := buildDeepLandlockProfile(depth, 1)
+
+		b.Run(fmt.Sprintf("depth=%d", depth), func(b *testing.B) {
+			b.ReportAllocs()
+
+			for range b.N {
+				result, err := landlock.Union(left, right)
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				_ = result
+			}
+		})
+	}
+}
+
+func BenchmarkLandlockValidateDeep(b *testing.B) {
+	for _, depth := range []int{10, 50, 200} {
+		profile := buildDeepLandlockProfile(depth, 0)
+
+		b.Run(fmt.Sprintf("depth=%d", depth), func(b *testing.B) {
+			b.ReportAllocs()
+
+			for range b.N {
+				err := landlock.ValidateStrict(profile)
+				if err != nil {
+					b.Fatal(err)
+				}
 			}
 		})
 	}
@@ -147,6 +252,8 @@ func BenchmarkLandlockIntersectDisjoint(b *testing.B) {
 		},
 	}
 
+	b.ReportAllocs()
+
 	for range b.N {
 		result, err := landlock.Intersect(left, right)
 		if err != nil {
@@ -163,6 +270,8 @@ func BenchmarkLandlockDiff(b *testing.B) {
 		right := buildLandlockProfile(numPaths)
 
 		b.Run(fmt.Sprintf("paths=%d", numPaths), func(b *testing.B) {
+			b.ReportAllocs()
+
 			for range b.N {
 				result, err := landlock.Diff(left, right)
 				if err != nil {
@@ -198,6 +307,8 @@ func BenchmarkLandlockFormatDiff(b *testing.B) {
 		}
 
 		b.Run(fmt.Sprintf("paths=%d", numPaths), func(b *testing.B) {
+			b.ReportAllocs()
+
 			for range b.N {
 				_ = landlock.FormatDiff(diff)
 			}
@@ -210,6 +321,8 @@ func BenchmarkLandlockFormatProfile(b *testing.B) {
 		profile := buildLandlockProfile(numPaths)
 
 		b.Run(fmt.Sprintf("paths=%d", numPaths), func(b *testing.B) {
+			b.ReportAllocs()
+
 			for range b.N {
 				_ = landlock.FormatProfile(profile)
 			}
@@ -223,6 +336,8 @@ func BenchmarkLandlockUnion(b *testing.B) {
 		right := buildLandlockProfile(numPaths)
 
 		b.Run(fmt.Sprintf("paths=%d", numPaths), func(b *testing.B) {
+			b.ReportAllocs()
+
 			for range b.N {
 				result, err := landlock.Union(left, right)
 				if err != nil {

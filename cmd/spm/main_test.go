@@ -18,8 +18,10 @@ package main
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -72,8 +74,16 @@ func TestReadFromStdinJSONArray(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(result) != 2 {
-		t.Fatalf("got %d items, want 2", len(result))
+	wantData := []string{`{"a":1}`, `{"b":2}`}
+	if got := inputData(result); !slices.Equal(got, wantData) {
+		t.Errorf("data = %q, want %q", got, wantData)
+	}
+
+	// An element of a stdin array carries its index, so a warning about it
+	// names which one it was.
+	wantNames := []string{"stdin[0]", "stdin[1]"}
+	if got := inputNames(result); !slices.Equal(got, wantNames) {
+		t.Errorf("names = %q, want %q", got, wantNames)
 	}
 }
 
@@ -85,8 +95,53 @@ func TestReadFromStdinSingleObject(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(result) != 1 {
-		t.Fatalf("got %d items, want 1", len(result))
+	if got := inputData(result); !slices.Equal(got, []string{`{"a":1}`}) {
+		t.Errorf("data = %q, want the one document", got)
+	}
+
+	if got := inputNames(result); !slices.Equal(got, []string{stdinName}) {
+		t.Errorf("names = %q, want [%q]", got, stdinName)
+	}
+}
+
+// TestReadFromStdinTooManyProfiles covers the bound on a stdin array, which
+// is the one way a single argument can expand into arbitrarily many inputs.
+func TestReadFromStdinTooManyProfiles(t *testing.T) {
+	t.Parallel()
+
+	const overTheBound = 1001
+
+	var builder strings.Builder
+
+	builder.WriteByte('[')
+
+	for idx := range overTheBound {
+		if idx > 0 {
+			builder.WriteByte(',')
+		}
+
+		builder.WriteString(`{"defaultAction":"SCMP_ACT_ERRNO"}`)
+	}
+
+	builder.WriteByte(']')
+
+	_, err := readFromStdin(strings.NewReader(builder.String()))
+	if !errors.Is(err, errTooManyStdin) {
+		t.Fatalf("error = %v, want %v", err, errTooManyStdin)
+	}
+
+	// The same array reaches the command as a usage error, not as a failed
+	// profile.
+	code, _, stderr := runCapture(t, []string{
+		cmdMerge, flagType, typeSeccomp, flagStrategy, strategyUnion,
+	}, strings.NewReader(builder.String()))
+
+	if code != exitUsage {
+		t.Fatalf("exit code = %d, want %d: %s", code, exitUsage, stderr)
+	}
+
+	if !strings.Contains(stderr, "too many profiles on stdin") {
+		t.Errorf("stderr = %q, want the stdin bound error", stderr)
 	}
 }
 
@@ -112,8 +167,14 @@ func TestReadInputsFromFiles(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(result) != 2 {
-		t.Fatalf("got %d items, want 2", len(result))
+	if got := inputData(result); !slices.Equal(got, []string{`{"a":1}`, `{"b":2}`}) {
+		t.Errorf("data = %q, want both documents in order", got)
+	}
+
+	// A file input is named by its path, so an error names the file rather
+	// than a position in a list that may hold a thousand of them.
+	if got := inputNames(result); !slices.Equal(got, []string{file1, file2}) {
+		t.Errorf("names = %q, want %q", got, []string{file1, file2})
 	}
 }
 
@@ -121,8 +182,34 @@ func TestReadInputsNonexistentFile(t *testing.T) {
 	t.Parallel()
 
 	_, err := readInputs([]string{"/no/such/file.json"}, nil)
-	if err == nil {
-		t.Fatal("expected error for nonexistent file")
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("error = %v, want one wrapping %v", err, fs.ErrNotExist)
+	}
+
+	if !strings.Contains(err.Error(), "/no/such/file.json") {
+		t.Errorf("error = %q, want the path it could not read", err)
+	}
+}
+
+// TestReadInputsEmptyFile covers a file that holds nothing, which is
+// reported the way empty stdin is rather than as a truncated document.
+func TestReadInputsEmptyFile(t *testing.T) {
+	t.Parallel()
+
+	empty := filepath.Join(t.TempDir(), "empty.json")
+
+	err := os.WriteFile(empty, []byte("  \n\t "), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = readInputs([]string{empty}, nil)
+	if !errors.Is(err, errEmptyInput) {
+		t.Fatalf("error = %v, want %v", err, errEmptyInput)
+	}
+
+	if !strings.Contains(err.Error(), empty) {
+		t.Errorf("error = %q, want the name of the empty file", err)
 	}
 }
 
@@ -153,8 +240,12 @@ func TestReadInputsStdinDash(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(result) != 1 {
-		t.Fatalf("got %d items, want 1", len(result))
+	if got := inputData(result); !slices.Equal(got, []string{`{"a":1}`}) {
+		t.Errorf("data = %q, want the document from stdin", got)
+	}
+
+	if got := inputNames(result); !slices.Equal(got, []string{stdinName}) {
+		t.Errorf("names = %q, want [%q]", got, stdinName)
 	}
 }
 
@@ -168,8 +259,8 @@ func TestReadInputsNoPathsUsesStdin(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(result) != 2 {
-		t.Fatalf("got %d items, want 2", len(result))
+	if got := inputData(result); !slices.Equal(got, []string{`{"a":1}`, `{"b":2}`}) {
+		t.Errorf("data = %q, want both documents in order", got)
 	}
 }
 
@@ -184,32 +275,57 @@ func TestReadInputsDuplicateStdin(t *testing.T) {
 	}
 }
 
+// TestErrorSentinels pins the messages of the input-reading sentinels, which
+// are what a user sees on stderr, and the bounds two of them spell out. A
+// bound is written as a literal here so that changing the constant changes
+// this test too.
 func TestErrorSentinels(t *testing.T) {
 	t.Parallel()
 
-	t.Run("errEmptyInput", func(t *testing.T) {
-		t.Parallel()
-
-		if errEmptyInput == nil {
-			t.Fatal("errEmptyInput should not be nil")
+	for _, testCase := range []struct {
+		err  error
+		want string
+	}{
+		{errEmptyInput, "no input provided"},
+		{errDuplicateStdin, `stdin ("-") can only be specified once`},
+		{errTooManyFiles, "too many input files (max 1000)"},
+		{errTooManyStdin, "too many profiles on stdin (max 1000)"},
+		{errStdinTooLarge, "stdin input exceeds 10485760 bytes"},
+		{errFileTooLarge, "file exceeds 10485760 byte limit"},
+		{errInputTooLarge, "inputs exceed 67108864 bytes in total"},
+	} {
+		if got := testCase.err.Error(); got != testCase.want {
+			t.Errorf("message = %q, want %q", got, testCase.want)
 		}
-	})
+	}
+}
 
-	t.Run("errStdinTooLarge", func(t *testing.T) {
-		t.Parallel()
+// TestExitCodeContract pins the documented exit codes as literal integers.
+// Every other assertion in the suite compares against these constants, so
+// changing one would otherwise leave the whole suite green while breaking
+// every caller that reads the exit status.
+func TestExitCodeContract(t *testing.T) {
+	t.Parallel()
 
-		if errStdinTooLarge == nil {
-			t.Fatal("errStdinTooLarge should not be nil")
-		}
-	})
+	if exitUsage != 2 {
+		t.Errorf("exitUsage = %d, want 2", exitUsage)
+	}
 
-	t.Run("errFileTooLarge", func(t *testing.T) {
-		t.Parallel()
+	if exitDiff != 1 {
+		t.Errorf("exitDiff = %d, want 1", exitDiff)
+	}
 
-		if errFileTooLarge == nil {
-			t.Fatal("errFileTooLarge should not be nil")
-		}
-	})
+	if maxInputFiles != 1000 {
+		t.Errorf("maxInputFiles = %d, want 1000", maxInputFiles)
+	}
+
+	if maxInputSize != 10<<20 {
+		t.Errorf("maxInputSize = %d, want %d", maxInputSize, 10<<20)
+	}
+
+	if maxTotalInputSize != 64<<20 {
+		t.Errorf("maxTotalInputSize = %d, want %d", maxTotalInputSize, 64<<20)
+	}
 }
 
 // TestDetectMixedProfileTypes covers the per-input detection: merging a
@@ -244,6 +360,10 @@ func TestDetectMixedProfileTypes(t *testing.T) {
 	}
 }
 
+// TestValidateQuietWritesNothing covers the --quiet contract in full: no
+// profile on stdout and nothing at all on stderr, the auto-detect note
+// included. It deliberately omits --type, which is the only case in which
+// there is a note to suppress.
 func TestValidateQuietWritesNothing(t *testing.T) {
 	t.Parallel()
 
@@ -252,7 +372,7 @@ func TestValidateQuietWritesNothing(t *testing.T) {
 	}))
 
 	code, stdout, stderr := runCapture(t, []string{
-		cmdValidate, flagType, typeSeccomp, "--quiet", file,
+		cmdValidate, "--quiet", file,
 	}, nil)
 
 	if code != 0 {
@@ -261,6 +381,44 @@ func TestValidateQuietWritesNothing(t *testing.T) {
 
 	if stdout != "" {
 		t.Errorf("stdout = %q, want nothing", stdout)
+	}
+
+	if stderr != "" {
+		t.Errorf("stderr = %q, want nothing on a quiet success", stderr)
+	}
+}
+
+// TestValidateNoDetectNote covers --no-detect-note, which keeps the profile
+// on stdout while dropping the note that --quiet also drops, so that a
+// pipeline can redirect stdout and leave a clean stderr in its log.
+func TestValidateNoDetectNote(t *testing.T) {
+	t.Parallel()
+
+	file := writeTemp(t, marshal(t, &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+	}))
+
+	code, stdout, stderr := runCapture(t, []string{
+		cmdValidate, flagNoDetectNote, file,
+	}, nil)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0: %s", code, stderr)
+	}
+
+	if !strings.Contains(stdout, string(specs.ActErrno)) {
+		t.Errorf("stdout = %q, want the validated profile", stdout)
+	}
+
+	if stderr != "" {
+		t.Errorf("stderr = %q, want no auto-detect note", stderr)
+	}
+
+	// Without the flag the note is there, so the test above is not passing
+	// for want of anything to suppress.
+	_, _, stderr = runCapture(t, []string{cmdValidate, file}, nil)
+	if !strings.Contains(stderr, "auto-detected profile type: "+typeSeccomp) {
+		t.Errorf("stderr = %q, want the auto-detect note", stderr)
 	}
 }
 

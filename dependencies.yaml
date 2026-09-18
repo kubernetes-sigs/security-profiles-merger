@@ -1,6 +1,14 @@
+# Dependabot tracks pinned action SHAs and go.mod. The tool versions below
+# live in a Makefile variable or a workflow env, where it cannot see them:
+# refPaths keep those copies in sync with each other, and the upstream
+# stanzas let the scheduled dependencies workflow ask each project whether
+# the pin is still the current release.
 dependencies:
   - name: golangci-lint
     version: 2.13.2
+    upstream:
+      flavour: github
+      url: golangci/golangci-lint
     refPaths:
       - path: Makefile
         match: ^GOLANGCI_LINT_VERSION
@@ -9,6 +17,9 @@ dependencies:
 
   - name: syft
     version: 1.51.1
+    upstream:
+      flavour: github
+      url: anchore/syft
     refPaths:
       - path: .github/workflows/ci.yml
         match: "syft-version: v"
@@ -17,6 +28,9 @@ dependencies:
 
   - name: goreleaser
     version: 2.18.1
+    upstream:
+      flavour: github
+      url: goreleaser/goreleaser
     refPaths:
       - path: .github/workflows/ci.yml
         match: "GORELEASER_VERSION: v"
@@ -25,16 +39,26 @@ dependencies:
 
   - name: cosign
     version: 3.0.6
+    upstream:
+      flavour: github
+      url: sigstore/cosign
     refPaths:
       - path: .github/workflows/release.yml
         match: "COSIGN_VERSION: v"
 
   - name: mdtoc
     version: 1.4.0
+    upstream:
+      flavour: github
+      url: kubernetes-sigs/mdtoc
     refPaths:
       - path: Makefile
         match: ^MDTOC_VERSION
 
+  # No upstream stanza: govulncheck is tagged far ahead of what golang/vuln
+  # publishes as a GitHub release, and the github flavour reads releases
+  # whenever a repository has any, so a stanza here would report this pin as
+  # current forever. go.mod-style tracking would be needed instead.
   - name: govulncheck
     version: 1.7.0
     refPaths:
@@ -43,6 +67,19 @@ dependencies:
 
   - name: zeitgeist
     version: 0.8.0
+    upstream:
+      flavour: github
+      url: kubernetes-sigs/zeitgeist
     refPaths:
       - path: Makefile
         match: ^ZEITGEIST_VERSION
+
+  # The libseccomp versions the seccomp model is checked against are a
+  # matrix in ci.yml, not one pin, so there is no single line for a refPath
+  # to match. Carrying the newest one here is what turns "add a version here
+  # when libseccomp releases one" into something a job can notice.
+  - name: libseccomp
+    version: 2.6.1
+    upstream:
+      flavour: github
+      url: seccomp/libseccomp

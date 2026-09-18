@@ -1,0 +1,33 @@
+name: dependency-updates
+
+# Dependabot watches pinned action SHAs and go.mod. The tool versions in the
+# Makefile and in the workflow envs, and the libseccomp releases the seccomp
+# model is checked against, are plain strings it cannot see. zeitgeist asks
+# every upstream about them instead, on a schedule rather than per pull
+# request: a release someone else cut is news, not a reason to fail a change.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Check the pinned versions against their upstreams
+        env:
+          # zeitgeist reads GITHUB_TOKEN, and the unauthenticated API budget
+          # does not stretch to a release listing per dependency.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The remote command needs a newer Go than the module's floor; let
+          # go run fetch the toolchain its module asks for, as govulncheck
+          # does in ci.yml.
+          GOTOOLCHAIN: auto
+        run: make verify-upstream

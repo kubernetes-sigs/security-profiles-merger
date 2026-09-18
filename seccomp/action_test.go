@@ -24,6 +24,73 @@ import (
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
 
+// restrictivenessOrder is the lattice the whole merge is built on, from the
+// most restrictive action to the least. SCMP_ACT_KILL_THREAD is the same
+// action as SCMP_ACT_KILL and is covered separately.
+func restrictivenessOrder() []specs.LinuxSeccompAction {
+	return []specs.LinuxSeccompAction{
+		specs.ActKillProcess,
+		specs.ActKill,
+		specs.ActTrap,
+		specs.ActErrno,
+		specs.ActNotify,
+		specs.ActTrace,
+		specs.ActLog,
+		specs.ActAllow,
+	}
+}
+
+// TestRestrictivenessOrder asserts every pair of the lattice in both
+// argument orders, which is what pins the order itself.
+//
+// Nothing else in the suite does: the safety oracles of the fuzz targets
+// express "never permits more" through MoreRestrictive and LessRestrictive,
+// so swapping two neighbours of the lattice leaves every one of them
+// satisfied by construction while changing what the merge emits. Only a
+// table naming the expected order can fail for such a swap.
+func TestRestrictivenessOrder(t *testing.T) {
+	t.Parallel()
+
+	order := restrictivenessOrder()
+
+	for idx, stricter := range order {
+		for _, looser := range order[idx+1:] {
+			if got := seccomp.MoreRestrictive(stricter, looser); got != stricter {
+				t.Errorf("MoreRestrictive(%q, %q) = %q, want %q", stricter, looser, got, stricter)
+			}
+
+			if got := seccomp.MoreRestrictive(looser, stricter); got != stricter {
+				t.Errorf("MoreRestrictive(%q, %q) = %q, want %q", looser, stricter, got, stricter)
+			}
+
+			if got := seccomp.LessRestrictive(stricter, looser); got != looser {
+				t.Errorf("LessRestrictive(%q, %q) = %q, want %q", stricter, looser, got, looser)
+			}
+
+			if got := seccomp.LessRestrictive(looser, stricter); got != looser {
+				t.Errorf("LessRestrictive(%q, %q) = %q, want %q", looser, stricter, got, looser)
+			}
+		}
+	}
+}
+
+// TestNotifyBetweenErrnoAndTrace pins the one placement of the lattice that
+// is a judgement call rather than a kernel fact: SCMP_ACT_NOTIFY blocks the
+// call until a supervisor decides, which is stricter than handing it to a
+// tracer (SCMP_ACT_TRACE) and looser than failing it outright
+// (SCMP_ACT_ERRNO).
+func TestNotifyBetweenErrnoAndTrace(t *testing.T) {
+	t.Parallel()
+
+	if got := seccomp.MoreRestrictive(specs.ActNotify, specs.ActErrno); got != specs.ActErrno {
+		t.Errorf("errno must be stricter than notify, got %q", got)
+	}
+
+	if got := seccomp.MoreRestrictive(specs.ActNotify, specs.ActTrace); got != specs.ActNotify {
+		t.Errorf("notify must be stricter than trace, got %q", got)
+	}
+}
+
 func TestMoreRestrictive(t *testing.T) {
 	t.Parallel()
 

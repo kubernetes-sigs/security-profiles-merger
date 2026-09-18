@@ -33,18 +33,18 @@ func TestDiffNil(t *testing.T) {
 	profile := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
 
 	_, err := seccomp.Diff(nil, profile)
-	if err == nil {
-		t.Fatal("expected error for nil left profile")
+	if !errors.Is(err, seccomp.ErrNilProfile) {
+		t.Fatalf("expected ErrNilProfile for a nil left profile, got: %v", err)
 	}
 
 	_, err = seccomp.Diff(profile, nil)
-	if err == nil {
-		t.Fatal("expected error for nil right profile")
+	if !errors.Is(err, seccomp.ErrNilProfile) {
+		t.Fatalf("expected ErrNilProfile for a nil right profile, got: %v", err)
 	}
 
 	_, err = seccomp.Diff(nil, nil)
-	if err == nil {
-		t.Fatal("expected error for nil-nil profiles")
+	if !errors.Is(err, seccomp.ErrNilProfile) {
+		t.Fatalf("expected ErrNilProfile for two nil profiles, got: %v", err)
 	}
 }
 

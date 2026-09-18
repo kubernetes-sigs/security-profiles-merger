@@ -1,0 +1,6 @@
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "capability": {
+    "allowedCapabilities": ["CHOWN"]
+  }
+}

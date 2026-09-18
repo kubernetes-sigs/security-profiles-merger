@@ -43,6 +43,24 @@ const (
 	maxGlobCacheEntries   = 1024
 	maxGlobCacheBytes     = 256 << 10
 	globCacheEvictDivisor = 4
+
+	// maxMergePathPairs bounds the pattern comparisons merging one category
+	// of paths may cost. Matching a literal against a pattern costs a
+	// regular expression evaluation, and every literal of one side may have
+	// to be tried against every pattern of the other, so the work grows with
+	// the product of the two counts. The prefix index removes most of those
+	// pairs when the patterns are rooted in different directories, but
+	// patterns sharing one prefix all land in the same bucket and the
+	// product is then what the merge pays: without a bound, two profiles of
+	// a few thousand paths under one directory take minutes, and nothing
+	// stops a profile from being larger still.
+	//
+	// Past the bound the merge falls back to a result that needs no
+	// matching, conservative for an intersection and equivalent for a union
+	// (see intersectVerbatim and unionVerbatim). The bound admits two
+	// profiles of MaxArtifactPaths paths each, so a profile a runtime
+	// accepts is merged exactly.
+	maxMergePathPairs = 1 << 20
 )
 
 // patternSyntax holds the bytes that make a path need analysis: glob
@@ -295,6 +313,53 @@ func forEachAncestor(name string, visit func(prefix string) bool) bool {
 	return false
 }
 
+// pathKey identifies the rule a path spells, so that two spellings of one
+// rule compare equal. A path without pattern syntax is identified by the
+// name it denotes, with repeated slashes collapsed and escape sequences
+// resolved, since apparmor_parser resolves them before it compiles the rule:
+// "/a/b" and `/a/\b` are one rule for one file. A pattern is identified by
+// the regular expression it compiles to, which two spellings of one pattern
+// share, and by its text when it compiles to nothing, since patterns that
+// match nothing are not thereby the same rule.
+type pathKey struct {
+	glob bool
+	text string
+}
+
+// keyForPath returns the identity of a path.
+func keyForPath(path string) pathKey {
+	matcher := matcherFor(path)
+
+	switch {
+	case matcher.kind == kindLiteral:
+		return pathKey{glob: false, text: matcher.literal}
+	case matcher.expr != nil:
+		return pathKey{glob: true, text: matcher.expr.String()}
+	default:
+		return pathKey{glob: true, text: path}
+	}
+}
+
+// exceedsPairBudget reports whether matching two sides against each other
+// would cost more comparisons than maxMergePathPairs. The literals of each
+// side are matched against the patterns of the other, and the patterns of
+// each side against the "**" patterns of the other, which costs one
+// comparison per pair as well. Counting the products rather than the paths
+// keeps a profile of many literals and no patterns, which needs no matching
+// at all, inside the budget whatever its size.
+// The counts are widened to uint64 first: they come from untrusted profiles,
+// and on a 32-bit platform their products overflow an int at roughly 27k
+// paths a side, which would turn the budget off exactly for the inputs it
+// exists for. Only ValidateArtifact bounds the path count, and the merge
+// runs Validate, so an unvalidated profile reaches this directly.
+func exceedsPairBudget(leftLiterals, leftGlobs, rightLiterals, rightGlobs int) bool {
+	pairs := uint64(leftLiterals)*uint64(rightGlobs) +
+		uint64(rightLiterals)*uint64(leftGlobs) +
+		uint64(leftGlobs)*uint64(rightGlobs)
+
+	return pairs > maxMergePathPairs
+}
+
 // prefixIndex groups patterns by a literal prefix so that a candidate is
 // tested only against the patterns whose prefix it starts with, rather than
 // against every pattern. Without it, matching n paths against m globs costs
@@ -395,10 +460,18 @@ func (set *pathSet) matches(path string) bool {
 // Non-glob paths are kept when matched by a glob on the other side.
 // For glob-vs-glob, a glob is kept when the other side has it verbatim or
 // expands over it with a "**" pattern (see globMatcher.expandedBy).
-// Otherwise the glob is dropped (conservative).
+// Otherwise the glob is dropped (conservative). Past the pair budget it
+// keeps only what both sides spell alike, which is conservative as well.
 func intersectPaths(left, right []string) []string {
 	leftSet := newPathSet(left)
 	rightSet := newPathSet(right)
+
+	if exceedsPairBudget(
+		len(leftSet.literals), len(leftSet.globs),
+		len(rightSet.literals), len(rightSet.globs),
+	) {
+		return intersectVerbatim(left, &rightSet)
+	}
 
 	seen := make(map[string]struct{})
 
@@ -477,6 +550,35 @@ func usableGlobs(paths []string) []string {
 	}
 
 	return globs
+}
+
+// intersectVerbatim returns the paths both sides list alike, the result an
+// intersection falls back to past its pair budget. A path both sides list
+// is permitted by both whatever it matches, so keeping it is exact; a path
+// only one side lists is dropped rather than matched against the other
+// side's patterns, which can only narrow the result. Order follows the left
+// side, as it does for the paths a full intersection keeps first.
+func intersectVerbatim(left []string, right *pathSet) []string {
+	var result []string
+
+	seen := make(map[string]struct{}, len(left))
+
+	for _, path := range left {
+		if _, dup := seen[path]; dup {
+			continue
+		}
+
+		_, literal := right.literals[path]
+		_, glob := right.globs[path]
+
+		if literal || glob {
+			seen[path] = struct{}{}
+
+			result = append(result, path)
+		}
+	}
+
+	return result
 }
 
 func addMatchedLiterals(

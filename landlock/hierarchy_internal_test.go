@@ -54,3 +54,57 @@ func TestPathAncestorsMatchesRelation(t *testing.T) {
 		}
 	}
 }
+
+// TestCleanPathTable pins the canonical form of a rule path against written
+// out expectations rather than against another implementation of the same
+// rule. The fuzz oracle carries its own cleaner, so a change here shows up
+// as a disagreement there; this table says which form is the right one.
+func TestCleanPathTable(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]string{
+		"/":             "/",
+		"/etc":          "/etc",
+		"/etc/":         "/etc",
+		"//etc//":       "/etc",
+		"/./etc/./":     "/etc",
+		"/etc/./passwd": "/etc/passwd",
+		"///":           "/",
+		"/.":            "/",
+		"":              ".",
+		".":             ".",
+		"./":            ".",
+		".//./":         ".",
+		"etc":           "etc",
+		"./etc":         "etc",
+		"etc/":          "etc",
+		"a/./b//c":      "a/b/c",
+		// ".." is kept: the kernel resolves it against the file system,
+		// where a symlink can make "/a/../b" name something other than
+		// "/b". Validate rejects such a path before a merge sees it.
+		"/a/../b":  "/a/../b",
+		"/a/..":    "/a/..",
+		"..":       "..",
+		"/a/b/../": "/a/b/..",
+		"/...":     "/...",
+		"/..data":  "/..data",
+		"/a b/c":   "/a b/c",
+	}
+
+	for input, want := range tests {
+		if got := cleanPath(input); got != want {
+			t.Errorf("cleanPath(%q) = %q, want %q", input, got, want)
+		}
+
+		// isCleanPath is the allocation-free precheck of cleanPath, so it
+		// must say "already clean" exactly for the paths cleanPath leaves
+		// alone.
+		if got, want := isCleanPath(input), cleanPath(input) == input; got != want {
+			t.Errorf("isCleanPath(%q) = %v, want %v", input, got, want)
+		}
+
+		if got := cleanPath(want); got != want {
+			t.Errorf("cleanPath(%q) = %q, want it to be idempotent", want, got)
+		}
+	}
+}

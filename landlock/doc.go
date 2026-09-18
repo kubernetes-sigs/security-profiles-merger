@@ -29,9 +29,17 @@ limitations under the License.
 // A kernel rejects a ruleset carrying an access right its ABI does not know,
 // so [RequiredABIVersion] reports the version a profile needs and
 // [ValidateForABI] checks it against the version a node reports. [Validate]
-// checks what the merge needs, [ValidateStrict] adds the checks worth making
-// on a profile a person wrote, and [ValidateArtifact] the ones a runtime
-// applies to a profile it did not author.
+// checks what the merge needs, [ValidateArtifact] adds the checks a runtime
+// applies to a profile it did not author, and [ValidateStrict] adds the ones
+// worth making on a profile a person wrote, so each rejects everything the
+// one before it rejects. [UnmarshalStrict] decodes a profile without
+// dropping members this package has no field for.
+//
+// Hierarchy resolution is textual, while the kernel binds a rule to the file
+// its path resolves to, so a rule of an [Intersect] result can grant an
+// input's access on a deeper path another input chose. [Intersect] documents
+// what follows from that, and [LoweredRulePaths] reports which rules of a
+// result carry such a grant.
 //
 // # Concurrency
 //

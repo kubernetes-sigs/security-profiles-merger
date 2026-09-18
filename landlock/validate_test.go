@@ -18,6 +18,8 @@ package landlock_test
 
 import (
 	"errors"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 
@@ -28,8 +30,8 @@ func TestValidateNil(t *testing.T) {
 	t.Parallel()
 
 	err := landlock.Validate(nil)
-	if err == nil {
-		t.Fatal("expected error for nil profile")
+	if !errors.Is(err, landlock.ErrNilProfile) {
+		t.Fatalf("Validate(nil) = %v, want ErrNilProfile", err)
 	}
 }
 
@@ -77,8 +79,8 @@ func TestValidateUnknownHandledFS(t *testing.T) {
 	}
 
 	err := landlock.Validate(profile)
-	if err == nil {
-		t.Fatal("expected error for unknown HandledAccessFS")
+	if !errors.Is(err, landlock.ErrUnknownRight) {
+		t.Fatalf("Validate = %v, want ErrUnknownRight", err)
 	}
 }
 
@@ -94,8 +96,8 @@ func TestValidateUnknownHandledNet(t *testing.T) {
 	}
 
 	err := landlock.Validate(profile)
-	if err == nil {
-		t.Fatal("expected error for unknown HandledAccessNet")
+	if !errors.Is(err, landlock.ErrUnknownRight) {
+		t.Fatalf("Validate = %v, want ErrUnknownRight", err)
 	}
 }
 
@@ -114,8 +116,8 @@ func TestValidateUnknownPathRuleRight(t *testing.T) {
 	}
 
 	err := landlock.Validate(profile)
-	if err == nil {
-		t.Fatal("expected error for unknown path rule right")
+	if !errors.Is(err, landlock.ErrUnknownRight) {
+		t.Fatalf("Validate = %v, want ErrUnknownRight", err)
 	}
 }
 
@@ -134,8 +136,8 @@ func TestValidateUnknownNetRuleRight(t *testing.T) {
 	}
 
 	err := landlock.Validate(profile)
-	if err == nil {
-		t.Fatal("expected error for unknown net rule right")
+	if !errors.Is(err, landlock.ErrUnknownRight) {
+		t.Fatalf("Validate = %v, want ErrUnknownRight", err)
 	}
 }
 
@@ -174,12 +176,8 @@ func TestValidateMultipleErrors(t *testing.T) {
 	}
 
 	err := landlock.Validate(profile)
-	if err == nil {
-		t.Fatal("expected error for multiple invalid rights")
-	}
-
 	if !errors.Is(err, landlock.ErrUnknownRight) {
-		t.Errorf("expected ErrUnknownRight, got: %v", err)
+		t.Fatalf("Validate = %v, want ErrUnknownRight", err)
 	}
 
 	msg := err.Error()
@@ -214,9 +212,16 @@ func TestValidateDuplicatePathRule(t *testing.T) {
 		NetRules: nil,
 	}
 
+	// The kernel folds duplicates and so does the merge, so only the
+	// strict check reports them.
 	err := landlock.Validate(profile)
+	if err != nil {
+		t.Fatalf("Validate = %v, want nil for a duplicate path rule", err)
+	}
+
+	err = landlock.ValidateStrict(profile)
 	if err == nil {
-		t.Fatal("expected error for duplicate path rule")
+		t.Fatal("expected ValidateStrict to report the duplicate path rule")
 	}
 
 	if !errors.Is(err, landlock.ErrDuplicateRule) {
@@ -244,9 +249,16 @@ func TestValidateDuplicateNetRule(t *testing.T) {
 		},
 	}
 
+	// The kernel folds duplicates and so does the merge, so only the
+	// strict check reports them.
 	err := landlock.Validate(profile)
+	if err != nil {
+		t.Fatalf("Validate = %v, want nil for a duplicate net rule", err)
+	}
+
+	err = landlock.ValidateStrict(profile)
 	if err == nil {
-		t.Fatal("expected error for duplicate net rule")
+		t.Fatal("expected ValidateStrict to report the duplicate net rule")
 	}
 
 	if !errors.Is(err, landlock.ErrDuplicateRule) {
@@ -284,8 +296,8 @@ func TestValidateStrictNil(t *testing.T) {
 	t.Parallel()
 
 	err := landlock.ValidateStrict(nil)
-	if err == nil {
-		t.Fatal("expected error for nil profile")
+	if !errors.Is(err, landlock.ErrNilProfile) {
+		t.Fatalf("ValidateStrict(nil) = %v, want ErrNilProfile", err)
 	}
 
 	if !errors.Is(err, landlock.ErrNilProfile) {
@@ -476,10 +488,13 @@ func TestValidateStrictAbsolutePathValid(t *testing.T) {
 	}
 }
 
+// The three tests below feed Validate the rights the golden tables in
+// golden_test.go name, which are written out by hand. Enumerating them from
+// the package instead would compare the package's table with itself.
 func TestValidateAllKnownFSRights(t *testing.T) {
 	t.Parallel()
 
-	all := landlock.KnownFSRights()
+	all := slices.Sorted(maps.Keys(goldenFSRights))
 
 	profile := &landlock.Profile{
 		HandledAccessFS:  all,
@@ -498,7 +513,7 @@ func TestValidateAllKnownFSRights(t *testing.T) {
 func TestValidateAllKnownNetRights(t *testing.T) {
 	t.Parallel()
 
-	all := landlock.KnownNetRights()
+	all := slices.Sorted(maps.Keys(goldenNetRights))
 
 	profile := &landlock.Profile{
 		HandledAccessFS:  nil,
@@ -517,7 +532,7 @@ func TestValidateAllKnownNetRights(t *testing.T) {
 func TestValidateAllKnownScopeRights(t *testing.T) {
 	t.Parallel()
 
-	all := landlock.KnownScopeRights()
+	all := slices.Sorted(maps.Keys(goldenScopeRights))
 
 	profile := &landlock.Profile{
 		HandledAccessFS:  nil,
@@ -568,9 +583,16 @@ func TestValidateDuplicateScopeRight(t *testing.T) {
 		NetRules:  nil,
 	}
 
+	// The kernel folds duplicates and so does the merge, so only the
+	// strict check reports them.
 	err := landlock.Validate(profile)
+	if err != nil {
+		t.Fatalf("Validate = %v, want nil for a duplicate scope right", err)
+	}
+
+	err = landlock.ValidateStrict(profile)
 	if err == nil {
-		t.Fatal("expected error for duplicate scope right")
+		t.Fatal("expected ValidateStrict to report the duplicate scope right")
 	}
 
 	if !errors.Is(err, landlock.ErrDuplicateRight) {
@@ -592,9 +614,16 @@ func TestValidateDuplicateFSRight(t *testing.T) {
 		NetRules:         nil,
 	}
 
+	// The kernel folds duplicates and so does the merge, so only the
+	// strict check reports them.
 	err := landlock.Validate(profile)
+	if err != nil {
+		t.Fatalf("Validate = %v, want nil for a duplicate FS right in handled set", err)
+	}
+
+	err = landlock.ValidateStrict(profile)
 	if err == nil {
-		t.Fatal("expected error for duplicate FS right in handled set")
+		t.Fatal("expected ValidateStrict to report the duplicate FS right in handled set")
 	}
 
 	if !errors.Is(err, landlock.ErrDuplicateRight) {
@@ -616,9 +645,16 @@ func TestValidateDuplicateHandledAccessNet(t *testing.T) {
 		NetRules:  nil,
 	}
 
+	// The kernel folds duplicates and so does the merge, so only the
+	// strict check reports them.
 	err := landlock.Validate(profile)
+	if err != nil {
+		t.Fatalf("Validate = %v, want nil for a duplicate HandledAccessNet right", err)
+	}
+
+	err = landlock.ValidateStrict(profile)
 	if err == nil {
-		t.Fatal("expected error for duplicate HandledAccessNet right")
+		t.Fatal("expected ValidateStrict to report the duplicate HandledAccessNet right")
 	}
 
 	if !errors.Is(err, landlock.ErrDuplicateRight) {
@@ -643,9 +679,16 @@ func TestValidateDuplicateNetRight(t *testing.T) {
 		}},
 	}
 
+	// The kernel folds duplicates and so does the merge, so only the
+	// strict check reports them.
 	err := landlock.Validate(profile)
+	if err != nil {
+		t.Fatalf("Validate = %v, want nil for a duplicate net right in rule", err)
+	}
+
+	err = landlock.ValidateStrict(profile)
 	if err == nil {
-		t.Fatal("expected error for duplicate net right in rule")
+		t.Fatal("expected ValidateStrict to report the duplicate net right in rule")
 	}
 
 	if !errors.Is(err, landlock.ErrDuplicateRight) {
@@ -670,9 +713,16 @@ func TestValidateDuplicatePathRuleRight(t *testing.T) {
 		NetRules: nil,
 	}
 
+	// The kernel folds duplicates and so does the merge, so only the
+	// strict check reports them.
 	err := landlock.Validate(profile)
+	if err != nil {
+		t.Fatalf("Validate = %v, want nil for a duplicate FS right in path rule", err)
+	}
+
+	err = landlock.ValidateStrict(profile)
 	if err == nil {
-		t.Fatal("expected error for duplicate FS right in path rule")
+		t.Fatal("expected ValidateStrict to report the duplicate FS right in path rule")
 	}
 
 	if !errors.Is(err, landlock.ErrDuplicateRight) {
@@ -992,5 +1042,202 @@ func TestValidateForABIReportsNetworkRuleRights(t *testing.T) {
 	err = landlock.ValidateForABI(profile, landlock.ABIV10)
 	if err != nil {
 		t.Errorf("ValidateForABI(v10) = %v, want nil", err)
+	}
+}
+
+// validationCorpus holds profiles covering every check the three validators
+// make, valid and invalid, so the lattice below is asserted over shapes that
+// actually fail somewhere.
+func validationCorpus() map[string]*landlock.Profile {
+	read := []landlock.FSAccessRight{landlock.FSAccessReadFile}
+	bind := []landlock.NetAccessRight{landlock.NetAccessBindTCP}
+	rule := func(path string) landlock.PathRule {
+		return landlock.PathRule{Path: path, AccessFS: read}
+	}
+
+	return map[string]*landlock.Profile{
+		"valid":            fsProfile(read, rule(pathEtc)),
+		"valid net":        netProfile(bind, landlock.NetRule{Port: 80, AccessNet: bind}),
+		"empty ruleset":    fsProfile(nil),
+		"unknown right":    fsProfile([]landlock.FSAccessRight{"bogus"}),
+		"unhandled right":  fsProfile(nil, rule(pathEtc)),
+		"relative path":    fsProfile(read, rule("etc")),
+		"empty path":       fsProfile(read, rule("")),
+		"dot path":         fsProfile(read, rule("./")),
+		"parent path":      fsProfile(read, rule("/a/../b")),
+		"nul path":         fsProfile(read, rule("/a\x00b")),
+		"long path":        fsProfile(read, rule("/"+strings.Repeat("a", landlock.MaxPathLen))),
+		"empty rule":       fsProfile(read, landlock.PathRule{Path: pathEtc, AccessFS: nil}),
+		"duplicate rule":   fsProfile(read, rule(pathEtc), rule("/etc/")),
+		"duplicate rights": fsProfile([]landlock.FSAccessRight{read[0], read[0]}, rule(pathEtc)),
+		"duplicate rule rights": fsProfile(read, landlock.PathRule{
+			Path:     pathEtc,
+			AccessFS: []landlock.FSAccessRight{read[0], read[0]},
+		}),
+		"duplicate port": netProfile(bind,
+			landlock.NetRule{Port: 80, AccessNet: bind},
+			landlock.NetRule{Port: 80, AccessNet: bind},
+		),
+		"nil": nil,
+	}
+}
+
+// TestValidationLattice asserts the order the three validators are
+// documented in: Validate checks what the merge needs, ValidateArtifact adds
+// what a kernel could not load, and ValidateStrict adds the duplicate
+// checks. So everything Validate rejects ValidateArtifact rejects, and
+// everything ValidateArtifact rejects ValidateStrict rejects.
+func TestValidationLattice(t *testing.T) {
+	t.Parallel()
+
+	for name, profile := range validationCorpus() {
+		base := landlock.Validate(profile)
+		artifact := landlock.ValidateArtifact(profile)
+		strict := landlock.ValidateStrict(profile)
+
+		if base != nil && artifact == nil {
+			t.Errorf("%s: Validate = %v but ValidateArtifact accepted it", name, base)
+		}
+
+		if artifact != nil && strict == nil {
+			t.Errorf("%s: ValidateArtifact = %v but ValidateStrict accepted it", name, artifact)
+		}
+
+		// A profile the merge takes is one Validate accepts, so the merge
+		// must fail exactly where Validate does.
+		_, err := landlock.Intersect(profile)
+		if (err != nil) != (base != nil) {
+			t.Errorf("%s: Intersect = %v, Validate = %v, want both or neither", name, err, base)
+		}
+	}
+}
+
+// TestValidateRejectsLongPaths covers the length limit, which bounds the
+// cost of every later check and of the merge's hierarchy resolution.
+func TestValidateRejectsLongPaths(t *testing.T) {
+	t.Parallel()
+
+	read := []landlock.FSAccessRight{landlock.FSAccessReadFile}
+
+	longest := "/" + strings.Repeat("a", landlock.MaxPathLen-1)
+
+	err := landlock.Validate(fsProfile(read, landlock.PathRule{Path: longest, AccessFS: read}))
+	if err != nil {
+		t.Errorf("Validate(%d bytes) = %v, want nil", len(longest), err)
+	}
+
+	tooLong := longest + "a"
+	profile := fsProfile(read, landlock.PathRule{Path: tooLong, AccessFS: read})
+
+	validators := map[string]func(*landlock.Profile) error{
+		"Validate":         landlock.Validate,
+		"ValidateStrict":   landlock.ValidateStrict,
+		"ValidateArtifact": landlock.ValidateArtifact,
+	}
+
+	for name, validate := range validators {
+		err := validate(profile)
+		if !errors.Is(err, landlock.ErrPathTooLong) {
+			t.Errorf("%s(%d bytes) = %v, want ErrPathTooLong", name, len(tooLong), err)
+		}
+	}
+
+	for name, mergeFn := range map[string]func(...*landlock.Profile) (*landlock.Profile, error){
+		"Intersect": landlock.Intersect,
+		"Union":     landlock.Union,
+	} {
+		_, err := mergeFn(profile, fsProfile(read))
+		if !errors.Is(err, landlock.ErrPathTooLong) {
+			t.Errorf("%s = %v, want ErrPathTooLong", name, err)
+		}
+	}
+}
+
+// TestValidateErrorsAreBounded checks that a rejection does not carry the
+// profile back out: a runtime logs what it refused, and for an artifact that
+// text is written by whoever built it.
+func TestValidateErrorsAreBounded(t *testing.T) {
+	t.Parallel()
+
+	const huge = 1 << 16
+
+	read := []landlock.FSAccessRight{landlock.FSAccessReadFile}
+	longRight := landlock.FSAccessRight(strings.Repeat("r", huge))
+
+	profiles := map[string]*landlock.Profile{
+		"nul path": fsProfile(read, landlock.PathRule{
+			Path: "/" + strings.Repeat("a", 200) + "\x00", AccessFS: read,
+		}),
+		"parent path": fsProfile(read, landlock.PathRule{
+			Path: "/" + strings.Repeat("a", 200) + "/../b", AccessFS: read,
+		}),
+		"relative path": fsProfile(read, landlock.PathRule{
+			Path: strings.Repeat("a", 2000), AccessFS: read,
+		}),
+		"unknown right": fsProfile([]landlock.FSAccessRight{longRight}),
+		"long path": fsProfile(read, landlock.PathRule{
+			Path: strings.Repeat("a", huge), AccessFS: nil,
+		}),
+	}
+
+	// Every message names a field, a sentinel and at most a bounded piece
+	// of the value, so a few hundred bytes is generous.
+	const limit = 512
+
+	for name, profile := range profiles {
+		reported := false
+
+		for _, err := range []error{
+			landlock.Validate(profile),
+			landlock.ValidateArtifact(profile),
+			landlock.ValidateStrict(profile),
+		} {
+			if err == nil {
+				continue
+			}
+
+			reported = true
+
+			if len(err.Error()) > limit {
+				t.Errorf("%s: error is %d bytes, want at most %d", name, len(err.Error()), limit)
+			}
+		}
+
+		if !reported {
+			t.Errorf("%s: expected an error from one of the validators", name)
+		}
+	}
+}
+
+// TestValidateManyErrorsAreBounded checks the other unbounded direction: a
+// profile can hold as many failures as it holds rules.
+func TestValidateManyErrorsAreBounded(t *testing.T) {
+	t.Parallel()
+
+	rules := make([]landlock.PathRule, 0, 1000)
+	for range 1000 {
+		rules = append(rules, landlock.PathRule{
+			Path:     "/a/../b",
+			AccessFS: []landlock.FSAccessRight{"bogus"},
+		})
+	}
+
+	err := landlock.ValidateStrict(fsProfile(nil, rules...))
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+
+	// Each nested join keeps at most merge.MaxJoinedErrors problems, so the
+	// message stays a fixed size whatever the profile holds.
+	if lines := strings.Count(err.Error(), "\n") + 1; lines > 128 {
+		t.Errorf("error reports %d problems, want them limited", lines)
+	}
+
+	if len(err.Error()) > 1<<14 {
+		t.Errorf("error is %d bytes, want it bounded", len(err.Error()))
+	}
+
+	if !strings.Contains(err.Error(), "more problems") {
+		t.Errorf("error does not say how many problems it left out: %q", err)
 	}
 }

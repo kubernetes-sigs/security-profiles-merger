@@ -18,6 +18,7 @@ package seccomp_test
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -30,8 +31,8 @@ func TestValidateNil(t *testing.T) {
 	t.Parallel()
 
 	err := seccomp.Validate(nil)
-	if err == nil {
-		t.Fatal("expected error for nil profile")
+	if !errors.Is(err, seccomp.ErrNilProfile) {
+		t.Fatalf("expected ErrNilProfile, got: %v", err)
 	}
 }
 
@@ -60,8 +61,12 @@ func TestValidateUnknownDefaultAction(t *testing.T) {
 	}
 
 	err := seccomp.Validate(profile)
-	if err == nil {
-		t.Fatal("expected error for unknown default action")
+	if !errors.Is(err, seccomp.ErrUnknownAction) {
+		t.Fatalf("expected ErrUnknownAction, got: %v", err)
+	}
+
+	if !strings.Contains(err.Error(), "default action") {
+		t.Errorf("error should mention the default action: %v", err)
 	}
 }
 
@@ -77,8 +82,12 @@ func TestValidateUnknownSyscallAction(t *testing.T) {
 	}
 
 	err := seccomp.Validate(profile)
-	if err == nil {
-		t.Fatal("expected error for unknown syscall action")
+	if !errors.Is(err, seccomp.ErrUnknownAction) {
+		t.Fatalf("expected ErrUnknownAction, got: %v", err)
+	}
+
+	if !strings.Contains(err.Error(), "syscall entry 1") {
+		t.Errorf("error should name the offending entry: %v", err)
 	}
 }
 
@@ -176,9 +185,53 @@ func TestValidateAllKnownActions(t *testing.T) {
 		profile := &specs.LinuxSeccomp{DefaultAction: action}
 
 		err := seccomp.Validate(profile)
+
+		// SCMP_ACT_NOTIFY is the one known action runc refuses as a
+		// default, so a profile using it there never loads.
+		if action == specs.ActNotify {
+			if !errors.Is(err, seccomp.ErrNotifyUnsupported) {
+				t.Errorf("expected ErrNotifyUnsupported for %q, got: %v", action, err)
+			}
+
+			continue
+		}
+
 		if err != nil {
 			t.Errorf("unexpected error for action %q: %v", action, err)
 		}
+	}
+}
+
+// TestValidateRejectsNotifyOnWrite pins the second place runc refuses
+// SCMP_ACT_NOTIFY: the write syscall, which the listener needs to answer a
+// notification. libseccomp itself accepts both positions, so Validate is
+// following the runtime here rather than the library.
+func TestValidateRejectsNotifyOnWrite(t *testing.T) {
+	t.Parallel()
+
+	profile := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{syscallRead}, Action: specs.ActNotify},
+			{Names: []string{syscallClose, syscallWrite}, Action: specs.ActNotify},
+		},
+	}
+
+	err := seccomp.Validate(profile)
+	if !errors.Is(err, seccomp.ErrNotifyUnsupported) {
+		t.Fatalf("expected ErrNotifyUnsupported, got: %v", err)
+	}
+
+	if !strings.Contains(err.Error(), "syscall entry 1") {
+		t.Errorf("error should mention syscall entry 1: %v", err)
+	}
+
+	// The same action on any other syscall loads fine.
+	profile.Syscalls = profile.Syscalls[:1]
+
+	err = seccomp.Validate(profile)
+	if err != nil {
+		t.Errorf("unexpected error for SCMP_ACT_NOTIFY on %s: %v", syscallRead, err)
 	}
 }
 
@@ -366,13 +419,22 @@ func TestValidateStrictAllKnownFlags(t *testing.T) {
 		Flags: []specs.LinuxSeccompFlag{
 			specs.LinuxSeccompFlagLog,
 			specs.LinuxSeccompFlagSpecAllow,
-			specs.LinuxSeccompFlagWaitKillableRecv,
 		},
 	}
 
 	err := seccomp.ValidateStrict(profile)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV is known but belongs to a
+	// listener, which ValidateStrict rejects along with everything else
+	// ValidateArtifact rejects.
+	profile.Flags = append(profile.Flags, specs.LinuxSeccompFlagWaitKillableRecv)
+
+	err = seccomp.ValidateStrict(profile)
+	if !errors.Is(err, seccomp.ErrListenerNotAllowed) {
+		t.Errorf("expected ErrListenerNotAllowed, got: %v", err)
 	}
 }
 
@@ -616,8 +678,8 @@ func TestValidateArtifactRejectsNotifyDefaultAction(t *testing.T) {
 	}
 
 	err = seccomp.ValidateStrict(profile)
-	if err != nil {
-		t.Errorf("ValidateStrict should accept SCMP_ACT_NOTIFY: %v", err)
+	if !errors.Is(err, seccomp.ErrNotifyNotAllowed) {
+		t.Errorf("ValidateStrict must reject what ValidateArtifact rejects, got: %v", err)
 	}
 }
 
@@ -664,8 +726,8 @@ func TestValidateArtifactRejectsListener(t *testing.T) {
 	}
 
 	err = seccomp.ValidateStrict(profile)
-	if err != nil {
-		t.Errorf("ValidateStrict should accept listener settings: %v", err)
+	if !errors.Is(err, seccomp.ErrListenerNotAllowed) {
+		t.Errorf("ValidateStrict must reject what ValidateArtifact rejects, got: %v", err)
 	}
 }
 
@@ -952,8 +1014,8 @@ func TestValidateArtifactRejectsListenerFlag(t *testing.T) {
 	}
 
 	err = seccomp.ValidateStrict(profile)
-	if err != nil {
-		t.Errorf("ValidateStrict should accept the listener flag: %v", err)
+	if !errors.Is(err, seccomp.ErrListenerNotAllowed) {
+		t.Errorf("ValidateStrict must reject what ValidateArtifact rejects, got: %v", err)
 	}
 }
 
@@ -1133,5 +1195,255 @@ func TestValidateArtifactConflictingEntries(t *testing.T) {
 				t.Errorf("Validate should accept conflicting entries: %v", err)
 			}
 		})
+	}
+}
+
+// latticeCorpus returns profiles covering what the three validators look at,
+// valid ones included, for the ordering assertion below.
+func latticeCorpus() []struct {
+	name    string
+	profile *specs.LinuxSeccomp
+} {
+	errno := uint(13)
+	huge := uint(70000)
+
+	filtered := func(value uint64) specs.LinuxSyscall {
+		return specs.LinuxSyscall{
+			Names:  []string{syscallRead},
+			Action: specs.ActAllow,
+			Args: []specs.LinuxSeccompArg{
+				{Index: 0, Value: value, Op: specs.OpEqualTo},
+			},
+		}
+	}
+
+	manyEntries := make([]specs.LinuxSyscall, 0, seccomp.MaxArtifactEntriesPerSyscall+1)
+	for idx := range seccomp.MaxArtifactEntriesPerSyscall + 1 {
+		manyEntries = append(manyEntries, filtered(uint64(idx)))
+	}
+
+	manyNames := make([]string, 0, seccomp.MaxArtifactNamesPerEntry+1)
+	for idx := range seccomp.MaxArtifactNamesPerEntry + 1 {
+		manyNames = append(manyNames, fmt.Sprintf("sys%d", idx))
+	}
+
+	return []struct {
+		name    string
+		profile *specs.LinuxSeccomp
+	}{
+		{"empty", &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}},
+		{"plain allowlist", &specs.LinuxSeccomp{
+			DefaultAction: specs.ActErrno,
+			Syscalls: []specs.LinuxSyscall{
+				{Names: []string{syscallRead, syscallWrite}, Action: specs.ActAllow},
+			},
+		}},
+		{"unknown action", &specs.LinuxSeccomp{DefaultAction: actInvalid}},
+		{"unknown operator", &specs.LinuxSeccomp{
+			DefaultAction: specs.ActErrno,
+			Syscalls: []specs.LinuxSyscall{{
+				Names: []string{syscallRead}, Action: specs.ActAllow,
+				Args: []specs.LinuxSeccompArg{{Index: 0, Op: "SCMP_CMP_BOGUS"}},
+			}},
+		}},
+		{"arg index out of range", &specs.LinuxSeccomp{
+			DefaultAction: specs.ActErrno,
+			Syscalls: []specs.LinuxSyscall{{
+				Names: []string{syscallRead}, Action: specs.ActAllow,
+				Args: []specs.LinuxSeccompArg{{Index: 9, Op: specs.OpEqualTo}},
+			}},
+		}},
+		{"empty names", &specs.LinuxSeccomp{
+			DefaultAction: specs.ActErrno,
+			Syscalls:      []specs.LinuxSyscall{{Names: nil, Action: specs.ActAllow}},
+		}},
+		{"notify default", &specs.LinuxSeccomp{DefaultAction: specs.ActNotify}},
+		{"notify on write", &specs.LinuxSeccomp{
+			DefaultAction: specs.ActErrno,
+			Syscalls: []specs.LinuxSyscall{
+				{Names: []string{syscallWrite}, Action: specs.ActNotify},
+			},
+		}},
+		{"notify elsewhere", &specs.LinuxSeccomp{
+			DefaultAction: specs.ActErrno,
+			ListenerPath:  "/run/seccomp-agent.sock",
+			Syscalls: []specs.LinuxSyscall{
+				{Names: []string{syscallRead}, Action: specs.ActNotify},
+			},
+		}},
+		{"listener metadata", &specs.LinuxSeccomp{
+			DefaultAction: specs.ActErrno, ListenerMetadata: "opaque",
+		}},
+		{"listener flag", &specs.LinuxSeccomp{
+			DefaultAction: specs.ActErrno,
+			Flags:         []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagWaitKillableRecv},
+		}},
+		{"duplicate names", &specs.LinuxSeccomp{
+			DefaultAction: specs.ActErrno,
+			Syscalls: []specs.LinuxSyscall{
+				{Names: []string{syscallRead}, Action: specs.ActAllow},
+				{Names: []string{syscallRead}, Action: specs.ActLog},
+			},
+		}},
+		{"duplicate architecture", &specs.LinuxSeccomp{
+			DefaultAction: specs.ActErrno,
+			Architectures: []specs.Arch{specs.ArchX86_64, specs.ArchX86_64},
+		}},
+		{"errno out of range", &specs.LinuxSeccomp{
+			DefaultAction: specs.ActErrno, DefaultErrnoRet: &huge,
+		}},
+		{"unused errnoRet", &specs.LinuxSeccomp{
+			DefaultAction: specs.ActAllow, DefaultErrnoRet: &errno,
+		}},
+		{"unused valueTwo", &specs.LinuxSeccomp{
+			DefaultAction: specs.ActErrno,
+			Syscalls: []specs.LinuxSyscall{{
+				Names: []string{syscallRead}, Action: specs.ActAllow,
+				Args: []specs.LinuxSeccompArg{
+					{Index: 0, Value: 1, ValueTwo: 2, Op: specs.OpEqualTo},
+				},
+			}},
+		}},
+		{"conflicting entries", &specs.LinuxSeccomp{
+			DefaultAction: specs.ActErrno,
+			Syscalls: []specs.LinuxSyscall{
+				{Names: []string{syscallRead}, Action: specs.ActAllow},
+				{Names: []string{syscallRead}, Action: specs.ActLog},
+			},
+		}},
+		{"too many entries", &specs.LinuxSeccomp{
+			DefaultAction: specs.ActErrno, Syscalls: manyEntries,
+		}},
+		{"too many names in one entry", &specs.LinuxSeccomp{
+			DefaultAction: specs.ActErrno,
+			Syscalls: []specs.LinuxSyscall{
+				{Names: manyNames, Action: specs.ActAllow},
+			},
+		}},
+	}
+}
+
+// TestValidationLattice asserts the ordering the three validators promise,
+// which the apparmor and landlock packages promise as well: whatever
+// Validate rejects, ValidateArtifact rejects, and whatever ValidateArtifact
+// rejects, ValidateStrict rejects. Callers pick a validator by how much they
+// trust the profile, and that choice only means something if the stricter
+// one never accepts what a weaker one refuses.
+func TestValidationLattice(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range latticeCorpus() {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			loadable := seccomp.Validate(testCase.profile)
+			artifact := seccomp.ValidateArtifact(testCase.profile)
+			strict := seccomp.ValidateStrict(testCase.profile)
+
+			if loadable != nil && artifact == nil {
+				t.Errorf("ValidateArtifact accepts what Validate rejects: %v", loadable)
+			}
+
+			if artifact != nil && strict == nil {
+				t.Errorf("ValidateStrict accepts what ValidateArtifact rejects: %v", artifact)
+			}
+		})
+	}
+}
+
+// TestValidateArtifactBoundsProfileSize covers the two bounds that hold for
+// the profile rather than for one syscall. Neither per-syscall cap sees an
+// entry that names a hundred thousand syscalls, and the rules such a profile
+// loads are the product of its name and condition counts.
+func TestValidateArtifactBoundsProfileSize(t *testing.T) {
+	t.Parallel()
+
+	names := make([]string, 0, seccomp.MaxArtifactNamesPerEntry+1)
+	for idx := range seccomp.MaxArtifactNamesPerEntry + 1 {
+		names = append(names, fmt.Sprintf("sys%d", idx))
+	}
+
+	err := seccomp.ValidateArtifact(&specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls: []specs.LinuxSyscall{
+			{Names: names, Action: specs.ActAllow},
+		},
+	})
+	if !errors.Is(err, seccomp.ErrTooManyNames) {
+		t.Errorf("expected ErrTooManyNames, got: %v", err)
+	}
+
+	// Entries within every per-syscall bound, spread over enough syscall
+	// names to load more rules than the profile may.
+	entries := seccomp.MaxArtifactClauses/seccomp.MaxArtifactNamesPerEntry + 1
+	syscalls := make([]specs.LinuxSyscall, 0, entries)
+
+	for idx := range entries {
+		entry := specs.LinuxSyscall{
+			Names:  make([]string, 0, seccomp.MaxArtifactNamesPerEntry),
+			Action: specs.ActAllow,
+		}
+		for nameIdx := range seccomp.MaxArtifactNamesPerEntry {
+			entry.Names = append(entry.Names, fmt.Sprintf("sys%d_%d", idx, nameIdx))
+		}
+
+		syscalls = append(syscalls, entry)
+	}
+
+	err = seccomp.ValidateArtifact(&specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls:      syscalls,
+	})
+	if !errors.Is(err, seccomp.ErrTooManyProfileClauses) {
+		t.Errorf("expected ErrTooManyProfileClauses, got: %v", err)
+	}
+}
+
+// TestValidateBoundsErrorSize pins the size of what a validation failure
+// hands back. The values it names come from the profile, which an artifact
+// author chooses freely: unbounded, a runtime logging the rejection of one
+// pull attempt would write megabytes.
+func TestValidateBoundsErrorSize(t *testing.T) {
+	t.Parallel()
+
+	const (
+		entries      = 51
+		valueSize    = 100 * 1024
+		generousSize = 8 * 1024
+	)
+
+	huge := strings.Repeat("X", valueSize)
+	profile := &specs.LinuxSeccomp{
+		DefaultAction: specs.LinuxSeccompAction(huge),
+		Architectures: []specs.Arch{specs.Arch(huge)},
+		Flags:         []specs.LinuxSeccompFlag{specs.LinuxSeccompFlag(huge)},
+	}
+
+	for range entries {
+		profile.Syscalls = append(profile.Syscalls, specs.LinuxSyscall{
+			Names:  []string{huge},
+			Action: specs.LinuxSeccompAction(huge),
+			Args: []specs.LinuxSeccompArg{
+				{Index: 0, Op: specs.LinuxSeccompOperator(huge)},
+			},
+		})
+	}
+
+	for _, validate := range []struct {
+		name     string
+		validate func(*specs.LinuxSeccomp) error
+	}{
+		{"Validate", seccomp.Validate},
+		{"ValidateArtifact", seccomp.ValidateArtifact},
+		{"ValidateStrict", seccomp.ValidateStrict},
+	} {
+		err := validate.validate(profile)
+		if err == nil {
+			t.Fatalf("%s accepted a profile of unknown actions", validate.name)
+		}
+
+		if size := len(err.Error()); size > generousSize {
+			t.Errorf("%s error is %d bytes, want at most %d", validate.name, size, generousSize)
+		}
 	}
 }

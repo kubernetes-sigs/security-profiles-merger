@@ -6,13 +6,33 @@ on:
       - "v*"
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 jobs:
-  release:
+  # A tag can be pushed at any commit, so this workflow runs the gate
+  # itself rather than assuming the commit under it was ever green.
+  verify:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make verify-coverage
+      - run: make build
+
+  release:
+    needs: [verify]
+    # A fork carries the tags it forked, and pushing one must not start a
+    # release under someone else's name.
+    if: github.repository == 'kubernetes-sigs/security-profiles-merger'
+    runs-on: ubuntu-latest
+    # Only this job publishes, so only this job can write, mint an OIDC
+    # token for keyless signing, or attest.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     # Pinned so that a release is reproducible; dependencies.yaml tracks them.
     env:
       COSIGN_VERSION: v3.0.6

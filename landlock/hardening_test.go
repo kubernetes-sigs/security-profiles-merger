@@ -121,9 +121,20 @@ func TestValidateDetectsDuplicatesAfterCleaning(t *testing.T) {
 		{Path: "/etc/", AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile}},
 	})
 
-	err := landlock.Validate(profile)
+	err := landlock.ValidateStrict(profile)
 	if !errors.Is(err, landlock.ErrDuplicateRule) {
-		t.Errorf("Validate = %v, want ErrDuplicateRule", err)
+		t.Errorf("ValidateStrict = %v, want ErrDuplicateRule", err)
+	}
+
+	// Validate and ValidateArtifact fold the duplicate as the merge does.
+	err = landlock.Validate(profile)
+	if err != nil {
+		t.Errorf("Validate = %v, want nil", err)
+	}
+
+	err = landlock.ValidateArtifact(profile)
+	if err != nil {
+		t.Errorf("ValidateArtifact = %v, want nil", err)
 	}
 }
 
@@ -409,15 +420,24 @@ func TestMergeOutputIsMinimal(t *testing.T) {
 	assertMergeFormat(t, "Intersect", landlock.Intersect,
 		"Profile{fs:read_dir,read_file /(read_dir) /etc/passwd(read_file)}", dirs, file)
 
-	// With a refer grant the rights below a mount point decide whether a
-	// file may move there, so the rules are kept as they are.
+	// A rule granting refer is kept as it is, because the rights collected
+	// up to a mount point decide whether a file may move there. A rule
+	// without a refer grant is minimized as any other, which keeps the
+	// output independent of how a fold grouped its inputs.
 	readRefer := fsRights{landlock.FSAccessReadFile, landlock.FSAccessRefer}
 	referRules := fsProfile(readRefer,
 		landlock.PathRule{Path: "/", AccessFS: readRefer},
 		landlock.PathRule{Path: "/etc", AccessFS: read},
 	)
 	assertMergeFormat(t, "Intersect", landlock.Intersect,
-		"Profile{fs:read_file,refer /(read_file,refer) /etc(read_file)}", referRules)
+		"Profile{fs:read_file,refer /(read_file,refer)}", referRules)
+
+	nestedRefer := fsProfile(readRefer,
+		landlock.PathRule{Path: "/", AccessFS: read},
+		landlock.PathRule{Path: "/etc", AccessFS: readRefer},
+	)
+	assertMergeFormat(t, "Intersect", landlock.Intersect,
+		"Profile{fs:read_file,refer /(read_file) /etc(read_file,refer)}", nestedRefer)
 }
 
 // TestUnionKeepsNestedRules covers rules whose path may be a symlink: on
@@ -533,10 +553,46 @@ func TestValidateForABIRejectsUnknownVersions(t *testing.T) {
 
 	profile := fsProfile(fsRights{landlock.FSAccessReadFile})
 
-	for _, abi := range []landlock.ABIVersion{-1, 0, landlock.LatestABIVersion + 1, 99} {
+	for _, abi := range []landlock.ABIVersion{-1, 0} {
 		err := landlock.ValidateForABI(profile, abi)
 		if !errors.Is(err, landlock.ErrUnknownABIVersion) {
 			t.Errorf("ValidateForABI(v%d) = %v, want ErrUnknownABIVersion", abi, err)
 		}
+	}
+}
+
+// A node may report an ABI version newer than this library knows rights
+// for. Landlock versions are cumulative, so such a kernel supports every
+// right here and validation must not fail for it.
+func TestValidateForABIClampsNewerVersions(t *testing.T) {
+	t.Parallel()
+
+	all := &landlock.Profile{
+		HandledAccessFS:  landlock.KnownFSRights(),
+		HandledAccessNet: landlock.KnownNetRights(),
+		Scoped:           landlock.KnownScopeRights(),
+		PathRules:        nil,
+		NetRules:         nil,
+	}
+
+	for _, abi := range []landlock.ABIVersion{
+		landlock.LatestABIVersion, landlock.LatestABIVersion + 1, 99,
+	} {
+		err := landlock.ValidateForABI(all, abi)
+		if err != nil {
+			t.Errorf("ValidateForABI(v%d) = %v, want nil", abi, err)
+		}
+	}
+
+	// Clamping reports no ABI problem, but the other checks still run.
+	unknown := fsProfile(fsRights{"bogus_right"})
+
+	err := landlock.ValidateForABI(unknown, 99)
+	if !errors.Is(err, landlock.ErrUnknownRight) {
+		t.Errorf("ValidateForABI(v99, unknown right) = %v, want ErrUnknownRight", err)
+	}
+
+	if errors.Is(err, landlock.ErrUnknownABIVersion) {
+		t.Errorf("ValidateForABI(v99) reported the version: %v", err)
 	}
 }

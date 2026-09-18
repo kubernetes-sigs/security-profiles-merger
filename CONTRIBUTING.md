@@ -26,11 +26,16 @@ We have full documentation on how to get started contributing here:
 
 The codebase is organized in four layers:
 
-- `spm/` is the public home of what the three profile packages share:
-  `SliceDiff` and the sentinel errors `ErrNoProfiles`, `ErrNilProfile` and
-  `ErrEmptyPath`. Each profile package re-exports these under its own name,
-  so a caller need not import it, but code generic over the profile types
-  can name them once and pkg.go.dev can link them.
+- `spm/` is the public home of what the three profile packages have in
+  common: `SliceDiff`, the sentinel errors `ErrNoProfiles`, `ErrNilProfile`
+  and `ErrEmptyPath`, and `Diff`, the `IsEqual() bool` method all three
+  `ProfileDiff` types carry. Each profile package re-exports these under its
+  own name, so a caller need not import it, but naming them once is what makes
+  `seccomp.SliceDiff` and `apparmor.StringSliceDiff` the same type rather than
+  twins, and what lets pkg.go.dev link them. Keep it this small: the three
+  profile types have no common shape, so nothing that needs to know which type
+  it has belongs here. `cmd/spm/kinds.go` is where that knowledge lives, as a
+  table of per-type function values.
 - `internal/merge/` contains generic merge primitives. `Fold` folds any
   profile type pairwise, `IntersectSlice`, `UnionSlice` and
   `DeduplicateSlice` work with any comparable element type, and `DiffSlice`
@@ -69,24 +74,63 @@ make                     # build, lint, and test (default target)
 make help                # display available targets
 make build               # build the spm binary (static)
 make test                # run tests with race detection and coverage (RACE= skips the race detector)
-make lint                # run golangci-lint
+make lint                # run golangci-lint (needs the libseccomp headers: the config lints the cgo bridge behind the libseccomp build tag too)
 make fuzz                # run all fuzz tests (default 30s, set FUZZTIME to adjust)
 make test-libseccomp     # check the seccomp model against libseccomp (needs cgo and libseccomp headers; set LIBSECCOMP_VERSION to require a particular one)
 make bench               # run benchmarks
-make verify              # run the Go-only verifications CI runs (rewrites the TOCs and go.mod in place)
+make verify              # run the verifications CI runs (rewrites the TOCs, go.mod and the goldens in place)
 make verify-coverage     # verify test coverage meets threshold (default 95%)
 make verify-tidy         # verify go.mod is tidy
 make verify-mdtoc        # verify table of contents in markdown files
+make verify-golden       # regenerate the CLI golden files and fail if any changed
 make verify-dependencies # verify external dependencies
+make verify-upstream     # check the pinned tool versions against their upstream releases (needs GITHUB_TOKEN)
 make govulncheck         # run govulncheck
 make tidy                # run go mod tidy
 make clean               # remove build artifacts
 ```
 
-`make verify` covers the verification jobs that need only the Go toolchain.
-Two CI jobs are not reproduced by it: the spell check, which uses
-[crate-ci/typos](https://github.com/crate-ci/typos), and the release snapshot
-build, which uses goreleaser and syft.
+The libseccomp headers (`libseccomp-dev` on Debian and Ubuntu) are needed by
+`make lint`, and therefore by `make verify` and the default `make` target, not
+only by `make test-libseccomp`: `.golangci.yml` sets `run.build-tags` to
+`libseccomp`, so the linter loads the cgo bridge behind that tag. Any version
+does for linting; only `make test-libseccomp` cares which one answers.
+
+`make verify` runs the build, lint, test, coverage, tidy, TOC, golden and
+dependency checks in one command. It is not Go-only, and it depends on
+`verify-coverage`, so it runs the test suite. The CI jobs it does not reproduce
+are the ones that need something the Makefile does not install or a machine it
+does not have: the spell check
+([crate-ci/typos](https://github.com/crate-ci/typos)), the release snapshot
+build (goreleaser and syft), the cross-platform test job (macOS and Windows
+runners), the cross-architecture vet job, the uninstrumented `test / bounds`
+job, the fuzz matrix, the benchmarks, and `test-libseccomp`, which needs a
+pinned libseccomp build. `make test-libseccomp`, `make fuzz` and `make bench`
+run those last three locally.
+
+### Golden files
+
+`cmd/spm/testdata/*.golden` pin the exact bytes the CLI writes to stdout, and
+`*.stderr.golden` the bytes it writes to stderr, for a table of invocations in
+`cmd/spm/golden_test.go`.
+
+After a deliberate change to the output, regenerate them:
+
+```sh
+make verify-golden      # or: go test ./cmd/spm -run TestGolden -update
+```
+
+The target regenerates the files and then fails if anything moved, so read
+`git diff cmd/spm/testdata` and commit it only if every changed byte is a
+change you meant. `-update` is a way to see a change, never a way to approve
+one: a golden it rewrites is a golden that has stopped holding anything to a
+contract. CI runs the same target, so a forgotten regeneration is a red build
+rather than a silently approved one.
+
+Anything a golden holds must be reproducible on any machine: no timestamps, no
+absolute paths, no output that depends on the architecture. The diff cases pass
+`--arch` for that reason. `TestGoldenIsReproducible` and
+`TestGoldenFilesHoldNothingMachineSpecific` guard both.
 
 ## How the merge semantics are checked
 

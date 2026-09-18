@@ -18,6 +18,7 @@ package landlock_test
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -164,5 +165,81 @@ func assertJSONRoundTrip(t *testing.T, profile *landlock.Profile) {
 
 	if !reflect.DeepEqual(*profile, got) {
 		t.Errorf("round-trip mismatch:\n  got:  %+v\n  want: %+v", got, *profile)
+	}
+}
+
+// TestUnmarshalStrict covers the decode a caller uses for a document it did
+// not write: encoding/json drops members the type has no field for, and for
+// a handled access set a dropped member is the permissive direction.
+func TestUnmarshalStrict(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		data    string
+		wantErr bool
+	}{
+		"a known document": {
+			data:    `{"handledAccessFs":["read_file"],"pathRules":[{"path":"/etc"}]}`,
+			wantErr: false,
+		},
+		"an empty object": {data: `{}`, wantErr: false},
+		"an unknown top level member": {
+			data:    `{"handledAccessFs":["read_file"],"handledAccessIoctl":["dev"]}`,
+			wantErr: true,
+		},
+		"an unknown member of a path rule": {
+			data:    `{"pathRules":[{"path":"/etc","accessFsExtra":["read_file"]}]}`,
+			wantErr: true,
+		},
+		"an unknown member of a net rule": {
+			data:    `{"netRules":[{"port":80,"accessNetExtra":["bind_tcp"]}]}`,
+			wantErr: true,
+		},
+		"a wrongly typed member": {data: `{"handledAccessFs":"read_file"}`, wantErr: true},
+		"a truncated document":   {data: `{"handledAccessFs":[`, wantErr: true},
+		"no document":            {data: ``, wantErr: true},
+		"a second document":      {data: `{}{}`, wantErr: true},
+		"trailing whitespace":    {data: "{}\n", wantErr: false},
+	}
+
+	for name, test := range tests {
+		var profile landlock.Profile
+
+		err := landlock.UnmarshalStrict([]byte(test.data), &profile)
+		if (err != nil) != test.wantErr {
+			t.Errorf("%s: UnmarshalStrict = %v, want an error: %v", name, err, test.wantErr)
+		}
+	}
+
+	err := landlock.UnmarshalStrict([]byte(`{}`), nil)
+	if !errors.Is(err, landlock.ErrNilProfile) {
+		t.Errorf("UnmarshalStrict(nil) = %v, want ErrNilProfile", err)
+	}
+}
+
+// TestUnmarshalStrictDecodesTheSameProfile checks that the strict decode
+// reads a valid document exactly as encoding/json does.
+func TestUnmarshalStrictDecodesTheSameProfile(t *testing.T) {
+	t.Parallel()
+
+	data, err := json.Marshal(goldenProfile())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var strict, plain landlock.Profile
+
+	err = landlock.UnmarshalStrict(data, &strict)
+	if err != nil {
+		t.Fatalf("UnmarshalStrict: %v", err)
+	}
+
+	err = json.Unmarshal(data, &plain)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if !reflect.DeepEqual(strict, plain) {
+		t.Errorf("UnmarshalStrict = %+v, want %+v", strict, plain)
 	}
 }

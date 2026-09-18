@@ -134,6 +134,70 @@ func TestJSONRoundTripPartialFields(t *testing.T) {
 	assertJSONRoundTrip(t, profile)
 }
 
+// goldenProfileJSON is the wire form of goldenProfile, as a consumer of this
+// package sees it. A round trip through the same struct cannot see a renamed
+// field, since it renames both ends at once; this document can, and is the
+// compatibility promise the JSON tags make.
+const goldenProfileJSON = `{"executable":{"allowedExecutables":["/usr/bin/bash","/usr/bin/curl"],` +
+	`"allowedLibraries":["/usr/lib/libc.so","/usr/lib/libm.so"]},` +
+	`"filesystem":{"readOnlyPaths":["/etc/config"],"writeOnlyPaths":["/var/log"],"readWritePaths":["/tmp"]},` +
+	`"network":{"allowRaw":true,"allowedProtocols":{"allowTcp":true,"allowUdp":false}},` +
+	`"capability":{"allowedCapabilities":["NET_ADMIN","SYS_TIME"]}}`
+
+// goldenProfile is the profile goldenProfileJSON encodes.
+func goldenProfile() apparmor.Profile {
+	return apparmor.Profile{
+		Executable: &apparmor.ExecutableRules{
+			AllowedExecutables: []string{pathBinBash, pathBinCurl},
+			AllowedLibraries:   []string{pathLibC, pathLibM},
+		},
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths:  []string{pathEtcConfig},
+			WriteOnlyPaths: []string{pathVarLog},
+			ReadWritePaths: []string{pathTmp},
+		},
+		Network: &apparmor.NetworkRules{
+			AllowRaw: boolPtr(true),
+			Protocols: &apparmor.AllowedProtocols{
+				AllowTCP: boolPtr(true),
+				AllowUDP: boolPtr(false),
+			},
+		},
+		Capabilities: &apparmor.CapabilityRules{
+			AllowedCapabilities: []string{capNetAdmin, capSysTime},
+		},
+	}
+}
+
+// TestJSONGoldenDocument compares the encoding against a document written out
+// here, in both directions: a renamed or dropped JSON tag changes the bytes
+// this produces and leaves a field of the decoded profile empty.
+func TestJSONGoldenDocument(t *testing.T) {
+	t.Parallel()
+
+	profile := goldenProfile()
+
+	data, err := json.Marshal(profile)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if string(data) != goldenProfileJSON {
+		t.Errorf("marshal produced\n  %s\nwant\n  %s", data, goldenProfileJSON)
+	}
+
+	var decoded apparmor.Profile
+
+	err = json.Unmarshal([]byte(goldenProfileJSON), &decoded)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if !reflect.DeepEqual(decoded, profile) {
+		t.Errorf("decoding the golden document gave\n  %+v\nwant\n  %+v", decoded, profile)
+	}
+}
+
 func assertJSONRoundTrip(t *testing.T, profile apparmor.Profile) {
 	t.Helper()
 

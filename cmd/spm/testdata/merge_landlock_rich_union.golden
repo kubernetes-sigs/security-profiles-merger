@@ -1,0 +1,62 @@
+{
+  "handledAccessFs": [
+    "read_file",
+    "truncate",
+    "write_file"
+  ],
+  "handledAccessNet": [
+    "bind_tcp",
+    "connect_tcp"
+  ],
+  "scoped": [
+    "signal"
+  ],
+  "pathRules": [
+    {
+      "path": "/etc",
+      "accessFs": [
+        "read_file"
+      ]
+    },
+    {
+      "path": "/opt/app",
+      "accessFs": [
+        "read_file"
+      ]
+    },
+    {
+      "path": "/usr/share",
+      "accessFs": [
+        "read_file"
+      ]
+    },
+    {
+      "path": "/var/lib/app",
+      "accessFs": [
+        "read_file",
+        "write_file"
+      ]
+    }
+  ],
+  "netRules": [
+    {
+      "port": 443,
+      "accessNet": [
+        "connect_tcp"
+      ]
+    },
+    {
+      "port": 8080,
+      "accessNet": [
+        "bind_tcp",
+        "connect_tcp"
+      ]
+    },
+    {
+      "port": 9090,
+      "accessNet": [
+        "bind_tcp"
+      ]
+    }
+  ]
+}
