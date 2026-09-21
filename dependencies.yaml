@@ -14,6 +14,8 @@ dependencies:
         match: ^GOLANGCI_LINT_VERSION
       - path: .github/workflows/ci.yml
         match: "^\\s+version: v"
+      - path: .github/workflows/release.yml
+        match: "^\\s+version: v"
 
   - name: syft
     version: 1.51.1

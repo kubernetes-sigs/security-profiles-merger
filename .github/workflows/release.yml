@@ -23,7 +23,16 @@ jobs:
       # the coverage floor, the golden contract, and the linters.
       - run: make verify-coverage
       - run: make verify-golden
-      - run: make lint
+      # Linted the way ci.yml lints: the action's prebuilt binary rather than
+      # make lint, whose go run needs a newer Go than the module's floor, and
+      # the libseccomp headers the config's build tag needs.
+      - run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libseccomp-dev
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.13.2
       - run: make build
 
   release:
