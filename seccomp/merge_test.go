@@ -19,6 +19,7 @@ package seccomp_test
 import (
 	"cmp"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -29,11 +30,12 @@ import (
 )
 
 const (
-	syscallRead  = "read"
-	syscallWrite = "write"
-	syscallOpen  = "open"
-	syscallClose = "close"
-	syscallClone = "clone"
+	syscallRead   = "read"
+	syscallWrite  = "write"
+	syscallOpen   = "open"
+	syscallClose  = "close"
+	syscallClone  = "clone"
+	syscallSocket = "socket"
 
 	actInvalid = "SCMP_ACT_INVALID"
 
@@ -2945,6 +2947,73 @@ func TestBareSyscallMergesSpellErrnoLikeProfiles(t *testing.T) {
 	}
 }
 
+// TestErrnoOnlyDifferenceKeepsTheFilters covers two profiles that deny the
+// same syscall under different argument filters and spell the denial's errno
+// differently, one leaving the implicit EPERM. The rules are one result to
+// the merge once the errno is unified, so both filters survive; without that
+// the syscall would collapse to an unconditional denial of calls both inputs
+// allow.
+func TestErrnoOnlyDifferenceKeepsTheFilters(t *testing.T) {
+	t.Parallel()
+
+	enosys := uint(38)
+
+	spelled := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActAllow,
+		Syscalls: []specs.LinuxSyscall{{
+			Names: []string{syscallSocket}, Action: specs.ActErrno, ErrnoRet: &enosys,
+			Args: []specs.LinuxSeccompArg{{Index: 0, Op: specs.OpEqualTo, Value: 10}},
+		}},
+	}
+	implicit := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActAllow,
+		Syscalls: []specs.LinuxSyscall{{
+			Names: []string{syscallSocket}, Action: specs.ActErrno,
+			Args: []specs.LinuxSeccompArg{{Index: 1, Op: specs.OpEqualTo, Value: 3}},
+		}},
+	}
+
+	for _, order := range [][2]*specs.LinuxSeccomp{
+		{implicit, spelled}, {spelled, implicit},
+	} {
+		result, err := seccomp.Intersect(order[0], order[1])
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if len(result.Syscalls) != 2 {
+			t.Fatalf(
+				"the syscall collapsed, denying calls both inputs allow: %s",
+				seccomp.FormatProfile(result),
+			)
+		}
+
+		for _, entry := range result.Syscalls {
+			if len(entry.Args) == 0 {
+				t.Errorf("entry %v lost its filter: %s", entry.Names,
+					seccomp.FormatProfile(result))
+			}
+
+			if entry.Action != specs.ActErrno {
+				t.Errorf("entry %v: action = %s, want ERRNO", entry.Names, entry.Action)
+			}
+		}
+	}
+
+	// An artifact that mixes the two spellings itself is still reported:
+	// the merge unifies what it merges, it does not bless an ambiguity an
+	// author wrote down.
+	mixed := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActAllow,
+		Syscalls:      append(slices.Clone(spelled.Syscalls), implicit.Syscalls...),
+	}
+
+	err := seccomp.ValidateArtifact(mixed)
+	if !errors.Is(err, seccomp.ErrConflictingEntries) {
+		t.Errorf("ValidateArtifact = %v, want ErrConflictingEntries", err)
+	}
+}
+
 // TestListenerComesFromTheProfileThatSetsIt pins the coupling between
 // SCMP_ACT_NOTIFY and the listener it needs. The action lattice can carry
 // the action in from either profile, so taking the listener from the left
@@ -3172,4 +3241,60 @@ func TestListenerFlagFollowsTheListener(t *testing.T) {
 	if !slices.Contains(result.Flags, specs.LinuxSeccompFlagWaitKillableRecv) {
 		t.Errorf("flag of the listener's profile was dropped: %v", result.Flags)
 	}
+}
+
+// TestErrnoStaysAsWrittenInAnExactShape covers the other side of the errno
+// unification: a syscall whose rules libseccomp evaluates exactly as written
+// keeps the errno each of them reports. Unifying there would lose what the
+// inputs said and buy nothing, since no collapse threatens the filters.
+func TestErrnoStaysAsWrittenInAnExactShape(t *testing.T) {
+	t.Parallel()
+
+	eperm, enosys := uint(1), uint(38)
+
+	// Shape (c): single equalities on one argument index.
+	exact := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActAllow,
+		Syscalls: []specs.LinuxSyscall{
+			{
+				Names: []string{syscallSocket}, Action: specs.ActErrno, ErrnoRet: &eperm,
+				Args: []specs.LinuxSeccompArg{{Index: 0, Op: specs.OpEqualTo, Value: 2}},
+			},
+			{
+				Names: []string{syscallSocket}, Action: specs.ActErrno, ErrnoRet: &enosys,
+				Args: []specs.LinuxSeccompArg{{Index: 0, Op: specs.OpEqualTo, Value: 10}},
+			},
+		},
+	}
+
+	result, err := seccomp.Intersect(exact, &specs.LinuxSeccomp{DefaultAction: specs.ActAllow})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	found := map[uint64]uint{}
+
+	for _, entry := range result.Syscalls {
+		if len(entry.Args) != 1 {
+			t.Fatalf("entry %v lost its filter: %s", entry.Names,
+				seccomp.FormatProfile(result))
+		}
+
+		found[entry.Args[0].Value] = runtimeErrnoOf(entry)
+	}
+
+	if want := map[uint64]uint{2: eperm, 10: enosys}; !maps.Equal(found, want) {
+		t.Errorf("errno by filter = %v, want %v: %s",
+			found, want, seccomp.FormatProfile(result))
+	}
+}
+
+// runtimeErrnoOf returns the errno a runtime applies to an entry: the value
+// it names, or EPERM where it names none.
+func runtimeErrnoOf(entry specs.LinuxSyscall) uint {
+	if entry.ErrnoRet == nil {
+		return 1
+	}
+
+	return *entry.ErrnoRet
 }

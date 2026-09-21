@@ -18,7 +18,6 @@ package apparmor
 
 import (
 	"fmt"
-	"maps"
 	"slices"
 	"strings"
 
@@ -31,12 +30,24 @@ var (
 	ErrNoProfiles = spm.ErrNoProfiles
 	// ErrNilProfile is returned when a nil profile is provided.
 	ErrNilProfile = spm.ErrNilProfile
+	// ErrMoreProblems is returned alongside the failures a report lists
+	// when it left others out: every validator bounds how many it reports,
+	// since a profile holds as many as it holds rules. A caller matching a
+	// sentinel must read a match here as "and possibly others", because a
+	// failure the profile holds can be absent from the error reporting it.
+	ErrMoreProblems = spm.ErrMoreProblems
 )
 
 // Intersect merges multiple AppArmor profiles via intersection: the resulting
 // profile permits an operation only if all input profiles permit it.
 // Capabilities are intersected, file access rules are intersected, and network
 // permissions use AND semantics.
+//
+// Capability names are upper-cased in the result and compared with ASCII
+// case folding, so a profile naming "chown" and one naming "CHOWN" name one
+// capability and the result spells it "CHOWN". The folding is deliberately
+// not Unicode's: U+017F and U+0131 upper-case into "S" and "I", which would
+// let a name spelled with one of them merge into a real capability.
 //
 // A nil section or network boolean is treated as an explicit empty section
 // or false, since to AppArmor an absent section denies everything it covers,
@@ -107,7 +118,7 @@ func foldProfiles(profiles []*Profile, mergeOp strategy) (*Profile, error) {
 	for idx, profile := range profiles {
 		normalized[idx] = normalizeProfile(profile)
 		deduplicateProfile(normalized[idx])
-		canonicalizeAliases(normalized[idx], false)
+		canonicalizeAliases(normalized[idx])
 
 		err := Validate(normalized[idx])
 		if err != nil {
@@ -132,29 +143,25 @@ func foldProfiles(profiles []*Profile, mergeOp strategy) (*Profile, error) {
 		return nil, fmt.Errorf("merge: %w", err)
 	}
 
-	// Each input holds one spelling per rule and category, but two inputs may
-	// spell one rule differently and the result then holds both.
-	canonicalizeAliases(result, true)
 	sortProfile(result)
 
 	return result, nil
 }
 
-// canonicalizeAliases folds the paths of a profile that spell the same rule
-// into one entry, keeping the shorter spelling. Two such spellings differ
+// canonicalizeAliases folds the paths of one list that spell the same rule
+// into one entry, keeping the simplest spelling. Two such spellings differ
 // only in escapes or repeated slashes the parser resolves, so they are one
 // rule for one file, and the merge would otherwise carry both and match only
 // one of them. Lists holding no such pair, which is every list of a profile
 // written by hand, are left as they are.
 //
-// crossCategory says whether two spellings in different filesystem
-// categories are folded as well, granting the file what both entries grant
-// it. A merge result needs that: two inputs may spell one rule differently,
-// and the result would otherwise hold the pair Validate reports as a
-// duplicate. An input does not get it, so that a profile naming one file in
-// two categories fails a merge whether or not the two spellings agree, which
-// is what it does for an exact duplicate.
-func canonicalizeAliases(profile *Profile, crossCategory bool) {
+// It runs on each input, not on the result. Two spellings in different
+// categories are left alone: a profile naming one file twice that way fails
+// the merge whether or not its spellings agree, which is what it does for an
+// exact duplicate. The result needs no folding of its own, since
+// unifyAliasSpellings has given every input the same spelling for a rule and
+// the merge introduces no new one.
+func canonicalizeAliases(profile *Profile) {
 	if profile.Executable != nil {
 		profile.Executable.AllowedExecutables = foldAliasList(
 			profile.Executable.AllowedExecutables,
@@ -165,12 +172,6 @@ func canonicalizeAliases(profile *Profile, crossCategory bool) {
 	}
 
 	if profile.Filesystem == nil {
-		return
-	}
-
-	if crossCategory {
-		profile.Filesystem = foldAliasPerms(profile.Filesystem)
-
 		return
 	}
 
@@ -304,36 +305,6 @@ func simplestSpelling(left, right string) int {
 	}
 
 	return strings.Compare(left, right)
-}
-
-// foldAliasPerms returns the filesystem rules with one spelling per rule,
-// granting it what its spellings grant together across the categories.
-func foldAliasPerms(rules *FilesystemRules) *FilesystemRules {
-	perms := expandFsPerms(rules)
-
-	paths := slices.Collect(maps.Keys(perms))
-	slices.SortFunc(paths, simplestSpelling)
-
-	if !hasAliases(paths) {
-		return rules
-	}
-
-	canonical := make(map[pathKey]string, len(paths))
-	folded := make(map[string]fsPermission, len(paths))
-
-	for _, path := range paths {
-		key := keyForPath(path)
-
-		name, ok := canonical[key]
-		if !ok {
-			name = path
-			canonical[key] = path
-		}
-
-		folded[name] = folded[name].union(perms[path])
-	}
-
-	return collapseFsPerms(folded)
 }
 
 func sortProfile(profile *Profile) {
@@ -573,6 +544,7 @@ func (intersectStrategy) mergeFilesystem(left, right *FilesystemRules) *Filesyst
 	if exceedsPairBudget(
 		len(leftSide.literals), len(leftSide.globs),
 		len(rightSide.literals), len(rightSide.globs),
+		max(leftSide.longest, rightSide.longest),
 	) {
 		addVerbatimGlobs(leftSide, rightSide, merged)
 
@@ -733,6 +705,7 @@ func unionPerms(left, right map[string]fsPermission) map[string]fsPermission {
 	if exceedsPairBudget(
 		len(leftSide.literals), len(leftSide.globs),
 		len(rightSide.literals), len(rightSide.globs),
+		max(leftSide.longest, rightSide.longest),
 	) {
 		return unionVerbatim(left, right)
 	}
@@ -956,7 +929,7 @@ func normalizeCapabilities(caps []string) []string {
 
 	result := make([]string, len(caps))
 	for idx, c := range caps {
-		result[idx] = strings.ToUpper(c)
+		result[idx] = asciiUpper(c)
 	}
 
 	return result

@@ -190,7 +190,7 @@ func TestMergeErrors(t *testing.T) {
 			name:       "stdin too large",
 			args:       []string{cmdMerge, flagType, typeSeccomp, flagStrategy, strategyIntersect},
 			stdin:      bytes.NewReader(make([]byte, maxInputSize+1)),
-			wantCode:   1,
+			wantCode:   exitUsage,
 			wantStderr: "exceeds",
 		},
 	}
@@ -837,8 +837,10 @@ func TestMergeFileTooLarge(t *testing.T) {
 		cmdMerge, flagType, typeSeccomp, flagStrategy, strategyIntersect, bigFile,
 	}, nil)
 
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1", code)
+	// A size limit is a usage error, as every other input limit is: the
+	// profile was never read, so nothing about it is known to be wrong.
+	if code != exitUsage {
+		t.Fatalf("exit code = %d, want %d", code, exitUsage)
 	}
 
 	if !strings.Contains(stderr, "exceeds") {
@@ -1215,7 +1217,7 @@ func TestUnknownFieldsWalksPromotedAndMapFields(t *testing.T) {
 	raw := `{"inner":"x","values":{"b":{"inner":"y","bogus":1},"a":{"inner":"z"}},` +
 		`"nested":{"n":[{"inner":"w","typo":2}]},"raw":{"k":{"anything":true}},"extra":3}`
 
-	got := unknownFields([]byte(raw), reflect.TypeFor[walkTarget]())
+	got, _ := unknownFields([]byte(raw), reflect.TypeFor[walkTarget]())
 
 	want := []string{"extra", "nested.n[0].typo", "values.b.bogus"}
 	if !slices.Equal(got, want) {
@@ -1228,7 +1230,10 @@ func TestUnknownFieldsPrefersShallowerField(t *testing.T) {
 
 	// "values" is the string field of walkShadowing, not the map promoted
 	// from walkShadowed, so nothing inside it is inspected.
-	got := unknownFields([]byte(`{"values":{"k":{"bogus":1}}}`), reflect.TypeFor[walkShadowing]())
+	got, _ := unknownFields(
+		[]byte(`{"values":{"k":{"bogus":1}}}`),
+		reflect.TypeFor[walkShadowing](),
+	)
 	if len(got) != 0 {
 		t.Errorf("unknownFields = %v, want none", got)
 	}
@@ -1430,20 +1435,21 @@ func TestMergeNoDetectNoteSuppressesDetectionNote(t *testing.T) {
 	}
 }
 
-// TestMergeDefaultModeReportsThroughTheMerge pins that --validate default,
-// which is what merge does without the flag, adds no validation pass of its
-// own: an invalid profile is reported by the merge function, with the prefix
-// it has always used.
-func TestMergeDefaultModeReportsThroughTheMerge(t *testing.T) {
+// TestMergeNamesTheInputItRejected pins that every validation mode names the
+// file a failure came from, the default one included. The merge functions
+// name a position instead ("validate profile 0"), which is not an argument
+// index once stdin carries an array of profiles and is not something a
+// caller can act on either way.
+func TestMergeNamesTheInputItRejected(t *testing.T) {
 	t.Parallel()
 
 	invalid := writeTemp(t, `{"defaultAction":"SCMP_ACT_BOGUS"}`)
-
-	const want = "error: validate profile 0: default action:"
+	want := "error: " + invalid + ": default action:"
 
 	for _, args := range [][]string{
 		{cmdMerge, flagStrategy, strategyIntersect, invalid},
 		{cmdMerge, flagStrategy, strategyIntersect, "--validate", modeNameDefault, invalid},
+		{cmdMerge, flagStrategy, strategyIntersect, "--validate", modeNameStrict, invalid},
 	} {
 		code, _, stderr := runCapture(t, args, nil)
 
@@ -1454,19 +1460,25 @@ func TestMergeDefaultModeReportsThroughTheMerge(t *testing.T) {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("stderr = %q, want it to contain %q", stderr, want)
 		}
+
+		if strings.Contains(stderr, "validate profile ") {
+			t.Errorf("stderr = %q, want no positional name", stderr)
+		}
 	}
 
-	// A mode the merge does not run itself reports through the CLI instead.
+	// An element of a JSON array on stdin is named the same way.
 	code, _, stderr := runCapture(t, []string{
-		cmdMerge, flagStrategy, strategyIntersect, "--validate", modeNameStrict, invalid,
-	}, nil)
+		cmdMerge, flagType, typeSeccomp, flagStrategy, strategyIntersect,
+	}, strings.NewReader(
+		`[{"defaultAction":"SCMP_ACT_ERRNO"},{"defaultAction":"SCMP_ACT_BOGUS"}]`,
+	))
 
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1 (stderr: %s)", code, stderr)
 	}
 
-	if !strings.Contains(stderr, "error: "+invalid+": default action:") {
-		t.Errorf("stderr = %q, want the CLI's own prefix", stderr)
+	if !strings.Contains(stderr, "error: stdin[1]: default action:") {
+		t.Errorf("stderr = %q, want the element named", stderr)
 	}
 }
 
@@ -1839,5 +1851,42 @@ func TestMergeOutputKeepsContentWhenItCannotWrite(t *testing.T) {
 
 	if string(data) != keep {
 		t.Errorf("output file = %q, want %q (not truncated by a failed write)", data, keep)
+	}
+}
+
+// TestMergeDefaultModeAcceptsWhatTheMergeAccepts pins the accept set of the
+// default validation mode against the merge functions' own: they validate
+// the profile they normalized, so a profile they deduplicate is one they
+// accept, and the CLI must not refuse it on their behalf. The failure they
+// do report is renamed to the input it came from.
+func TestMergeDefaultModeAcceptsWhatTheMergeAccepts(t *testing.T) {
+	t.Parallel()
+
+	duplicate := writeTemp(t, `{"filesystem":{"readOnlyPaths":["/etc/passwd","/etc/passwd"]}}`)
+
+	code, stdout, stderr := runCapture(t, []string{
+		cmdMerge, flagType, typeAppArmor, flagStrategy, strategyIntersect,
+		duplicate, duplicate,
+	}, nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %s)", code, stderr)
+	}
+
+	if stdout == "" {
+		t.Error("stdout is empty, want the merged profile")
+	}
+
+	// A strict run is where such a profile is refused, and it names the
+	// input as well.
+	code, _, stderr = runCapture(t, []string{
+		cmdMerge, flagType, typeAppArmor, flagStrategy, strategyIntersect,
+		"--validate", modeNameStrict + "," + modeNameStrict, duplicate, duplicate,
+	}, nil)
+	if code != 1 {
+		t.Fatalf("strict exit code = %d, want 1 (stderr: %s)", code, stderr)
+	}
+
+	if !strings.Contains(stderr, duplicate+": ") {
+		t.Errorf("stderr = %q, want the input named", stderr)
 	}
 }

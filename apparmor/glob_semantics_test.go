@@ -245,7 +245,11 @@ func TestDoubleStarNarrowsOnlyGlobsBelowItsPrefix(t *testing.T) {
 		{"/**", "/etc/{,**}", true},
 		{"/etc/**", "/etc/sub/{,*}", true},
 		{`/etc\/**`, "/etc/*", true},
-		{"/etc/***", "/etc/*", false},
+		// A run of two or more stars is one "**", so it narrows what
+		// "/etc/**" narrows: the extra stars add nothing to the names the
+		// run matches, and a baseline is not meant to change what a merge
+		// keeps because someone typed one star too many.
+		{"/etc/***", "/etc/*", true},
 		{"/etc/**/", "/etc/*/", false},
 		{"/etc/**", `/etc/\/foo/*`, false},
 		{"/etc/**", `/etc/foo/\/*`, false},

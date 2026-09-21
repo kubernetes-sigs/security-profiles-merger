@@ -21,11 +21,15 @@ import (
 	"fmt"
 	"strconv"
 	"unicode/utf8"
+
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 // ErrMoreProblems stands in for the failures JoinLimited left out, so that a
-// caller can tell a truncated report from a complete one.
-var ErrMoreProblems = errors.New("more problems omitted")
+// caller can tell a truncated report from a complete one. It is the sentinel
+// the public packages export, so that a caller matching it matches what they
+// document.
+var ErrMoreProblems = spm.ErrMoreProblems
 
 // MaxQuotedBytes bounds how much of a caller-supplied value QuoteBounded
 // renders. A validation error names the input that failed, and for an

@@ -19,6 +19,8 @@ package landlock
 import (
 	"fmt"
 	"strings"
+
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
 // FormatProfile returns a human-readable representation of a Landlock profile.
@@ -59,7 +61,7 @@ func (p Profile) String() string {
 
 // String returns a human-readable representation of the path rule.
 func (r PathRule) String() string {
-	return fmt.Sprintf("%s(%s)", r.Path, joinRights(r.AccessFS))
+	return fmt.Sprintf("%s(%s)", merge.SafeText(r.Path), joinRights(r.AccessFS))
 }
 
 // String returns a human-readable representation of the network rule.
@@ -71,7 +73,7 @@ func joinRights[T ~string](rights []T) string {
 	strs := make([]string, len(rights))
 
 	for idx, r := range rights {
-		strs[idx] = string(r)
+		strs[idx] = merge.SafeText(string(r))
 	}
 
 	return strings.Join(strs, ",")

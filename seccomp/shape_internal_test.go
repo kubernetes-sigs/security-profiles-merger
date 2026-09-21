@@ -18,6 +18,7 @@ package seccomp
 
 import (
 	"math/bits"
+	"slices"
 	"testing"
 	"time"
 
@@ -253,5 +254,87 @@ func TestIsRangeOpUnknownOperator(t *testing.T) {
 
 	if isRangeOp(specs.LinuxSeccompOperator("SCMP_CMP_FUTURE")) {
 		t.Error("isRangeOp(unknown) = true, want false")
+	}
+}
+
+// TestDedupeClausesRemovesRepeats covers the precondition safeShape
+// documents but does not check: the clauses it is given hold no exact
+// duplicate. Nothing asserted that dedupeClauses removes one, so the whole
+// function could have been the identity and every shape verdict would still
+// have looked right.
+func TestDedupeClausesRemovesRepeats(t *testing.T) {
+	t.Parallel()
+
+	arg := func(index uint, value uint64) specs.LinuxSeccompArg {
+		return specs.LinuxSeccompArg{Index: index, Op: specs.OpEqualTo, Value: value}
+	}
+
+	allow := func(args ...specs.LinuxSeccompArg) clause {
+		return clause{action: specs.ActAllow, errnoRet: nil, args: args}
+	}
+
+	first := allow(arg(0, 1))
+	second := allow(arg(1, 2))
+	other := clause{
+		action: specs.ActErrno, errnoRet: nil,
+		args: []specs.LinuxSeccompArg{arg(0, 1)},
+	}
+
+	got := dedupeClauses([]clause{first, second, first, other, second})
+	if len(got) != 3 {
+		t.Fatalf("dedupeClauses kept %d clauses, want 3: %v", len(got), got)
+	}
+
+	// The first occurrence of each is kept, in order.
+	for idx, want := range []clause{first, second, other} {
+		if !got[idx].sameResult(want) || !slices.Equal(got[idx].args, want.args) {
+			t.Errorf("clause %d = %v, want %v", idx, got[idx], want)
+		}
+	}
+
+	// A syscall whose rules are a safe shape only once the duplicates are
+	// gone is accepted, which is what the precondition buys.
+	repeated := []clause{first, first, second, second}
+	if !safeShape(dedupeClauses(repeated)) {
+		t.Error("safeShape rejects a shape that is safe once deduplicated")
+	}
+}
+
+// TestIndexSetBeyondItsBits covers the map an indexSet falls back to past
+// the 64 indices it tracks in a word. Validate rejects an argument index
+// past the six the kernel passes, so no profile reaches the map; the
+// bare-list functions validate nothing, which is the path that can, and the
+// set is what tells a shape check whether two conditions share an index.
+func TestIndexSetBeyondItsBits(t *testing.T) {
+	t.Parallel()
+
+	var set indexSet
+
+	for _, index := range []uint{0, indexSetBits, indexSetBits + 1, indexSetBits * 2} {
+		if set.add(index) {
+			t.Errorf("add(%d) reported the index as already present", index)
+		}
+	}
+
+	for _, index := range []uint{0, indexSetBits, indexSetBits + 1, indexSetBits * 2} {
+		if !set.add(index) {
+			t.Errorf("add(%d) did not report the index as present", index)
+		}
+	}
+
+	// Two sets intersect when they share an index, in the word or the map.
+	var inWord, inMap indexSet
+
+	inWord.add(1)
+	inMap.add(indexSetBits + 1)
+
+	if inWord.intersects(&inMap) || inMap.intersects(&inWord) {
+		t.Error("sets sharing no index report an intersection")
+	}
+
+	inWord.add(indexSetBits + 1)
+
+	if !inWord.intersects(&inMap) || !inMap.intersects(&inWord) {
+		t.Error("sets sharing an index past the word report no intersection")
 	}
 }

@@ -76,7 +76,7 @@ func pickClause(
 }
 
 func lessRestrictiveClause(left, right clause) clause {
-	return pickClause(left, right, LessRestrictive)
+	return pickClause(left, right, lessRestrictive)
 }
 
 // syscallRules holds every clause of one profile for a single syscall name.
@@ -142,17 +142,24 @@ const maxLoadedClauses = 1 << 16
 // conditional entries of its name, and exact duplicates are dropped.
 //
 // An input whose entries would load more than maxLoadedClauses rules in
-// total is summarized instead: every syscall of it is read as the clause a
-// collapse picks, which is at least as restrictive as the syscall's rules for
-// intersection and at least as permissive for union.
+// total has as many of its syscalls summarized as it takes to fit, largest
+// first: such a syscall is read as the clause a collapse picks, which is at
+// least as restrictive as its rules for intersection and at least as
+// permissive for union. The syscalls that fit are read exactly, so one
+// oversized syscall costs its own filters rather than every filter of the
+// profile.
 func collectRules(syscalls []specs.LinuxSyscall, def *clause) map[string]*syscallRules {
-	if totalClauses(syscalls, def) > maxLoadedClauses {
-		return summarizeRules(syscalls, def)
+	counts, total := clauseCounts(syscalls, def)
+	summarized := oversizedNames(counts, total)
+
+	rules := summarizeRules(syscalls, def, summarized)
+
+	skip := func(name string) bool { return summarized[name] }
+	if len(summarized) == 0 {
+		skip = nil
 	}
 
-	rules := make(map[string]*syscallRules)
-
-	forEachClause(syscalls, def, nil, func(_ int, name string, next clause) {
+	forEachClause(syscalls, def, skip, func(_ int, name string, next clause) {
 		current, ok := rules[name]
 		if !ok {
 			current = &syscallRules{unconditional: nil, conditional: nil, summary: nil}
@@ -211,6 +218,46 @@ func totalClauses(syscalls []specs.LinuxSyscall, def *clause) uint64 {
 	return total
 }
 
+// singleEquality reports whether a clause tests one argument for equality,
+// which is the only filter shape unifyErrno rewrites.
+func singleEquality(current clause) bool {
+	return len(current.args) == 1 && current.args[0].Op == specs.OpEqualTo
+}
+
+// oversizedNames returns the syscalls to read in summarized form so that the
+// clauses the others load stay inside maxLoadedClauses. The largest go
+// first, and only as many as the bound requires, so a profile spends its
+// budget on the syscalls that fit rather than on the one that does not.
+// Names of equal size are ordered by name, so which syscall loses its
+// filters never depends on the order the entries arrive in.
+func oversizedNames(counts map[string]uint64, total uint64) map[string]bool {
+	if total <= maxLoadedClauses {
+		return nil
+	}
+
+	names := slices.Collect(maps.Keys(counts))
+	slices.SortFunc(names, func(first, second string) int {
+		if counts[first] != counts[second] {
+			return cmp.Compare(counts[second], counts[first])
+		}
+
+		return cmp.Compare(first, second)
+	})
+
+	summarized := make(map[string]bool)
+
+	for _, name := range names {
+		if total <= maxLoadedClauses {
+			break
+		}
+
+		summarized[name] = true
+		total -= counts[name]
+	}
+
+	return summarized
+}
+
 // clauseCounts returns how many clauses each syscall name loads and how many
 // they are in total, counted as totalClauses counts them.
 func clauseCounts(syscalls []specs.LinuxSyscall, def *clause) (map[string]uint64, uint64) {
@@ -256,8 +303,8 @@ func (s *clauseSummary) fold(next clause) *clauseSummary {
 		return &clauseSummary{strictest: next, loosest: next}
 	}
 
-	s.strictest = pickClause(s.strictest, next, MoreRestrictive)
-	s.loosest = pickClause(s.loosest, next, LessRestrictive)
+	s.strictest = pickClause(s.strictest, next, moreRestrictive)
+	s.loosest = pickClause(s.loosest, next, lessRestrictive)
 
 	return s
 }
@@ -280,8 +327,16 @@ func (s *clauseSummary) pick(intersect bool) clause {
 // loads the same clauses, so each entry is folded once and its fold applied
 // per name, which keeps the pass linear in the size of the input instead of
 // in the clauses it would expand to.
-func summarizeRules(syscalls []specs.LinuxSyscall, def *clause) map[string]*syscallRules {
+// only names the syscalls to summarize; the rest are left to the caller,
+// which reads them exactly.
+func summarizeRules(
+	syscalls []specs.LinuxSyscall, def *clause, only map[string]bool,
+) map[string]*syscallRules {
 	rules := make(map[string]*syscallRules)
+
+	if len(only) == 0 {
+		return rules
+	}
 
 	for idx := range syscalls {
 		entry := &syscalls[idx]
@@ -301,6 +356,10 @@ func summarizeRules(syscalls []specs.LinuxSyscall, def *clause) map[string]*sysc
 		}
 
 		for _, name := range entry.Names {
+			if !only[name] {
+				continue
+			}
+
 			current, ok := rules[name]
 			if !ok {
 				current = &syscallRules{unconditional: nil, conditional: nil, summary: nil}
@@ -429,11 +488,11 @@ type ruleMerger struct {
 }
 
 func intersectRules() ruleMerger {
-	return ruleMerger{pick: MoreRestrictive, intersect: true}
+	return ruleMerger{pick: moreRestrictive, intersect: true}
 }
 
 func unionRules() ruleMerger {
-	return ruleMerger{pick: LessRestrictive, intersect: false}
+	return ruleMerger{pick: lessRestrictive, intersect: false}
 }
 
 func (m ruleMerger) pickClause(left, right clause) clause {
@@ -482,7 +541,12 @@ func (m ruleMerger) settleInputs(rules map[string]*syscallRules, def *clause) {
 			continue
 		}
 
-		if current.unconditional != nil || safeShape(current.conditional) {
+		if current.unconditional != nil {
+			continue
+		}
+
+		current.conditional = unifyErrno(current.conditional)
+		if safeShape(current.conditional) {
 			continue
 		}
 
@@ -505,11 +569,88 @@ func (m ruleMerger) settleInputs(rules map[string]*syscallRules, def *clause) {
 func (m ruleMerger) settleOutput(
 	def, fallback *clause, conditional []clause,
 ) (*clause, []clause) {
+	conditional = unifyErrno(conditional)
 	if len(conditional) == 0 || safeShape(conditional) {
 		return fallback, conditional
 	}
 
 	return m.collapse(def, conditional), nil
+}
+
+// unifyErrno gives clauses that apply one action but report different errno
+// values the errno of the first of them. Such clauses are different results
+// to libseccomp, which evaluates them in an order of its own, so the shape
+// check refuses them and the syscall collapses to a single unconditional
+// rule: a baseline filtering one argument and an artifact filtering another,
+// one of them spelling the EPERM the other leaves implicit, would deny every
+// call of a syscall both inputs allow. Unifying the errno keeps the filters
+// and costs only the value a denied call reports, which is the trade
+// finishRules already makes when it keeps a clause rather than its errno.
+//
+// The clauses must share one action: an action decides whether a call runs
+// at all, so no action may be rewritten here. ValidateArtifact reports the
+// same clauses as conflicting rather than unifying them, since an artifact
+// says what it means and the ambiguity is the author's to resolve.
+//
+// Only clauses testing one argument for equality are unified. That is the
+// shape a baseline and an artifact filtering different arguments produce,
+// which is the case worth keeping filters for; every other operator leaves
+// the clauses as they are, so a rule set whose evaluation order this
+// package reads conservatively keeps being read that way rather than being
+// made to look uniform.
+//
+// A clause set that is already a safe shape is left alone. Shape (c) holds
+// single equalities on one argument index with any results, so libseccomp
+// evaluates it exactly as written: rewriting its errno values there would
+// lose what the inputs said for nothing, since no collapse threatens the
+// filters.
+func unifyErrno(clauses []clause) []clause {
+	if !errnoUnifiable(clauses) {
+		return clauses
+	}
+
+	unified := slices.Clone(clauses)
+	for idx := range unified {
+		unified[idx].errnoRet = clauses[0].errnoRet
+	}
+
+	return unified
+}
+
+// errnoUnifiable reports whether unifyErrno may rewrite these clauses: they
+// are several, they apply one errno-carrying action, they do not already
+// form a safe shape, each tests one argument for equality, no two test the
+// same one, and they do not all report the same errno already.
+func errnoUnifiable(clauses []clause) bool {
+	if len(clauses) < 2 || !errnoSignificant(clauses[0].action) || safeShape(clauses) {
+		return false
+	}
+
+	differs := false
+	filters := make(map[string]struct{}, len(clauses))
+
+	for _, current := range clauses {
+		if !actionsEquivalent(current.action, clauses[0].action) || !singleEquality(current) {
+			return false
+		}
+
+		// Two clauses testing the same argument for the same value are a
+		// conflict rather than a pair to unify: libseccomp refuses the
+		// second rule, so which result a call gets is not something this
+		// package can read, and the syscall must keep collapsing.
+		filter := sortedArgsKey(current.args)
+		if _, repeated := filters[filter]; repeated {
+			return false
+		}
+
+		filters[filter] = struct{}{}
+
+		if !equalUintPtr(current.errnoRet, clauses[0].errnoRet) {
+			differs = true
+		}
+	}
+
+	return differs
 }
 
 // mergeRules merges the clauses of one syscall from two sides.
@@ -1012,7 +1153,7 @@ func raiseOverlapsOfRedundant(
 // restrictive action than the second.
 func stricter(first, second clause) bool {
 	return !actionsEquivalent(first.action, second.action) &&
-		actionsEquivalent(MoreRestrictive(first.action, second.action), first.action)
+		actionsEquivalent(moreRestrictive(first.action, second.action), first.action)
 }
 
 func defaultClause(profile *specs.LinuxSeccomp) *clause {

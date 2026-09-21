@@ -130,6 +130,16 @@ var (
 	// ErrTooManyPaths is returned by ValidateArtifact and ValidateStrict
 	// when a profile holds more than MaxArtifactPaths paths.
 	ErrTooManyPaths = errors.New("too many paths")
+
+	// ErrTooManyPatternBytes is returned by ValidateArtifact and
+	// ValidateStrict when the glob patterns of a profile are longer than
+	// MaxArtifactPatternBytes in total.
+	ErrTooManyPatternBytes = errors.New("glob patterns too long in total")
+
+	// ErrTooManyCapabilities is returned by ValidateArtifact and
+	// ValidateStrict when a profile holds more than
+	// MaxArtifactCapabilities capability names.
+	ErrTooManyCapabilities = errors.New("too many capabilities")
 )
 
 // MaxArtifactPaths bounds how many paths a profile accepted by
@@ -147,6 +157,32 @@ var (
 // when it is merged with another profile of this size.
 const MaxArtifactPaths = 1024
 
+// MaxArtifactPatternBytes bounds the total length of the glob patterns of a
+// profile accepted by ValidateArtifact or ValidateStrict. Only paths holding
+// pattern syntax count: a literal path is matched by comparison, while a
+// pattern is compiled into a program first.
+//
+// A compiled pattern is cached, since the merge matches the same pattern
+// against many names and validation reads it again. The cache is bounded,
+// as anything holding data from a profile must be, so a profile whose
+// patterns do not fit it is recompiled instead of reused: a profile of a
+// thousand four-kilobyte patterns spent 38 seconds in ValidateArtifact and
+// 14 in a merge against a four-rule baseline, none of it in matching. The
+// bound admits two profiles of this size at once and leaves room for a node
+// baseline, so a profile a runtime accepts is compiled once.
+//
+// Profiles of the size KEP-6061 recommends runtimes accept spell a few
+// patterns of a few dozen bytes each.
+const MaxArtifactPatternBytes = 64 << 10
+
+// MaxArtifactCapabilities bounds how many capability names a profile
+// accepted by ValidateArtifact or ValidateStrict may hold. A name need not
+// be one this package knows, since a newer kernel may know it, so nothing
+// else bounds the list: a profile naming a hundred thousand of them is
+// merged in milliseconds but reported in megabytes, and every other section
+// of an artifact is bounded. Linux has some forty capabilities.
+const MaxArtifactCapabilities = 512
+
 // joinLimited reports at most a bounded number of the failures it is given.
 // A profile holds as many failures as it holds paths, and an artifact chooses
 // that number, so the rejection a runtime logs needs a ceiling just as the
@@ -157,8 +193,32 @@ func joinLimited(errs ...error) error {
 	return merge.JoinLimited(errs...)
 }
 
+// asciiUpper upper-cases the ASCII letters of a name and leaves every other
+// byte as it is. strings.ToUpper folds by Unicode rules, where U+017F and
+// U+0131 upper-case into "S" and "I", so a capability spelled with one of
+// them would compare equal to a real capability name, pass ValidateStrict as
+// a known one, and be merged into the real one. A capability name is a word
+// of ASCII characters (see ErrInvalidCapabilityName), so nothing a profile
+// can spell needs the Unicode rules.
+func asciiUpper(name string) string {
+	var builder strings.Builder
+
+	builder.Grow(len(name))
+
+	for idx := range len(name) {
+		char := name[idx]
+		if char >= 'a' && char <= 'z' {
+			char -= 'a' - 'A'
+		}
+
+		builder.WriteByte(char)
+	}
+
+	return builder.String()
+}
+
 func isKnownCapability(name string) bool {
-	switch strings.ToUpper(name) {
+	switch asciiUpper(name) {
 	case "CHOWN", "DAC_OVERRIDE", "DAC_READ_SEARCH", "FOWNER", "FSETID",
 		"KILL", "SETGID", "SETUID", "SETPCAP", "LINUX_IMMUTABLE",
 		"NET_BIND_SERVICE", "NET_BROADCAST", "NET_ADMIN", "NET_RAW",
@@ -213,7 +273,9 @@ func isKnownCapability(name string) bool {
 // Validation failures are collected and returned together, except that an
 // oversized path is reported on its own: every other check would scan the
 // path the length check already refused. Very many failures are reported as
-// the first of them followed by a count of the rest.
+// the first of them followed by a count of the rest, which matches
+// ErrMoreProblems: a sentinel a profile violates can therefore be absent
+// from the error that reports it.
 func Validate(profile *Profile) error {
 	if profile == nil {
 		return ErrNilProfile
@@ -319,6 +381,14 @@ func ValidateStrict(profile *Profile) error {
 	}
 
 	if profile.Capabilities != nil {
+		// The spelling check first, so that ValidateStrict rejects every
+		// name ValidateArtifact rejects rather than only implying it: a
+		// name outside the word grammar is not a known capability either,
+		// but it is reported as the spelling problem it is.
+		errs = append(errs, validateCapabilitySpelling(
+			profile.Capabilities.AllowedCapabilities,
+		)...)
+
 		err := validateCapabilityNames(profile.Capabilities.AllowedCapabilities)
 		if err != nil {
 			errs = append(errs, err)
@@ -404,18 +474,43 @@ func ValidateArtifact(profile *Profile) error {
 }
 
 // validatePathCount reports a profile holding more paths than
-// MaxArtifactPaths. The count is not part of the message: it says nothing a
-// caller cannot count itself, and the limit is the number that matters.
+// MaxArtifactPaths, or patterns longer in total than
+// MaxArtifactPatternBytes. The count is not part of the message: it says
+// nothing a caller cannot count itself, and the limit is the number that
+// matters.
+//
+// Whether a path is a pattern is decided by the bytes it holds rather than
+// by compiling it, so that counting an over-large profile costs no more than
+// reading it.
 func validatePathCount(profile *Profile) error {
 	count := 0
+	patternBytes := 0
 
 	visitPathLists(profile, func(_ string, paths []string) {
 		count += len(paths)
+
+		for _, path := range paths {
+			if strings.ContainsAny(path, patternSyntax) {
+				patternBytes += len(path)
+			}
+		}
 	})
 
 	if count > MaxArtifactPaths {
 		return fmt.Errorf("%d paths, at most %d: %w",
 			count, MaxArtifactPaths, ErrTooManyPaths)
+	}
+
+	if patternBytes > MaxArtifactPatternBytes {
+		return fmt.Errorf("%d bytes of glob patterns, at most %d: %w",
+			patternBytes, MaxArtifactPatternBytes, ErrTooManyPatternBytes)
+	}
+
+	if profile.Capabilities != nil &&
+		len(profile.Capabilities.AllowedCapabilities) > MaxArtifactCapabilities {
+		return fmt.Errorf("%d capabilities, at most %d: %w",
+			len(profile.Capabilities.AllowedCapabilities),
+			MaxArtifactCapabilities, ErrTooManyCapabilities)
 	}
 
 	return nil
@@ -461,7 +556,7 @@ func validatePathLengths(profile *Profile) error {
 		}, ErrPathTooLong, false)...)
 	})
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
 }
 
 // hasDotComponent reports whether a path has a "." or ".." component, with
@@ -633,11 +728,20 @@ const unquotableChars = " \t\r\n\"!,"
 
 // hasUnquotableChar reports whether a path holds a character of that set
 // unescaped. A backslash makes the character after it part of the path,
-// whatever it is, which is how a profile spells a path holding a space or a
-// comma, and the merge resolves the escape the way the parser does. A comma
-// is accepted where another path character follows it, as inside an
-// alternation, and reported where the path ends or a character that cannot
-// continue it follows, which is the "/foobar," the parser refuses.
+// which is how a profile spells a path holding a space or a comma, and the
+// merge resolves the escape the way the parser does. A comma is accepted
+// where another path character follows it, as inside an alternation, and
+// reported where the path ends or a character that cannot continue it
+// follows, which is the "/foobar," the parser refuses.
+//
+// A backslash protects the character after it only where that character can
+// be written in a rule at all. The parser resolves no escape whose second
+// byte is a control character (see escapeSequence), so the backslash and the
+// byte both survive into the rule: `/tmp/a\` followed by a raw newline is a
+// path holding a newline, and a consumer rendering it writes a rule that
+// ends mid-path and a second rule of the path author's choosing. The two-
+// character forms spell the same paths safely (\n, \r, \t, or \x0a), so
+// nothing is lost by refusing this one.
 func hasUnquotableChar(path string) bool {
 	for idx := 0; idx < len(path); idx++ {
 		char := path[idx]
@@ -645,6 +749,10 @@ func hasUnquotableChar(path string) bool {
 		switch {
 		case char == '\\':
 			idx++
+
+			if idx < len(path) && isControlByte(path[idx]) {
+				return true
+			}
 		case char == ',':
 			if idx+1 >= len(path) || unquotable(path[idx+1]) {
 				return true
@@ -655,6 +763,12 @@ func hasUnquotableChar(path string) bool {
 	}
 
 	return false
+}
+
+// isControlByte reports whether a byte is one no rule can carry in the
+// clear: the C0 controls and DEL. A path names them with an escape.
+func isControlByte(char byte) bool {
+	return char < 0x20 || char == 0x7f
 }
 
 // unquotable reports whether a character has to be escaped to stay part of a
@@ -870,7 +984,7 @@ func validateDuplicateCapabilities(caps []string) error {
 	var errs []error
 
 	for _, cap := range caps {
-		upper := strings.ToUpper(cap)
+		upper := asciiUpper(cap)
 		if _, ok := seen[upper]; ok {
 			errs = append(errs, fmt.Errorf(
 				"AllowedCapabilities: %s: %w",
@@ -896,7 +1010,7 @@ func validateCapabilityNames(caps []string) error {
 		}
 	}
 
-	return errors.Join(errs...)
+	return joinLimited(errs...)
 }
 
 // validateDuplicatesInSlice reports the paths of one list that spell a rule

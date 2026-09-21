@@ -39,6 +39,10 @@ func TestValidateArtifactRejectsUnquotablePaths(t *testing.T) {
 		"/abc def", "/foobar,", "/tmp/a!b", `/tmp/a"b`, "/tmp/a\tb",
 		"/tmp/a\rb", "/tmp/a,", "/tmp/a,,b", "/tmp/a, b", "/etc/{a,b},",
 		"/etc/[!a]", `/tmp/a\\ b`, "/tmp/ ",
+		// A backslash does not protect a control character: the parser
+		// resolves no escape whose second byte is one, so both bytes reach
+		// the rule and the newline ends it wherever a consumer renders it.
+		"/tmp/a\\\nb", "/tmp/a\\\rb", "/tmp/a\\\tb",
 	} {
 		t.Run(path, func(t *testing.T) {
 			t.Parallel()
@@ -69,10 +73,11 @@ func TestValidateArtifactAcceptsEscapedPaths(t *testing.T) {
 	t.Parallel()
 
 	for _, path := range []string{
-		`/tmp/a\ b`, `/tmp/a\	b`, `/tmp/a\"b`, `/tmp/a\!b`, `/tmp/a\,`,
+		`/tmp/a\ b`, `/tmp/a\"b`, `/tmp/a\!b`, `/tmp/a\,`,
 		`/tmp/a\,b`, "/etc/{a,b}", "/etc/{a,}", "/etc/{,a}", "/etc/a,b",
-		`/tmp/a\
-b`,
+		// The two-character forms of the same control characters, which the
+		// parser does resolve, so the rule carries no raw byte.
+		`/tmp/a\tb`, `/tmp/a\nb`, `/tmp/a\rb`, `/tmp/a\x0ab`,
 	} {
 		t.Run(path, func(t *testing.T) {
 			t.Parallel()
@@ -249,6 +254,64 @@ func TestValidateArtifactRejectsTooManyPaths(t *testing.T) {
 	err = apparmor.Validate(readOnly(paths...))
 	if err != nil {
 		t.Errorf("Validate = %v, want nil", err)
+	}
+}
+
+// TestCapabilityNamesFoldAsciiOnly covers the capability names two profiles
+// agree on. Folding them with Unicode rules would let U+017F and U+0131,
+// whose upper case is "S" and "I", spell a real capability: the name would
+// pass ValidateStrict as a known one and the merge would grant the real
+// capability to a profile that never named it.
+func TestCapabilityNamesFoldAsciiOnly(t *testing.T) {
+	t.Parallel()
+
+	caps := func(names ...string) *apparmor.Profile {
+		return &apparmor.Profile{
+			Executable: nil, Filesystem: nil, Network: nil,
+			Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: names},
+		}
+	}
+
+	const homoglyph = "\u017fys_admin"
+
+	for name, validate := range map[string]validateFunc{
+		"ValidateArtifact": apparmor.ValidateArtifact,
+		"ValidateStrict":   apparmor.ValidateStrict,
+	} {
+		err := validate(caps(homoglyph))
+		if !errors.Is(err, apparmor.ErrInvalidCapabilityName) {
+			t.Errorf("%s = %v, want ErrInvalidCapabilityName", name, err)
+		}
+	}
+
+	// The merge runs Validate only, so the name survives as itself rather
+	// than as the capability it resembles.
+	merged, err := apparmor.Union(caps(homoglyph), caps())
+	if err != nil {
+		t.Fatalf("Union: %v", err)
+	}
+
+	if got := merged.Capabilities.AllowedCapabilities; slices.Contains(got, "SYS_ADMIN") {
+		t.Errorf("Union = %q, want no SYS_ADMIN: no input named it", got)
+	}
+
+	merged, err = apparmor.Intersect(caps(homoglyph), caps("SYS_ADMIN"))
+	if err != nil {
+		t.Fatalf("Intersect: %v", err)
+	}
+
+	if got := merged.Capabilities.AllowedCapabilities; len(got) != 0 {
+		t.Errorf("Intersect = %q, want nothing: the names differ", got)
+	}
+
+	// ASCII case still folds, which is what the merge is for.
+	merged, err = apparmor.Intersect(caps("chown"), caps("CHOWN"))
+	if err != nil {
+		t.Fatalf("Intersect: %v", err)
+	}
+
+	if got := merged.Capabilities.AllowedCapabilities; !slices.Equal(got, []string{"CHOWN"}) {
+		t.Errorf("Intersect = %q, want [CHOWN]", got)
 	}
 }
 

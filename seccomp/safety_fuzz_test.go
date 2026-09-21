@@ -144,9 +144,9 @@ func safetyProfile(reader *byteReader, errnos bool) *specs.LinuxSeccomp {
 
 		for argIdx := range argCount {
 			arg := specs.LinuxSeccompArg{
-				Index:    uint(argIdx),
-				Value:    uint64(reader.next() % valueSpan),
-				ValueTwo: uint64(reader.next() % valueSpan),
+				Index:    safetyArgIndex(reader, argIdx),
+				Value:    safetyValue(reader, valueSpan),
+				ValueTwo: safetyValue(reader, valueSpan),
 				Op:       safetyOps[int(reader.next())%len(safetyOps)],
 			}
 			entry.Args = append(entry.Args, arg)
@@ -371,6 +371,31 @@ func checkBareMergeSafety(
 			}
 		}
 	})
+}
+
+// safetyValue draws an argument value. Most are small, so that two entries
+// often compare the same value and the interesting overlaps arise, but one
+// in eight straddles 2**32: libseccomp splits a 64-bit comparison into one
+// of the upper and one of the lower half, which is the hazard safeShape's
+// wide-range rule exists for and which a value under the span can never
+// reach.
+func safetyValue(reader *byteReader, span uint64) uint64 {
+	if reader.next()%8 == 0 {
+		return uint64(reader.next())<<32 | uint64(reader.next())
+	}
+
+	return uint64(reader.next()) % span
+}
+
+// safetyArgIndex draws an argument index. It usually numbers the arguments
+// in order and sometimes repeats the previous one, which runtimes load as
+// one rule per condition rather than as one rule of two conditions.
+func safetyArgIndex(reader *byteReader, argIdx int) uint {
+	if reader.next()%4 == 0 {
+		return uint(max(argIdx-1, 0))
+	}
+
+	return uint(argIdx)
 }
 
 // underAssumedDefault lowers SCMP_ACT_KILL_PROCESS entries to

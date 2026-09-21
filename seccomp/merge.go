@@ -36,6 +36,12 @@ var (
 	ErrNoProfiles = spm.ErrNoProfiles
 	// ErrNilProfile is returned when a nil profile is provided.
 	ErrNilProfile = spm.ErrNilProfile
+	// ErrMoreProblems is returned alongside the failures a report lists
+	// when it left others out: every validator bounds how many it reports,
+	// since a profile holds as many as it holds rules. A caller matching a
+	// sentinel must read a match here as "and possibly others", because a
+	// failure the profile holds can be absent from the error reporting it.
+	ErrMoreProblems = spm.ErrMoreProblems
 	// ErrNotifyWithoutListener is returned by Validate for a profile that
 	// applies SCMP_ACT_NOTIFY while naming no listener to hand the
 	// notification to, and by Intersect and Union if a result would ever
@@ -159,7 +165,7 @@ var (
 // This implements the profile merging semantics defined in KEP-6061 for CRI
 // runtimes merging OCI-pulled profiles with node baselines.
 func Intersect(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
-	return foldProfiles(profiles, mergeStrategy{pick: MoreRestrictive, isIntersect: true})
+	return foldProfiles(profiles, mergeStrategy{pick: moreRestrictive, isIntersect: true})
 }
 
 // Union merges multiple seccomp profiles via union: the resulting profile
@@ -205,7 +211,7 @@ func Intersect(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 // This implements the merge semantics used by the Security Profiles Operator
 // for combining recorded profiles.
 func Union(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
-	return foldProfiles(profiles, mergeStrategy{pick: LessRestrictive, isIntersect: false})
+	return foldProfiles(profiles, mergeStrategy{pick: lessRestrictive, isIntersect: false})
 }
 
 type mergeStrategy struct {

@@ -47,6 +47,9 @@ var (
 	// oversized path costs no further work: every other check, and the
 	// merge's hierarchy resolution, walks the path component by component.
 	ErrPathTooLong = errors.New("path exceeds 4096 bytes")
+	// ErrTooManyRules is returned by ValidateArtifact and ValidateStrict
+	// when a profile holds more than MaxArtifactRules rules.
+	ErrTooManyRules = errors.New("too many rules")
 
 	// ErrParentPath is returned when a path rule contains a ".." component.
 	// The kernel resolves ".." against the file system, where a symlink can
@@ -92,6 +95,23 @@ var (
 // rules costs time in the length of the path for every rule.
 const MaxPathLen = 4096
 
+// MaxArtifactRules bounds how many rules a profile accepted by
+// ValidateArtifact or ValidateStrict may hold, counted over its path rules
+// and its network rules together.
+//
+// Merging a profile costs the number of rules times the depth of their
+// paths, since an intersection resolves every rule against the ancestors of
+// every other: forty thousand rules of two-thousand-component paths took
+// fourteen seconds and allocated close to four gigabytes. MaxPathLen bounds
+// the depth of one path, and this bounds how many of them there are, so an
+// over-large profile is refused where the reason can still be reported
+// rather than merged slowly. The seccomp and apparmor packages bound an
+// artifact the same way.
+//
+// Landlock profiles name the directories a workload may touch; the ones
+// KEP-6061 recommends runtimes accept hold a few dozen rules.
+const MaxArtifactRules = 1024
+
 // fieldRef names a profile field, or an element of it when idx is not
 // negative, in error messages. It is formatted only when an error is
 // reported, so validating a large profile does not build a string per rule.
@@ -125,8 +145,10 @@ func netRuleRef(idx int) fieldRef  { return fieldRef{field: "NetRules", idx: idx
 // pass: the kernel folds them and so does the merge. ValidateStrict rejects
 // them, and ValidateArtifact adds what a kernel could not load, so what
 // Validate rejects ValidateArtifact rejects, and what ValidateArtifact
-// rejects ValidateStrict rejects. All validation failures are collected and
-// returned together.
+// rejects ValidateStrict rejects. Validation failures are collected and
+// returned together, up to a bound: past it the error matches
+// ErrMoreProblems instead of listing the rest, so a sentinel a profile
+// violates can be absent from the error that reports it.
 func Validate(profile *Profile) error {
 	_, err := validateProfile(profile, false)
 
@@ -399,7 +421,29 @@ func validateDuplicatePaths(rules []PathRule, cleaned []string) error {
 // see Intersect for what a runtime can do about it, and LoweredRulePaths
 // for which rules of a result carry such a grant.
 func ValidateArtifact(profile *Profile) error {
+	err := validateRuleCount(profile)
+	if err != nil {
+		return err
+	}
+
 	return validateLoadableProfile(profile, false)
+}
+
+// validateRuleCount reports a profile holding more rules than
+// MaxArtifactRules. It runs first and on its own, so that an over-large
+// profile is refused rather than walked.
+func validateRuleCount(profile *Profile) error {
+	if profile == nil {
+		return nil
+	}
+
+	count := len(profile.PathRules) + len(profile.NetRules)
+	if count > MaxArtifactRules {
+		return fmt.Errorf("%d rules, at most %d: %w",
+			count, MaxArtifactRules, ErrTooManyRules)
+	}
+
+	return nil
 }
 
 // ValidateStrict is intended for user-authored profiles. It performs every
@@ -413,6 +457,11 @@ func ValidateArtifact(profile *Profile) error {
 // the result handles or scopes at least one right, since Intersect and
 // Union deduplicate, prune unhandled rights, and drop empty rules.
 func ValidateStrict(profile *Profile) error {
+	err := validateRuleCount(profile)
+	if err != nil {
+		return err
+	}
+
 	return validateLoadableProfile(profile, true)
 }
 

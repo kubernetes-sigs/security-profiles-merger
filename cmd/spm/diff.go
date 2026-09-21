@@ -69,6 +69,8 @@ var (
 // explicit when --arch named one, so that the default stays whatever the
 // profile type's own Diff does.
 type diffArch struct {
+	// named reports whether --arch was given at all, whatever its value.
+	named    bool
 	value    specs.Arch
 	explicit bool
 }
@@ -78,16 +80,16 @@ type diffArch struct {
 // against the prefix: an architecture nothing runs on is implied by neither
 // profile, so a misspelling such as SCMP_ARCH_ARM64 would otherwise compare
 // as --arch none does and report a difference the named node does not have.
-func parseDiffArch(value string) (diffArch, error) {
+func parseDiffArch(value string, named bool) (diffArch, error) {
 	switch {
 	case value == archNative:
-		return diffArch{value: "", explicit: false}, nil
+		return diffArch{named: named, value: "", explicit: false}, nil
 	case value == archNone:
-		return diffArch{value: "", explicit: true}, nil
+		return diffArch{named: named, value: "", explicit: true}, nil
 	case strings.HasPrefix(value, archPrefix) && knownArch(specs.Arch(value)):
-		return diffArch{value: specs.Arch(value), explicit: true}, nil
+		return diffArch{named: named, value: specs.Arch(value), explicit: true}, nil
 	default:
-		return diffArch{value: "", explicit: false}, fmt.Errorf(
+		return diffArch{named: named, value: "", explicit: false}, fmt.Errorf(
 			"%w %q (use %s, %s, or a name such as %sX86_64)",
 			errUnknownArchName, value, archNative, archNone, archPrefix,
 		)
@@ -148,11 +150,13 @@ func runDiff(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	if code := validateDiffFlags(flags.Args(), opts.format, opts.profileType, stderr); code != 0 {
+	if code := validateDiffFlags(
+		flags.Args(), argsSeparated(args), opts.format, opts.profileType, stderr,
+	); code != 0 {
 		return code
 	}
 
-	arch, err := parseDiffArch(opts.arch)
+	arch, err := parseDiffArch(opts.arch, flagNamed(flags, "arch"))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 
@@ -203,8 +207,10 @@ func diffInputs(
 
 // validateDiffFlags checks the flag order first, so that a flag after the
 // file arguments is reported as such, and then the flag values.
-func validateDiffFlags(args []string, format, profileType string, stderr io.Writer) int {
-	if code := checkFlagOrder(args, stderr); code != 0 {
+func validateDiffFlags(
+	args []string, separated bool, format, profileType string, stderr io.Writer,
+) int {
+	if code := checkFlagOrder(args, separated, stderr); code != 0 {
 		return code
 	}
 

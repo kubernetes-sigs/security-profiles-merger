@@ -59,6 +59,14 @@ var (
 	ErrNilProfile = errors.New("profile must not be nil")
 	// ErrEmptyPath is returned when a path rule contains an empty string.
 	ErrEmptyPath = errors.New("empty path")
+	// ErrMoreProblems stands in for the validation failures a report left
+	// out. A profile holds as many failures as it holds rules, and an
+	// artifact chooses how many that is, so every validator bounds what it
+	// reports and matches this instead of the rest. A caller dispatching on
+	// a sentinel must therefore treat a match here as "and possibly others":
+	// a failure the profile holds can be absent from the error that reports
+	// it.
+	ErrMoreProblems = errors.New("more problems omitted")
 )
 
 // SliceDiff represents added and removed items in a set-like slice. It is

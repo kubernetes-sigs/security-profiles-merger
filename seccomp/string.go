@@ -21,6 +21,8 @@ import (
 	"strings"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
 // FormatProfile returns a human-readable representation of a seccomp profile.
@@ -56,10 +58,12 @@ func FormatProfile(profile *specs.LinuxSeccomp) string {
 	}
 
 	if profile.ListenerPath != "" {
-		parts = append(parts, "listener:"+profile.ListenerPath)
+		parts = append(parts, "listener:"+merge.SafeText(profile.ListenerPath))
 
 		if profile.ListenerMetadata != "" {
-			parts = append(parts, "listenerMeta:"+profile.ListenerMetadata)
+			parts = append(
+				parts, "listenerMeta:"+merge.SafeText(profile.ListenerMetadata),
+			)
 		}
 	}
 
@@ -78,10 +82,10 @@ func (e SyscallEntry) String() string {
 	}
 
 	if len(e.Args) == 0 {
-		return e.Name + "->" + action
+		return merge.SafeText(e.Name) + "->" + action
 	}
 
-	return fmt.Sprintf("%s(%s)->%s", e.Name, formatArgs(e.Args), action)
+	return fmt.Sprintf("%s(%s)->%s", merge.SafeText(e.Name), formatArgs(e.Args), action)
 }
 
 // String returns a human-readable representation of the syscall detail.
@@ -113,7 +117,7 @@ func formatArgs(args []specs.LinuxSeccompArg) string {
 }
 
 func formatSyscall(syscall specs.LinuxSyscall) string {
-	names := strings.Join(syscall.Names, ",")
+	names := strings.Join(merge.SafeTexts(syscall.Names), ",")
 	action := string(syscall.Action)
 
 	if syscall.ErrnoRet != nil {

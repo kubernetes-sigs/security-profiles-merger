@@ -19,11 +19,14 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime/debug"
+
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
 // version is set at build time through -ldflags. A binary built without it,
@@ -141,7 +144,19 @@ func checkParsable(inputs []profileInput) error {
 
 		err := json.Unmarshal(input.data, &fields)
 		if err != nil {
-			return fmt.Errorf("parsing %s: %w", input.name, err)
+			// The decoder names the Go type it was decoding into, which
+			// says nothing to someone holding a profile. What it was asked
+			// for here is an object, which every profile type is. That is
+			// only the reason it failed when the document parses at all:
+			// a syntax error is reported as itself, since "not a JSON
+			// object" would point at the wrong thing.
+			if json.Valid(input.data) {
+				return fmt.Errorf(
+					"parsing %s: %w", merge.SafeText(input.name), errNotAnObject,
+				)
+			}
+
+			return decodeError(input.name, err)
 		}
 	}
 
@@ -194,7 +209,7 @@ func detectOneProfileType(raw []byte) []string {
 // a path is given. Commands buffer their result and flush it only once they
 // have succeeded, so a failed run never truncates an existing file.
 func flushOutput(path string, content []byte, stdout, stderr io.Writer) int {
-	if path == "" {
+	if path == "" || path == stdinArg {
 		_, err := stdout.Write(content)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "error: writing output: %v\n", err)
@@ -246,6 +261,10 @@ func prepareOutputFile(file *os.File) error {
 // the node by default.
 const ownerReadWrite = 0o600
 
+// errSymlinkOutput reports an --output path that is a symbolic link, which
+// is refused rather than followed.
+var errSymlinkOutput = errors.New("refusing to write through a symbolic link")
+
 // writeOutputFile writes content to path with the mode above. A symlink at
 // path is refused rather than followed, so that --output cannot be aimed
 // through one at a file elsewhere, and the mode is set explicitly on a
@@ -266,10 +285,13 @@ func writeOutputFile(path string, content []byte) error {
 	)
 	if err != nil {
 		if isSymlinkRefusal(err) {
-			return fmt.Errorf("open: %w: %s is a symbolic link", err, path)
+			return fmt.Errorf(
+				"%w: %s is a symbolic link; write to its target, or to stdout with -",
+				errSymlinkOutput, path,
+			)
 		}
 
-		return fmt.Errorf("open: %w", err)
+		return bareFileError(err)
 	}
 
 	err = prepareOutputFile(file)

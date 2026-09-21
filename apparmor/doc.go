@@ -80,7 +80,11 @@ limitations under the License.
 //
 // Every exported function is safe to call from several goroutines at once.
 // The package keeps one internal cache of analyzed glob patterns, guarded by
-// its own lock, which is the only state shared between calls; it holds no
-// profile data and changes no result. Concurrent calls only need their
-// profiles not to be written to at the same time from elsewhere.
+// its own lock, which is the only state shared between calls; it changes no
+// result, only the work a repeated pattern costs. It does hold the pattern
+// text of the profiles it analyzed, bounded by its own size limits and
+// evicted as newer patterns arrive, so a process merging untrusted profiles
+// keeps some of their paths in memory after a call returns. Concurrent calls
+// only need their profiles not to be written to at the same time from
+// elsewhere.
 package apparmor

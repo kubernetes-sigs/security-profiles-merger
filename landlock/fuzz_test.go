@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 	"sigs.k8s.io/security-profiles-merger/landlock"
 )
 
@@ -1248,14 +1249,18 @@ func assertDiffFormat(t *testing.T, diff *landlock.ProfileDiff, left, right *lan
 		return
 	}
 
+	// A path holding a control byte or invalid UTF-8 is quoted rather than
+	// written through, so it is looked for as the formatter writes it: a
+	// runtime's log and an operator's terminal are not places to let a
+	// profile choose the bytes.
 	for _, rule := range slices.Concat(diff.PathRules.Added, diff.PathRules.Removed) {
-		if !strings.Contains(formatted, rule.Path) {
+		if !strings.Contains(formatted, merge.SafeText(rule.Path)) {
 			t.Errorf("FormatDiff = %q, missing the path %q", formatted, rule.Path)
 		}
 	}
 
 	for _, change := range diff.PathRules.Changed {
-		if !strings.Contains(formatted, change.Path) {
+		if !strings.Contains(formatted, merge.SafeText(change.Path)) {
 			t.Errorf("FormatDiff = %q, missing the changed path %q", formatted, change.Path)
 		}
 	}

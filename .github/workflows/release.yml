@@ -18,7 +18,12 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      # The same gate a pull request passes, so that a tag cannot ship what
+      # a pull request could not merge: the tests with the race detector and
+      # the coverage floor, the golden contract, and the linters.
       - run: make verify-coverage
+      - run: make verify-golden
+      - run: make lint
       - run: make build
 
   release:

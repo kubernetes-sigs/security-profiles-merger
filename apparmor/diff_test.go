@@ -957,3 +957,73 @@ func TestDiffReportsRealConstraintOnly(t *testing.T) {
 			capChown, apparmor.FormatDiff(diff))
 	}
 }
+
+// TestDiffNetworkBooleanOneSided covers a network boolean set on one side
+// and absent on the other, which no other case here does: they all set both
+// sides. An absent boolean denies what it covers, so it says what an
+// explicit false says and differs from an explicit true.
+func TestDiffNetworkBooleanOneSided(t *testing.T) {
+	t.Parallel()
+
+	set := func(value bool) *apparmor.Profile {
+		return &apparmor.Profile{
+			Executable: nil,
+			Filesystem: nil,
+			Network: &apparmor.NetworkRules{
+				AllowRaw: &value,
+				Protocols: &apparmor.AllowedProtocols{
+					AllowTCP: &value,
+					AllowUDP: nil,
+				},
+			},
+			Capabilities: nil,
+		}
+	}
+
+	absent := &apparmor.Profile{
+		Executable: nil,
+		Filesystem: nil,
+		Network: &apparmor.NetworkRules{
+			AllowRaw:  nil,
+			Protocols: &apparmor.AllowedProtocols{AllowTCP: nil, AllowUDP: nil},
+		},
+		Capabilities: nil,
+	}
+
+	for _, testCase := range []struct {
+		value     bool
+		wantEqual bool
+	}{
+		{value: true, wantEqual: false},
+		{value: false, wantEqual: true},
+	} {
+		for _, pair := range [][2]*apparmor.Profile{
+			{set(testCase.value), absent}, {absent, set(testCase.value)},
+		} {
+			diff, err := apparmor.Diff(pair[0], pair[1])
+			if err != nil {
+				t.Fatalf("Diff: %v", err)
+			}
+
+			if diff.Equal != testCase.wantEqual {
+				t.Errorf(
+					"Diff(%s, %s).Equal = %v, want %v",
+					apparmor.FormatProfile(pair[0]), apparmor.FormatProfile(pair[1]),
+					diff.Equal, testCase.wantEqual,
+				)
+
+				continue
+			}
+
+			if testCase.wantEqual {
+				continue
+			}
+
+			if diff.Network == nil || diff.Network.AllowRaw == nil ||
+				diff.Network.AllowTCP == nil {
+				t.Errorf("Diff = %s, want both booleans reported",
+					apparmor.FormatDiff(diff))
+			}
+		}
+	}
+}

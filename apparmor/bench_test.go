@@ -29,6 +29,14 @@ import (
 // stops matching altogether: both are cliffs the smaller sizes hide.
 var benchPathCounts = []int{10, 50, 200, 1024, 2000}
 
+// benchProfilePaths returns how many paths buildAppArmorProfile writes for a
+// count: one per filesystem category, one executable, and the one library.
+func benchProfilePaths(numPaths int) int {
+	const categories = 4
+
+	return categories*numPaths + 1
+}
+
 func buildAppArmorProfile(numPaths int) *apparmor.Profile {
 	allCaps := allKnownTestCaps()
 	numCaps := min(numPaths, len(allCaps))
@@ -126,9 +134,18 @@ func BenchmarkAppArmorValidate(b *testing.B) {
 	}
 }
 
+// BenchmarkAppArmorValidateStrict measures the strict validator, which
+// rejects a profile holding more than MaxArtifactPaths paths as
+// ValidateArtifact does. buildAppArmorProfile writes four paths per count
+// plus one library, so the larger counts are past that bound and are
+// measured by BenchmarkAppArmorValidate instead, which has no such ceiling.
 func BenchmarkAppArmorValidateStrict(b *testing.B) {
 	for _, numPaths := range benchPathCounts {
 		profile := buildAppArmorProfile(numPaths)
+
+		if benchProfilePaths(numPaths) > apparmor.MaxArtifactPaths {
+			continue
+		}
 
 		b.Run(fmt.Sprintf("paths=%d", numPaths), func(b *testing.B) {
 			b.ReportAllocs()

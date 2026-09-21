@@ -61,6 +61,16 @@ const (
 	// profiles of MaxArtifactPaths paths each, so a profile a runtime
 	// accepts is merged exactly.
 	maxMergePathPairs = 1 << 20
+	// maxMergePathWork bounds the same matching by the bytes it compares,
+	// not only by the number of comparisons. One comparison runs a pattern's
+	// program over a name, so it costs about the length of the pattern plus
+	// the length of the name, and a profile chooses both: two profiles of a
+	// quarter megabyte, well inside MaxArtifactPaths and the pair bound,
+	// took two minutes to intersect while allocating almost nothing. The
+	// budget is the pair bound at the length of a path a profile names.
+	maxMergePathWork = maxMergePathPairs * typicalPathLen
+	// typicalPathLen is the path length the pair bound assumes.
+	typicalPathLen = 64
 )
 
 // patternSyntax holds the bytes that make a path need analysis: glob
@@ -352,12 +362,25 @@ func keyForPath(path string) pathKey {
 // paths a side, which would turn the budget off exactly for the inputs it
 // exists for. Only ValidateArtifact bounds the path count, and the merge
 // runs Validate, so an unvalidated profile reaches this directly.
-func exceedsPairBudget(leftLiterals, leftGlobs, rightLiterals, rightGlobs int) bool {
+func exceedsPairBudget(
+	leftLiterals, leftGlobs, rightLiterals, rightGlobs, longest int,
+) bool {
 	pairs := pathCount(leftLiterals)*pathCount(rightGlobs) +
 		pathCount(rightLiterals)*pathCount(leftGlobs) +
 		pathCount(leftGlobs)*pathCount(rightGlobs)
 
-	return pairs > maxMergePathPairs
+	if pairs > maxMergePathPairs {
+		return true
+	}
+
+	// longest bounds both the pattern and the name of every pair. At or
+	// below the assumed length, a pair costs no more than the pair bound
+	// already allows for.
+	if longest <= typicalPathLen {
+		return false
+	}
+
+	return pairs*pathCount(longest) > maxMergePathWork
 }
 
 // pathCount widens a count of paths for the arithmetic above. Every count it
@@ -413,6 +436,9 @@ type pathSet struct {
 	byPrefix prefixIndex
 	// literals holds every literal path of the set.
 	literals map[string]struct{}
+	// longest is the length of the longest path of the set, which bounds
+	// what one comparison against it costs.
+	longest int
 }
 
 func newPathSet(patterns []string) pathSet {
@@ -420,6 +446,7 @@ func newPathSet(patterns []string) pathSet {
 		globs:    make(map[string]*globMatcher, len(patterns)),
 		byPrefix: make(prefixIndex, len(patterns)),
 		literals: make(map[string]struct{}, len(patterns)),
+		longest:  0,
 	}
 
 	for _, pattern := range patterns {
@@ -432,6 +459,8 @@ func newPathSet(patterns []string) pathSet {
 // insert records a pattern.
 func (set *pathSet) insert(pattern string) {
 	matcher := matcherFor(pattern)
+
+	set.longest = max(set.longest, len(pattern))
 
 	if matcher.kind == kindLiteral {
 		set.literals[pattern] = struct{}{}
@@ -476,6 +505,7 @@ func intersectPaths(left, right []string) []string {
 	if exceedsPairBudget(
 		len(leftSet.literals), len(leftSet.globs),
 		len(rightSet.literals), len(rightSet.globs),
+		max(leftSet.longest, rightSet.longest),
 	) {
 		return intersectVerbatim(left, &rightSet)
 	}
@@ -615,6 +645,8 @@ type fsSide struct {
 	// starStar indexes the "**" globs, the only ones that can narrow
 	// another glob.
 	starStar prefixIndex
+	// longest is the length of the longest path of the side.
+	longest int
 }
 
 // grants returns the permissions the globs of the side grant the file name.
@@ -639,10 +671,13 @@ func buildFsSide(perms map[string]fsPermission) fsSide {
 		globs:    make(map[string]fsPathEntry, len(perms)),
 		byPrefix: make(prefixIndex),
 		starStar: make(prefixIndex),
+		longest:  0,
 	}
 
 	for path, perm := range perms {
 		matcher := matcherFor(path)
+
+		side.longest = max(side.longest, len(path))
 
 		if matcher.kind == kindLiteral {
 			side.literals = append(side.literals, fsPathEntry{

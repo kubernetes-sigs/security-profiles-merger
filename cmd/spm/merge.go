@@ -23,6 +23,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -32,6 +33,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
 const mergeUsage = `Usage: spm merge [options] [files...]
@@ -98,7 +101,7 @@ func runMerge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	if code := checkFlagOrder(flags.Args(), stderr); code != 0 {
+	if code := checkFlagOrder(flags.Args(), argsSeparated(args), stderr); code != 0 {
 		return code
 	}
 
@@ -202,8 +205,7 @@ func validateMergeFlags(
 	strategy := opts.strategy
 	if strategy == "" {
 		_, _ = fmt.Fprintln(stderr, "error: --strategy is required")
-
-		flags.PrintDefaults()
+		printUsage(flags, mergeUsage, stderr, stderr)
 
 		return exitUsage
 	}
@@ -267,12 +269,41 @@ func mergeProfiles[T any](request mergeRequest[T], stdout, stderr io.Writer) int
 
 	result, err := mergeFn(profiles...)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "error: %v\n", nameMergeFailure(err, request.inputs))
 
 		return 1
 	}
 
 	return writeOutput(result, request.formatFn(result), request.format, stdout, stderr)
+}
+
+// mergeFailurePrefix is how the merge functions name the input a validation
+// failure came from: their own position in the argument list.
+const mergeFailurePrefix = "validate profile "
+
+// nameMergeFailure replaces the position a merge function names with the
+// input it stands for. The merge validates the profiles it was handed, in
+// the order it was handed them, so the position is an index into the same
+// list the caller built; the caller knows what each one was read from, and
+// a file name or "stdin[2]" is what a reader can act on.
+func nameMergeFailure(err error, inputs []profileInput) error {
+	text := err.Error()
+	if !strings.HasPrefix(text, mergeFailurePrefix) {
+		return err
+	}
+
+	position, message, found := strings.Cut(text[len(mergeFailurePrefix):], ": ")
+	if !found {
+		return err
+	}
+
+	idx, convErr := strconv.Atoi(position)
+	if convErr != nil || idx < 0 || idx >= len(inputs) {
+		return err
+	}
+
+	//nolint:err113 // the message is the merge's own, renamed
+	return errors.New(merge.SafeText(inputs[idx].name) + ": " + message)
 }
 
 // checkInputs runs each input's own validation and reports whether any
@@ -290,7 +321,7 @@ func checkInputs[T any](
 
 		err := checks[idx](profile)
 		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "error: %s: %v\n", inputs[idx].name, err)
+			_, _ = fmt.Fprintf(stderr, "error: %s: %v\n", merge.SafeText(inputs[idx].name), err)
 
 			failed = true
 		}
@@ -306,6 +337,9 @@ const (
 	// per-file bound still allows maxInputFiles * maxInputSize to be read
 	// into memory at once.
 	maxTotalInputSize = 64 << 20
+	// maxMessageBytes bounds a message built from input the caller did not
+	// write, such as the literal a JSON decoder quotes back.
+	maxMessageBytes = 512
 )
 
 var (
@@ -317,6 +351,8 @@ var (
 	errFileTooLarge   = fmt.Errorf("file exceeds %d byte limit", maxInputSize)
 	errInputTooLarge  = fmt.Errorf("inputs exceed %d bytes in total", maxTotalInputSize)
 	errUnknownField   = errors.New("unknown field")
+	errNotAnObject    = errors.New("not a JSON object")
+	errDecode         = errors.New("decoding failed")
 	errInvalidUTF8    = errors.New(
 		"invalid UTF-8, which the JSON decoder replaces with U+FFFD, " +
 			"so distinct profiles can decode alike",
@@ -326,6 +362,10 @@ var (
 // stdinName is how an input read from stdin is named in errors and
 // warnings. Elements of a JSON array read from stdin get an index appended.
 const stdinName = "stdin"
+
+// stdinArg is the file argument that names stdin, and the --output value
+// that names stdout.
+const stdinArg = "-"
 
 // profileInput is one profile document together with the name of where it
 // came from, so that errors and warnings can name the file rather than a
@@ -344,6 +384,7 @@ type profileInput struct {
 func readErrorExit(err error) int {
 	for _, sentinel := range []error{
 		errDuplicateStdin, errTooManyFiles, errTooManyStdin,
+		errFileTooLarge, errStdinTooLarge, errInputTooLarge,
 	} {
 		if errors.Is(err, sentinel) {
 			return exitUsage
@@ -393,7 +434,7 @@ func readInputs(paths []string, stdin io.Reader) ([]profileInput, error) {
 	for _, path := range paths {
 		added := 0
 
-		if path == "-" {
+		if path == stdinArg {
 			if stdinUsed {
 				return nil, errDuplicateStdin
 			}
@@ -411,7 +452,7 @@ func readInputs(paths []string, stdin io.Reader) ([]profileInput, error) {
 
 			result = append(result, items...)
 		} else {
-			data, err := readFileWithLimit(filepath.Clean(path))
+			data, err := readFileWithLimit(path)
 			if err != nil {
 				return nil, fmt.Errorf("reading %s: %w", path, err)
 			}
@@ -429,17 +470,21 @@ func readInputs(paths []string, stdin io.Reader) ([]profileInput, error) {
 	return result, nil
 }
 
+// readFileWithLimit reads a file of at most maxInputSize bytes. The failure
+// it returns carries the reason alone: the caller names the input as the
+// caller wrote it, and the decorations os adds would otherwise spell the
+// path a second time, cleaned into one the caller never typed.
 func readFileWithLimit(path string) ([]byte, error) {
-	file, err := os.Open(path)
+	file, err := os.Open(filepath.Clean(path))
 	if err != nil {
-		return nil, fmt.Errorf("open: %w", err)
+		return nil, bareFileError(err)
 	}
 
 	defer func() { _ = file.Close() }()
 
 	data, err := io.ReadAll(io.LimitReader(file, maxInputSize+1))
 	if err != nil {
-		return nil, fmt.Errorf("read: %w", err)
+		return nil, bareFileError(err)
 	}
 
 	if len(data) > maxInputSize {
@@ -453,6 +498,19 @@ func readFileWithLimit(path string) ([]byte, error) {
 	}
 
 	return data, nil
+}
+
+// bareFileError strips the path and the operation an *fs.PathError carries,
+// leaving the reason. The caller names the input itself, and "open: open
+// ./a/../b.json" spells one path twice, the second time cleaned into a path
+// the caller never wrote.
+func bareFileError(err error) error {
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		return pathErr.Err
+	}
+
+	return err
 }
 
 func readFromStdin(reader io.Reader) ([]profileInput, error) {
@@ -473,30 +531,55 @@ func readFromStdin(reader io.Reader) ([]profileInput, error) {
 		return nil, errEmptyInput
 	}
 
-	var array []json.RawMessage
+	array, err := readStdinArray(data)
+	if err != nil {
+		return nil, err
+	}
 
-	err = json.Unmarshal(data, &array)
-	if err == nil {
-		if len(array) == 0 {
-			return nil, errEmptyInput
-		}
-
-		if len(array) > maxInputFiles {
-			return nil, errTooManyStdin
-		}
-
-		result := make([]profileInput, len(array))
-		for idx, item := range array {
-			result[idx] = profileInput{
-				name: stdinName + "[" + strconv.Itoa(idx) + "]",
-				data: item,
-			}
-		}
-
-		return result, nil
+	if array != nil {
+		return array, nil
 	}
 
 	return []profileInput{{name: stdinName, data: data}}, nil
+}
+
+// readStdinArray reads a JSON array of profiles, naming each element by its
+// index. It returns nil for a document that is not an array, which the
+// caller reads as a single profile.
+//
+// The element count is read from the token stream before the array is
+// decoded: decoding first materializes every element of a document that
+// chooses how many there are, which costs orders of magnitude more than the
+// document itself before the limit could refuse it.
+func readStdinArray(data []byte) ([]profileInput, error) {
+	count, isArray, err := countArrayElements(data)
+	if err == nil && isArray && count > maxInputFiles {
+		return nil, errTooManyStdin
+	}
+
+	var array []json.RawMessage
+
+	// A document that is not an array is a single profile, which the caller
+	// reads from the same bytes, so the decoder's complaint about it says
+	// nothing here.
+	//nolint:nilerr // not an array: the caller reads a single profile
+	if json.Unmarshal(data, &array) != nil {
+		return nil, nil
+	}
+
+	if len(array) == 0 {
+		return nil, errEmptyInput
+	}
+
+	result := make([]profileInput, len(array))
+	for idx, item := range array {
+		result[idx] = profileInput{
+			name: stdinName + "[" + strconv.Itoa(idx) + "]",
+			data: item,
+		}
+	}
+
+	return result, nil
 }
 
 // unmarshalAll decodes every raw profile under its own policy, given one per
@@ -517,19 +600,22 @@ func unmarshalAll[T any](
 
 		err := json.Unmarshal(input.data, profile)
 		if err != nil {
-			return nil, fmt.Errorf("parsing %s: %w", input.name, err)
+			return nil, decodeError(input.name, err)
 		}
+
+		duplicates, moreDuplicates := duplicateKeys(input.data)
+		unknown, moreUnknown := unknownFieldsOf[T](input.data)
 
 		checks := []struct {
 			err    error
 			reject bool
 		}{
 			{
-				pathsError(errDuplicateKey, duplicateKeys(input.data)),
+				pathsError(errDuplicateKey, duplicates, moreDuplicates),
 				policy.rejectDuplicates,
 			},
 			{
-				pathsError(errUnknownField, unknownFieldsOf[T](input.data)),
+				pathsError(errUnknownField, unknown, moreUnknown),
 				policy.rejectUnknown,
 			},
 			{invalidUTF8Error(input.data), policy.rejectInvalidUTF8},
@@ -541,10 +627,10 @@ func unmarshalAll[T any](
 			}
 
 			if check.reject {
-				return nil, fmt.Errorf("parsing %s: %w", input.name, check.err)
+				return nil, fmt.Errorf("parsing %s: %w", merge.SafeText(input.name), check.err)
 			}
 
-			_, _ = fmt.Fprintf(stderr, "warning: %s: %v\n", input.name, check.err)
+			_, _ = fmt.Fprintf(stderr, "warning: %s: %v\n", merge.SafeText(input.name), check.err)
 		}
 
 		profiles[idx] = profile
@@ -555,12 +641,101 @@ func unmarshalAll[T any](
 
 // pathsError wraps kind with the given field paths, or returns nil when
 // there are none.
-func pathsError(kind error, paths []string) error {
+func pathsError(kind error, paths []string, omitted int) error {
 	if len(paths) == 0 {
 		return nil
 	}
 
-	return fieldPathsError(kind, paths)
+	return fieldPathsError(kind, paths, omitted)
+}
+
+// countArrayElements reports how many elements a JSON array holds, reading
+// the tokens rather than the values. It reports whether the document is an
+// array at all, and stops counting past maxInputFiles, which is all the
+// caller needs to refuse it.
+func countArrayElements(data []byte) (int, bool, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+
+	token, err := decoder.Token()
+	if err != nil {
+		//nolint:wrapcheck // the caller reports it through decodeError
+		return 0, false, err
+	}
+
+	if delim, ok := token.(json.Delim); !ok || delim != '[' {
+		return 0, false, nil
+	}
+
+	count := 0
+
+	for decoder.More() {
+		err = skipValue(decoder)
+		if err != nil {
+			return count, true, err
+		}
+
+		count++
+
+		if count > maxInputFiles {
+			return count, true, nil
+		}
+	}
+
+	return count, true, nil
+}
+
+// skipValue reads one value from the decoder without keeping it, following
+// nested arrays and objects to their end.
+func skipValue(decoder *json.Decoder) error {
+	depth := 0
+
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			//nolint:wrapcheck // the caller reports it through decodeError
+			return err
+		}
+
+		if delim, ok := token.(json.Delim); ok {
+			switch delim {
+			case '[', '{':
+				depth++
+			case ']', '}':
+				depth--
+			}
+		}
+
+		if depth == 0 {
+			return nil
+		}
+	}
+}
+
+// decodeError reports a decoder failure against the input it came from. The
+// decoder quotes the offending literal in several of its messages, and an
+// artifact chooses how long that literal is: a nine-megabyte number reaches
+// a runtime's log as nine megabytes unless the text is bounded here, which
+// is the same reason the library bounds every value it reports.
+func decodeError(name string, err error) error {
+	return fmt.Errorf(
+		"parsing %s: %w: %s",
+		merge.SafeText(name), errDecode, boundedText(err.Error()),
+	)
+}
+
+// boundedText truncates a message to maxMessageBytes on a rune boundary,
+// marking the elision so that it is never mistaken for the message.
+func boundedText(text string) string {
+	if len(text) <= maxMessageBytes {
+		return text
+	}
+
+	end := maxMessageBytes
+	for end > 0 && !utf8.RuneStart(text[end]) {
+		end--
+	}
+
+	return text[:end] + "..."
 }
 
 // invalidUTF8Error reports the first byte of raw that does not start a valid
@@ -594,12 +769,12 @@ func invalidUTF8Error(raw []byte) error {
 // to learn whether there is anything to report. The caller has already
 // decoded raw into a T, so the only thing a strict decode can still object
 // to is an unknown member.
-func unknownFieldsOf[T any](raw []byte) []string {
+func unknownFieldsOf[T any](raw []byte) ([]string, int) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 
 	if decoder.Decode(new(T)) == nil {
-		return nil
+		return nil, 0
 	}
 
 	return unknownFields(raw, reflect.TypeFor[T]())
@@ -611,22 +786,22 @@ func unknownFieldsOf[T any](raw []byte) []string {
 // when asked to reject them, so the document is walked here instead to
 // report every one. Members are matched to fields the way encoding/json
 // does: by the exact JSON name first, case-insensitively otherwise.
-func unknownFields(raw []byte, target reflect.Type) []string {
+func unknownFields(raw []byte, target reflect.Type) ([]string, int) {
 	var document any
 
 	err := json.Unmarshal(raw, &document)
 	if err != nil {
-		return nil
+		return nil, 0
 	}
 
-	var found []string
+	var found pathCollector
 
 	walkUnknownFields(document, target, "", &found)
 
-	return found
+	return found.paths, found.omitted
 }
 
-func walkUnknownFields(value any, typ reflect.Type, prefix string, found *[]string) {
+func walkUnknownFields(value any, typ reflect.Type, prefix string, found *pathCollector) {
 	for typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()
 	}
@@ -646,7 +821,7 @@ func walkUnknownFields(value any, typ reflect.Type, prefix string, found *[]stri
 	}
 }
 
-func walkSliceItems(value any, typ reflect.Type, prefix string, found *[]string) {
+func walkSliceItems(value any, typ reflect.Type, prefix string, found *pathCollector) {
 	// []byte and json.RawMessage take any JSON value.
 	if typ.Elem().Kind() == reflect.Uint8 {
 		return
@@ -662,7 +837,7 @@ func walkSliceItems(value any, typ reflect.Type, prefix string, found *[]string)
 	}
 }
 
-func walkMapValues(value any, typ reflect.Type, prefix string, found *[]string) {
+func walkMapValues(value any, typ reflect.Type, prefix string, found *pathCollector) {
 	object, ok := value.(map[string]any)
 	if !ok {
 		return
@@ -673,7 +848,7 @@ func walkMapValues(value any, typ reflect.Type, prefix string, found *[]string) 
 	}
 }
 
-func walkStructFields(value any, typ reflect.Type, prefix string, found *[]string) {
+func walkStructFields(value any, typ reflect.Type, prefix string, found *pathCollector) {
 	object, ok := value.(map[string]any)
 	if !ok {
 		return
@@ -684,7 +859,7 @@ func walkStructFields(value any, typ reflect.Type, prefix string, found *[]strin
 	for _, key := range slices.Sorted(maps.Keys(object)) {
 		fieldType, known := fields.lookup(key)
 		if !known {
-			*found = append(*found, joinFieldPath(prefix, key))
+			found.add(joinFieldPath(prefix, key))
 
 			continue
 		}

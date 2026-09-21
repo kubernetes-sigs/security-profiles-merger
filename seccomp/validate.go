@@ -50,6 +50,13 @@ var (
 	// ErrEmptySyscallName is returned when a syscall entry contains an
 	// empty string in its name list.
 	ErrEmptySyscallName = errors.New("empty syscall name")
+	// ErrInvalidSyscallName is returned by ValidateArtifact and
+	// ValidateStrict when a syscall name holds a NUL byte or another
+	// control character. A runtime resolves a name through libseccomp's C
+	// API, where a NUL ends it: "re\x00ad" is added as "read" there while
+	// this package keeps the two apart, so a scanner and the runtime would
+	// read one profile differently.
+	ErrInvalidSyscallName = errors.New("invalid syscall name")
 	// ErrDuplicateSyscallName is returned when the same syscall name
 	// appears in more than one syscall entry.
 	ErrDuplicateSyscallName = errors.New("duplicate syscall name")
@@ -177,8 +184,10 @@ const MaxArtifactClausesPerSyscall = 256
 // listenerPath it needs, which is what a runtime needs to load the profile
 // at all. Intersect and Union run it on every
 // input and fail on the first invalid profile, so callers that want to
-// report all problems up front can call it themselves. All validation
-// failures are collected and returned together.
+// report all problems up front can call it themselves. Validation failures
+// are collected and returned together, up to a bound: past it the error
+// matches ErrMoreProblems instead of listing the rest, so a sentinel a
+// profile violates can be absent from the error that reports it.
 //
 // Errno values are not range-checked here; ValidateStrict and
 // ValidateArtifact do that. runc narrows errnoRet to an int16 and skips an
@@ -370,6 +379,7 @@ func ValidateArtifact(profile *specs.LinuxSeccomp) error {
 func artifactChecks() []profileCheck {
 	return []profileCheck{
 		validateShape,
+		validateSyscallNameSpelling,
 		validateNoNotify,
 		validateNoListener,
 		validateEntryCount,
@@ -788,6 +798,41 @@ func (c *ruleChecker) checkShapes() {
 			c.conflict(state.mixedAt, name)
 		}
 	}
+}
+
+// validateSyscallNameSpelling reports a syscall name a runtime would read
+// differently than this package does: one holding a NUL, which ends the
+// name in the C API a runtime resolves it through, or another control
+// character, which no syscall name holds and which forges a line wherever
+// the profile is rendered.
+func validateSyscallNameSpelling(profile *specs.LinuxSeccomp) error {
+	var errs []error
+
+	for idx := range profile.Syscalls {
+		for _, name := range profile.Syscalls[idx].Names {
+			if !hasControlByte(name) {
+				continue
+			}
+
+			errs = append(errs, fmt.Errorf(
+				"syscall entry %d: %s: %w",
+				idx, merge.QuoteBounded(name), ErrInvalidSyscallName,
+			))
+		}
+	}
+
+	return joinLimited(errs...)
+}
+
+// hasControlByte reports whether a name holds a C0 control character or DEL.
+func hasControlByte(name string) bool {
+	for idx := range len(name) {
+		if name[idx] < 0x20 || name[idx] == 0x7f {
+			return true
+		}
+	}
+
+	return false
 }
 
 func validateNoNotify(profile *specs.LinuxSeccomp) error {
