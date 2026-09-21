@@ -157,7 +157,7 @@ func TestPairBudgetIgnoresLiteralOnlyProfiles(t *testing.T) {
 
 	literals, _ := budgetShape(4096)
 
-	if exceedsPairBudget(len(literals), 0, len(literals), 0) {
+	if exceedsPairBudget(len(literals), 0, len(literals), 0, maxGlobPatternLen) {
 		t.Error("a merge of literals alone exceeds the pair budget")
 	}
 
@@ -179,10 +179,78 @@ func TestPairBudgetAdmitsArtifactSizedProfiles(t *testing.T) {
 
 	half := MaxArtifactPaths / 2
 
-	if exceedsPairBudget(half, half, half, half) {
+	if exceedsPairBudget(half, half, half, half, typicalPathLen) {
 		t.Errorf(
 			"two profiles of %d paths exceed the pair budget of %d",
 			MaxArtifactPaths, maxMergePathPairs,
 		)
+	}
+
+	// The same profiles of long paths do not: a comparison costs the bytes
+	// it compares, and at MaxPathLen every pair costs 64 times what the
+	// pair bound assumes.
+	if !exceedsPairBudget(half, half, half, half, maxGlobPatternLen) {
+		t.Errorf(
+			"two profiles of %d paths of %d bytes stay inside the work budget of %d",
+			MaxArtifactPaths, maxGlobPatternLen, maxMergePathWork,
+		)
+	}
+
+	// A profile of a handful of paths is never weighed out of the exact
+	// merge, however long its paths are.
+	if exceedsPairBudget(16, 16, 16, 16, maxGlobPatternLen) {
+		t.Error("a profile of 32 paths exceeds the work budget")
+	}
+}
+
+// budgetExecutables is budgetProfile for the executable lists, which the
+// merge matches through intersectPaths rather than through mergeFilesystem.
+func budgetExecutables(paths ...string) *Profile {
+	return &Profile{
+		Executable: &ExecutableRules{
+			AllowedExecutables: paths,
+			AllowedLibraries:   slices.Clone(paths),
+		},
+		Filesystem:   nil,
+		Network:      nil,
+		Capabilities: nil,
+	}
+}
+
+// TestIntersectPastItsBudgetKeepsCommonExecutables covers the other half of
+// the fallback. The executable and library lists are matched by
+// intersectPaths, a separate implementation from the filesystem one, and
+// its over-budget path (intersectVerbatim) was reached by no test: the
+// budget case above builds filesystem rules, which route elsewhere.
+func TestIntersectPastItsBudgetKeepsCommonExecutables(t *testing.T) {
+	t.Parallel()
+
+	literals, globs := budgetShape(2048)
+	shared := "/bin/shared"
+
+	left := budgetExecutables(append(slices.Clone(literals), shared)...)
+	right := budgetExecutables(append(slices.Clone(globs), shared)...)
+
+	result, err := Intersect(left, right)
+	if err != nil {
+		t.Fatalf("Intersect: %v", err)
+	}
+
+	for name, got := range map[string][]string{
+		"AllowedExecutables": result.Executable.AllowedExecutables,
+		"AllowedLibraries":   result.Executable.AllowedLibraries,
+	} {
+		if !slices.Equal(got, []string{shared}) {
+			t.Errorf("%s = %q, want only %q", name, got, shared)
+		}
+	}
+
+	// The fallback keeps no more than matching would: every path it kept is
+	// one both sides hold, so both sides permit it.
+	leftSet := newPathSet(left.Executable.AllowedExecutables)
+	rightSet := newPathSet(right.Executable.AllowedExecutables)
+
+	if !leftSet.matches(shared) || !rightSet.matches(shared) {
+		t.Error("the kept path is not permitted by both inputs")
 	}
 }

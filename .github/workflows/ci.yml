@@ -235,7 +235,19 @@ jobs:
           path: ${{ env.GOFUZZCACHE }}
           key: fuzz-${{ matrix.fuzz.name }}-${{ github.sha }}
           restore-keys: fuzz-${{ matrix.fuzz.name }}-
-      - run: go test -fuzz="^${{ matrix.fuzz.target }}\$" -fuzztime=30s ${{ matrix.fuzz.package }}
+      # go test exits 0 when the pattern matches no target, so a target
+      # renamed, deleted or hidden behind a build tag would fuzz nothing for
+      # thirty seconds and pass. The matrix completeness check counts the
+      # declarations; this checks that the run did something.
+      - shell: bash
+        run: |
+          set -o pipefail
+          go test -fuzz="^${{ matrix.fuzz.target }}\$" -fuzztime=30s \
+            ${{ matrix.fuzz.package }} 2>&1 | tee fuzz.log
+          if grep -q "no fuzz tests to fuzz" fuzz.log; then
+            echo "::error::${{ matrix.fuzz.target }} matched no fuzz target"
+            exit 1
+          fi
 
   benchmark:
     runs-on: ubuntu-latest
@@ -257,7 +269,13 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - run: go test -bench=. -benchmem -count=5 -run=^$ ${{ matrix.package }} | tee benchmark.txt
+      # The default shell does not set pipefail, so without it the pipe
+      # into tee hides a failing or panicking benchmark behind tee's own
+      # exit code, and the job stays green on partial output.
+      - shell: bash
+        run: |
+          set -o pipefail
+          go test -bench=. -benchmem -count=5 -run=^$ ${{ matrix.package }} | tee benchmark.txt
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: benchmark-${{ matrix.name }}

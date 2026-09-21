@@ -196,7 +196,7 @@ func TestDuplicateKeys(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		got := duplicateKeys([]byte(test.raw))
+		got, _ := duplicateKeys([]byte(test.raw))
 		if !slices.Equal(got, test.want) {
 			t.Errorf("duplicateKeys(%s) = %q, want %q", test.raw, got, test.want)
 		}
@@ -360,4 +360,64 @@ func TestInteractiveStdinPrintsUsage(t *testing.T) {
 		!strings.Contains(stderr, "Usage: spm merge") {
 		t.Errorf("stderr = %q, want the hint and the usage", stderr)
 	}
+}
+
+// TestInputLimitsAtTheirBoundary covers the CLI's own size and count limits
+// at the value that decides them: the limit is accepted and one more is
+// refused. Every other test of these limits overshoots by a wide margin, so
+// an off-by-one would refuse an input the tool promises to read.
+func TestInputLimitsAtTheirBoundary(t *testing.T) {
+	t.Parallel()
+
+	// A profile padded with spaces to an exact size.
+	profileOf := func(size int) string {
+		const profile = `{"defaultAction":"SCMP_ACT_ERRNO"}`
+
+		return profile + strings.Repeat(" ", size-len(profile))
+	}
+
+	t.Run("stdin size", func(t *testing.T) {
+		t.Parallel()
+
+		code, _, stderr := runCapture(t, []string{
+			cmdValidate, flagType, typeSeccomp, "--quiet",
+		}, strings.NewReader(profileOf(maxInputSize)))
+		if code != 0 {
+			t.Errorf("at the limit: exit %d, want 0 (%s)", code, stderr)
+		}
+
+		code, _, _ = runCapture(t, []string{
+			cmdValidate, flagType, typeSeccomp, "--quiet",
+		}, strings.NewReader(profileOf(maxInputSize+1)))
+		if code != exitUsage {
+			t.Errorf("one past the limit: exit %d, want %d", code, exitUsage)
+		}
+	})
+
+	t.Run("profiles on stdin", func(t *testing.T) {
+		t.Parallel()
+
+		array := func(count int) string {
+			items := make([]string, count)
+			for idx := range items {
+				items[idx] = `{"defaultAction":"SCMP_ACT_ERRNO"}`
+			}
+
+			return "[" + strings.Join(items, ",") + "]"
+		}
+
+		code, _, stderr := runCapture(t, []string{
+			cmdValidate, flagType, typeSeccomp, "--quiet",
+		}, strings.NewReader(array(maxInputFiles)))
+		if code != 0 {
+			t.Errorf("at the limit: exit %d, want 0 (%s)", code, stderr)
+		}
+
+		code, _, _ = runCapture(t, []string{
+			cmdValidate, flagType, typeSeccomp, "--quiet",
+		}, strings.NewReader(array(maxInputFiles+1)))
+		if code != exitUsage {
+			t.Errorf("one past the limit: exit %d, want %d", code, exitUsage)
+		}
+	})
 }

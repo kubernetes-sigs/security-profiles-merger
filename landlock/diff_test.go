@@ -18,6 +18,7 @@ package landlock_test
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -584,5 +585,69 @@ func TestDiffSortsRuleRights(t *testing.T) {
 	want := "Diff{~/var:[read_file]->[execute,read_file] ~:80:[connect_tcp]->[bind_tcp,connect_tcp]}"
 	if got := landlock.FormatDiff(diff); got != want {
 		t.Errorf("FormatDiff = %s, want %s", got, want)
+	}
+}
+
+// TestDiffReportsEachChangeKindAlone covers a diff whose rules changed in
+// one way only. The case above populates added, removed and changed rules
+// at once, so the gate that decides whether a section is reported could
+// have required two of the three and still passed: a pure addition or a
+// pure removal would then have been reported as equal.
+func TestDiffReportsEachChangeKindAlone(t *testing.T) {
+	t.Parallel()
+
+	rule := func(path string, right landlock.FSAccessRight) landlock.PathRule {
+		return landlock.PathRule{Path: path, AccessFS: []landlock.FSAccessRight{right}}
+	}
+
+	netRule := func(port uint16, right landlock.NetAccessRight) landlock.NetRule {
+		return landlock.NetRule{Port: port, AccessNet: []landlock.NetAccessRight{right}}
+	}
+
+	profile := func(paths []landlock.PathRule, nets []landlock.NetRule) *landlock.Profile {
+		return &landlock.Profile{
+			HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessReadFile},
+			HandledAccessNet: []landlock.NetAccessRight{landlock.NetAccessBindTCP},
+			Scoped:           nil,
+			PathRules:        paths,
+			NetRules:         nets,
+		}
+	}
+
+	one := []landlock.PathRule{rule(pathEtc, landlock.FSAccessReadFile)}
+	two := append(slices.Clone(one), rule(pathVar, landlock.FSAccessReadFile))
+	changed := []landlock.PathRule{rule(pathEtc, landlock.FSAccessWriteFile)}
+
+	oneNet := []landlock.NetRule{netRule(80, landlock.NetAccessBindTCP)}
+	twoNets := append(slices.Clone(oneNet), netRule(443, landlock.NetAccessBindTCP))
+	changedNet := []landlock.NetRule{netRule(80, landlock.NetAccessConnectTCP)}
+
+	for _, testCase := range []struct {
+		name        string
+		left, right *landlock.Profile
+	}{
+		{"path added", profile(one, oneNet), profile(two, oneNet)},
+		{"path removed", profile(two, oneNet), profile(one, oneNet)},
+		{"path changed", profile(one, oneNet), profile(changed, oneNet)},
+		{"net added", profile(one, oneNet), profile(one, twoNets)},
+		{"net removed", profile(one, twoNets), profile(one, oneNet)},
+		{"net changed", profile(one, oneNet), profile(one, changedNet)},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			diff, err := landlock.Diff(testCase.left, testCase.right)
+			if err != nil {
+				t.Fatalf("Diff: %v", err)
+			}
+
+			if diff.Equal {
+				t.Errorf(
+					"Diff(%s, %s).Equal = true, want a difference",
+					landlock.FormatProfile(testCase.left),
+					landlock.FormatProfile(testCase.right),
+				)
+			}
+		})
 	}
 }

@@ -330,7 +330,7 @@ func formatPathRulesDiff(pathRulesDiff *PathRulesDiff) []string {
 	for _, change := range pathRulesDiff.Changed {
 		parts = append(parts, fmt.Sprintf(
 			"~%s:[%s]->[%s]",
-			change.Path,
+			merge.SafeText(change.Path),
 			joinRights(change.Left),
 			joinRights(change.Right),
 		))

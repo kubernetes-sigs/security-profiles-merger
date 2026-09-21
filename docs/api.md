@@ -37,12 +37,17 @@ For full Go documentation, see the
 Every exported function of `seccomp`, `apparmor` and `landlock` is safe to
 call from several goroutines at once, so a CRI runtime may merge profiles for
 concurrent container starts without serializing them. The functions hold no
-state between calls and never modify their arguments; concurrent calls only
-need their profiles not to be written to at the same time from elsewhere.
+state between calls and never modify their arguments, except
+`landlock.UnmarshalStrict`, which decodes into the profile it is given;
+concurrent calls only need their profiles not to be written to at the same
+time from elsewhere.
 
 The one piece of state shared between calls is an internal cache of analyzed
-glob patterns in `apparmor`, guarded by its own lock. It holds no profile
-data and changes no result, only the work a repeated pattern costs.
+glob patterns in `apparmor`, guarded by its own lock. It changes no result,
+only the work a repeated pattern costs. It does hold the pattern text of the
+profiles it analyzed, bounded by its own size limits and evicted as newer
+patterns arrive, so a process merging untrusted profiles keeps some of their
+paths in memory after a call returns.
 
 ## spm
 
@@ -130,7 +135,8 @@ Sentinel errors (`ErrNoProfiles`, `ErrNilProfile`, `ErrUnknownAction`,
 `ErrNotifyNotAllowed`, `ErrListenerNotAllowed`, `ErrTooManyEntries`,
 `ErrTooManyClauses`, `ErrTooManyNames`, `ErrTooManyProfileClauses`,
 `ErrErrnoOutOfRange`, `ErrUnusedValueTwo`, `ErrUnusedErrnoRet`,
-`ErrConflictingEntries`, `ErrNotifyUnsupported`, `ErrNotifyWithoutListener`)
+`ErrConflictingEntries`, `ErrNotifyUnsupported`, `ErrNotifyWithoutListener`,
+`ErrInvalidSyscallName`, `ErrMoreProblems`)
 are documented in the
 [package reference](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#pkg-variables).
 
@@ -150,6 +156,16 @@ than a malformed field:
 - `ErrTooManyNames` and `ErrTooManyProfileClauses` (`ValidateArtifact`,
   `ValidateStrict`): one entry carries more than `MaxArtifactNamesPerEntry`
   names, or the profile loads more than `MaxArtifactClauses` rules in total.
+- `ErrInvalidSyscallName` (`ValidateArtifact`, `ValidateStrict`): a syscall
+  name holds a NUL byte or another control character. A runtime resolves a
+  name through libseccomp's C API, where a NUL ends it, so `"re\x00ad"` is
+  added there as `read` while this package keeps the two names apart.
+- `ErrMoreProblems` (every validator of every package, and the shared
+  `spm.ErrMoreProblems`): the report lists some failures and left others
+  out. Every validator bounds how many it names, since a profile holds as
+  many as it holds rules, so a sentinel a profile violates can be absent
+  from the error reporting it: read a match here as "and possibly others"
+  before dispatching on another sentinel.
 
 ### Limits
 
@@ -294,7 +310,7 @@ default add none. Why all four are needed is explained under
   and one rule per condition per name when it repeats an argument index, so
   the rules a profile loads grow as the product of its name and condition
   counts rather than with its size. 40000 names against 256 conditions fit in
-  440 KB of JSON and load ten million rules. `MaxArtifactNamesPerEntry`
+  441 KB of JSON and load ten million rules. `MaxArtifactNamesPerEntry`
   (1024) bounds the first factor of a single entry and `MaxArtifactClauses`
   (16384) the profile's total, so `ValidateArtifact` and `ValidateStrict`
   reject such a profile with `ErrTooManyNames` and
@@ -305,7 +321,7 @@ default add none. Why all four are needed is explained under
   That is what bounds `Diff`, `IntersectSyscalls` and `UnionSyscalls`, which
   validate nothing, and `MaxArtifactClauses` sits well below it, so an
   accepted artifact is always merged rule by rule. Measured on the shape
-  above: before these bounds, `ValidateArtifact` accepted the 440 KB profile
+  above: before these bounds, `ValidateArtifact` accepted the 441 KB profile
   after 4.5 s and `Intersect` then took 3.8 s and allocated 7.7 GB; now
   validation rejects it in about 10 ms, and merging it anyway takes about
   20 ms and allocates a few megabytes.
@@ -422,9 +438,14 @@ default add none. Why all four are needed is explained under
 
 `KILL_PROCESS > KILL_THREAD > TRAP > ERRNO > NOTIFY > TRACE > LOG > ALLOW`
 
-`MoreRestrictive` and `LessRestrictive` treat unknown actions as maximally
-restrictive. `Intersect` and `Union` validate their inputs first and reject
-unknown actions with `ErrUnknownAction`.
+`MoreRestrictive` and `LessRestrictive` rank an unknown action as maximally
+restrictive, above `SCMP_ACT_KILL_PROCESS`, and report it as
+`SCMP_ACT_KILL_PROCESS`: a caller writing the result into a profile writes an action
+a runtime loads rather than the unknown one back. `Intersect` and `Union`
+validate their inputs first and reject unknown actions with
+`ErrUnknownAction`; the bare `IntersectSyscalls` and `UnionSyscalls` do not
+validate, and they keep the action an entry carries rather than the ranking's
+stand-in for it.
 
 ## apparmor
 
@@ -496,15 +517,27 @@ Sentinel errors (`ErrNoProfiles`, `ErrNilProfile`, `ErrEmptyPath`,
 `ErrUnknownCapability`, `ErrInvalidCapabilityName`,
 `ErrDuplicateExecutablePath`, `ErrRelativePath`, `ErrInvalidGlob`,
 `ErrGlobTooComplex`, `ErrDotComponent`, `ErrUnquotablePath`, `ErrNulInPath`,
-and `ErrTooManyPaths`) are documented
+`ErrTooManyPaths`, `ErrTooManyPatternBytes`, `ErrTooManyCapabilities`, and
+`ErrMoreProblems`) are documented
 in the [package reference](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#pkg-variables).
 
 Validation failures are collected and returned together, with two
 qualifications: an oversized path is reported on its own, since every other
 check would scan a path the length check already refused, and very many
-failures are reported as the first of them followed by a count of the rest.
+failures are reported as the first of them followed by a count of the rest,
+which matches `ErrMoreProblems`.
 
 ### Limits
+
+`MaxArtifactPatternBytes` (64 KiB) bounds the total length of the glob
+patterns of such a profile, and `MaxArtifactCapabilities` (512) how many
+capability names it holds. A compiled pattern is cached, and the cache is
+bounded as anything holding profile data must be, so a profile whose
+patterns do not fit it is recompiled on every use: a thousand four-kilobyte
+patterns cost 38 seconds in `ValidateArtifact` and 14 in a merge against a
+four-rule baseline, none of it in matching. The capability list is the one
+section nothing else bounds, since a name need not be one this package
+knows.
 
 `MaxArtifactPaths` (1024) bounds how many paths a profile accepted by
 `ValidateArtifact` may hold, counted over every path list of the profile.
@@ -539,6 +572,9 @@ engine (`convert_aaregex_to_pcre` and `libapparmor_re`). In particular:
 - Matching works on bytes, not characters: `?` matches one byte, so `/tmp/?`
   does not match `/tmp/é` (two bytes in UTF-8) and `/tmp/??` does, and a
   class member such as `é` stands for each of its bytes.
+- A run of two or more stars is one `**`: the extra stars match what the
+  first two already match, so `/etc/***` narrows another pattern exactly as
+  `/etc/**` does rather than dropping out of an intersection.
 - A star run requires a character only when it fills a whole path component:
   when it follows a `/` and is followed by `/` or ends the pattern. So
   `/dir/*` and `/dir/**` do not match `/dir/` itself, while `/etc/*.conf`
@@ -564,7 +600,7 @@ engine (`convert_aaregex_to_pcre` and `libapparmor_re`). In particular:
   `ValidateStrict` and `ValidateArtifact` compare paths with repeated slashes
   collapsed and escapes resolved, so `/tmp/A` and `/tmp/\x41` listed in two
   categories are reported with `ErrDuplicatePath`, and the merge functions
-  fold them into one entry granting what both spellings grant. Two profiles
+  fold two spellings within one category into one entry. Two profiles
   spelling one rule differently are given a common spelling before they are
   merged, so intersecting a profile listing `/tmp/A` with one listing
   `/tmp/\x41` keeps the file both grant. The spelling kept is one an input
@@ -593,7 +629,11 @@ path character follows it, as inside an alternation `{a,b}`. `ValidateStrict`
 and `ValidateArtifact` report a path holding one of these unescaped with
 `ErrUnquotablePath`; the rule does not load, and a consumer that renders
 `  <path> <perms>,\n` would turn a path holding a newline into further rules
-of the profile author's choosing. `Validate` and the merge functions accept
+of the profile author's choosing. A backslash protects only a character that
+can be written in a rule: the parser resolves no escape whose second byte is
+a control character, so a backslash followed by a raw newline leaves both
+bytes in the path and is reported too. The two-character forms (`\n`, `\r`,
+`\t`, or `\x0a`) spell those paths safely. `Validate` and the merge functions accept
 such a path and treat it as opaque text. Note the consequence for classes:
 a class written `[!a]` is unloadable, since the negation AppArmor accepts is
 `[^a]` and a literal `!` in a class has to be escaped (`[\!a]`).
@@ -602,6 +642,13 @@ A path holding a NUL byte, or an escape denoting one such as `\000`, `\x00`
 or `\d000`, loads but matches nothing: no name the kernel hands AppArmor
 holds a NUL. `ValidateStrict` and `ValidateArtifact` report it with
 `ErrNulInPath`, as they do the other rules that load and match nothing.
+
+Capability names are compared with ASCII case folding, not Unicode folding:
+`ſ` (U+017F) and `ı` (U+0131) upper-case into `S` and `I`, so folding them
+by Unicode rules would let a name spelled with one of them pass
+`ValidateStrict` as a known capability and be merged into the real one. The
+merge upper-cases the names it keeps, so a result spells them `CHOWN` rather
+than `chown`.
 
 A capability name must be a word of letters, digits and `_`.
 `ValidateArtifact` reports anything else with `ErrInvalidCapabilityName`, for
@@ -732,7 +779,7 @@ import "sigs.k8s.io/security-profiles-merger/landlock"
 | `Intersect` | Merge via intersection; handled sets unioned, rules intersected |
 | `Union` | Merge via union; handled sets intersected, rules unioned |
 | `Validate` | Check what the merge needs: known rights and valid paths (no empty paths, paths over `MaxPathLen`, NUL bytes, or `..` components). Duplicate rules and rights pass, as the kernel and the merge fold them |
-| `ValidateStrict` | For user-authored profiles: all ValidateArtifact checks plus duplicate rules and rights, which no other validator reports |
+| `ValidateStrict` | For user-authored profiles: all ValidateArtifact checks, the cap on the number of rules included, plus duplicate rules and rights, which no other validator reports |
 | `ValidateArtifact` | For untrusted profiles: known rights and valid paths, plus what a kernel could not load: relative paths, rules granting unhandled rights, rules granting no right, and rulesets that handle and scope nothing; duplicates are accepted, as the kernel and the merge fold them |
 | `ValidateForABI` | All Validate checks plus rights the given Landlock ABI version does not know. A version newer than `LatestABIVersion` is treated as `LatestABIVersion`, since ABI versions are cumulative; only a version below `ABIV1` is rejected, with `ErrUnknownABIVersion`. It does not check loadability otherwise; combine it with ValidateArtifact or ValidateStrict for that |
 | `RequiredABIVersion` | The lowest Landlock ABI version supporting every right a profile uses |
@@ -768,12 +815,20 @@ Sentinel errors (`ErrNoProfiles`, `ErrNilProfile`, `ErrUnknownRight`,
 `ErrDuplicateRule`, `ErrEmptyPath`, `ErrPathTooLong`, `ErrInvalidPath`,
 `ErrParentPath`, `ErrUnhandledRight`, `ErrDuplicateRight`, `ErrRelativePath`,
 `ErrEmptyRule`, `ErrEmptyRuleset`, `ErrUnsupportedABIRight`,
-`ErrUnknownABIVersion`, `ErrUnexpectedData`) are documented in the
+`ErrUnknownABIVersion`, `ErrUnexpectedData`, `ErrTooManyRules`,
+`ErrMoreProblems`) are documented in the
 [package reference](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#pkg-variables).
 
 `ErrPathTooLong` reports a rule path over `MaxPathLen` (4096) bytes and is
 checked before every other path check, so an oversized path costs nothing
-further. `ErrUnexpectedData` is returned by `UnmarshalStrict` when data
+further. `ErrTooManyRules` reports a profile holding more than
+`MaxArtifactRules` (1024) rules, counted over its path and network rules
+together, and is checked first and on its own by `ValidateArtifact` and
+`ValidateStrict`: merging costs the number of rules times the depth of their
+paths, since an intersection resolves every rule against the ancestors of
+every other, so an over-large profile is refused where the reason can still
+be reported. `ErrMoreProblems` reports that a validator left some failures
+out, which every validator of every package does past a bound. `ErrUnexpectedData` is returned by `UnmarshalStrict` when data
 follows the profile in the input. `UnmarshalStrict` exists because
 `encoding/json` drops unknown members, which for a profile from an untrusted
 source loses exactly what a reader must not ignore: a member a newer version

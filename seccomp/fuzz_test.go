@@ -75,6 +75,22 @@ func flagsFromMask(mask uint8) []specs.LinuxSeccompFlag {
 	return result
 }
 
+// fuzzArgs turns a drawn value into an argument filter: one equality on the
+// first argument.
+//
+// The shape is fixed, unlike in the safety generator, which draws operators,
+// wide values and repeated indices. This target asserts that folding is
+// commutative and that the bare syscall-list functions answer as the profile
+// merge does, and neither holds for a filter the merge cannot read exactly:
+// both then answer in the safe direction of their strategy, which is what
+// the safety targets assert, but they need not answer alike. Drawing those
+// shapes here would assert a property the package does not claim.
+func fuzzArgs(value uint64) []specs.LinuxSeccompArg {
+	return []specs.LinuxSeccompArg{
+		{Index: 0, Value: value, ValueTwo: 0, Op: specs.OpEqualTo},
+	}
+}
+
 func fuzzProfile(
 	defaultIdx, action1Idx, action2Idx uint8,
 	name1, name2 string,
@@ -121,9 +137,7 @@ func fuzzProfile(
 	}
 
 	if hasArgs1 {
-		sc1.Args = []specs.LinuxSeccompArg{
-			{Index: 0, Value: argVal1, Op: specs.OpEqualTo},
-		}
+		sc1.Args = fuzzArgs(argVal1)
 	}
 
 	if errno1 != 0 {
@@ -137,9 +151,7 @@ func fuzzProfile(
 	}
 
 	if hasArgs2 {
-		sc2.Args = []specs.LinuxSeccompArg{
-			{Index: 0, Value: argVal2, Op: specs.OpEqualTo},
-		}
+		sc2.Args = fuzzArgs(argVal2)
 	}
 
 	if errno2 != 0 {

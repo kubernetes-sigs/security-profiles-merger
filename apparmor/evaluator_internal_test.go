@@ -81,9 +81,39 @@ type evalParser struct {
 // evalParse parses a pattern into nodes. It reports false for syntax the
 // evaluator does not support.
 func evalParse(pattern string) ([]evalNode, bool) {
-	parser := evalParser{pattern: pattern, pos: 0}
+	parser := evalParser{pattern: evalCollapseSlashes(pattern), pos: 0}
 
 	return parser.sequence(false)
+}
+
+// evalCollapseSlashes collapses runs of "/" into one, keeping a leading
+// "//" that is not the start of a longer run. The parser does this to every
+// path before it compiles one, and to every name before it matches one, so
+// "/etc//x" and "/etc/x" are one path to AppArmor.
+func evalCollapseSlashes(text string) string {
+	var builder strings.Builder
+
+	start := 0
+
+	if strings.HasPrefix(text, "//") && (len(text) == 2 || text[2] != '/') {
+		builder.WriteString("//")
+
+		start = 2
+	}
+
+	previousSlash := false
+
+	for idx := start; idx < len(text); idx++ {
+		if text[idx] == '/' && previousSlash {
+			continue
+		}
+
+		previousSlash = text[idx] == '/'
+
+		builder.WriteByte(text[idx])
+	}
+
+	return builder.String()
 }
 
 // sequence parses until the end of the pattern or, inside an alternation,
@@ -130,16 +160,97 @@ func (parser *evalParser) element(prevSlash bool) (evalNode, bool) {
 	case ']', '}':
 		return newEvalNode('l', char), false
 	case '\\':
-		if parser.pos >= len(parser.pattern) {
-			return newEvalNode('l', char), false
-		}
-
-		parser.pos++
-
-		return newEvalNode('l', parser.pattern[parser.pos-1]), true
+		return parser.escape()
 	}
 
 	return newEvalNode('l', char), true
+}
+
+// escape parses an escape whose backslash was consumed. The parser resolves
+// a numeric or named escape to the byte it denotes and every other escape to
+// the character itself; the byte is a literal either way, which is what
+// keeping a resolved metacharacter escaped amounts to. An escape denoting
+// NUL is not modeled: no name holds one, and every validator rejects it.
+func (parser *evalParser) escape() (evalNode, bool) {
+	if parser.pos >= len(parser.pattern) {
+		return newEvalNode('l', '\\'), false
+	}
+
+	char := parser.pattern[parser.pos]
+	parser.pos++
+
+	node, numeric := parser.numericEscape(char)
+	if numeric {
+		return node, node.char != 0
+	}
+
+	const named = "\\\\\"\"a\ae\x1bf\fn\nr\rt\t"
+
+	for idx := 0; idx < len(named); idx += 2 {
+		if named[idx] == char {
+			return newEvalNode('l', named[idx+1]), true
+		}
+	}
+
+	return newEvalNode('l', char), true
+}
+
+// numericEscape resolves an octal, decimal or hex escape whose first
+// character after the backslash is given, reporting whether it was one. An
+// escape denoting NUL is reported as unsupported by its zero byte, since no
+// name holds one.
+func (parser *evalParser) numericEscape(char byte) (evalNode, bool) {
+	var (
+		digits string
+		base   int
+	)
+
+	switch {
+	case char >= '0' && char <= '7':
+		parser.pos--
+		digits, base = "01234567", 8
+	case char == 'd':
+		digits, base = "0123456789", 10
+	case char == 'x' || char == 'X':
+		digits, base = "0123456789abcdefABCDEF", 16
+	default:
+		return newEvalNode('l', char), false
+	}
+
+	value, read := parser.digits(digits, base)
+	if read == 0 {
+		return newEvalNode('l', char), false
+	}
+
+	return newEvalNode('l', byte(value)), true
+}
+
+// digits reads at most three digits of the base, stopping before the value
+// would leave the byte range, and returns the value and how many it read.
+func (parser *evalParser) digits(allowed string, base int) (int, int) {
+	value, read := 0, 0
+
+	for read < 3 && parser.pos < len(parser.pattern) {
+		digit := strings.IndexByte(allowed, parser.pattern[parser.pos])
+		if digit < 0 {
+			break
+		}
+
+		if digit >= base {
+			digit -= base // the upper-case half of the hex digits
+		}
+
+		next := value*base + digit
+		if next > 255 {
+			break
+		}
+
+		value = next
+		read++
+		parser.pos++
+	}
+
+	return value, read
 }
 
 // star parses a star run whose first star was consumed. A run of three or
@@ -238,6 +349,8 @@ func matchGlob(pattern, name string) bool {
 	}
 
 	nodes, _ := parsed.([]evalNode)
+
+	name = evalCollapseSlashes(name)
 
 	return evalMatch(nodes, name, 0, func(end int) bool { return end == len(name) })
 }
@@ -622,12 +735,17 @@ func TestMatchGlobAgreesWithRegex(t *testing.T) {
 		}
 
 		for _, probe := range probes {
-			want := matcher.matches(probe)
+			// A name reaches the matcher through literalName, which is what
+			// resolves its escapes and collapses its slashes, so both
+			// implementations are given the name in that form.
+			name := literalName(probe)
 
-			got := matchGlob(pattern, probe)
+			want := matcher.matches(name)
+
+			got := matchGlob(pattern, name)
 			if got != want {
 				t.Errorf("matchGlob(%q, %q) = %v, parser port says %v",
-					pattern, probe, got, want)
+					pattern, name, got, want)
 			}
 		}
 	}
@@ -938,6 +1056,68 @@ func FuzzAppArmorUnionPermits(f *testing.F) {
 				FormatProfile(left), FormatProfile(right),
 				FormatProfile(result), FormatProfile(swapped),
 			)
+		}
+	})
+}
+
+// FuzzMatchGlobAgreesWithPort is the differential oracle of
+// TestMatchGlobAgreesWithRegex over arbitrary input rather than a fixed
+// table: matchGlob is an independent matcher written from the AppArmor
+// semantics, and the parser port compiles a pattern into a regular
+// expression, so the two disagree only where one of them is wrong.
+//
+// The table names 47 patterns. It is the only check the port has on what a
+// pattern means rather than on what the merge does with it, and the escape
+// decoder and the class parser hold cases the table never reaches, such as
+// an uppercase hex escape or a class whose range runs backwards.
+func FuzzMatchGlobAgreesWithPort(f *testing.F) {
+	for _, pattern := range append(evalExtraPatterns, evalPatterns...) {
+		for _, probe := range evalProbes {
+			f.Add(pattern, probe)
+		}
+	}
+
+	f.Add(`/etc/\x41*`, "/etc/A")
+	f.Add(`/etc/\xab*`, "/etc/\xab")
+	f.Add(`/etc/\XAB*`, "/etc/\xab")
+	f.Add(`/etc/[b-a]`, "/etc/a")
+	f.Add(`/etc/\d65*`, "/etc/A")
+	f.Add(`/etc/\101*`, "/etc/A")
+	f.Add("/etc/[\x00-\x7f]", "/etc/a")
+
+	f.Fuzz(func(t *testing.T, pattern, probe string) {
+		if len(pattern) > maxGlobPatternLen || len(probe) > maxGlobPatternLen {
+			return
+		}
+
+		if !IsGlobPattern(pattern) || strings.ContainsRune(pattern, 0) {
+			return
+		}
+
+		matcher := matcherFor(pattern)
+		if !matcher.usable() {
+			return
+		}
+
+		// The evaluator models a subset of the pattern syntax, which is why
+		// matchGlob panics outside it. A pattern it does not parse says
+		// nothing about either implementation.
+		nodes, supported := evalParse(pattern)
+		if !supported {
+			return
+		}
+
+		// A name reaches the matcher through literalName, which resolves
+		// its escapes and collapses its slashes; both implementations are
+		// given the name in that form.
+		name := literalName(probe)
+
+		want := matcher.matches(name)
+
+		got := evalMatch(nodes, name, 0, func(end int) bool { return end == len(name) })
+		if got != want {
+			t.Errorf("the evaluator matches %q against %q = %v, the parser port says %v",
+				pattern, probe, got, want)
 		}
 	})
 }

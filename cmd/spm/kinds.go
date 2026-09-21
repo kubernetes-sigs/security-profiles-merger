@@ -19,6 +19,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"slices"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
@@ -115,15 +116,20 @@ func (ops kindOps[T, D]) diffCommand(
 ) int {
 	diffFn := ops.diff
 
+	// The usage error turns on whether --arch was named at all, not on
+	// whether its value changes anything: "--arch native" asks for what the
+	// flag's absence already implies, but naming it for a kind that has no
+	// architectures is the same mistake the other values are, rather than a
+	// flag that quietly does nothing.
+	if arch.named && ops.diffForArch == nil {
+		_, _ = fmt.Fprintf(
+			stderr, "error: --arch only applies to %s profiles\n", typeSeccomp,
+		)
+
+		return exitUsage
+	}
+
 	if arch.explicit {
-		if ops.diffForArch == nil {
-			_, _ = fmt.Fprintf(
-				stderr, "error: --arch only applies to %s profiles\n", typeSeccomp,
-			)
-
-			return exitUsage
-		}
-
 		diffFn = func(left, right *T) (*D, error) {
 			return ops.diffForArch(arch.value, left, right)
 		}
@@ -157,8 +163,12 @@ func newKind[T any, D equalChecker](ops kindOps[T, D]) profileKind {
 
 			for idx, mode := range modes {
 				// modeDefault is what the merge functions run on their own
-				// inputs, so running it here as well would only duplicate
-				// the work and report it with a different prefix.
+				// inputs, and they run it on the profile they normalized
+				// rather than on the one the caller passed: a profile the
+				// merge deduplicates would fail a check run here. The merge
+				// names an input by position, which is not something a
+				// caller can act on, so nameMergeFailure maps that name
+				// onto the input afterwards instead.
 				if mode != modeDefault {
 					checks[idx] = ops.checker(mode)
 				}
@@ -244,10 +254,25 @@ func kindByName(name string) (profileKind, bool) {
 // report it, exiting with parseExit. A detected type is noted on stderr
 // unless noDetectNote is set, so that a command in a pipeline can stay
 // silent about what it inferred.
+//
+// A named type is checked against the inputs as well, rather than taken on
+// faith: only the members of that type are decoded, so an input of another
+// kind decodes into an empty profile, which an intersection reads as
+// permitting nothing and a diff reads as equal to anything. Both would
+// otherwise succeed, with an unknown-field warning as the only sign.
 func resolveKind(
 	profileType string, inputs []profileInput, parseExit int, noDetectNote bool,
 	stderr io.Writer,
 ) (profileKind, int) {
+	if profileType != "" {
+		code := checkTypeMatchesInputs(profileType, inputs, stderr)
+		if code != 0 {
+			var none profileKind
+
+			return none, code
+		}
+	}
+
 	if profileType == "" {
 		err := checkParsable(inputs)
 		if err != nil {
@@ -291,6 +316,31 @@ func resolveKind(
 	}
 
 	return kind, 0
+}
+
+// checkTypeMatchesInputs reports an input whose members say it is a profile
+// of a kind other than the one --type names. An input holding the members of
+// two kinds is accepted here: naming the type is what resolves that case,
+// which is what reportTypeConflict asks the caller to do.
+func checkTypeMatchesInputs(
+	profileType string, inputs []profileInput, stderr io.Writer,
+) int {
+	for _, input := range inputs {
+		detected := detectOneProfileType(input.data)
+		if len(detected) == 0 || slices.Contains(detected, profileType) {
+			continue
+		}
+
+		_, _ = fmt.Fprintf(
+			stderr,
+			"error: %s holds a %s profile, not the %s --type names\n",
+			input.name, detected[0], profileType,
+		)
+
+		return exitUsage
+	}
+
+	return 0
 }
 
 // reportTypeConflict explains why the profile type could not be resolved:

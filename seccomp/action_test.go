@@ -177,19 +177,35 @@ func TestActKillAndActKillThreadEquivalent(t *testing.T) {
 	}
 }
 
+// TestUnknownActionIsMostRestrictive pins both halves of what an unknown
+// action means to these two: it ranks as the most restrictive action there
+// is, and it is reported as the action of that rank rather than echoed back,
+// so that a caller writing the result into a profile writes one a runtime
+// loads.
 func TestUnknownActionIsMostRestrictive(t *testing.T) {
 	t.Parallel()
 
 	unknown := specs.LinuxSeccompAction("SCMP_ACT_UNKNOWN")
 
 	got := seccomp.MoreRestrictive(unknown, specs.ActAllow)
-	if got != unknown {
-		t.Errorf("MoreRestrictive(unknown, allow) = %q, want %q", got, unknown)
+	if got != specs.ActKillProcess {
+		t.Errorf("MoreRestrictive(unknown, allow) = %q, want %q", got, specs.ActKillProcess)
 	}
 
+	// The stand-in is no less restrictive than the rank the unknown action
+	// was given, which is above SCMP_ACT_KILL_PROCESS.
 	got = seccomp.MoreRestrictive(specs.ActKillProcess, unknown)
-	if got != unknown {
-		t.Errorf("MoreRestrictive(kill, unknown) = %q, want %q", got, unknown)
+	if got != specs.ActKillProcess {
+		t.Errorf("MoreRestrictive(kill_process, unknown) = %q, want %q",
+			got, specs.ActKillProcess)
+	}
+
+	// The ranking itself is unchanged: the unknown action still wins over
+	// every known one, including SCMP_ACT_KILL_PROCESS.
+	got = seccomp.LessRestrictive(unknown, specs.ActKillProcess)
+	if got != specs.ActKillProcess {
+		t.Errorf("LessRestrictive(unknown, kill_process) = %q, want %q",
+			got, specs.ActKillProcess)
 	}
 }
 
@@ -209,7 +225,7 @@ func TestLessRestrictiveUnknownAction(t *testing.T) {
 	}
 
 	got = seccomp.LessRestrictive(unknown, unknown)
-	if got != unknown {
-		t.Errorf("LessRestrictive(unknown, unknown) = %q, want %q", got, unknown)
+	if got != specs.ActKillProcess {
+		t.Errorf("LessRestrictive(unknown, unknown) = %q, want %q", got, specs.ActKillProcess)
 	}
 }

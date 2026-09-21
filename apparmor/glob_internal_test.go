@@ -420,3 +420,58 @@ func TestDecodeEscapes(t *testing.T) {
 		}
 	}
 }
+
+// TestExpandedByGuards covers globMatcher.expandedBy directly. Every caller
+// reaches it through prefixIndex, which pre-filters the bases to trailing
+// "**" patterns and pre-walks the prefixes, so through a caller most of the
+// function's guards cannot fail: the checks below are what keeps it correct
+// for a caller that does not pre-filter.
+func TestExpandedByGuards(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		name        string
+		glob, base  string
+		want        bool
+		description string
+	}{
+		{
+			name: "base expands over the glob", glob: "/etc/a*", base: "/etc/**",
+			want: true, description: "the ordinary case a caller reaches",
+		},
+		{
+			name: "base is not a trailing double star", glob: "/etc/a*", base: "/etc/*",
+			want: false, description: "a single star does not cross a slash",
+		},
+		{
+			name: "base has no prefix", glob: "/etc/a*", base: "**",
+			want: false, description: "a relative pattern narrows nothing",
+		},
+		{
+			name: "glob outside the base prefix", glob: "/var/a*", base: "/etc/**",
+			want: false, description: "the prefixes do not nest",
+		},
+		{
+			name: "glob is the base", glob: "/etc/**", base: "/etc/**",
+			want: true, description: "a pattern grants everything it matches",
+		},
+		{
+			name: "glob can match the base prefix", glob: "/etc/{,a}", base: "/etc/**",
+			want: false, description: `"**" requires a character after the prefix`,
+		},
+		{
+			name: "unusable glob", glob: "/etc/{a}", base: "/etc/**",
+			want: false, description: "a pattern the parser rejects matches nothing",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := matcherFor(testCase.glob).expandedBy(matcherFor(testCase.base))
+			if got != testCase.want {
+				t.Errorf("%q expandedBy %q = %v, want %v (%s)",
+					testCase.glob, testCase.base, got, testCase.want, testCase.description)
+			}
+		})
+	}
+}

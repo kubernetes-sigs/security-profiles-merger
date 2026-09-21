@@ -72,14 +72,63 @@ func printUsage(flags *flag.FlagSet, usageText string, out, stderr io.Writer) {
 	flags.SetOutput(stderr)
 }
 
+// flagNamed reports whether the named flag was given on the command line,
+// which its value cannot say when the value equals the default.
+func flagNamed(flags *flag.FlagSet, name string) bool {
+	named := false
+
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			named = true
+		}
+	})
+
+	return named
+}
+
+// argsSeparated reports whether the caller ended the flags with a "--",
+// after which everything is a file name. Only a "--" the flag parser would
+// consume counts: one after the first operand is an operand itself, and a
+// flag value that happens to be "--" is not a separator either, so the scan
+// stops at the first argument that is neither a flag nor a flag's value.
+func argsSeparated(args []string) bool {
+	for idx := 0; idx < len(args); idx++ {
+		arg := args[idx]
+
+		if arg == "--" {
+			return true
+		}
+
+		if arg == stdinArg || !strings.HasPrefix(arg, "-") {
+			return false
+		}
+
+		// A flag given as "-name value" takes the next argument; one given
+		// as "-name=value" does not.
+		if !strings.Contains(arg, "=") && idx+1 < len(args) {
+			idx++
+		}
+	}
+
+	return false
+}
+
 // checkFlagOrder rejects flags placed after file arguments. The flag package
 // stops at the first file argument, so a flag after it would be read as a
 // file name; such an argument that names no file is reported as a misplaced
 // flag. Commands run this before checking their flag values, since a flag
 // the parser never saw would otherwise be reported as missing.
-func checkFlagOrder(args []string, stderr io.Writer) int {
+func checkFlagOrder(args []string, separated bool, stderr io.Writer) int {
 	for _, arg := range args {
-		if arg == "-" || !strings.HasPrefix(arg, "-") {
+		if arg == stdinArg || !strings.HasPrefix(arg, "-") {
+			continue
+		}
+
+		// After "--" the caller has said these are file names, whatever
+		// they start with, so a missing one is a missing file rather than a
+		// misplaced flag. flag.Args() no longer records the separator, so
+		// the caller passes it through (see argsSeparated).
+		if separated {
 			continue
 		}
 

@@ -70,25 +70,16 @@ func FuzzDuplicateKeys(f *testing.F) {
 	addJSONFuzzSeeds(f)
 
 	f.Fuzz(func(t *testing.T, raw string) {
-		paths := duplicateKeys([]byte(raw))
+		paths, omitted := duplicateKeys([]byte(raw))
 
-		if !slices.Equal(paths, duplicateKeys([]byte(raw))) {
+		again, omittedAgain := duplicateKeys([]byte(raw))
+		if !slices.Equal(paths, again) || omitted != omittedAgain {
 			t.Errorf("duplicateKeys(%q) is not reproducible", raw)
 		}
 
-		seen := make(map[string]struct{}, len(paths))
+		checkPathBound(t, raw, paths, omitted)
 
-		for _, path := range paths {
-			if _, dup := seen[path]; dup {
-				t.Errorf("duplicateKeys reported %q more than once: %v", path, paths)
-			}
-
-			seen[path] = struct{}{}
-
-			if namesAppearLiterally(raw) && !strings.Contains(raw, lastPathSegment(path)) {
-				t.Errorf("duplicateKeys reported %q, which %q does not hold", path, raw)
-			}
-		}
+		checkPathsAreDistinctAndPresent(t, raw, paths)
 
 		// Re-encoding the decoded document emits every member once, so the
 		// scan must find nothing in it, unless two of its member names fold
@@ -103,10 +94,45 @@ func FuzzDuplicateKeys(f *testing.F) {
 			return
 		}
 
-		if got := duplicateKeys(encoded); len(got) != 0 {
+		if got, _ := duplicateKeys(encoded); len(got) != 0 {
 			t.Errorf("duplicateKeys(%s) = %v, want none", encoded, got)
 		}
 	})
+}
+
+// checkPathsAreDistinctAndPresent asserts that a scan names each path once
+// and names only members the document spells.
+func checkPathsAreDistinctAndPresent(t *testing.T, raw string, paths []string) {
+	t.Helper()
+
+	seen := make(map[string]struct{}, len(paths))
+
+	for _, path := range paths {
+		if _, dup := seen[path]; dup {
+			t.Errorf("duplicateKeys reported %q more than once: %v", path, paths)
+		}
+
+		seen[path] = struct{}{}
+
+		if namesAppearLiterally(raw) && !strings.Contains(raw, lastPathSegment(path)) {
+			t.Errorf("duplicateKeys reported %q, which %q does not hold", path, raw)
+		}
+	}
+}
+
+// checkPathBound asserts what every reported list of field paths obeys: at
+// most maxReportedPaths of them, and a count of the rest only once that many
+// are listed.
+func checkPathBound(t *testing.T, raw string, paths []string, omitted int) {
+	t.Helper()
+
+	if len(paths) > maxReportedPaths {
+		t.Errorf("%q: reported %d paths, at most %d", raw, len(paths), maxReportedPaths)
+	}
+
+	if omitted > 0 && len(paths) != maxReportedPaths {
+		t.Errorf("%q: omitted %d with only %d reported", raw, omitted, len(paths))
+	}
 }
 
 // namesAppearLiterally reports whether the member names of a document are
@@ -213,10 +239,32 @@ func FuzzUnknownFields(f *testing.F) {
 	addJSONFuzzSeeds(f)
 
 	f.Fuzz(func(t *testing.T, raw string) {
-		paths := unknownFieldsOf[specs.LinuxSeccomp]([]byte(raw))
+		paths, omitted := unknownFieldsOf[specs.LinuxSeccomp]([]byte(raw))
+
+		checkPathBound(t, raw, paths, omitted)
 
 		if len(paths) == 0 {
+			// The documented converse: a document the type decodes strictly
+			// holds no unknown member, so nothing may be reported for one.
+			// Only a valid document can be decoded at all, so an invalid one
+			// says nothing either way.
+			decoder := json.NewDecoder(strings.NewReader(raw))
+			decoder.DisallowUnknownFields()
+
+			if omitted != 0 {
+				t.Errorf("unknownFieldsOf(%q) omitted %d with none reported", raw, omitted)
+			}
+
 			return
+		}
+
+		// The reverse: a document with an unknown member must not decode
+		// strictly, whatever else is wrong with it.
+		strict := json.NewDecoder(strings.NewReader(raw))
+		strict.DisallowUnknownFields()
+
+		if strict.Decode(new(specs.LinuxSeccomp)) == nil {
+			t.Errorf("unknownFieldsOf(%q) = %v, but the document decodes strictly", raw, paths)
 		}
 
 		if !json.Valid([]byte(raw)) {

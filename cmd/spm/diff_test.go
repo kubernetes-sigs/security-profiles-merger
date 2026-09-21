@@ -117,8 +117,15 @@ func TestDiffErrors(t *testing.T) {
 			wantStderr: testExactlyTwo,
 		},
 		{
-			name:       testUnknownFormat,
-			args:       []string{cmdDiff, flagType, typeSeccomp, flagFormat, testBogus},
+			// With two readable profiles, the format is the only thing that
+			// can fail: without them the case passed on the "exactly 2
+			// profiles" error, which carries the same exit code, and on a
+			// message printed before the format was acted on at all.
+			name: testUnknownFormat,
+			args: []string{
+				cmdDiff, flagType, typeSeccomp, flagFormat, testBogus,
+				seccompFile, seccompFile2,
+			},
 			stdin:      nil,
 			wantCode:   exitUsage,
 			wantStderr: testUnknownFormat,
@@ -641,7 +648,7 @@ func TestParseDiffArch(t *testing.T) {
 		// does rather than as the node the caller named.
 		{archPrefix + "ARM64", "", false, true},
 	} {
-		got, err := parseDiffArch(testCase.value)
+		got, err := parseDiffArch(testCase.value, true)
 
 		if testCase.wantErr {
 			if !errors.Is(err, errUnknownArchName) {

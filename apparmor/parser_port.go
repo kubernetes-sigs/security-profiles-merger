@@ -456,11 +456,22 @@ func (conv *converter) star(pos int, escaped bool) (int, bool) {
 		conv.regex.WriteString(`[^/\x00]`)
 	}
 
-	if pos+1 < len(conv.pattern) && conv.pattern[pos+1] == '*' {
-		conv.trailingStarStar = componentStart && pos+2 == len(conv.pattern)
+	// A run of two or more stars is one "**": the parser emits a second
+	// "[^/\x00]*" for a third star, which matches the same names as the
+	// "[^\x00]*" before it already does, so the run says nothing more than
+	// "**" says. Counting it as one glob token is what lets a pattern
+	// spelled "/etc/***" narrow another pattern the way "/etc/**" does,
+	// rather than silently dropping it from an intersection.
+	runEnd := pos
+	for runEnd+1 < len(conv.pattern) && conv.pattern[runEnd+1] == '*' {
+		runEnd++
+	}
+
+	if runEnd > pos {
+		conv.trailingStarStar = componentStart && runEnd+1 == len(conv.pattern)
 		conv.regex.WriteString(`[^\x00]*`)
 
-		return pos + 1, true
+		return runEnd, true
 	}
 
 	conv.regex.WriteString(`[^/\x00]*`)

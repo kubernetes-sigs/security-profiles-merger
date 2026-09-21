@@ -247,13 +247,15 @@ The same code means the same thing in every subcommand:
 |------|---------|
 | `0` | Success. For `diff`, the two profiles are equal |
 | `1` | The profile is bad: it does not parse, does not validate, or its output could not be written. For `diff`, `1` means *different* and nothing else |
-| `2` | Usage error: an unknown command, flag, type, format, strategy or `--validate` mode; a flag after the file arguments; too many inputs; stdin named twice; a profile type that cannot be detected or that the inputs disagree on. For `diff`, every failure, since `1` is taken |
+| `2` | Usage error: an unknown command, flag, type, format, strategy, architecture or `--validate` mode; `--arch` for a profile type that has no architectures; a flag after the file arguments; an input larger than the limits below; too many inputs; stdin named twice; a profile type that cannot be detected, that the inputs disagree on, or that `--type` names against what an input holds. For `diff`, every failure, since `1` is taken |
 
 The split is between "you invoked it wrong", which no profile can cause, and
 "the profile is wrong", which is the answer the command was asked for. So
 naming stdin twice (`spm merge - -`), passing more than 1000 file arguments,
-or piping a JSON array of more than 1000 profiles all exit `2`, even though
-each is discovered while reading the inputs.
+piping a JSON array of more than 1000 profiles, or handing it a file over
+10 MiB or inputs over 64 MiB in total all exit `2`, even though each is
+discovered while reading the inputs: the profile was never read, so nothing
+about it is known to be wrong.
 
 ### Install
 
@@ -345,11 +347,17 @@ spm merge --type seccomp --strategy intersect baseline.json - < recording.json
 ```
 
 Use `--format=human` for human-readable output via `FormatProfile`, and
-`--output` to write the result to a file instead of stdout. The file is only
-written once the merge has succeeded, so a failed run never truncates it. It
+`--output` to write the result to a file instead of stdout; `--output -`
+means stdout, as `-` means stdin for an input. The file is only written once
+the merge has succeeded, so a failed run never truncates it. A regular file
 is written with mode `0600` whether it is created or already existed, and
-regardless of the umask, since a merged profile can name node-local paths;
-a symbolic link at that path is refused rather than followed:
+regardless of the umask, since a merged profile can name node-local paths; a
+device or FIFO keeps the mode it has, so `--output /dev/null` leaves that
+node alone. A symbolic link as the final path component is refused rather
+than followed, which is why `--output /dev/stdout` is refused as well: use
+`--output -` or shell redirection for that. A symlinked *directory* in the
+path is followed, so the guard is about the file `--output` names, not about
+the route to it:
 
 ```sh
 spm merge --type seccomp --strategy intersect --format human a.json b.json
@@ -390,10 +398,15 @@ written, stdin by `stdin`, and one element of a JSON array on stdin by
 `stdin[i]`.
 
 ```
-error: parsing baseline.json: unexpected end of JSON input
+error: parsing baseline.json: decoding failed: unexpected end of JSON input
 warning: stdin[2]: unknown field "syscalls[0].comment"
-error: artifact.json: syscall entry 0 action: unknown seccomp action
+error: artifact.json: syscall entry 0 action: unknown seccomp action "SCMP_ACT_BOGUS"
 ```
+
+Every validation mode names the input this way, the default one included: a
+failure the merge functions would report as "profile 1" is reported here as
+the file, or as `stdin[i]` for an element of an array on stdin, since a
+position is not something a caller can act on.
 
 A field path names each member as `object.member` and each element of a list
 as `list[i]`. A member name that cannot be a plain path segment, which no

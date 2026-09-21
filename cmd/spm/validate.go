@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"io"
 	"slices"
+
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
 const validateUsage = `Usage: spm validate [options] [files...]
@@ -31,7 +33,8 @@ array of profiles.
 Writes the validated profiles on success; --quiet writes no profile and
 notes no auto-detected profile type, and --no-detect-note drops that note
 while still writing the profiles. Errors and warnings always go to stderr.
---quiet cannot be combined with --output, nor --strict with --artifact.
+--quiet cannot be combined with --output or --format, nor --strict with
+--artifact.
 
 Options:
 `
@@ -71,7 +74,7 @@ func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	if code := checkFlagOrder(flags.Args(), stderr); code != 0 {
+	if code := checkFlagOrder(flags.Args(), argsSeparated(args), stderr); code != 0 {
 		return code
 	}
 
@@ -82,6 +85,7 @@ func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		strict:      *strict,
 		artifact:    *artifact,
 		quiet:       *quiet,
+		formatSet:   flagNamed(flags, "format"),
 	}, stderr)
 	if code != 0 {
 		return code
@@ -153,6 +157,9 @@ type validateFlags struct {
 	strict      bool
 	artifact    bool
 	quiet       bool
+	// formatSet reports whether --format was named, which a default value
+	// cannot tell apart from the flag being left out.
+	formatSet bool
 }
 
 func validateValidateFlags(opts validateFlags, stderr io.Writer) int {
@@ -175,6 +182,16 @@ func validateValidateFlags(opts validateFlags, stderr io.Writer) int {
 	if opts.quiet && opts.output != "" {
 		_, _ = fmt.Fprintln(
 			stderr, "error: --quiet cannot be combined with --output",
+		)
+
+		return exitUsage
+	}
+
+	// --format shapes the profile --quiet suppresses, so naming both says
+	// two things that cannot both be meant, as --output does.
+	if opts.quiet && opts.formatSet {
+		_, _ = fmt.Fprintln(
+			stderr, "error: --quiet cannot be combined with --format",
 		)
 
 		return exitUsage
@@ -208,7 +225,7 @@ func validateProfiles[T any](
 	for idx, profile := range profiles {
 		err := check(profile)
 		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "error: %s: %v\n", inputs[idx].name, err)
+			_, _ = fmt.Fprintf(stderr, "error: %s: %v\n", merge.SafeText(inputs[idx].name), err)
 
 			failed = true
 		}

@@ -32,6 +32,12 @@ var (
 	ErrNoProfiles = spm.ErrNoProfiles
 	// ErrNilProfile is returned when a nil profile is provided.
 	ErrNilProfile = spm.ErrNilProfile
+	// ErrMoreProblems is returned alongside the failures a report lists
+	// when it left others out: every validator bounds how many it reports,
+	// since a profile holds as many as it holds rules. A caller matching a
+	// sentinel must read a match here as "and possibly others", because a
+	// failure the profile holds can be absent from the error reporting it.
+	ErrMoreProblems = spm.ErrMoreProblems
 )
 
 // Intersect merges multiple Landlock profiles via intersection: the resulting

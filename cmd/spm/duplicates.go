@@ -25,6 +25,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
 var errDuplicateKey = errors.New("duplicate key")
@@ -55,7 +57,7 @@ type scanFrame struct {
 // where encoding/json fills one field from both. Every object in a profile
 // decodes into a struct, so the comparison applies at every depth. raw must
 // be valid JSON; the scan stops at the first syntax error.
-func duplicateKeys(raw []byte) []string {
+func duplicateKeys(raw []byte) ([]string, int) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	// Numbers are kept as text: they only need to be skipped, and a value
 	// out of the float64 range must not stop the scan.
@@ -63,13 +65,13 @@ func duplicateKeys(raw []byte) []string {
 
 	var (
 		stack []*scanFrame
-		found []string
+		found pathCollector
 	)
 
 	for {
 		token, err := decoder.Token()
 		if err != nil {
-			return found
+			return found.paths, found.omitted
 		}
 
 		var top *scanFrame
@@ -84,7 +86,7 @@ func duplicateKeys(raw []byte) []string {
 			stack = stack[:len(stack)-1]
 		case top.expectsKey():
 			key, _ := token.(string)
-			found = top.addKey(key, found)
+			top.addKey(key, &found)
 		case isDelim:
 			stack = append(stack, newScanFrame(top.nextValuePath(), delim == '{'))
 		default:
@@ -113,9 +115,9 @@ func (frame *scanFrame) expectsKey() bool {
 	return frame != nil && frame.wantKey
 }
 
-// addKey records a member name and returns found with its path appended the
-// first time the name repeats.
-func (frame *scanFrame) addKey(key string, found []string) []string {
+// addKey records a member name and collects its path the first time the name
+// repeats.
+func (frame *scanFrame) addKey(key string, found *pathCollector) {
 	frame.member = joinFieldPath(frame.path, key)
 	frame.wantKey = false
 
@@ -125,16 +127,41 @@ func (frame *scanFrame) addKey(key string, found []string) []string {
 	if !seen {
 		frame.keys[folded] = false
 
-		return found
+		return
 	}
 
 	if reported {
-		return found
+		return
 	}
 
 	frame.keys[folded] = true
 
-	return append(found, frame.member)
+	found.add(frame.member)
+}
+
+// maxReportedPaths is the number of field paths one message lists, the same
+// ceiling the library puts on the failures it joins.
+const maxReportedPaths = merge.MaxJoinedErrors
+
+// pathCollector gathers the field paths of one message, bounded the way the
+// library bounds its own joined failures: past merge.MaxJoinedErrors it
+// counts what it leaves out rather than keeping it. A document chooses both
+// how many paths it holds and how long each one is, since a path carries its
+// whole ancestry, so an unbounded collector turns a profile of a few hundred
+// kilobytes into hundreds of megabytes of warning.
+type pathCollector struct {
+	paths   []string
+	omitted int
+}
+
+func (c *pathCollector) add(path string) {
+	if len(c.paths) >= maxReportedPaths {
+		c.omitted++
+
+		return
+	}
+
+	c.paths = append(c.paths, path)
 }
 
 // foldName returns the name in the case-folded form encoding/json uses to
@@ -190,16 +217,24 @@ func (frame *scanFrame) nextValuePath() string {
 }
 
 // fieldPathsError wraps kind with the quoted paths, pluralizing the kind
-// when there are several, as in `unknown fields "a", "b"`.
-func fieldPathsError(kind error, paths []string) error {
+// when there are several, as in `unknown fields "a", "b"`. Each path is
+// quoted with a length bound and omitted counts the ones the collector left
+// out, so that the message a runtime logs is bounded however the document
+// that produced it was shaped.
+func fieldPathsError(kind error, paths []string, omitted int) error {
 	quoted := make([]string, len(paths))
 	for idx, field := range paths {
-		quoted[idx] = strconv.Quote(field)
+		quoted[idx] = merge.QuoteBounded(field)
 	}
 
-	if len(paths) == 1 {
+	if len(paths) == 1 && omitted == 0 {
 		return fmt.Errorf("%w %s", kind, quoted[0])
 	}
 
-	return fmt.Errorf("%ws %s", kind, strings.Join(quoted, ", "))
+	listed := strings.Join(quoted, ", ")
+	if omitted > 0 {
+		listed = fmt.Sprintf("%s and %d more", listed, omitted)
+	}
+
+	return fmt.Errorf("%ws %s", kind, listed)
 }
