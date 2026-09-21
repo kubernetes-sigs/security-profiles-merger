@@ -30,6 +30,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -692,12 +693,45 @@ func walkStructFields(value any, typ reflect.Type, prefix string, found *[]strin
 	}
 }
 
+// joinFieldPath appends a member name to a field path. A name that cannot
+// be spelled as a plain path segment is bracketed and quoted, the way an
+// array index is, so that one path names one member: written with a dot
+// unconditionally, the member "a.b" and the member "b" of the object "a"
+// spell the same path, and a member named "" spells the path of the object
+// holding it. Every member of a profile document is a plain name, so this
+// only shows up for a document that is not one.
 func joinFieldPath(prefix, key string) string {
+	if !plainFieldName(key) {
+		return prefix + "[" + strconv.Quote(key) + "]"
+	}
+
 	if prefix == "" {
 		return key
 	}
 
 	return prefix + "." + key
+}
+
+// plainFieldName reports whether a member name can be a path segment as it
+// is: a non-empty, valid UTF-8 name holding none of the punctuation a path
+// is built from and nothing unprintable. A name outside that, which no
+// profile document has, is bracketed and quoted instead, which also spells
+// out a byte a terminal would otherwise swallow.
+func plainFieldName(name string) bool {
+	if name == "" || !utf8.ValidString(name) {
+		return false
+	}
+
+	for _, char := range name {
+		switch {
+		case char == '.', char == '[', char == ']', char == '"', char == '\\':
+			return false
+		case unicode.IsControl(char):
+			return false
+		}
+	}
+
+	return true
 }
 
 // fieldSet maps the JSON names of a struct's fields to their types, once by
