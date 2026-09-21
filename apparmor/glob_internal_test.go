@@ -22,6 +22,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 )
 
 // swapGlobCache gives the test an empty glob cache and restores the shared
@@ -368,7 +370,7 @@ func TestUnbalancedPatternsScanInLinearTime(t *testing.T) {
 		analyzePattern(pattern, false)
 		hasDotComponent(pattern)
 
-		if elapsed := time.Since(start); uninstrumentedRun() && elapsed > 2*time.Second {
+		if elapsed := time.Since(start); testutil.UninstrumentedRun() && elapsed > 2*time.Second {
 			t.Errorf("analyzing %d bytes of %q took %v", size, char, elapsed)
 		}
 	}

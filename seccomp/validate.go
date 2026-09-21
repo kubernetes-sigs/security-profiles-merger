@@ -236,16 +236,6 @@ func Validate(profile *specs.LinuxSeccomp) error {
 		}
 	}
 
-	return joinLimited(errs...)
-}
-
-// joinLimited reports at most a bounded number of the failures it is given.
-// A profile holds as many failures as it holds entries, and an artifact
-// chooses that number, so the rejection a runtime logs needs a ceiling just
-// as the values it names do (see merge.QuoteBounded).
-//
-//nolint:wrapcheck // the joined failures are this package's own errors
-func joinLimited(errs ...error) error {
 	return merge.JoinLimited(errs...)
 }
 
@@ -297,7 +287,7 @@ func validateNotifySupport(profile *specs.LinuxSeccomp) error {
 		errs = append(errs, fmt.Errorf("listenerPath: %w", ErrNotifyWithoutListener))
 	}
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 // ValidateStrict is the strictest of the three: it rejects everything
@@ -415,14 +405,14 @@ func validateWith(
 		}
 	}
 
-	return errors.Join(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 // validateShape runs the checks shared by ValidateStrict and
 // ValidateArtifact that do not depend on trust: duplicate architectures and
 // flags, and out-of-range errno values.
 func validateShape(profile *specs.LinuxSeccomp) error {
-	return errors.Join(
+	return merge.JoinLimited(
 		validateDuplicateArchitectures(profile.Architectures),
 		validateDuplicateFlags(profile.Flags),
 		validateErrnoRange(profile),
@@ -453,7 +443,7 @@ func validateErrnoRange(profile *specs.LinuxSeccomp) error {
 		}
 	}
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 func validateUnusedValueTwo(profile *specs.LinuxSeccomp) error {
@@ -470,7 +460,7 @@ func validateUnusedValueTwo(profile *specs.LinuxSeccomp) error {
 		}
 	}
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 func validateUnusedErrnoRet(profile *specs.LinuxSeccomp) error {
@@ -493,7 +483,7 @@ func validateUnusedErrnoRet(profile *specs.LinuxSeccomp) error {
 		}
 	}
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 func validateDuplicateNames(profile *specs.LinuxSeccomp) error {
@@ -658,7 +648,7 @@ func validateSyscallRules(profile *specs.LinuxSeccomp) error {
 		checker.checkShapes()
 	}
 
-	return joinLimited(checker.errs...)
+	return merge.JoinLimited(checker.errs...)
 }
 
 // validateProfileClauses bounds the profile as a whole: the names one entry
@@ -688,7 +678,7 @@ func validateProfileClauses(profile *specs.LinuxSeccomp) error {
 		))
 	}
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 // ruleChecker carries the state of validateSyscallRules.
@@ -821,7 +811,7 @@ func validateSyscallNameSpelling(profile *specs.LinuxSeccomp) error {
 		}
 	}
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 // hasControlByte reports whether a name holds a C0 control character or DEL.
@@ -852,7 +842,7 @@ func validateNoNotify(profile *specs.LinuxSeccomp) error {
 		}
 	}
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 func validateEntryCount(profile *specs.LinuxSeccomp) error {
@@ -876,7 +866,7 @@ func validateEntryCount(profile *specs.LinuxSeccomp) error {
 		}
 	}
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 func validateNoListener(profile *specs.LinuxSeccomp) error {
@@ -900,7 +890,7 @@ func validateNoListener(profile *specs.LinuxSeccomp) error {
 		))
 	}
 
-	return errors.Join(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 // validateDuplicateSyscallNames reports each duplicated syscall name once,
@@ -959,7 +949,7 @@ func validateDuplicateSyscallNames(syscalls []specs.LinuxSyscall) error {
 		}
 	}
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 // formatEntries renders entry indices as "0", "0 and 1", or "0, 1 and 2".
@@ -1040,7 +1030,7 @@ func validateArchitectures(archs []specs.Arch) error {
 		}
 	}
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 func validateFlags(flags []specs.LinuxSeccompFlag) error {
@@ -1054,7 +1044,7 @@ func validateFlags(flags []specs.LinuxSeccompFlag) error {
 		}
 	}
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 func validateDuplicateArchitectures(archs []specs.Arch) error {
@@ -1072,7 +1062,7 @@ func validateDuplicateArchitectures(archs []specs.Arch) error {
 		}
 	}
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 func validateDuplicateFlags(flags []specs.LinuxSeccompFlag) error {
@@ -1090,7 +1080,7 @@ func validateDuplicateFlags(flags []specs.LinuxSeccompFlag) error {
 		}
 	}
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 func validateSyscallArgs(syscalls []specs.LinuxSyscall) error {
@@ -1114,5 +1104,5 @@ func validateSyscallArgs(syscalls []specs.LinuxSyscall) error {
 		}
 	}
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }

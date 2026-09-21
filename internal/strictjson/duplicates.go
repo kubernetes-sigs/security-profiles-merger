@@ -14,12 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package main
+// Package strictjson finds what encoding/json accepts silently and a
+// profile from somewhere else must not carry: members repeated within one
+// object, members the target type has no field for, bytes that are not valid
+// UTF-8, and data behind the document. The command and the three profile
+// packages share it, so that a library caller can refuse the same documents
+// the command refuses.
+package strictjson
 
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -29,17 +34,18 @@ import (
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
-var errDuplicateKey = errors.New("duplicate key")
-
-// scanFrame is an open object or array during duplicateKeys.
+// scanFrame is an open object or array during DuplicateKeys. It holds the
+// name or index of the value it is at rather than that value's path: a path
+// carries its whole ancestry, so keeping one per open frame, or building one
+// per value, costs memory quadratic in a document that nests deeply or puts
+// many values under a long name. A path is built from the stack only when a
+// repeated member is reported.
 type scanFrame struct {
 	// keys holds the folded names of the members seen so far in an object,
 	// mapped to whether they were already reported as repeated. It is nil
 	// for an array.
 	keys map[string]bool
-	// path is the frame's own path.
-	path string
-	// member is the path of the object member whose value comes next.
+	// member is the name of the object member whose value comes next.
 	member string
 	// index is the index of the next array element.
 	index int
@@ -47,7 +53,7 @@ type scanFrame struct {
 	wantKey bool
 }
 
-// duplicateKeys returns the paths of object members that occur more than
+// DuplicateKeys returns the paths of object members that occur more than
 // once in the same object, at any depth, in document order and each once.
 // encoding/json keeps the last of them silently, while other parsers may
 // keep the first, so a profile with repeated members can mean different
@@ -57,7 +63,7 @@ type scanFrame struct {
 // where encoding/json fills one field from both. Every object in a profile
 // decodes into a struct, so the comparison applies at every depth. raw must
 // be valid JSON; the scan stops at the first syntax error.
-func duplicateKeys(raw []byte) ([]string, int) {
+func DuplicateKeys(raw []byte) ([]string, int) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	// Numbers are kept as text: they only need to be skipped, and a value
 	// out of the float64 range must not stop the scan.
@@ -86,11 +92,15 @@ func duplicateKeys(raw []byte) ([]string, int) {
 			stack = stack[:len(stack)-1]
 		case top.expectsKey():
 			key, _ := token.(string)
-			top.addKey(key, &found)
+			if top.addKey(key) {
+				found.addLazily(func() string { return memberPath(stack) })
+			}
 		case isDelim:
-			stack = append(stack, newScanFrame(top.nextValuePath(), delim == '{'))
+			top.startValue()
+
+			stack = append(stack, newScanFrame(delim == '{'))
 		default:
-			top.nextValuePath()
+			top.startValue()
 		}
 	}
 }
@@ -99,8 +109,8 @@ func isClosing(delim json.Delim) bool {
 	return delim == '}' || delim == ']'
 }
 
-func newScanFrame(path string, object bool) *scanFrame {
-	frame := &scanFrame{keys: nil, path: path, member: "", index: 0, wantKey: false}
+func newScanFrame(object bool) *scanFrame {
+	frame := &scanFrame{keys: nil, member: "", index: 0, wantKey: false}
 	if object {
 		frame.keys = map[string]bool{}
 		frame.wantKey = true
@@ -115,10 +125,10 @@ func (frame *scanFrame) expectsKey() bool {
 	return frame != nil && frame.wantKey
 }
 
-// addKey records a member name and collects its path the first time the name
-// repeats.
-func (frame *scanFrame) addKey(key string, found *pathCollector) {
-	frame.member = joinFieldPath(frame.path, key)
+// addKey records a member name and reports whether this is the first time
+// the name repeats, which is when its path is collected.
+func (frame *scanFrame) addKey(key string) bool {
+	frame.member = key
 	frame.wantKey = false
 
 	folded := foldName(key)
@@ -127,21 +137,56 @@ func (frame *scanFrame) addKey(key string, found *pathCollector) {
 	if !seen {
 		frame.keys[folded] = false
 
-		return
+		return false
 	}
 
 	if reported {
-		return
+		return false
 	}
 
 	frame.keys[folded] = true
 
-	found.add(frame.member)
+	return true
 }
 
-// maxReportedPaths is the number of field paths one message lists, the same
+// startValue advances the frame past the value that starts next. A nil frame
+// is the document root.
+func (frame *scanFrame) startValue() {
+	if frame == nil {
+		return
+	}
+
+	if frame.keys != nil {
+		frame.wantKey = true
+
+		return
+	}
+
+	frame.index++
+}
+
+// memberPath returns the path of the member the innermost frame is at. Every
+// outer frame is at the value holding the next one: an object at its current
+// member, an array at the element before its next index.
+func memberPath(stack []*scanFrame) string {
+	path := ""
+
+	for _, frame := range stack {
+		if frame.keys != nil {
+			path = joinFieldPath(path, frame.member)
+
+			continue
+		}
+
+		path += "[" + strconv.Itoa(frame.index-1) + "]"
+	}
+
+	return path
+}
+
+// MaxReportedPaths is the number of field paths one message lists, the same
 // ceiling the library puts on the failures it joins.
-const maxReportedPaths = merge.MaxJoinedErrors
+const MaxReportedPaths = merge.MaxJoinedErrors
 
 // pathCollector gathers the field paths of one message, bounded the way the
 // library bounds its own joined failures: past merge.MaxJoinedErrors it
@@ -155,13 +200,18 @@ type pathCollector struct {
 }
 
 func (c *pathCollector) add(path string) {
-	if len(c.paths) >= maxReportedPaths {
+	c.addLazily(func() string { return path })
+}
+
+// addLazily is add for a path that is only worth building when it is kept.
+func (c *pathCollector) addLazily(path func() string) {
+	if len(c.paths) >= MaxReportedPaths {
 		c.omitted++
 
 		return
 	}
 
-	c.paths = append(c.paths, path)
+	c.paths = append(c.paths, path())
 }
 
 // foldName returns the name in the case-folded form encoding/json uses to
@@ -195,25 +245,6 @@ func foldRune(char rune) rune {
 
 		char = next
 	}
-}
-
-// nextValuePath returns the path of the value that starts next in frame, and
-// advances the frame past it. A nil frame is the document root.
-func (frame *scanFrame) nextValuePath() string {
-	if frame == nil {
-		return ""
-	}
-
-	if frame.keys != nil {
-		frame.wantKey = true
-
-		return frame.member
-	}
-
-	path := frame.path + "[" + strconv.Itoa(frame.index) + "]"
-	frame.index++
-
-	return path
 }
 
 // fieldPathsError wraps kind with the quoted paths, pluralizing the kind

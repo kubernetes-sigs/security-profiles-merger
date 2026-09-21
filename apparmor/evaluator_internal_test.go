@@ -735,10 +735,10 @@ func TestMatchGlobAgreesWithRegex(t *testing.T) {
 		}
 
 		for _, probe := range probes {
-			// A name reaches the matcher through literalName, which is what
+			// A name reaches the matcher in the form its own analysis gives it, which is what
 			// resolves its escapes and collapses its slashes, so both
 			// implementations are given the name in that form.
-			name := literalName(probe)
+			name := matchedName(probe)
 
 			want := matcher.matches(name)
 
@@ -1107,10 +1107,10 @@ func FuzzMatchGlobAgreesWithPort(f *testing.F) {
 			return
 		}
 
-		// A name reaches the matcher through literalName, which resolves
+		// A name reaches the matcher in the form its own analysis gives it, which resolves
 		// its escapes and collapses its slashes; both implementations are
 		// given the name in that form.
-		name := literalName(probe)
+		name := matchedName(probe)
 
 		want := matcher.matches(name)
 
@@ -1120,4 +1120,10 @@ func FuzzMatchGlobAgreesWithPort(f *testing.F) {
 				pattern, probe, got, want)
 		}
 	})
+}
+
+// matchedName returns a name as the merge hands it to a matcher: the literal
+// its analysis denotes, with escapes resolved and slashes collapsed.
+func matchedName(path string) string {
+	return matcherFor(path).literal
 }

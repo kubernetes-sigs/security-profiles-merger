@@ -51,6 +51,10 @@ var (
 	ErrNotifyWithoutListener = errors.New("SCMP_ACT_NOTIFY without a listener")
 )
 
+// InputError is returned by Intersect and Union when one of the profiles
+// they were given fails validation, naming its position among the arguments.
+type InputError = spm.InputError
+
 // Intersect merges multiple seccomp profiles via intersection: the resulting
 // profile permits a syscall only if all input profiles permit it. For each
 // syscall and argument combination, the more restrictive action is chosen.
@@ -165,7 +169,7 @@ var (
 // This implements the profile merging semantics defined in KEP-6061 for CRI
 // runtimes merging OCI-pulled profiles with node baselines.
 func Intersect(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
-	return foldProfiles(profiles, mergeStrategy{pick: moreRestrictive, isIntersect: true})
+	return foldProfiles(profiles, intersectRules())
 }
 
 // Union merges multiple seccomp profiles via union: the resulting profile
@@ -211,33 +215,18 @@ func Intersect(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 // This implements the merge semantics used by the Security Profiles Operator
 // for combining recorded profiles.
 func Union(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
-	return foldProfiles(profiles, mergeStrategy{pick: lessRestrictive, isIntersect: false})
-}
-
-type mergeStrategy struct {
-	pick        func(first, second specs.LinuxSeccompAction) specs.LinuxSeccompAction
-	isIntersect bool
-}
-
-func (s mergeStrategy) rules() ruleMerger {
-	if s.isIntersect {
-		return intersectRules()
-	}
-
-	return unionRules()
+	return foldProfiles(profiles, unionRules())
 }
 
 func foldProfiles(
-	profiles []*specs.LinuxSeccomp, strategy mergeStrategy,
+	profiles []*specs.LinuxSeccomp, rules ruleMerger,
 ) (*specs.LinuxSeccomp, error) {
 	for idx, profile := range profiles {
 		err := Validate(profile)
 		if err != nil {
-			return nil, fmt.Errorf("validate profile %d: %w", idx, err)
+			return nil, &spm.InputError{Index: idx, Err: err}
 		}
 	}
-
-	rules := strategy.rules()
 
 	result, err := merge.Fold(
 		profiles,
@@ -247,7 +236,7 @@ func foldProfiles(
 			return normalizeProfile(only, rules)
 		},
 		func(left, right *specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
-			return mergeTwo(left, right, strategy), nil
+			return mergeTwo(left, right, rules), nil
 		},
 	)
 	if err != nil {
@@ -288,12 +277,12 @@ func normalizeProfile(profile *specs.LinuxSeccomp, rules ruleMerger) *specs.Linu
 
 func mergeTwo(
 	left, right *specs.LinuxSeccomp,
-	strategy mergeStrategy,
+	rules ruleMerger,
 ) *specs.LinuxSeccomp {
 	// The merged default follows the same tie-break as every other clause:
 	// the left side wins when the actions are equivalent, so its errno
 	// survives.
-	mergedDefault := pickClause(*defaultClause(left), *defaultClause(right), strategy.pick)
+	mergedDefault := pickClause(*defaultClause(left), *defaultClause(right), rules.pick)
 
 	// The listener comes from the first profile that provides one rather
 	// than from the left unconditionally: the action lattice can carry
@@ -311,15 +300,15 @@ func mergeTwo(
 		ListenerMetadata: listener.ListenerMetadata,
 	}
 
-	merged.Flags = mergeFlags(left.Flags, right.Flags, strategy.isIntersect, listener == left)
+	merged.Flags = mergeFlags(left.Flags, right.Flags, rules.intersect, listener == left)
 
-	if strategy.isIntersect {
+	if rules.intersect {
 		merged.Architectures = merge.IntersectSlice(left.Architectures, right.Architectures)
 	} else {
 		merged.Architectures = merge.UnionSlice(left.Architectures, right.Architectures)
 	}
 
-	merged.Syscalls = strategy.rules().mergeProfileSyscalls(left, right, &mergedDefault)
+	merged.Syscalls = rules.mergeProfileSyscalls(left, right, &mergedDefault)
 
 	return merged
 }

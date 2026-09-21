@@ -21,6 +21,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 )
 
 // budgetShape builds the shape the pair budget exists for: literals and
@@ -78,7 +80,7 @@ func TestMergesStayWithinTheirPairBudget(t *testing.T) {
 		}
 
 		elapsed := time.Since(start)
-		if uninstrumentedRun() && elapsed > 2*time.Second {
+		if testutil.UninstrumentedRun() && elapsed > 2*time.Second {
 			t.Errorf("%s of %d paths took %v", name, 2*len(literals), elapsed)
 		}
 
@@ -204,7 +206,7 @@ func TestPairBudgetAdmitsArtifactSizedProfiles(t *testing.T) {
 }
 
 // budgetExecutables is budgetProfile for the executable lists, which the
-// merge matches through intersectPaths rather than through mergeFilesystem.
+// merge reads as paths granting one permission.
 func budgetExecutables(paths ...string) *Profile {
 	return &Profile{
 		Executable: &ExecutableRules{
@@ -217,11 +219,10 @@ func budgetExecutables(paths ...string) *Profile {
 	}
 }
 
-// TestIntersectPastItsBudgetKeepsCommonExecutables covers the other half of
-// the fallback. The executable and library lists are matched by
-// intersectPaths, a separate implementation from the filesystem one, and
-// its over-budget path (intersectVerbatim) was reached by no test: the
-// budget case above builds filesystem rules, which route elsewhere.
+// TestIntersectPastItsBudgetKeepsCommonExecutables covers the fallback for
+// the executable and library lists, which go through the same permission
+// merge the filesystem rules do: past the budget only what both sides list
+// alike survives.
 func TestIntersectPastItsBudgetKeepsCommonExecutables(t *testing.T) {
 	t.Parallel()
 
@@ -243,14 +244,5 @@ func TestIntersectPastItsBudgetKeepsCommonExecutables(t *testing.T) {
 		if !slices.Equal(got, []string{shared}) {
 			t.Errorf("%s = %q, want only %q", name, got, shared)
 		}
-	}
-
-	// The fallback keeps no more than matching would: every path it kept is
-	// one both sides hold, so both sides permit it.
-	leftSet := newPathSet(left.Executable.AllowedExecutables)
-	rightSet := newPathSet(right.Executable.AllowedExecutables)
-
-	if !leftSet.matches(shared) || !rightSet.matches(shared) {
-		t.Error("the kept path is not permitted by both inputs")
 	}
 }

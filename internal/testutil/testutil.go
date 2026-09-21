@@ -1,5 +1,3 @@
-//go:build !race
-
 /*
 Copyright The Kubernetes Authors.
 
@@ -16,8 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package seccomp
+// Package testutil holds what the tests of several packages share.
+package testutil
 
-// raceDetectorEnabled reports that this test binary was built without the
-// race detector, which multiplies the cost of a loop several times over.
-const raceDetectorEnabled = false
+import "testing"
+
+// UninstrumentedRun reports whether the test binary runs without coverage
+// counters and without the race detector. Both multiply the cost of a loop
+// several times over, so a wall-clock bound says nothing about the
+// algorithmic cost it is meant to pin while either is on.
+func UninstrumentedRun() bool {
+	return testing.CoverMode() == "" && !raceDetectorEnabled
+}

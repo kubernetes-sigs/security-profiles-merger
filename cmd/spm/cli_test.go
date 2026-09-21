@@ -20,7 +20,6 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -162,43 +161,6 @@ func TestResolveVersion(t *testing.T) {
 	for _, test := range tests {
 		if got := resolveVersion(test.linked, test.read); got != test.want {
 			t.Errorf("%s: resolveVersion() = %q, want %q", test.name, got, test.want)
-		}
-	}
-}
-
-func TestDuplicateKeys(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		raw  string
-		want []string
-	}{
-		{`{"a":1,"b":2}`, nil},
-		{`{"a":1,"a":2}`, []string{"a"}},
-		{`{"a":1,"a":2,"a":3,"b":[],"b":{}}`, []string{"a", "b"}},
-		{`{"s":[{"n":1},{"n":[1,{"x":1,"x":2}],"n":3}]}`, []string{"s[1].n[1].x", "s[1].n"}},
-		{`{"a":{"b":1},"c":{"b":2}}`, nil},
-		{`[{"a":1},{"a":1,"a":2}]`, []string{"[1].a"}},
-		// A name that cannot be a plain path segment is bracketed and
-		// quoted, so that one path names one member: an empty name would
-		// otherwise spell the path of the object holding it, and a name
-		// holding a dot the path of a member one level down.
-		{`{"":1,"":2}`, []string{`[""]`}},
-		{`{"":{"":1,"":2},"":3}`, []string{`[""][""]`, `[""]`}},
-		{`{"a":{"b":1,"b":2},"a.b":0,"a.b":9}`, []string{"a.b", `["a.b"]`}},
-		{`{"a":1e999,"a":"x"}`, []string{"a"}},
-		{`{"a":1,"A":2}`, []string{"A"}},
-		{`{"defaultAction":1,"DEFAULTACTION":2,"defaultaction":3}`, []string{"DEFAULTACTION"}},
-		{"{\"k\":1,\"\u212a\":2}", []string{"\u212a"}},
-		{`{"ab":1,"a":2}`, nil},
-		{`"text"`, nil},
-		{`{"a":1,"a":`, []string{"a"}},
-	}
-
-	for _, test := range tests {
-		got, _ := duplicateKeys([]byte(test.raw))
-		if !slices.Equal(got, test.want) {
-			t.Errorf("duplicateKeys(%s) = %q, want %q", test.raw, got, test.want)
 		}
 	}
 }

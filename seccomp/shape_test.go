@@ -24,6 +24,7 @@ import (
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
 
@@ -480,7 +481,7 @@ func TestIntersectAtPairwiseBudgetIsFast(t *testing.T) {
 		}
 	}
 
-	if elapsed := time.Since(start); seccomp.UninstrumentedRun() && elapsed > generousBudget {
+	if elapsed := time.Since(start); testutil.UninstrumentedRun() && elapsed > generousBudget {
 		t.Errorf("merges took %s, want well under %s", elapsed, generousBudget)
 	}
 }
@@ -651,7 +652,7 @@ func TestValidateArtifactStaysFastOnHugeEntries(t *testing.T) {
 
 	// Coverage counters slow these loops several times over, so the bound
 	// is only checked without coverage.
-	if elapsed := time.Since(start); seccomp.UninstrumentedRun() && elapsed > generousBudget {
+	if elapsed := time.Since(start); testutil.UninstrumentedRun() && elapsed > generousBudget {
 		t.Errorf("validation took %s, want well under %s", elapsed, generousBudget)
 	}
 }

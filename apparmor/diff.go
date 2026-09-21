@@ -18,6 +18,7 @@ package apparmor
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
@@ -79,11 +80,11 @@ type BoolPtrDiff struct {
 //
 // Profiles are compared by what AppArmor loads from them, so a profile and
 // its merge result compare equal unless the merge changed what the profile
-// permits. Paths are normalized as apparmor_parser normalizes them and
-// deduplicated, so /foo//bar and /foo/bar compare equal (while /foo/./bar,
-// which matches nothing, does not), and an omitted section or network
-// boolean is compared as the explicit empty section or false that it denies
-// the same as, which is how Intersect writes it. A profile that says nothing
+// permits. Paths are compared by the rule they spell, as apparmor_parser
+// reads them: /foo//bar, /foo/bar and an escaped spelling of either are one
+// rule (while /foo/./bar, which matches nothing, is another), and an omitted
+// section or network boolean is compared as the explicit empty section or
+// false that it denies the same as, which is how Intersect writes it. A profile that says nothing
 // about raw sockets and one that forbids them are therefore equal, and
 // Diff(p, Intersect(p)) is equal unless p has glob patterns that match
 // nothing, which Intersect drops.
@@ -119,12 +120,12 @@ func Diff(left, right *Profile) (*ProfileDiff, error) {
 }
 
 func diffExecutables(diff *ProfileDiff, left, right *Profile) {
-	if execDiff := diffStringSlice(executablePaths(left), executablePaths(right)); execDiff != nil {
+	if execDiff := diffPaths(executablePaths(left), executablePaths(right)); execDiff != nil {
 		diff.Equal = false
 		diff.Executables = execDiff
 	}
 
-	if libDiff := diffStringSlice(libraryPaths(left), libraryPaths(right)); libDiff != nil {
+	if libDiff := diffPaths(libraryPaths(left), libraryPaths(right)); libDiff != nil {
 		diff.Equal = false
 		diff.Libraries = libDiff
 	}
@@ -147,9 +148,9 @@ func libraryPaths(profile *Profile) []string {
 }
 
 func diffFilesystem(diff *ProfileDiff, left, right *Profile) {
-	roDiff := diffStringSlice(fsPaths(left, fsReadOnly), fsPaths(right, fsReadOnly))
-	woDiff := diffStringSlice(fsPaths(left, fsWriteOnly), fsPaths(right, fsWriteOnly))
-	rwDiff := diffStringSlice(fsPaths(left, fsReadWrite), fsPaths(right, fsReadWrite))
+	roDiff := diffPaths(fsPaths(left, fsReadOnly), fsPaths(right, fsReadOnly))
+	woDiff := diffPaths(fsPaths(left, fsWriteOnly), fsPaths(right, fsWriteOnly))
+	rwDiff := diffPaths(fsPaths(left, fsReadWrite), fsPaths(right, fsReadWrite))
 
 	if roDiff != nil || woDiff != nil || rwDiff != nil {
 		diff.Equal = false
@@ -270,6 +271,82 @@ func diffCapabilities(diff *ProfileDiff, left, right *Profile) {
 		diff.Equal = false
 		diff.Capabilities = capDiff
 	}
+}
+
+// diffPaths compares two path lists by the rule each path spells rather than
+// by its text, as Validate and the merge do: "/etc/passwd" and an escaped
+// spelling of it are one rule, so a profile and its merge result, which
+// keeps one spelling per rule, do not differ in it. A path only one side
+// holds is reported in that side's spelling.
+func diffPaths(left, right []string) *StringSliceDiff {
+	leftKeys := pathsByRule(left)
+	rightKeys := pathsByRule(right)
+
+	var added, removed []string
+
+	for key, path := range leftKeys {
+		if _, both := rightKeys[key]; !both {
+			removed = append(removed, path)
+		}
+	}
+
+	for key, path := range rightKeys {
+		if _, both := leftKeys[key]; !both {
+			added = append(added, path)
+		}
+	}
+
+	if len(added) == 0 && len(removed) == 0 {
+		return nil
+	}
+
+	slices.Sort(added)
+	slices.Sort(removed)
+
+	return &StringSliceDiff{Added: added, Removed: removed}
+}
+
+// pathsByRule maps the rule each path spells to the simplest spelling the
+// list holds for it.
+func pathsByRule(paths []string) map[string]string {
+	rules := make(map[string]string, len(paths))
+
+	for _, path := range paths {
+		key := ruleText(path)
+		if kept, ok := rules[key]; !ok || simplestSpelling(path, kept) < 0 {
+			rules[key] = path
+		}
+	}
+
+	return rules
+}
+
+// ruleText identifies the rule a path spells without compiling it. Diff
+// validates nothing, so it must stay linear in what it is given: the name a
+// literal denotes, or the expression the parser port translates a pattern
+// into, which two spellings of one pattern share. A path the port rejects,
+// or one too long for it, is identified by its text.
+func ruleText(path string) string {
+	if !strings.ContainsAny(path, patternSyntax) {
+		return "l:" + filterSlashes(path)
+	}
+
+	if len(path) > maxGlobPatternLen {
+		return "t:" + path
+	}
+
+	conv := convertPattern(filterSlashes(decodeEscapes(path)))
+
+	switch conv.kind {
+	case kindLiteral:
+		return "l:" + literalBytes(conv.regex[:conv.literalEnd])
+	case kindGlob:
+		return "g:" + conv.regex
+	case kindInvalid:
+		return "t:" + path
+	}
+
+	return "t:" + path
 }
 
 func diffStringSlice(left, right []string) *StringSliceDiff {

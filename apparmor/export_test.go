@@ -16,8 +16,6 @@ limitations under the License.
 
 package apparmor
 
-import "testing"
-
 // MatcherUsable reports whether the matcher can match anything with the
 // path, so that external tests can tell a pattern the merge keeps from one
 // it silently drops. Validate leaves such patterns to ValidateStrict and
@@ -37,12 +35,4 @@ func PathIdentity(path string) string {
 	}
 
 	return "literal:" + key.text
-}
-
-// uninstrumentedRun reports whether the test binary runs without coverage
-// counters and without the race detector. Both multiply the cost of a loop
-// several times over, so a wall-clock bound says nothing about the
-// algorithmic cost it is meant to pin while either is on.
-func uninstrumentedRun() bool {
-	return testing.CoverMode() == "" && !raceDetectorEnabled
 }

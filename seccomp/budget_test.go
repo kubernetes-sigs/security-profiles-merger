@@ -25,6 +25,7 @@ import (
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
 
@@ -170,7 +171,7 @@ func TestIntersectArtifactSizedContestedProfile(t *testing.T) {
 
 	// Coverage counters slow these loops several times over, so the bound
 	// is only checked without coverage.
-	if elapsed := time.Since(start); seccomp.UninstrumentedRun() && elapsed > generousBudget {
+	if elapsed := time.Since(start); testutil.UninstrumentedRun() && elapsed > generousBudget {
 		t.Errorf("merge took %s, want well under %s", elapsed, generousBudget)
 	}
 
@@ -423,7 +424,7 @@ func TestMergeBoundsMultiNameExpansion(t *testing.T) {
 
 		// Coverage counters and the race detector slow this several times
 		// over, so the bound is only checked without them.
-		if elapsed := time.Since(start); seccomp.UninstrumentedRun() &&
+		if elapsed := time.Since(start); testutil.UninstrumentedRun() &&
 			elapsed > generousBudget {
 			t.Errorf("%s took %s, want well under %s", direction.name, elapsed, generousBudget)
 		}
@@ -469,7 +470,7 @@ func TestValidateArtifactRejectsMultiNameExpansion(t *testing.T) {
 	start := time.Now()
 	err := seccomp.ValidateArtifact(profile)
 
-	if elapsed := time.Since(start); seccomp.UninstrumentedRun() && elapsed > generousBudget {
+	if elapsed := time.Since(start); testutil.UninstrumentedRun() && elapsed > generousBudget {
 		t.Errorf("validation took %s, want well under %s", elapsed, generousBudget)
 	}
 

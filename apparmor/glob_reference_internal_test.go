@@ -294,11 +294,11 @@ func TestIntersectPathsMatchesReference(t *testing.T) {
 	for range 60000 {
 		left, right := refRandPaths(rnd), refRandPaths(rnd)
 
-		got := sortedClone(intersectPaths(left, right))
+		got := sortedClone(intersectStrategy{}.mergePaths(left, right))
 		want := sortedClone(refIntersectPaths(left, right))
 
 		if !slices.Equal(got, want) {
-			t.Fatalf("intersectPaths(%q, %q) = %q, want %q", left, right, got, want)
+			t.Fatalf("mergePaths(%q, %q) = %q, want %q", left, right, got, want)
 		}
 	}
 }

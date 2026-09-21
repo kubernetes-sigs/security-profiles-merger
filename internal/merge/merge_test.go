@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 func intersectCases() []struct {
@@ -241,13 +242,13 @@ func TestErrors(t *testing.T) {
 	t.Run("ErrNoProfiles", func(t *testing.T) {
 		t.Parallel()
 
-		if merge.ErrNoProfiles == nil {
+		if spm.ErrNoProfiles == nil {
 			t.Fatal("ErrNoProfiles should not be nil")
 		}
 
 		const want = "at least one profile is required"
-		if merge.ErrNoProfiles.Error() != want {
-			t.Errorf("ErrNoProfiles = %q, want %q", merge.ErrNoProfiles.Error(), want)
+		if spm.ErrNoProfiles.Error() != want {
+			t.Errorf("ErrNoProfiles = %q, want %q", spm.ErrNoProfiles.Error(), want)
 		}
 	})
 }
@@ -336,7 +337,7 @@ func TestFormatSliceDiff(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := merge.FormatSliceDiff(test.prefix, merge.SliceDiff[string]{
+			got := merge.FormatSliceDiff(test.prefix, spm.SliceDiff[string]{
 				Added:   test.added,
 				Removed: test.removed,
 			})
@@ -354,7 +355,7 @@ func TestFormatSliceDiffOfDiffSlice(t *testing.T) {
 
 	added, removed := merge.DiffSlice([]string{"a", "b"}, []string{"b", "c"})
 
-	got := merge.FormatSliceDiff("x", merge.SliceDiff[string]{Added: added, Removed: removed})
+	got := merge.FormatSliceDiff("x", spm.SliceDiff[string]{Added: added, Removed: removed})
 	if want := "x:-a,+c"; got != want {
 		t.Errorf("FormatSliceDiff() = %q, want %q", got, want)
 	}

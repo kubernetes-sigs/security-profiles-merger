@@ -24,7 +24,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -34,8 +33,10 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
+	"sigs.k8s.io/security-profiles-merger/internal/strictjson"
 	"sigs.k8s.io/security-profiles-merger/landlock"
 	"sigs.k8s.io/security-profiles-merger/seccomp"
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 func TestMergeErrors(t *testing.T) {
@@ -1168,8 +1169,8 @@ func TestUnmarshalAllReportsEveryUnknownField(t *testing.T) {
 	_, err = unmarshalAll[specs.LinuxSeccomp](
 		inputs, []decodePolicy{modeStrict.decodePolicy()}, &bytes.Buffer{},
 	)
-	if !errors.Is(err, errUnknownField) {
-		t.Errorf("expected errUnknownField when rejecting, got: %v", err)
+	if !errors.Is(err, spm.ErrUnknownField) {
+		t.Errorf("expected spm.ErrUnknownField when rejecting, got: %v", err)
 	}
 }
 
@@ -1182,60 +1183,6 @@ func TestUnmarshalAllRejectsTrailingData(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "after top-level value") {
 		t.Errorf("expected a trailing data error, got: %v", err)
-	}
-}
-
-// walkEmbedded and walkTarget exercise the parts of the unknown-field walker
-// the profile types do not use: promoted fields and map values.
-type walkEmbedded struct {
-	Inner string `json:"inner"`
-}
-
-type walkTarget struct {
-	walkEmbedded
-
-	Values map[string]walkEmbedded    `json:"values"`
-	Nested map[string][]walkEmbedded  `json:"nested"`
-	Raw    map[string]json.RawMessage `json:"raw"`
-}
-
-// walkShadowing embeds a struct whose field shares a JSON name with one of
-// its own; encoding/json decodes into the shallower field.
-type walkShadowing struct {
-	walkShadowed
-
-	Values string `json:"values"`
-}
-
-type walkShadowed struct {
-	Values map[string]walkEmbedded `json:"values"`
-}
-
-func TestUnknownFieldsWalksPromotedAndMapFields(t *testing.T) {
-	t.Parallel()
-
-	raw := `{"inner":"x","values":{"b":{"inner":"y","bogus":1},"a":{"inner":"z"}},` +
-		`"nested":{"n":[{"inner":"w","typo":2}]},"raw":{"k":{"anything":true}},"extra":3}`
-
-	got, _ := unknownFields([]byte(raw), reflect.TypeFor[walkTarget]())
-
-	want := []string{"extra", "nested.n[0].typo", "values.b.bogus"}
-	if !slices.Equal(got, want) {
-		t.Errorf("unknownFields = %v, want %v", got, want)
-	}
-}
-
-func TestUnknownFieldsPrefersShallowerField(t *testing.T) {
-	t.Parallel()
-
-	// "values" is the string field of walkShadowing, not the map promoted
-	// from walkShadowed, so nothing inside it is inspected.
-	got, _ := unknownFields(
-		[]byte(`{"values":{"k":{"bogus":1}}}`),
-		reflect.TypeFor[walkShadowing](),
-	)
-	if len(got) != 0 {
-		t.Errorf("unknownFields = %v, want none", got)
 	}
 }
 
@@ -1613,7 +1560,7 @@ func TestInvalidUTF8Error(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := invalidUTF8Error([]byte(testCase.raw))
+			err := strictjson.InvalidUTF8([]byte(testCase.raw))
 
 			if testCase.want == "" {
 				if err != nil {
@@ -1623,8 +1570,8 @@ func TestInvalidUTF8Error(t *testing.T) {
 				return
 			}
 
-			if !errors.Is(err, errInvalidUTF8) {
-				t.Fatalf("error = %v, want one wrapping %v", err, errInvalidUTF8)
+			if !errors.Is(err, spm.ErrInvalidUTF8) {
+				t.Fatalf("error = %v, want one wrapping %v", err, spm.ErrInvalidUTF8)
 			}
 
 			if !strings.Contains(err.Error(), testCase.want) {

@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"slices"
@@ -24,8 +25,10 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 	"sigs.k8s.io/security-profiles-merger/landlock"
 	"sigs.k8s.io/security-profiles-merger/seccomp"
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 // validateMode selects which validation a profile kind runs.
@@ -93,7 +96,7 @@ type profileKind struct {
 }
 
 // kindOps holds the package functions of one profile type.
-type kindOps[T any, D equalChecker] struct {
+type kindOps[T any, D spm.Diff] struct {
 	intersect        func(...*T) (*T, error)
 	union            func(...*T) (*T, error)
 	validate         func(*T) error
@@ -152,7 +155,7 @@ func (ops kindOps[T, D]) checker(mode validateMode) func(*T) error {
 	return ops.validate
 }
 
-func newKind[T any, D equalChecker](ops kindOps[T, D]) profileKind {
+func newKind[T any, D spm.Diff](ops kindOps[T, D]) profileKind {
 	return profileKind{
 		merge: func(
 			inputs []profileInput, strategy string, modes []validateMode,
@@ -334,7 +337,7 @@ func checkTypeMatchesInputs(
 		_, _ = fmt.Fprintf(
 			stderr,
 			"error: %s holds a %s profile, not the %s --type names\n",
-			input.name, detected[0], profileType,
+			merge.SafeText(input.name), detected[0], profileType,
 		)
 
 		return exitUsage
@@ -352,7 +355,7 @@ func reportTypeConflict(conflict *typeConflict, stderr io.Writer) {
 		_, _ = fmt.Fprintf(
 			stderr,
 			"error: %s mixes profile types (%s and %s), use --type\n",
-			conflict.input, conflict.first, conflict.second,
+			merge.SafeText(conflict.input), conflict.first, conflict.second,
 		)
 
 		return
@@ -374,4 +377,131 @@ func unknownType(stderr io.Writer, name string) int {
 	)
 
 	return exitUsage
+}
+
+// typeConflict names two profile types that cannot both be right for the
+// same run.
+type typeConflict struct {
+	// first and second name the two types, in the order they were found.
+	first, second string
+	// input names the input carrying members of both types, and is empty
+	// when the two types come from different inputs.
+	input string
+}
+
+// detectProfileType infers the profile type from the members the inputs
+// carry. Every input is inspected, not only the first: merging profiles of
+// different types would drop whatever the chosen type has no field for, so a
+// disagreement is reported rather than resolved. An input whose type cannot
+// be told apart, such as an empty object, defers to the others.
+//
+// A single input carrying members of two types is a disagreement too:
+// picking one of them by a fixed precedence would validate or merge a
+// profile that is mostly empty, and report success for it. Such an input is
+// reported the same way as two inputs that disagree.
+//
+// The first result is the detected type, empty when no input reveals one.
+// The second describes a conflict, and is nil when the inputs agree on one
+// type.
+func detectProfileType(inputs []profileInput) (string, *typeConflict) {
+	detected := ""
+
+	for _, input := range inputs {
+		current := detectOneProfileType(input.data)
+		if len(current) > 1 {
+			return current[0], &typeConflict{
+				first:  current[0],
+				second: current[1],
+				input:  input.name,
+			}
+		}
+
+		if len(current) == 0 {
+			continue
+		}
+
+		if detected == "" {
+			detected = current[0]
+
+			continue
+		}
+
+		if current[0] != detected {
+			return detected, &typeConflict{
+				first: detected, second: current[0], input: "",
+			}
+		}
+	}
+
+	return detected, nil
+}
+
+// checkParsable decodes every input as a JSON object, the shape all profile
+// types share, so that malformed input is reported as a parse error rather
+// than as a type that cannot be detected.
+func checkParsable(inputs []profileInput) error {
+	for _, input := range inputs {
+		var fields map[string]json.RawMessage
+
+		err := json.Unmarshal(input.data, &fields)
+		if err != nil {
+			// The decoder names the Go type it was decoding into, which
+			// says nothing to someone holding a profile. What it was asked
+			// for here is an object, which every profile type is. That is
+			// only the reason it failed when the document parses at all:
+			// a syntax error is reported as itself, since "not a JSON
+			// object" would point at the wrong thing.
+			if json.Valid(input.data) {
+				return fmt.Errorf(
+					"parsing %s: %w", merge.SafeText(input.name), errNotAnObject,
+				)
+			}
+
+			return decodeError(input.name, err)
+		}
+	}
+
+	return nil
+}
+
+// detectKeys lists the members that reveal each profile type, in the order
+// the types are reported.
+//
+//nolint:gochecknoglobals // immutable lookup table
+var detectKeys = []struct {
+	profileType string
+	keys        []string
+}{
+	{typeSeccomp, []string{"defaultAction"}},
+	{typeLandlock, []string{
+		"handledAccessFs", "handledAccessNet", "pathRules", "netRules", "scoped",
+	}},
+	{typeAppArmor, []string{"executable", "filesystem", "capability", "network"}},
+}
+
+// detectOneProfileType returns every profile type whose members the document
+// carries, in detectKeys order. More than one means the document is
+// ambiguous: returning only the first would silently drop the members of the
+// others, so the caller reports it instead.
+func detectOneProfileType(raw []byte) []string {
+	var fields map[string]json.RawMessage
+
+	err := json.Unmarshal(raw, &fields)
+	if err != nil {
+		return nil
+	}
+
+	var found []string
+
+	for _, candidate := range detectKeys {
+		for _, key := range candidate.keys {
+			if _, ok := fields[key]; ok {
+				found = append(found, candidate.profileType)
+
+				break
+			}
+		}
+	}
+
+	return found
 }

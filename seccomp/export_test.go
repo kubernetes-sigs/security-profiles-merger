@@ -17,8 +17,6 @@ limitations under the License.
 package seccomp
 
 import (
-	"testing"
-
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
 
@@ -34,14 +32,4 @@ func SafeShape(profile *specs.LinuxSeccomp, name string) bool {
 	current, ok := collectRules(profile.Syscalls, defaultClause(profile))[name]
 
 	return !ok || current.unconditional != nil || safeShape(current.conditional)
-}
-
-// UninstrumentedRun reports whether the test binary runs without coverage
-// counters and without the race detector. Both multiply the cost of a loop
-// several times over, so a wall-clock bound says nothing about the
-// algorithmic cost it is meant to pin while either is on.
-func UninstrumentedRun() bool { return uninstrumentedRun() }
-
-func uninstrumentedRun() bool {
-	return testing.CoverMode() == "" && !raceDetectorEnabled
 }

@@ -26,11 +26,6 @@ import (
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
-// ErrNoProfiles is returned when no profiles are provided. It lives in the
-// spm package so that a caller working with more than one profile type
-// matches it once.
-var ErrNoProfiles = spm.ErrNoProfiles
-
 // Fold merges a slice of profiles using pairwise reduction. A single profile
 // is cloned; two or more are merged left to right. Profiles must be non-nil:
 // callers validate them, reporting ErrNilProfile with the index, before
@@ -41,7 +36,7 @@ func Fold[T any](
 	mergeFn func(*T, *T) (*T, error),
 ) (*T, error) {
 	if len(profiles) == 0 {
-		return nil, ErrNoProfiles
+		return nil, spm.ErrNoProfiles
 	}
 
 	if len(profiles) == 1 {
@@ -65,16 +60,18 @@ func Fold[T any](
 
 // FormatSliceDiff formats a SliceDiff as a prefixed diff string, listing the
 // removed items with a "-" and then the added items with a "+", as in
-// "caps:-CHOWN,+KILL".
-func FormatSliceDiff[T ~string](prefix string, diff SliceDiff[T]) string {
+// "caps:-CHOWN,+KILL". An item holding bytes that are not safe to print is
+// quoted (see SafeText): a diff is computed over profiles nothing validated,
+// and its rendering is what a runtime logs.
+func FormatSliceDiff[T ~string](prefix string, diff spm.SliceDiff[T]) string {
 	items := make([]string, 0, len(diff.Removed)+len(diff.Added))
 
 	for _, r := range diff.Removed {
-		items = append(items, "-"+string(r))
+		items = append(items, "-"+SafeText(string(r)))
 	}
 
 	for _, a := range diff.Added {
-		items = append(items, "+"+string(a))
+		items = append(items, "+"+SafeText(string(a)))
 	}
 
 	return prefix + ":" + strings.Join(items, ",")
@@ -119,36 +116,13 @@ func DiffSlice[T cmp.Ordered](left, right []T) ([]T, []T) {
 	return added, removed
 }
 
-// SliceDiff represents added and removed items in a set-like slice.
-type SliceDiff[T comparable] = spm.SliceDiff[T]
-
-const smallSliceThreshold = 16
-
-// IntersectSlice returns elements present in both left and right.
+// IntersectSlice returns the elements present in both left and right, each
+// once, in the order left holds them.
 func IntersectSlice[T comparable](left, right []T) []T {
-	switch {
-	case len(left) == 0 || len(right) == 0:
+	if len(left) == 0 || len(right) == 0 {
 		return nil
-	case len(left)+len(right) <= smallSliceThreshold:
-		return intersectSliceSmall(left, right)
-	default:
-		return intersectSliceLarge(left, right)
-	}
-}
-
-func intersectSliceSmall[T comparable](left, right []T) []T {
-	result := make([]T, 0, min(len(left), len(right)))
-
-	for _, val := range left {
-		if slices.Contains(right, val) && !slices.Contains(result, val) {
-			result = append(result, val)
-		}
 	}
 
-	return result
-}
-
-func intersectSliceLarge[T comparable](left, right []T) []T {
 	rightSet := make(map[T]struct{}, len(right))
 	for _, val := range right {
 		rightSet[val] = struct{}{}
@@ -158,9 +132,40 @@ func intersectSliceLarge[T comparable](left, right []T) []T {
 	seen := make(map[T]struct{}, len(left))
 
 	for _, val := range left {
-		if _, ok := rightSet[val]; ok {
-			if _, dup := seen[val]; !dup {
-				seen[val] = struct{}{}
+		if _, ok := rightSet[val]; !ok {
+			continue
+		}
+
+		if _, dup := seen[val]; !dup {
+			seen[val] = struct{}{}
+			result = append(result, val)
+		}
+	}
+
+	return result
+}
+
+// UnionSlice returns the elements of left and then of right, each once.
+//
+// The lists it is given are rights, architectures and flags: a handful of
+// elements, merged once per rule and per ancestor of a rule, so it is the
+// allocations that cost rather than the comparisons. A linear scan of the
+// result needs no map, and past a few elements the map takes over so that a
+// list a profile chose the length of stays linear.
+func UnionSlice[T comparable](left, right []T) []T {
+	if len(left)+len(right) == 0 {
+		return nil
+	}
+
+	if len(left)+len(right) > smallUnion {
+		return DeduplicateSlice(slices.Concat(left, right))
+	}
+
+	result := make([]T, 0, len(left)+len(right))
+
+	for _, list := range [2][]T{left, right} {
+		for _, val := range list {
+			if !slices.Contains(result, val) {
 				result = append(result, val)
 			}
 		}
@@ -169,60 +174,9 @@ func intersectSliceLarge[T comparable](left, right []T) []T {
 	return result
 }
 
-// UnionSlice returns all unique elements from left and right, preserving order.
-func UnionSlice[T comparable](left, right []T) []T {
-	switch {
-	case len(left) == 0 && len(right) == 0:
-		return nil
-	case len(left) == 0:
-		return slices.Clone(right)
-	case len(right) == 0:
-		return slices.Clone(left)
-	case len(left)+len(right) <= smallSliceThreshold:
-		return unionSliceSmall(left, right)
-	default:
-		return unionSliceLarge(left, right)
-	}
-}
-
-func unionSliceSmall[T comparable](left, right []T) []T {
-	result := make([]T, 0, len(left)+len(right))
-
-	for _, val := range left {
-		if !slices.Contains(result, val) {
-			result = append(result, val)
-		}
-	}
-
-	for _, val := range right {
-		if !slices.Contains(result, val) {
-			result = append(result, val)
-		}
-	}
-
-	return result
-}
-
-func unionSliceLarge[T comparable](left, right []T) []T {
-	result := make([]T, 0, len(left)+len(right))
-	seen := make(map[T]struct{}, len(left)+len(right))
-
-	for _, val := range left {
-		if _, ok := seen[val]; !ok {
-			seen[val] = struct{}{}
-			result = append(result, val)
-		}
-	}
-
-	for _, val := range right {
-		if _, ok := seen[val]; !ok {
-			seen[val] = struct{}{}
-			result = append(result, val)
-		}
-	}
-
-	return result
-}
+// smallUnion is the combined length up to which UnionSlice scans instead of
+// hashing.
+const smallUnion = 16
 
 // IsAbsPath reports whether a profile path starts at the root. Profile paths
 // are Linux paths whatever the host is, so this uses slash semantics rather

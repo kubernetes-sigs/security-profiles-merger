@@ -17,6 +17,7 @@ limitations under the License.
 package apparmor_test
 
 import (
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -1025,5 +1026,111 @@ func TestDiffNetworkBooleanOneSided(t *testing.T) {
 					apparmor.FormatDiff(diff))
 			}
 		}
+	}
+}
+
+// TestFormatDiffQuotesUnsafeBytes covers the rendering of a diff, which a
+// runtime logs and which is computed over profiles nothing has validated: a
+// path or capability holding a newline or an escape sequence is quoted, as
+// FormatProfile quotes it, rather than written through.
+func TestFormatDiffQuotesUnsafeBytes(t *testing.T) {
+	t.Parallel()
+
+	const hostile = "/a\nFORGED \x1b[31mred"
+
+	left := &apparmor.Profile{
+		Executable: &apparmor.ExecutableRules{AllowedExecutables: nil, AllowedLibraries: nil},
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths: []string{"/a"}, WriteOnlyPaths: nil, ReadWritePaths: nil,
+		},
+		Network:      nil,
+		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: nil},
+	}
+	right := &apparmor.Profile{
+		Executable: &apparmor.ExecutableRules{
+			AllowedExecutables: []string{hostile}, AllowedLibraries: nil,
+		},
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths: []string{hostile}, WriteOnlyPaths: nil, ReadWritePaths: nil,
+		},
+		Network:      nil,
+		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{"X\nY"}},
+	}
+
+	diff, err := apparmor.Diff(left, right)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+
+	if formatted := apparmor.FormatDiff(diff); strings.ContainsAny(formatted, "\n\x1b") {
+		t.Errorf("FormatDiff writes control bytes through: %q", formatted)
+	}
+}
+
+// TestDiffComparesRulesNotSpellings covers a profile against its own merge
+// result. The merge keeps one spelling per rule, so a diff that compared the
+// text would report the spelling it dropped as removed and the one it kept
+// as added: a constraint log naming an added path where nothing was added.
+func TestDiffComparesRulesNotSpellings(t *testing.T) {
+	t.Parallel()
+
+	paths := func(list ...string) *apparmor.Profile {
+		return &apparmor.Profile{
+			Executable: &apparmor.ExecutableRules{
+				AllowedExecutables: list, AllowedLibraries: nil,
+			},
+			Filesystem: &apparmor.FilesystemRules{
+				ReadOnlyPaths: list, WriteOnlyPaths: nil, ReadWritePaths: nil,
+			},
+			Network:      nil,
+			Capabilities: nil,
+		}
+	}
+
+	artifact := paths(`/etc/\x70asswd`, `/var/l\og/*`)
+
+	effective, err := apparmor.Intersect(paths("/etc/passwd", "/var/log/*"), artifact)
+	if err != nil {
+		t.Fatalf("Intersect: %v", err)
+	}
+
+	diff, err := apparmor.Diff(artifact, effective)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+
+	if !diff.Equal {
+		t.Errorf("Diff(artifact, effective) = %s, want equal", apparmor.FormatDiff(diff))
+	}
+
+	// A profile naming one rule twice equals its merge result, which names
+	// it once.
+	twice := paths("/bin/A", `/bin/\x41`)
+
+	merged, err := apparmor.Intersect(twice)
+	if err != nil {
+		t.Fatalf("Intersect: %v", err)
+	}
+
+	diff, err = apparmor.Diff(twice, merged)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+
+	if !diff.Equal {
+		t.Errorf("Diff(p, Intersect(p)) = %s, want equal", apparmor.FormatDiff(diff))
+	}
+
+	// A rule only one side holds is still reported, in that side's spelling.
+	diff, err = apparmor.Diff(paths(`/etc/\x70asswd`), paths("/etc/shadow"))
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+
+	want := &apparmor.StringSliceDiff{
+		Added: []string{"/etc/shadow"}, Removed: []string{`/etc/\x70asswd`},
+	}
+	if diff.Equal || !reflect.DeepEqual(diff.Executables, want) {
+		t.Errorf("Diff = %s, want %v", apparmor.FormatDiff(diff), want)
 	}
 }

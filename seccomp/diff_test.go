@@ -1420,3 +1420,50 @@ func TestDiffSyscallsIgnoresEntryOrder(t *testing.T) {
 		})
 	}
 }
+
+// TestFormatDiffQuotesUnsafeBytes covers the rendering of a diff, which a
+// runtime logs and which is computed over profiles nothing has validated:
+// every string a profile supplies is quoted when it holds a control byte,
+// wherever in the diff it appears.
+func TestFormatDiffQuotesUnsafeBytes(t *testing.T) {
+	t.Parallel()
+
+	const hostile = "x\nFORGED \x1b[31mred"
+
+	left := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{hostile}, Action: specs.ActAllow},
+		},
+	}
+	right := &specs.LinuxSeccomp{
+		DefaultAction:    specs.LinuxSeccompAction(hostile),
+		Architectures:    []specs.Arch{specs.Arch(hostile)},
+		Flags:            []specs.LinuxSeccompFlag{specs.LinuxSeccompFlag(hostile)},
+		ListenerPath:     hostile,
+		ListenerMetadata: hostile,
+		Syscalls: []specs.LinuxSyscall{
+			{
+				Names: []string{hostile}, Action: specs.LinuxSeccompAction(hostile),
+				Args: []specs.LinuxSeccompArg{
+					{Index: 0, Op: specs.LinuxSeccompOperator(hostile)},
+				},
+			},
+			{Names: []string{hostile + "2"}, Action: specs.ActAllow},
+		},
+	}
+
+	diff, err := seccomp.Diff(left, right)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+
+	for name, formatted := range map[string]string{
+		"FormatDiff":    seccomp.FormatDiff(diff),
+		"FormatProfile": seccomp.FormatProfile(right),
+	} {
+		if strings.ContainsAny(formatted, "\n\x1b") {
+			t.Errorf("%s writes control bytes through: %q", name, formatted)
+		}
+	}
+}

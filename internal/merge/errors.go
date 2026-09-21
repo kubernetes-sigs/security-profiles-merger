@@ -17,19 +17,14 @@ limitations under the License.
 package merge
 
 import (
-	"errors"
 	"fmt"
+	"slices"
 	"strconv"
+	"strings"
 	"unicode/utf8"
 
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
-
-// ErrMoreProblems stands in for the failures JoinLimited left out, so that a
-// caller can tell a truncated report from a complete one. It is the sentinel
-// the public packages export, so that a caller matching it matches what they
-// document.
-var ErrMoreProblems = spm.ErrMoreProblems
 
 // MaxQuotedBytes bounds how much of a caller-supplied value QuoteBounded
 // renders. A validation error names the input that failed, and for an
@@ -66,31 +61,85 @@ func QuoteBounded(value string) string {
 // a count of the ones it left out. It returns nil when every error is nil and
 // the error itself when exactly one is non-nil, matching errors.Join.
 //
+// A result of JoinLimited given as one of the errors is flattened into the
+// list rather than counted as one: validators build their report from the
+// reports of their checks, and the bound has to hold for the whole of it,
+// not once per check.
+//
 // The omitted errors stay omitted: a caller that needs to match one with
 // errors.Is must not rely on a failure past the limit being present. A
-// truncated result matches ErrMoreProblems, so the truncation itself is
+// truncated result matches spm.ErrMoreProblems, so the truncation itself is
 // visible rather than silent.
 func JoinLimited(errs ...error) error {
-	kept := make([]error, 0, min(len(errs), MaxJoinedErrors))
-	omitted := 0
+	var report limitedError
 
 	for _, err := range errs {
-		if err == nil {
-			continue
-		}
-
-		if len(kept) < MaxJoinedErrors {
-			kept = append(kept, err)
-
-			continue
-		}
-
-		omitted++
+		report.add(err)
 	}
 
-	if omitted > 0 {
-		kept = append(kept, fmt.Errorf("%d %w", omitted, ErrMoreProblems))
+	switch {
+	case len(report.kept) == 0:
+		return nil
+	case len(report.kept) == 1 && report.omitted == 0:
+		return report.kept[0]
+	default:
+		return &report
+	}
+}
+
+// limitedError is the result of JoinLimited: the failures it kept and how
+// many it left out.
+type limitedError struct {
+	kept    []error
+	omitted int
+}
+
+// Error lists the kept failures one per line, as errors.Join does, followed
+// by the count of the omitted ones.
+func (l *limitedError) Error() string {
+	lines := make([]string, 0, len(l.kept)+1)
+	for _, err := range l.kept {
+		lines = append(lines, err.Error())
 	}
 
-	return errors.Join(kept...)
+	if l.omitted > 0 {
+		lines = append(lines, fmt.Sprintf("%d %v", l.omitted, spm.ErrMoreProblems))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// Unwrap returns the kept failures, and spm.ErrMoreProblems when any were left
+// out, so that errors.Is sees both.
+func (l *limitedError) Unwrap() []error {
+	if l.omitted == 0 {
+		return l.kept
+	}
+
+	return append(slices.Clone(l.kept), spm.ErrMoreProblems)
+}
+
+func (l *limitedError) add(err error) {
+	if err == nil {
+		return
+	}
+
+	//nolint:errorlint // only a report itself is flattened, not one wrapped
+	if nested, ok := err.(*limitedError); ok {
+		for _, kept := range nested.kept {
+			l.add(kept)
+		}
+
+		l.omitted += nested.omitted
+
+		return
+	}
+
+	if len(l.kept) < MaxJoinedErrors {
+		l.kept = append(l.kept, err)
+
+		return
+	}
+
+	l.omitted++
 }
