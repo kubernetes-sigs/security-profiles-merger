@@ -24,12 +24,13 @@ We have full documentation on how to get started contributing here:
 
 ## Architecture
 
-The codebase is organized in four layers:
+The codebase is organized in layers:
 
 - `spm/` is the public home of what the three profile packages have in
-  common: `SliceDiff`, the sentinel errors `ErrNoProfiles`, `ErrNilProfile`
-  and `ErrEmptyPath`, and `Diff`, the `IsEqual() bool` method all three
-  `ProfileDiff` types carry. Each profile package re-exports these under its
+  common: `SliceDiff`, `InputError`, the sentinel errors they share (such as
+  `ErrNilProfile`, `ErrMoreProblems` and the ones `UnmarshalStrict` returns),
+  and `Diff`, the `IsEqual() bool` method all three `ProfileDiff` types
+  carry. Each profile package re-exports these under its
   own name, so a caller need not import it, but naming them once is what makes
   `seccomp.SliceDiff` and `apparmor.StringSliceDiff` the same type rather than
   twins, and what lets pkg.go.dev link them. Keep it this small: the three
@@ -46,22 +47,31 @@ The codebase is organized in four layers:
   seccomp passes it a clone function that normalizes, since a single profile
   is normalized rather than merged. The profile packages use the other
   primitives as they need them.
+- `internal/strictjson/` finds what `encoding/json` accepts silently and a
+  profile from somewhere else must not carry: repeated members, members no
+  field reads, invalid UTF-8 and trailing data. Each package's
+  `UnmarshalStrict` is its `Unmarshal`, and the command uses the scans one by
+  one, since its default mode warns where the strict modes reject.
+- `internal/testutil/` holds what the tests of several packages share.
 - `seccomp/`, `apparmor/`, `landlock/` each expose the same public API surface:
   `Intersect`, `Union`, `Validate`, `ValidateStrict`, `ValidateArtifact`,
-  `Diff`, `FormatDiff`, and `FormatProfile`. Each package defines its own types
+  `UnmarshalStrict`, `Diff`, `FormatDiff`, and `FormatProfile`. Each package defines its own types
   (seccomp uses OCI runtime-spec types, apparmor and landlock define their own)
   and implements profile-specific normalization, deduplication, and merge logic
   on top of `internal/merge/`. The seccomp package merges syscalls through a
   clause model (`rules.go`, `args.go`) that reasons about argument filter
   regions. It relies on libseccomp's evaluation only for the safe shapes
-  described in `shape.go`, reads every other rule set conservatively, and
+  described in the package documentation, reads every other rule set conservatively, and
   only emits safe shapes.
 - `internal/libseccomp/` is a test aid, built only with the `libseccomp` build
   tag: it compiles a profile with libseccomp itself so that tests can check the
   seccomp evaluation model against the filter a kernel would run.
 - `cmd/spm/` is a thin CLI layer that wires the packages together using Go
-  generics: `kinds.go` registers each profile type's functions once, and the
-  merge, validate, and diff commands dispatch through that registry. It uses
+  generics: `kinds.go` registers each profile type's functions once and
+  detects the type of an input, and the merge, validate, and diff commands
+  dispatch through that registry. `input.go` reads and bounds the inputs,
+  `decode.go` decodes them under a per-input policy, and `output.go` writes
+  the result. It uses
   the standard library `flag` package with manual subcommand dispatch. The
   merge command takes one validation mode per input, so a single run can
   check a baseline strictly and a pulled profile the way a runtime checks an

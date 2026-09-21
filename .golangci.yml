@@ -123,6 +123,10 @@ linters:
     - wsl_v5
     - zerologlint
   settings:
+    wrapcheck:
+      # The failures internal/merge joins are this module's own.
+      ignore-package-globs:
+        - sigs.k8s.io/security-profiles-merger/internal/*
     depguard:
       rules:
         main:
@@ -171,10 +175,6 @@ linters:
       - linters:
           - tagliatelle
         path: apparmor/(types|diff)\.go
-      - linters:
-          - gosec
-        path: cmd/spm/merge\.go
-        text: G304
       - linters:
           - paralleltest
         path: apparmor/glob_internal_test\.go

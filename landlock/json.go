@@ -17,50 +17,45 @@ limitations under the License.
 package landlock
 
 import (
-	"bytes"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
+	"sigs.k8s.io/security-profiles-merger/internal/strictjson"
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 // ErrUnexpectedData is returned by UnmarshalStrict when the document is
 // followed by anything but whitespace. A profile is one JSON object, and a
 // second one behind it would be dropped silently.
-var ErrUnexpectedData = errors.New("unexpected data after the profile")
+var ErrUnexpectedData = spm.ErrUnexpectedData
 
-// UnmarshalStrict decodes a Landlock profile and rejects members the
-// Profile, PathRule and NetRule types have no field for.
+// ErrDuplicateKey, ErrUnknownField and ErrInvalidUTF8 are returned by
+// UnmarshalStrict for a document encoding/json would decode without a word:
+// one repeating a member, holding a member no field reads, or holding a byte
+// the decoder replaces. See the spm package for each.
+var (
+	ErrDuplicateKey = spm.ErrDuplicateKey
+	ErrUnknownField = spm.ErrUnknownField
+	ErrInvalidUTF8  = spm.ErrInvalidUTF8
+)
+
+// UnmarshalStrict decodes a Landlock profile and rejects what encoding/json
+// accepts silently: members the Profile, PathRule and NetRule types have no
+// field for, members repeated within one object, bytes that are not valid
+// UTF-8, and data behind the profile.
 //
-// encoding/json drops unknown members, which for a profile pulled from an
-// untrusted source loses exactly what a reader must not ignore: a member a
-// newer version of this format uses to handle a further access right is
-// dropped, and the profile then looks like one that does not handle it,
-// which is the permissive direction. Use this instead of json.Unmarshal
-// wherever the document comes from somewhere else, and validate the result
-// with ValidateArtifact afterwards.
+// Each loses something a reader of an untrusted profile must not lose. A
+// member a newer version of this format uses to handle a further access
+// right is dropped, and the profile then looks like one that does not
+// handle it, which is the permissive direction. A repeated member is read
+// as its last occurrence here and as its first elsewhere, so a scanner and
+// the runtime can read one document as two profiles. Use this instead of
+// json.Unmarshal wherever the document comes from somewhere else, and
+// validate the result with ValidateArtifact afterwards.
 //
-// It reports the first structural problem it finds rather than collecting
-// them, as encoding/json does.
+// The profile is decoded into as json.Unmarshal decodes into it, so pass a
+// zero Profile: a member the document omits keeps the value it had.
 func UnmarshalStrict(data []byte, profile *Profile) error {
 	if profile == nil {
 		return ErrNilProfile
 	}
 
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-
-	err := decoder.Decode(profile)
-	if err != nil {
-		return fmt.Errorf("decode profile: %w", err)
-	}
-
-	// Decode stops at the end of the first value, so anything behind it
-	// would otherwise be ignored.
-	_, err = decoder.Token()
-	if !errors.Is(err, io.EOF) {
-		return ErrUnexpectedData
-	}
-
-	return nil
+	return strictjson.Unmarshal(data, profile)
 }

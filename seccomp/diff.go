@@ -562,8 +562,8 @@ func appendScalarDiffs(parts []string, diff *ProfileDiff) []string {
 	if diff.DefaultAction != nil {
 		parts = append(parts, fmt.Sprintf(
 			"default:%s->%s",
-			diff.DefaultAction.Left,
-			diff.DefaultAction.Right,
+			merge.SafeText(string(diff.DefaultAction.Left)),
+			merge.SafeText(string(diff.DefaultAction.Right)),
 		))
 	}
 
@@ -623,7 +623,7 @@ func formatQuotedOrNone(str string) string {
 		return "<none>"
 	}
 
-	return str
+	return merge.SafeText(str)
 }
 
 func formatSliceDiff[T ~string](prefix string, sliceDiff *SliceDiff[T]) string {
@@ -646,7 +646,7 @@ func formatSyscallsDiff(syscallsDiff *SyscallsDiff) []string {
 	for _, change := range syscallsDiff.Changed {
 		parts = append(parts, fmt.Sprintf(
 			"~%s:%s->%s",
-			change.Name,
+			merge.SafeText(change.Name),
 			formatDetailActions(change.Left),
 			formatDetailActions(change.Right),
 		))

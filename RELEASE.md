@@ -3,14 +3,21 @@
 The security-profiles-merger is released on an as-needed basis. The process is
 as follows:
 
-1. An issue is proposing a new release with a changelog since the last release
+1. An issue is proposing a new release, listing what changed for a consumer
+   since the last one. The `release-note` blocks of the merged pull requests
+   are the source: they say what a change rejects, returns differently or
+   adds, which a commit title does not. The version follows the
+   [API stability](README.md#api-stability) policy, so a patch release never
+   breaks a caller: a change that rejects input that used to validate, or
+   returns a different merge result, makes the release a minor one
 1. All [OWNERS](OWNERS) must LGTM this release
 1. An OWNER runs `git tag -s $VERSION`, where `$VERSION` is a `v`-prefixed
    version such as `v0.4.2` (the release workflow only runs for tags matching
    `v*`), then pushes the tag with `git push <remote> $VERSION`, where
    `<remote>` is the kubernetes-sigs repository, not a fork
 1. Pushing the tag triggers a GitHub Actions workflow. Its first job is a
-   gate that runs `make verify-coverage` and `make build`, and the publishing
+   gate that runs `make verify-coverage`, `make verify-golden`, `make lint`
+   and `make build`, and the publishing
    job needs it, so a tag pushed at a red commit fails before anything is
    signed or uploaded. A tag can be pushed at any commit, which is why the
    workflow runs the gate itself rather than assuming the commit under it was
@@ -18,7 +25,9 @@ as follows:
 1. The publishing job then runs goreleaser to build the binaries, generate
    cosign-signed checksums, SBOMs (via syft), and build provenance
    attestations, and to publish the GitHub release. GitHub generates the
-   release notes from the changes since the previous tag
+   release notes from the changes since the previous tag; an OWNER puts the
+   list from the release issue above them, which is what says what a
+   consumer has to do
 1. The release issue is closed
 
 The publishing job only runs in `kubernetes-sigs/security-profiles-merger`. A

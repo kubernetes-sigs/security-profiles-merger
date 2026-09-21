@@ -38,7 +38,7 @@ var (
 )
 
 const (
-	maxGlobPatternLen     = 4096
+	maxGlobPatternLen     = MaxPathLen
 	maxGlobAlternatives   = 100
 	maxGlobCacheEntries   = 1024
 	maxGlobCacheBytes     = 256 << 10
@@ -57,7 +57,7 @@ const (
 	//
 	// Past the bound the merge falls back to a result that needs no
 	// matching, conservative for an intersection and equivalent for a union
-	// (see intersectVerbatim and unionVerbatim). The bound admits two
+	// (see addVerbatimGlobs and unionVerbatim). The bound admits two
 	// profiles of MaxArtifactPaths paths each, so a profile a runtime
 	// accepts is merged exactly.
 	maxMergePathPairs = 1 << 20
@@ -293,16 +293,6 @@ func IsGlobPattern(path string) bool {
 	return strings.ContainsAny(path, patternSyntax) && matcherFor(path).kind != kindLiteral
 }
 
-// literalName returns the file name a literal path denotes, with escape
-// sequences resolved, for matching against globs.
-func literalName(path string) string {
-	if !strings.ContainsAny(path, patternSyntax) {
-		return filterSlashes(path)
-	}
-
-	return matcherFor(path).literal
-}
-
 // forEachAncestor calls visit with every literal prefix a glob pattern could
 // have and still match name: the empty prefix, which belongs to patterns
 // starting with a glob token, and every directory prefix of name. A glob's
@@ -402,13 +392,13 @@ func (index prefixIndex) add(prefix, pattern string) {
 }
 
 // candidates calls visit for every pattern whose prefix name starts with,
-// stopping early when visit returns true, which it then reports.
-func (index prefixIndex) candidates(name string, visit func(pattern string) bool) bool {
+// stopping early when visit returns true.
+func (index prefixIndex) candidates(name string, visit func(pattern string) bool) {
 	if len(index) == 0 {
-		return false
+		return
 	}
 
-	return forEachAncestor(name, func(prefix string) bool {
+	forEachAncestor(name, func(prefix string) bool {
 		return slices.ContainsFunc(index[prefix], visit)
 	})
 }
@@ -417,214 +407,6 @@ func (index prefixIndex) candidates(name string, visit func(pattern string) bool
 func (index prefixIndex) addStarStar(pattern string, matcher *globMatcher) {
 	if matcher.starStar && matcher.prefix != "" {
 		index.add(matcher.prefix, pattern)
-	}
-}
-
-// expands reports whether some "**" pattern of the index expands over the
-// glob, so that the intersection of the two is the glob itself.
-func (index prefixIndex) expands(matcher *globMatcher) bool {
-	return index.candidates(matcher.prefix, func(pattern string) bool {
-		return matcher.expandedBy(matcherFor(pattern))
-	})
-}
-
-// pathSet holds a list of paths for matching literals against it.
-type pathSet struct {
-	// globs holds every glob pattern of the set, by pattern.
-	globs map[string]*globMatcher
-	// byPrefix indexes the usable globs by prefix.
-	byPrefix prefixIndex
-	// literals holds every literal path of the set.
-	literals map[string]struct{}
-	// longest is the length of the longest path of the set, which bounds
-	// what one comparison against it costs.
-	longest int
-}
-
-func newPathSet(patterns []string) pathSet {
-	set := pathSet{
-		globs:    make(map[string]*globMatcher, len(patterns)),
-		byPrefix: make(prefixIndex, len(patterns)),
-		literals: make(map[string]struct{}, len(patterns)),
-		longest:  0,
-	}
-
-	for _, pattern := range patterns {
-		set.insert(pattern)
-	}
-
-	return set
-}
-
-// insert records a pattern.
-func (set *pathSet) insert(pattern string) {
-	matcher := matcherFor(pattern)
-
-	set.longest = max(set.longest, len(pattern))
-
-	if matcher.kind == kindLiteral {
-		set.literals[pattern] = struct{}{}
-
-		return
-	}
-
-	if _, ok := set.globs[pattern]; ok {
-		return
-	}
-
-	set.globs[pattern] = matcher
-
-	if matcher.usable() {
-		set.byPrefix.add(matcher.prefix, pattern)
-	}
-}
-
-// matches reports whether a literal path is present or covered by a glob.
-func (set *pathSet) matches(path string) bool {
-	if _, ok := set.literals[path]; ok {
-		return true
-	}
-
-	name := literalName(path)
-
-	return set.byPrefix.candidates(name, func(pattern string) bool {
-		return set.globs[pattern].matches(name)
-	})
-}
-
-// intersectPaths returns paths permitted by both sides, with glob awareness.
-// Non-glob paths are kept when matched by a glob on the other side.
-// For glob-vs-glob, a glob is kept when the other side has it verbatim or
-// expands over it with a "**" pattern (see globMatcher.expandedBy).
-// Otherwise the glob is dropped (conservative). Past the pair budget it
-// keeps only what both sides spell alike, which is conservative as well.
-func intersectPaths(left, right []string) []string {
-	leftSet := newPathSet(left)
-	rightSet := newPathSet(right)
-
-	if exceedsPairBudget(
-		len(leftSet.literals), len(leftSet.globs),
-		len(rightSet.literals), len(rightSet.globs),
-		max(leftSet.longest, rightSet.longest),
-	) {
-		return intersectVerbatim(left, &rightSet)
-	}
-
-	seen := make(map[string]struct{})
-
-	var result []string
-
-	addPath := func(path string) {
-		if _, ok := seen[path]; !ok {
-			seen[path] = struct{}{}
-			result = append(result, path)
-		}
-	}
-
-	addMatchedLiterals(left, &rightSet, addPath)
-	addMatchedLiterals(right, &leftSet, addPath)
-
-	addNarrowedGlobs(left, right, addPath)
-
-	return result
-}
-
-// addNarrowedGlobs keeps the globs both sides permit: those present on both
-// sides verbatim, and those the other side expands over with a "**" pattern
-// rooted at a containing prefix. It walks each glob's prefix ancestors
-// against the other side's "**" patterns rather than comparing every pair,
-// which would be quadratic in the number of globs.
-func addNarrowedGlobs(left, right []string, addPath func(string)) {
-	leftGlobs := usableGlobs(left)
-	rightGlobs := usableGlobs(right)
-
-	if len(leftGlobs) == 0 || len(rightGlobs) == 0 {
-		return
-	}
-
-	leftStarStar := starStarIndex(leftGlobs)
-	rightStarStar := starStarIndex(rightGlobs)
-	rightSeen := make(map[string]struct{}, len(rightGlobs))
-
-	for _, pattern := range rightGlobs {
-		rightSeen[pattern] = struct{}{}
-	}
-
-	for _, pattern := range leftGlobs {
-		if _, both := rightSeen[pattern]; both || rightStarStar.expands(matcherFor(pattern)) {
-			addPath(pattern)
-		}
-	}
-
-	for _, pattern := range rightGlobs {
-		if leftStarStar.expands(matcherFor(pattern)) {
-			addPath(pattern)
-		}
-	}
-}
-
-// starStarIndex indexes the "**" patterns of a list by their prefix.
-func starStarIndex(patterns []string) prefixIndex {
-	index := make(prefixIndex)
-
-	for _, pattern := range patterns {
-		index.addStarStar(pattern, matcherFor(pattern))
-	}
-
-	return index
-}
-
-// usableGlobs returns the glob patterns of a path list that match anything.
-// A pattern past the matcher's limits, or one AppArmor rejects, grants
-// nothing here, so it cannot contribute to an intersection.
-func usableGlobs(paths []string) []string {
-	var globs []string
-
-	for _, path := range paths {
-		if IsGlobPattern(path) && matcherFor(path).usable() {
-			globs = append(globs, path)
-		}
-	}
-
-	return globs
-}
-
-// intersectVerbatim returns the paths both sides list alike, the result an
-// intersection falls back to past its pair budget. A path both sides list
-// is permitted by both whatever it matches, so keeping it is exact; a path
-// only one side lists is dropped rather than matched against the other
-// side's patterns, which can only narrow the result. Order follows the left
-// side, as it does for the paths a full intersection keeps first.
-func intersectVerbatim(left []string, right *pathSet) []string {
-	var result []string
-
-	seen := make(map[string]struct{}, len(left))
-
-	for _, path := range left {
-		if _, dup := seen[path]; dup {
-			continue
-		}
-
-		_, literal := right.literals[path]
-		_, glob := right.globs[path]
-
-		if literal || glob {
-			seen[path] = struct{}{}
-
-			result = append(result, path)
-		}
-	}
-
-	return result
-}
-
-func addMatchedLiterals(
-	paths []string, matcher *pathSet, addPath func(string),
-) {
-	for _, path := range paths {
-		if !IsGlobPattern(path) && matcher.matches(path) {
-			addPath(path)
-		}
 	}
 }
 

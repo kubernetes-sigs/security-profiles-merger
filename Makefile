@@ -115,7 +115,7 @@ verify: verify-coverage lint verify-tidy verify-mdtoc verify-golden verify-depen
 lint: ## Run golangci-lint (needs the libseccomp headers; the config lints the cgo bridge too)
 	$(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(GOLANGCI_LINT_VERSION) run
 
-MDOCS := README.md docs/api.md
+MDOCS := README.md docs/api.md docs/cli.md docs/integration.md
 
 .PHONY: verify-mdtoc
 verify-mdtoc: ## Verify table of contents in markdown files

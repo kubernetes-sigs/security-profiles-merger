@@ -40,6 +40,10 @@ var (
 	ErrMoreProblems = spm.ErrMoreProblems
 )
 
+// InputError is returned by Intersect and Union when one of the profiles
+// they were given fails validation, naming its position among the arguments.
+type InputError = spm.InputError
+
 // Intersect merges multiple Landlock profiles via intersection: the resulting
 // profile restricts access to the intersection of what all input profiles
 // allow. HandledAccessFS and HandledAccessNet are unioned (handling more rights
@@ -137,7 +141,7 @@ func foldProfiles(
 		// and paths, then normalize using the paths validation cleaned.
 		cleaned, err := validateProfile(profile, false)
 		if err != nil {
-			return nil, fmt.Errorf("validate profile %d: %w", idx, err)
+			return nil, &spm.InputError{Index: idx, Err: err}
 		}
 
 		normalized[idx] = normalizeProfile(profile, cleaned)
@@ -418,19 +422,6 @@ func directAccess[Key comparable, Right comparable](
 	return rules[ruleKey]
 }
 
-// hierarchyAccess returns the rights granted for a path by every rule on the
-// path itself or one of its ancestors. Landlock rules cover the whole file
-// hierarchy beneath their path and rights from nested rules accumulate.
-//
-// It looks up the path's ancestors rather than scanning every rule, because
-// the caller runs it once per rule of either side and scanning would make a
-// profile with many rules quadratic to merge.
-func hierarchyAccess(
-	path string, rules map[string][]FSAccessRight,
-) []FSAccessRight {
-	return ancestorAccess(pathAncestors(path), rules)
-}
-
 // effectiveFSAccess returns the rights a profile grants for a path in an
 // intersection: the rights of the path's own rule and of its ancestors, but
 // FSAccessRefer only when the rule on the path itself grants it.
@@ -453,18 +444,25 @@ func hierarchyAccess(
 func effectiveFSAccess(
 	path string, rules map[string][]FSAccessRight,
 ) []FSAccessRight {
-	access := hierarchyAccess(path, rules)
+	access := ancestorAccess(pathAncestors(path), rules)
 	if slices.Contains(rules[path], FSAccessRefer) {
 		return access
 	}
 
-	// hierarchyAccess owns the slice it returns, so this cannot write into
+	// ancestorAccess owns the slice it returns, so this cannot write into
 	// a rule of the input.
 	return slices.DeleteFunc(access, func(right FSAccessRight) bool {
 		return right == FSAccessRefer
 	})
 }
 
+// ancestorAccess returns the rights granted for a path by every rule on the
+// path itself or one of its ancestors. Landlock rules cover the whole file
+// hierarchy beneath their path and rights from nested rules accumulate.
+//
+// It looks up the given ancestors rather than scanning every rule, because
+// the caller runs it once per rule of either side and scanning would make a
+// profile with many rules quadratic to merge.
 func ancestorAccess(
 	ancestors []string, rules map[string][]FSAccessRight,
 ) []FSAccessRight {
@@ -743,9 +741,9 @@ func toSet[T comparable](items []T) map[T]struct{} {
 // every set and rule. It does not change what the profile permits.
 func normalizeProfile(profile *Profile, cleaned []string) *Profile {
 	return &Profile{
-		HandledAccessFS:  dedupRights(profile.HandledAccessFS),
-		HandledAccessNet: dedupRights(profile.HandledAccessNet),
-		Scoped:           dedupRights(profile.Scoped),
+		HandledAccessFS:  merge.DeduplicateSlice(profile.HandledAccessFS),
+		HandledAccessNet: merge.DeduplicateSlice(profile.HandledAccessNet),
+		Scoped:           merge.DeduplicateSlice(profile.Scoped),
 		PathRules: mergeDuplicateRules(
 			profile.PathRules,
 			func(idx int, _ PathRule) string { return cleaned[idx] },
@@ -790,14 +788,14 @@ func mergeDuplicateRules[Rule any, Key comparable, Right comparable](
 		ruleKey := key(idx, rule)
 
 		if pos, ok := seen[ruleKey]; ok {
-			rights[pos] = dedupRights(slices.Concat(rights[pos], access(rule)))
+			rights[pos] = merge.DeduplicateSlice(slices.Concat(rights[pos], access(rule)))
 
 			continue
 		}
 
 		seen[ruleKey] = len(keys)
 		keys = append(keys, ruleKey)
-		rights = append(rights, dedupRights(access(rule)))
+		rights = append(rights, merge.DeduplicateSlice(access(rule)))
 	}
 
 	result := make([]Rule, len(keys))
@@ -806,14 +804,4 @@ func mergeDuplicateRules[Rule any, Key comparable, Right comparable](
 	}
 
 	return result
-}
-
-// dedupRights returns a new slice holding the rights in order of first
-// occurrence, or nil when there are none.
-func dedupRights[T comparable](rights []T) []T {
-	if len(rights) == 0 {
-		return nil
-	}
-
-	return merge.DeduplicateSlice(rights)
 }

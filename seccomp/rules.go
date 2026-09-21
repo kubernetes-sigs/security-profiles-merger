@@ -28,8 +28,8 @@ import (
 
 // clause is a single rule for one syscall as a runtime adds it to
 // libseccomp: an action, an optional errno, and optional argument filters.
-// A clause without args is unconditional. See shape.go for how libseccomp
-// evaluates the clauses of a syscall.
+// A clause without args is unconditional. See the package documentation
+// for how libseccomp evaluates the clauses of a syscall.
 //
 // The merge computes over a working model of a syscall's clauses: an
 // unconditional clause decides every call; otherwise the least restrictive
@@ -182,7 +182,7 @@ func collectRules(syscalls []specs.LinuxSyscall, def *clause) map[string]*syscal
 	return rules
 }
 
-// entryClauses counts the clauses one entry loads for each of its names,
+// entryClauseCount counts the clauses one entry loads for each of its names,
 // the way runtimes add them but without expanding the entry: none when the
 // entry equals the profile default, one per condition when it repeats an
 // argument index, and one otherwise.

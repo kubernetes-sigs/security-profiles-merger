@@ -24,6 +24,7 @@ import (
 	"unicode/utf8"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 var (
@@ -158,7 +159,7 @@ func TestJoinLimitedCountsWhatItOmits(t *testing.T) {
 		t.Errorf("JoinLimited kept an error past the limit: %v", err)
 	}
 
-	if !errors.Is(err, merge.ErrMoreProblems) {
+	if !errors.Is(err, spm.ErrMoreProblems) {
 		t.Errorf("JoinLimited error = %q, want it to report the omission", err.Error())
 	}
 
@@ -191,5 +192,47 @@ func TestDeduplicateSliceNeverAliasesTheInput(t *testing.T) {
 
 	if &grown[0] == &input[:1][0] {
 		t.Error("appending to the result wrote into the caller's backing array")
+	}
+}
+
+// TestJoinLimitedBoundsANestedReport covers a report built from reports. A
+// validator joins the failures of its checks, each of which has joined its
+// own, and the bound has to hold for the whole: counted once per check, a
+// profile of a hundred thousand empty names produced nine megabytes of
+// report that did not even match ErrMoreProblems.
+func TestJoinLimitedBoundsANestedReport(t *testing.T) {
+	t.Parallel()
+
+	group := func(count int) error {
+		errs := make([]error, count)
+		for idx := range errs {
+			errs[idx] = fmt.Errorf("failure %d", idx) //nolint:err113 // test data
+		}
+
+		return merge.JoinLimited(errs...)
+	}
+
+	sentinel := errors.New("sentinel") //nolint:err113 // test data
+
+	report := merge.JoinLimited(group(1000), group(5), sentinel, group(1000))
+
+	lines := strings.Count(report.Error(), "\n") + 1
+	if lines != merge.MaxJoinedErrors+1 {
+		t.Errorf("report holds %d lines, want %d", lines, merge.MaxJoinedErrors+1)
+	}
+
+	if !errors.Is(report, spm.ErrMoreProblems) {
+		t.Error("a truncated report does not match ErrMoreProblems")
+	}
+
+	// 2006 failures went in, 32 are listed.
+	if want := "1974 " + spm.ErrMoreProblems.Error(); !strings.HasSuffix(report.Error(), want) {
+		t.Errorf("report ends %q, want %q", report.Error()[len(report.Error())-40:], want)
+	}
+
+	// A report inside the bound lists everything and claims no omission.
+	small := merge.JoinLimited(group(3), sentinel)
+	if errors.Is(small, spm.ErrMoreProblems) || !errors.Is(small, sentinel) {
+		t.Errorf("small report = %v", small)
 	}
 }

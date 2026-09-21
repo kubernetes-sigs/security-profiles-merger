@@ -38,6 +38,10 @@ var (
 	ErrMoreProblems = spm.ErrMoreProblems
 )
 
+// InputError is returned by Intersect and Union when one of the profiles
+// they were given fails validation, naming its position among the arguments.
+type InputError = spm.InputError
+
 // Intersect merges multiple AppArmor profiles via intersection: the resulting
 // profile permits an operation only if all input profiles permit it.
 // Capabilities are intersected, file access rules are intersected, and network
@@ -110,7 +114,7 @@ func foldProfiles(profiles []*Profile, mergeOp strategy) (*Profile, error) {
 	for idx, profile := range profiles {
 		err := validateEmptyPathsInProfile(profile)
 		if err != nil {
-			return nil, fmt.Errorf("validate profile %d: %w", idx, err)
+			return nil, &spm.InputError{Index: idx, Err: err}
 		}
 	}
 
@@ -122,7 +126,7 @@ func foldProfiles(profiles []*Profile, mergeOp strategy) (*Profile, error) {
 
 		err := Validate(normalized[idx])
 		if err != nil {
-			return nil, fmt.Errorf("validate profile %d: %w", idx, err)
+			return nil, &spm.InputError{Index: idx, Err: err}
 		}
 	}
 
@@ -162,22 +166,7 @@ func foldProfiles(profiles []*Profile, mergeOp strategy) (*Profile, error) {
 // unifyAliasSpellings has given every input the same spelling for a rule and
 // the merge introduces no new one.
 func canonicalizeAliases(profile *Profile) {
-	if profile.Executable != nil {
-		profile.Executable.AllowedExecutables = foldAliasList(
-			profile.Executable.AllowedExecutables,
-		)
-		profile.Executable.AllowedLibraries = foldAliasList(
-			profile.Executable.AllowedLibraries,
-		)
-	}
-
-	if profile.Filesystem == nil {
-		return
-	}
-
-	profile.Filesystem.ReadOnlyPaths = foldAliasList(profile.Filesystem.ReadOnlyPaths)
-	profile.Filesystem.WriteOnlyPaths = foldAliasList(profile.Filesystem.WriteOnlyPaths)
-	profile.Filesystem.ReadWritePaths = foldAliasList(profile.Filesystem.ReadWritePaths)
+	mapPathLists(profile, foldAliasList)
 }
 
 // unifyAliasSpellings gives every profile the same spelling for a rule any
@@ -229,15 +218,25 @@ func unifyAliasSpellings(profiles []*Profile) {
 // eachPathList calls visit with every list of paths a profile holds. The
 // slices are visited in place, so a visitor may rewrite their elements.
 func eachPathList(profile *Profile, visit func(paths []string)) {
+	mapPathLists(profile, func(paths []string) []string {
+		visit(paths)
+
+		return paths
+	})
+}
+
+// mapPathLists replaces every list of paths a profile holds with what apply
+// returns for it. A section the profile omits holds no list.
+func mapPathLists(profile *Profile, apply func(paths []string) []string) {
 	if profile.Executable != nil {
-		visit(profile.Executable.AllowedExecutables)
-		visit(profile.Executable.AllowedLibraries)
+		profile.Executable.AllowedExecutables = apply(profile.Executable.AllowedExecutables)
+		profile.Executable.AllowedLibraries = apply(profile.Executable.AllowedLibraries)
 	}
 
 	if profile.Filesystem != nil {
-		visit(profile.Filesystem.ReadOnlyPaths)
-		visit(profile.Filesystem.WriteOnlyPaths)
-		visit(profile.Filesystem.ReadWritePaths)
+		profile.Filesystem.ReadOnlyPaths = apply(profile.Filesystem.ReadOnlyPaths)
+		profile.Filesystem.WriteOnlyPaths = apply(profile.Filesystem.WriteOnlyPaths)
+		profile.Filesystem.ReadWritePaths = apply(profile.Filesystem.ReadWritePaths)
 	}
 }
 
@@ -308,16 +307,7 @@ func simplestSpelling(left, right string) int {
 }
 
 func sortProfile(profile *Profile) {
-	if profile.Executable != nil {
-		slices.Sort(profile.Executable.AllowedExecutables)
-		slices.Sort(profile.Executable.AllowedLibraries)
-	}
-
-	if profile.Filesystem != nil {
-		slices.Sort(profile.Filesystem.ReadOnlyPaths)
-		slices.Sort(profile.Filesystem.WriteOnlyPaths)
-		slices.Sort(profile.Filesystem.ReadWritePaths)
-	}
+	eachPathList(profile, slices.Sort[[]string])
 
 	if profile.Capabilities != nil {
 		slices.Sort(profile.Capabilities.AllowedCapabilities)
@@ -435,12 +425,7 @@ type intersectStrategy struct{}
 // intersecting it with itself gives.
 func (intersectStrategy) prepare(profile *Profile) {
 	populateEmpty(profile)
-
-	profile.Executable.AllowedExecutables = dropUnusableGlobs(profile.Executable.AllowedExecutables)
-	profile.Executable.AllowedLibraries = dropUnusableGlobs(profile.Executable.AllowedLibraries)
-	profile.Filesystem.ReadOnlyPaths = dropUnusableGlobs(profile.Filesystem.ReadOnlyPaths)
-	profile.Filesystem.WriteOnlyPaths = dropUnusableGlobs(profile.Filesystem.WriteOnlyPaths)
-	profile.Filesystem.ReadWritePaths = dropUnusableGlobs(profile.Filesystem.ReadWritePaths)
+	mapPathLists(profile, dropUnusableGlobs)
 }
 
 // populateEmpty replaces every nil section of the profile with an explicit
@@ -486,8 +471,12 @@ func (intersectStrategy) mergeStrings(left, right []string) []string {
 	return merge.IntersectSlice(left, right)
 }
 
+// mergePaths intersects two plain path lists through the permission merge,
+// reading every path as granting one permission, so that the executable
+// lists and the filesystem rules are narrowed, budgeted and fallen back by
+// one implementation.
 func (intersectStrategy) mergePaths(left, right []string) []string {
-	return intersectPaths(left, right)
+	return permittedPaths(intersectPerms(readPerms(left), readPerms(right)))
 }
 
 // mergeBool never sees nil, since prepare populated every boolean.
@@ -512,9 +501,11 @@ func mergeBoolPtr(left, right *bool, combine func(lhs, rhs bool) bool) *bool {
 }
 
 func (intersectStrategy) mergeFilesystem(left, right *FilesystemRules) *FilesystemRules {
-	leftPerms := expandFsPerms(left)
-	rightPerms := expandFsPerms(right)
+	return collapseFsPerms(intersectPerms(expandFsPerms(left), expandFsPerms(right)))
+}
 
+// intersectPerms returns the permissions both sides grant, per path.
+func intersectPerms(leftPerms, rightPerms map[string]fsPermission) map[string]fsPermission {
 	merged := make(map[string]fsPermission)
 
 	// Literal-vs-literal intersection via map lookup: O(n+m).
@@ -548,14 +539,14 @@ func (intersectStrategy) mergeFilesystem(left, right *FilesystemRules) *Filesyst
 	) {
 		addVerbatimGlobs(leftSide, rightSide, merged)
 
-		return collapseFsPerms(merged)
+		return merged
 	}
 
 	matchFsLiterals(leftSide.literals, rightSide, merged)
 	matchFsLiterals(rightSide.literals, leftSide, merged)
 	matchFsGlobs(leftSide, rightSide, merged)
 
-	return collapseFsPerms(merged)
+	return merged
 }
 
 // addFsMatch records the permissions two matching entries share under key,
@@ -902,16 +893,7 @@ func cloneCapabilities(caps *CapabilityRules) *CapabilityRules {
 func normalizeProfile(profile *Profile) *Profile {
 	result := cloneProfile(profile)
 
-	if result.Executable != nil {
-		result.Executable.AllowedExecutables = normalizePaths(result.Executable.AllowedExecutables)
-		result.Executable.AllowedLibraries = normalizePaths(result.Executable.AllowedLibraries)
-	}
-
-	if result.Filesystem != nil {
-		result.Filesystem.ReadOnlyPaths = normalizePaths(result.Filesystem.ReadOnlyPaths)
-		result.Filesystem.WriteOnlyPaths = normalizePaths(result.Filesystem.WriteOnlyPaths)
-		result.Filesystem.ReadWritePaths = normalizePaths(result.Filesystem.ReadWritePaths)
-	}
+	mapPathLists(result, normalizePaths)
 
 	if result.Capabilities != nil {
 		result.Capabilities.AllowedCapabilities = normalizeCapabilities(
@@ -936,26 +918,7 @@ func normalizeCapabilities(caps []string) []string {
 }
 
 func deduplicateProfile(profile *Profile) {
-	if profile.Executable != nil {
-		profile.Executable.AllowedExecutables = merge.DeduplicateSlice(
-			profile.Executable.AllowedExecutables,
-		)
-		profile.Executable.AllowedLibraries = merge.DeduplicateSlice(
-			profile.Executable.AllowedLibraries,
-		)
-	}
-
-	if profile.Filesystem != nil {
-		profile.Filesystem.ReadOnlyPaths = merge.DeduplicateSlice(
-			profile.Filesystem.ReadOnlyPaths,
-		)
-		profile.Filesystem.WriteOnlyPaths = merge.DeduplicateSlice(
-			profile.Filesystem.WriteOnlyPaths,
-		)
-		profile.Filesystem.ReadWritePaths = merge.DeduplicateSlice(
-			profile.Filesystem.ReadWritePaths,
-		)
-	}
+	mapPathLists(profile, merge.DeduplicateSlice[string])
 
 	if profile.Capabilities != nil {
 		profile.Capabilities.AllowedCapabilities = merge.DeduplicateSlice(

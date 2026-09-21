@@ -1,4 +1,4 @@
-//go:build !race
+//go:build race
 
 /*
 Copyright The Kubernetes Authors.
@@ -16,8 +16,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package apparmor
+package testutil
 
-// raceDetectorEnabled reports that this test binary was built without the
-// race detector, which multiplies the cost of a loop several times over.
-const raceDetectorEnabled = false
+// raceDetectorEnabled reports that this binary was built with the race
+// detector, which multiplies the cost of a loop several times over.
+const raceDetectorEnabled = true

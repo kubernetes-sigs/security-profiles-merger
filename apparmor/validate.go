@@ -75,7 +75,7 @@ var (
 	// 4096 bytes, the longest pattern the matcher accepts and longer than
 	// any Linux path. Validate checks the length before anything else, so
 	// an oversized path costs no further work.
-	ErrPathTooLong = errors.New("path exceeds 4096 bytes")
+	ErrPathTooLong = spm.ErrPathTooLong
 
 	// ErrDotComponent is returned by ValidateStrict and ValidateArtifact
 	// when a path has a literal "." or ".." component. The kernel hands
@@ -93,7 +93,7 @@ var (
 	// ErrRelativePath is returned by ValidateStrict and ValidateArtifact
 	// when a path does not start with "/". AppArmor file rules must use
 	// absolute paths.
-	ErrRelativePath = errors.New("relative path (must be absolute)")
+	ErrRelativePath = spm.ErrRelativePath
 
 	// ErrUnquotablePath is returned by ValidateStrict and ValidateArtifact
 	// when a path holds a character apparmor_parser's lexer does not accept
@@ -116,15 +116,16 @@ var (
 	// (ErrGlobTooComplex).
 	ErrNulInPath = errors.New("path contains a NUL byte")
 
-	// ErrInvalidCapabilityName is returned by ValidateArtifact when a
-	// capability name holds a character that cannot spell one. A capability
+	// ErrInvalidCapabilityName is returned by ValidateArtifact and
+	// ValidateStrict when a capability name holds a character that cannot
+	// spell one. A capability
 	// is a word of letters, digits and "_", so a name holding anything else
 	// does not load, and, like a path, is how an untrusted profile smuggles
 	// rules into a consumer that renders it.
 	//
 	// ValidateArtifact checks the spelling but not the name: a name this
 	// package does not know may be one a newer kernel does. ValidateStrict
-	// reports an unknown name as ErrUnknownCapability.
+	// checks both, and reports an unknown name as ErrUnknownCapability.
 	ErrInvalidCapabilityName = errors.New("invalid capability name")
 
 	// ErrTooManyPaths is returned by ValidateArtifact and ValidateStrict
@@ -141,6 +142,11 @@ var (
 	// MaxArtifactCapabilities capability names.
 	ErrTooManyCapabilities = errors.New("too many capabilities")
 )
+
+// MaxPathLen is the longest path this package accepts, in bytes, which is
+// also the longest pattern the matcher compiles. It is the limit the
+// landlock package applies to its rule paths.
+const MaxPathLen = spm.MaxPathLen
 
 // MaxArtifactPaths bounds how many paths a profile accepted by
 // ValidateArtifact or ValidateStrict may hold, counted over every path list
@@ -182,16 +188,6 @@ const MaxArtifactPatternBytes = 64 << 10
 // merged in milliseconds but reported in megabytes, and every other section
 // of an artifact is bounded. Linux has some forty capabilities.
 const MaxArtifactCapabilities = 512
-
-// joinLimited reports at most a bounded number of the failures it is given.
-// A profile holds as many failures as it holds paths, and an artifact chooses
-// that number, so the rejection a runtime logs needs a ceiling just as the
-// values it names do (see merge.QuoteBounded).
-//
-//nolint:wrapcheck // the joined failures are this package's own errors
-func joinLimited(errs ...error) error {
-	return merge.JoinLimited(errs...)
-}
 
 // asciiUpper upper-cases the ASCII letters of a name and leaves every other
 // byte as it is. strings.ToUpper folds by Unicode rules, where U+017F and
@@ -339,7 +335,7 @@ func validateStructure(profile *Profile) (bool, error) {
 		}
 	}
 
-	return false, joinLimited(errs...)
+	return false, merge.JoinLimited(errs...)
 }
 
 // ValidateStrict is the strictest of the three: it rejects everything
@@ -363,36 +359,13 @@ func validateStructure(profile *Profile) (bool, error) {
 // generated rather than written, and a generator is exactly what the bound
 // is there to keep in hand.
 func ValidateStrict(profile *Profile) error {
-	if profile == nil {
-		return ErrNilProfile
-	}
-
-	err := validatePathCount(profile)
+	errs, err := artifactErrors(profile)
 	if err != nil {
 		return err
 	}
 
-	oversized, err := validateStructure(profile)
-
-	var errs []error
-
-	if err != nil {
-		errs = append(errs, err)
-	}
-
 	if profile.Capabilities != nil {
-		// The spelling check first, so that ValidateStrict rejects every
-		// name ValidateArtifact rejects rather than only implying it: a
-		// name outside the word grammar is not a known capability either,
-		// but it is reported as the spelling problem it is.
-		errs = append(errs, validateCapabilitySpelling(
-			profile.Capabilities.AllowedCapabilities,
-		)...)
-
-		err := validateCapabilityNames(profile.Capabilities.AllowedCapabilities)
-		if err != nil {
-			errs = append(errs, err)
-		}
+		errs = append(errs, validateCapabilityNames(profile.Capabilities.AllowedCapabilities))
 	}
 
 	if profile.Executable != nil {
@@ -408,11 +381,7 @@ func ValidateStrict(profile *Profile) error {
 		)...)
 	}
 
-	if !oversized {
-		errs = append(errs, validateLoadablePaths(profile)...)
-	}
-
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 // ValidateArtifact validates a profile received from an untrusted source,
@@ -443,13 +412,29 @@ func ValidateStrict(profile *Profile) error {
 // ValidateArtifact does not compare the profile against a baseline; callers
 // intersect the result with their baseline afterwards.
 func ValidateArtifact(profile *Profile) error {
+	errs, err := artifactErrors(profile)
+	if err != nil {
+		return err
+	}
+
+	return merge.JoinLimited(errs...)
+}
+
+// artifactErrors runs the checks of ValidateArtifact and returns what they
+// found. ValidateStrict starts from the same list and adds to it, so that a
+// profile it accepts is one ValidateArtifact accepts by construction rather
+// than by two functions being kept alike.
+//
+// The second result is a failure that ends validation on its own: a nil
+// profile, or one past a size limit, which is refused rather than scanned.
+func artifactErrors(profile *Profile) ([]error, error) {
 	if profile == nil {
-		return ErrNilProfile
+		return nil, ErrNilProfile
 	}
 
 	err := validatePathCount(profile)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	oversized, err := validateStructure(profile)
@@ -470,14 +455,13 @@ func ValidateArtifact(profile *Profile) error {
 		errs = append(errs, validateLoadablePaths(profile)...)
 	}
 
-	return joinLimited(errs...)
+	return errs, nil
 }
 
 // validatePathCount reports a profile holding more paths than
 // MaxArtifactPaths, or patterns longer in total than
-// MaxArtifactPatternBytes. The count is not part of the message: it says
-// nothing a caller cannot count itself, and the limit is the number that
-// matters.
+// MaxArtifactPatternBytes, or more capabilities than MaxArtifactCapabilities.
+// The message names the count and the limit it exceeds.
 //
 // Whether a path is a pattern is decided by the bytes it holds rather than
 // by compiling it, so that counting an over-large profile costs no more than
@@ -556,7 +540,7 @@ func validatePathLengths(profile *Profile) error {
 		}, ErrPathTooLong, false)...)
 	})
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 // hasDotComponent reports whether a path has a "." or ".." component, with
@@ -904,7 +888,7 @@ func validateEmptyPathsInProfile(profile *Profile) error {
 		errs = append(errs, validateEmptyPaths(context, paths)...)
 	})
 
-	return errors.Join(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 // validateFilesystemPaths reports the paths listed in more than one
@@ -942,7 +926,7 @@ func validateFilesystemPaths(rules *FilesystemRules) error {
 		}
 	}
 
-	return errors.Join(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 func validateDuplicatePathsInCategory(rules *FilesystemRules) error {
@@ -961,7 +945,7 @@ func validateDuplicatePathsInCategory(rules *FilesystemRules) error {
 	errs = append(errs, woErrs...)
 	errs = append(errs, rwErrs...)
 
-	return errors.Join(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 func validateEmptyCapabilities(caps []string) error {
@@ -975,7 +959,7 @@ func validateEmptyCapabilities(caps []string) error {
 		}
 	}
 
-	return errors.Join(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 func validateDuplicateCapabilities(caps []string) error {
@@ -995,7 +979,7 @@ func validateDuplicateCapabilities(caps []string) error {
 		seen[upper] = struct{}{}
 	}
 
-	return errors.Join(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 func validateCapabilityNames(caps []string) error {
@@ -1010,7 +994,7 @@ func validateCapabilityNames(caps []string) error {
 		}
 	}
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 // validateDuplicatesInSlice reports the paths of one list that spell a rule

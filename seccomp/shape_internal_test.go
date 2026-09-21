@@ -23,6 +23,8 @@ import (
 	"time"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 )
 
 // wideIndex is an argument index far past the bitmap indexSet keeps and past
@@ -90,7 +92,7 @@ func TestHasRepeatedIndexIsLinear(t *testing.T) {
 
 	// Coverage counters slow these loops several times over, so the bound
 	// is only checked without coverage.
-	if elapsed := time.Since(start); uninstrumentedRun() && elapsed > generousBudget {
+	if elapsed := time.Since(start); testutil.UninstrumentedRun() && elapsed > generousBudget {
 		t.Errorf("took %s for %d conditions, want well under %s", elapsed, count, generousBudget)
 	}
 }

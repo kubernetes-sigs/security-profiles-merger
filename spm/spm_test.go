@@ -54,6 +54,52 @@ func TestSentinelsAreShared(t *testing.T) {
 			errs:   []error{apparmor.ErrEmptyPath, landlock.ErrEmptyPath},
 			shared: spm.ErrEmptyPath,
 		},
+		{
+			name:   "ErrRelativePath",
+			errs:   []error{apparmor.ErrRelativePath, landlock.ErrRelativePath},
+			shared: spm.ErrRelativePath,
+		},
+		{
+			name:   "ErrPathTooLong",
+			errs:   []error{apparmor.ErrPathTooLong, landlock.ErrPathTooLong},
+			shared: spm.ErrPathTooLong,
+		},
+		{
+			name: "ErrMoreProblems",
+			errs: []error{
+				seccomp.ErrMoreProblems, apparmor.ErrMoreProblems, landlock.ErrMoreProblems,
+			},
+			shared: spm.ErrMoreProblems,
+		},
+		{
+			name: "ErrDuplicateKey",
+			errs: []error{
+				seccomp.ErrDuplicateKey, apparmor.ErrDuplicateKey, landlock.ErrDuplicateKey,
+			},
+			shared: spm.ErrDuplicateKey,
+		},
+		{
+			name: "ErrUnknownField",
+			errs: []error{
+				seccomp.ErrUnknownField, apparmor.ErrUnknownField, landlock.ErrUnknownField,
+			},
+			shared: spm.ErrUnknownField,
+		},
+		{
+			name: "ErrInvalidUTF8",
+			errs: []error{
+				seccomp.ErrInvalidUTF8, apparmor.ErrInvalidUTF8, landlock.ErrInvalidUTF8,
+			},
+			shared: spm.ErrInvalidUTF8,
+		},
+		{
+			name: "ErrUnexpectedData",
+			errs: []error{
+				seccomp.ErrUnexpectedData, apparmor.ErrUnexpectedData,
+				landlock.ErrUnexpectedData,
+			},
+			shared: spm.ErrUnexpectedData,
+		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
@@ -231,5 +277,47 @@ func TestDiffsFromTheAPISatisfyDiff(t *testing.T) {
 		if !diff.IsEqual() {
 			t.Errorf("%s: diff of a profile with itself reports not equal", name)
 		}
+	}
+}
+
+// TestInputErrorNamesTheFailingProfile covers the index every package's
+// merge reports: a caller merging inputs of different standing dispatches on
+// which one failed, and must not have to read that out of a message.
+func TestInputErrorNamesTheFailingProfile(t *testing.T) {
+	t.Parallel()
+
+	_, err := seccomp.Intersect(
+		&specs.LinuxSeccomp{DefaultAction: specs.ActErrno},
+		&specs.LinuxSeccomp{DefaultAction: "SCMP_ACT_BOGUS"},
+	)
+
+	var inputErr *spm.InputError
+	if !errors.As(err, &inputErr) {
+		t.Fatalf("Intersect = %v, want an InputError", err)
+	}
+
+	if inputErr.Index != 1 {
+		t.Errorf("Index = %d, want 1", inputErr.Index)
+	}
+
+	if !errors.Is(err, seccomp.ErrUnknownAction) {
+		t.Errorf("errors.Is does not see through the InputError: %v", err)
+	}
+
+	emptyPath := new(apparmor.Profile)
+	emptyPath.Filesystem = new(apparmor.FilesystemRules)
+	emptyPath.Filesystem.ReadOnlyPaths = []string{""}
+
+	_, err = apparmor.Union(emptyPath)
+	if !errors.As(err, &inputErr) || inputErr.Index != 0 {
+		t.Errorf("apparmor.Union = %v, want an InputError for profile 0", err)
+	}
+
+	emptyRule := new(landlock.Profile)
+	emptyRule.PathRules = make([]landlock.PathRule, 1)
+
+	_, err = landlock.Intersect(new(landlock.Profile), new(landlock.Profile), emptyRule)
+	if !errors.As(err, &inputErr) || inputErr.Index != 2 {
+		t.Errorf("landlock.Intersect = %v, want an InputError for profile 2", err)
 	}
 }

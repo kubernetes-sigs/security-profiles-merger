@@ -28,6 +28,7 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"sigs.k8s.io/security-profiles-merger/seccomp"
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 const (
@@ -262,11 +263,7 @@ func readDiffInputs(
 	return data, nil
 }
 
-type equalChecker interface {
-	IsEqual() bool
-}
-
-func diffProfiles[T any, D equalChecker](
+func diffProfiles[T any, D spm.Diff](
 	inputs []profileInput,
 	format string,
 	diffFn func(*T, *T) (*D, error),

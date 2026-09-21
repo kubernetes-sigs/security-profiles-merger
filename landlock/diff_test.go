@@ -651,3 +651,38 @@ func TestDiffReportsEachChangeKindAlone(t *testing.T) {
 		})
 	}
 }
+
+// TestFormatDiffQuotesUnsafeBytes covers the rendering of a diff, which a
+// runtime logs and which is computed over profiles nothing has validated.
+func TestFormatDiffQuotesUnsafeBytes(t *testing.T) {
+	t.Parallel()
+
+	const hostile = "x\nFORGED \x1b[31mred"
+
+	left := &landlock.Profile{
+		HandledAccessFS:  nil,
+		HandledAccessNet: nil,
+		Scoped:           nil,
+		PathRules:        nil,
+		NetRules:         nil,
+	}
+	right := &landlock.Profile{
+		HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessRight(hostile)},
+		HandledAccessNet: []landlock.NetAccessRight{landlock.NetAccessRight(hostile)},
+		Scoped:           []landlock.ScopeRight{landlock.ScopeRight(hostile)},
+		PathRules: []landlock.PathRule{{
+			Path:     "/" + hostile,
+			AccessFS: []landlock.FSAccessRight{landlock.FSAccessRight(hostile)},
+		}},
+		NetRules: nil,
+	}
+
+	diff, err := landlock.Diff(left, right)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+
+	if formatted := landlock.FormatDiff(diff); strings.ContainsAny(formatted, "\n\x1b") {
+		t.Errorf("FormatDiff writes control bytes through: %q", formatted)
+	}
+}

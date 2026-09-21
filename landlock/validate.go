@@ -46,7 +46,7 @@ var (
 	// MaxPathLen bytes. The length is checked before anything else, so an
 	// oversized path costs no further work: every other check, and the
 	// merge's hierarchy resolution, walks the path component by component.
-	ErrPathTooLong = errors.New("path exceeds 4096 bytes")
+	ErrPathTooLong = spm.ErrPathTooLong
 	// ErrTooManyRules is returned by ValidateArtifact and ValidateStrict
 	// when a profile holds more than MaxArtifactRules rules.
 	ErrTooManyRules = errors.New("too many rules")
@@ -67,7 +67,7 @@ var (
 
 	// ErrRelativePath is returned when a path rule uses a relative path.
 	// Landlock requires absolute paths for filesystem rules.
-	ErrRelativePath = errors.New("relative path (must be absolute)")
+	ErrRelativePath = spm.ErrRelativePath
 
 	// ErrEmptyRule is returned when a path or network rule grants no access
 	// right. The kernel rejects such a rule with ENOMSG.
@@ -84,7 +84,8 @@ var (
 	ErrUnsupportedABIRight = errors.New("access right needs a newer Landlock ABI")
 
 	// ErrUnknownABIVersion is returned by ValidateForABI for a version
-	// outside ABIV1 to LatestABIVersion.
+	// below ABIV1, which names no kernel. A version above LatestABIVersion
+	// is accepted and read as LatestABIVersion.
 	ErrUnknownABIVersion = errors.New("unknown Landlock ABI version")
 )
 
@@ -93,7 +94,7 @@ var (
 // patterns. A rule path names a file the kernel opens, so nothing longer
 // can ever be loaded, while resolving one against the paths of the other
 // rules costs time in the length of the path for every rule.
-const MaxPathLen = 4096
+const MaxPathLen = spm.MaxPathLen
 
 // MaxArtifactRules bounds how many rules a profile accepted by
 // ValidateArtifact or ValidateStrict may hold, counted over its path rules
@@ -193,7 +194,7 @@ func validateProfile(profile *Profile, checkDuplicates bool) ([]string, error) {
 		errs = append(errs, validateDuplicates(profile, cleaned)...)
 	}
 
-	return cleaned, joinLimited(errs...)
+	return cleaned, merge.JoinLimited(errs...)
 }
 
 // validateDuplicates reports duplicate rights in every set and rule, and
@@ -240,7 +241,7 @@ func validateRights[T ~string](
 		}
 	}
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 // validatePath rejects empty paths, paths longer than MaxPathLen, paths
@@ -393,7 +394,7 @@ func validateDuplicatePaths(rules []PathRule, cleaned []string) error {
 		seen[cleaned[idx]] = struct{}{}
 	}
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 // ValidateArtifact validates a profile received from an untrusted source,
@@ -420,6 +421,10 @@ func validateDuplicatePaths(rules []PathRule, cleaned []string) error {
 // since it looks at one profile and at path strings rather than at files:
 // see Intersect for what a runtime can do about it, and LoweredRulePaths
 // for which rules of a result carry such a grant.
+//
+// A profile may hold at most MaxArtifactRules rules (ErrTooManyRules), which
+// is checked first and on its own, so that an over-large profile is refused
+// rather than walked.
 func ValidateArtifact(profile *Profile) error {
 	err := validateRuleCount(profile)
 	if err != nil {
@@ -474,7 +479,7 @@ func validateLoadableProfile(profile *Profile, checkDuplicates bool) error {
 	errs := appendErr(nil, err)
 	errs = append(errs, validateLoadable(profile)...)
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 // RequiredABIVersion returns the lowest Landlock ABI version supporting every
@@ -539,10 +544,10 @@ func ValidateForABI(profile *Profile, abi ABIVersion) error {
 
 	if abi < ABIV1 {
 		errs = append(errs, fmt.Errorf(
-			"%w: v%d (known: v%d to v%d)", ErrUnknownABIVersion, abi, ABIV1, LatestABIVersion,
+			"%w: v%d (the first is v%d)", ErrUnknownABIVersion, abi, ABIV1,
 		))
 
-		return joinLimited(errs...)
+		return merge.JoinLimited(errs...)
 	}
 
 	// Every right this package knows is supported from LatestABIVersion on,
@@ -550,7 +555,7 @@ func ValidateForABI(profile *Profile, abi ABIVersion) error {
 	abi = min(abi, LatestABIVersion)
 
 	if profile == nil {
-		return joinLimited(errs...)
+		return merge.JoinLimited(errs...)
 	}
 
 	errs = append(errs, abiErrors(handledFSRef(), profile.HandledAccessFS, abi, fsAccessABI)...)
@@ -565,7 +570,7 @@ func ValidateForABI(profile *Profile, abi ABIVersion) error {
 		errs = append(errs, abiErrors(netRuleRef(idx), rule.AccessNet, abi, netAccessABI)...)
 	}
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 // abiErrors reports every right of the list that needs a newer ABI version
@@ -647,7 +652,7 @@ func validateHandled[T ~string](
 		}
 	}
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 func validateDuplicateRights[T ~string](context fieldRef, rights []T) error {
@@ -665,7 +670,7 @@ func validateDuplicateRights[T ~string](context fieldRef, rights []T) error {
 		seen[right] = struct{}{}
 	}
 
-	return joinLimited(errs...)
+	return merge.JoinLimited(errs...)
 }
 
 func validateDuplicatePorts(rules []NetRule) error {
@@ -683,15 +688,5 @@ func validateDuplicatePorts(rules []NetRule) error {
 		seen[rule.Port] = struct{}{}
 	}
 
-	return joinLimited(errs...)
-}
-
-// joinLimited reports at most a bounded number of the failures it is given.
-// A profile holds as many failures as it holds rules, and an artifact
-// chooses that number, so the rejection a runtime logs needs a ceiling just
-// as the values it names do (see merge.QuoteBounded).
-//
-//nolint:wrapcheck // the joined failures are this package's own errors
-func joinLimited(errs ...error) error {
 	return merge.JoinLimited(errs...)
 }
