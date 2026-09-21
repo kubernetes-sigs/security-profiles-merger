@@ -395,6 +395,11 @@ warning: stdin[2]: unknown field "syscalls[0].comment"
 error: artifact.json: syscall entry 0 action: unknown seccomp action
 ```
 
+A field path names each member as `object.member` and each element of a list
+as `list[i]`. A member name that cannot be a plain path segment, which no
+profile has, is bracketed and quoted instead, as in `["a.b"]`, so that one
+path always names one member.
+
 Profiles can also be read from stdin, as a single profile or a JSON array of
 profiles:
 

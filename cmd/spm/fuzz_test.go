@@ -19,6 +19,7 @@ package main
 import (
 	"encoding/json"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -46,6 +47,10 @@ func addJSONFuzzSeeds(f *testing.F) {
 		`[]`,
 		`[[[[[[[[[[1]]]]]]]]]]`,
 		`{"a":{"a":{"a":{"a":1,"A":2}}}}`,
+		// Two repeated members in different objects whose paths would
+		// collide if a name that is not a plain segment were written bare.
+		`{"":{"":1,"":2},"":3}`,
+		`{"a":{"b":1,"b":2},"a.b":0,"a.b":9}`,
 		`{"ſ":1,"s":2}`,
 		// An escape hides the member name from the raw bytes: the scan
 		// reports the decoded name, which the document does not spell.
@@ -112,13 +117,67 @@ func namesAppearLiterally(raw string) bool {
 	return utf8.ValidString(raw) && !strings.Contains(raw, `\`)
 }
 
-// lastPathSegment returns the member name a reported path ends in.
+// lastPathSegment returns the member name a reported path ends in. A name
+// that is not a plain segment is bracketed and quoted, and may hold a
+// bracket or a quote itself, so the path is walked from the left rather
+// than searched backwards for a delimiter. An array index unquotes to
+// nothing and leaves the member name before it, which is the one a reported
+// path ends in.
 func lastPathSegment(path string) string {
-	if idx := strings.LastIndexByte(path, '.'); idx >= 0 {
-		return path[idx+1:]
+	last := ""
+
+	for idx := 0; idx < len(path); {
+		if path[idx] == '[' {
+			start := idx
+			idx = skipBracketed(path, idx)
+
+			name, err := strconv.Unquote(path[start+1 : idx-1])
+			if err == nil {
+				last = name
+			}
+
+			continue
+		}
+
+		if path[idx] == '.' {
+			idx++
+		}
+
+		start := idx
+		for idx < len(path) && path[idx] != '.' && path[idx] != '[' {
+			idx++
+		}
+
+		last = path[start:idx]
 	}
 
-	return path
+	return last
+}
+
+// skipBracketed returns the index just past the bracketed segment starting
+// at idx, honoring the escapes inside a quoted member name.
+func skipBracketed(path string, idx int) int {
+	idx++
+
+	if idx < len(path) && path[idx] == '"' {
+		for idx++; idx < len(path) && path[idx] != '"'; idx++ {
+			if path[idx] == '\\' {
+				idx++
+			}
+		}
+
+		idx++
+	}
+
+	for idx < len(path) && path[idx] != ']' {
+		idx++
+	}
+
+	if idx < len(path) {
+		idx++
+	}
+
+	return idx
 }
 
 // foldsMemberNames reports whether any object of the document holds two
