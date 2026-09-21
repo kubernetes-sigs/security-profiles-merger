@@ -75,84 +75,119 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
+// typeConflict names two profile types that cannot both be right for the
+// same run.
+type typeConflict struct {
+	// first and second name the two types, in the order they were found.
+	first, second string
+	// input names the input carrying members of both types, and is empty
+	// when the two types come from different inputs.
+	input string
+}
+
 // detectProfileType infers the profile type from the members the inputs
 // carry. Every input is inspected, not only the first: merging profiles of
 // different types would drop whatever the chosen type has no field for, so a
 // disagreement is reported rather than resolved. An input whose type cannot
 // be told apart, such as an empty object, defers to the others.
 //
+// A single input carrying members of two types is a disagreement too:
+// picking one of them by a fixed precedence would validate or merge a
+// profile that is mostly empty, and report success for it. Such an input is
+// reported the same way as two inputs that disagree.
+//
 // The first result is the detected type, empty when no input reveals one.
-// The second names the type of a conflicting input, and is empty when the
-// inputs agree; when it is set, the first result is the type it conflicts
-// with.
-func detectProfileType(data [][]byte) (string, string) {
+// The second describes a conflict, and is nil when the inputs agree on one
+// type.
+func detectProfileType(inputs []profileInput) (string, *typeConflict) {
 	detected := ""
 
-	for _, raw := range data {
-		current := detectOneProfileType(raw)
-		if current == "" {
+	for _, input := range inputs {
+		current := detectOneProfileType(input.data)
+		if len(current) > 1 {
+			return current[0], &typeConflict{
+				first:  current[0],
+				second: current[1],
+				input:  input.name,
+			}
+		}
+
+		if len(current) == 0 {
 			continue
 		}
 
 		if detected == "" {
-			detected = current
+			detected = current[0]
 
 			continue
 		}
 
-		if current != detected {
-			return detected, current
+		if current[0] != detected {
+			return detected, &typeConflict{
+				first: detected, second: current[0], input: "",
+			}
 		}
 	}
 
-	return detected, ""
+	return detected, nil
 }
 
 // checkParsable decodes every input as a JSON object, the shape all profile
 // types share, so that malformed input is reported as a parse error rather
 // than as a type that cannot be detected.
-func checkParsable(data [][]byte) error {
-	for idx, raw := range data {
+func checkParsable(inputs []profileInput) error {
+	for _, input := range inputs {
 		var fields map[string]json.RawMessage
 
-		err := json.Unmarshal(raw, &fields)
+		err := json.Unmarshal(input.data, &fields)
 		if err != nil {
-			return fmt.Errorf("parsing profile %d: %w", idx, err)
+			return fmt.Errorf("parsing %s: %w", input.name, err)
 		}
 	}
 
 	return nil
 }
 
-func detectOneProfileType(raw []byte) string {
+// detectKeys lists the members that reveal each profile type, in the order
+// the types are reported.
+//
+//nolint:gochecknoglobals // immutable lookup table
+var detectKeys = []struct {
+	profileType string
+	keys        []string
+}{
+	{typeSeccomp, []string{"defaultAction"}},
+	{typeLandlock, []string{
+		"handledAccessFs", "handledAccessNet", "pathRules", "netRules", "scoped",
+	}},
+	{typeAppArmor, []string{"executable", "filesystem", "capability", "network"}},
+}
+
+// detectOneProfileType returns every profile type whose members the document
+// carries, in detectKeys order. More than one means the document is
+// ambiguous: returning only the first would silently drop the members of the
+// others, so the caller reports it instead.
+func detectOneProfileType(raw []byte) []string {
 	var fields map[string]json.RawMessage
 
 	err := json.Unmarshal(raw, &fields)
 	if err != nil {
-		return ""
+		return nil
 	}
 
-	if _, ok := fields["defaultAction"]; ok {
-		return typeSeccomp
-	}
+	var found []string
 
-	for _, key := range []string{
-		"handledAccessFs", "handledAccessNet", "pathRules", "netRules", "scoped",
-	} {
-		if _, ok := fields[key]; ok {
-			return typeLandlock
+	for _, candidate := range detectKeys {
+		for _, key := range candidate.keys {
+			if _, ok := fields[key]; ok {
+				found = append(found, candidate.profileType)
+
+				break
+			}
 		}
 	}
 
-	for _, key := range []string{
-		"executable", "filesystem", "capability", "network",
-	} {
-		if _, ok := fields[key]; ok {
-			return typeAppArmor
-		}
-	}
-
-	return ""
+	return found
 }
 
 // flushOutput writes a command's result to stdout, or to the output file when
@@ -170,9 +205,7 @@ func flushOutput(path string, content []byte, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	const ownerReadWrite = 0o600
-
-	err := os.WriteFile(filepath.Clean(path), content, ownerReadWrite)
+	err := writeOutputFile(filepath.Clean(path), content)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "error: writing output file: %v\n", err)
 
@@ -180,6 +213,85 @@ func flushOutput(path string, content []byte, stdout, stderr io.Writer) int {
 	}
 
 	return 0
+}
+
+// prepareOutputFile sets the mode of a regular output file and empties it,
+// in that order. A file that is not regular is left alone: its mode belongs
+// to whoever created it, and truncating a device or a FIFO is not meaningful.
+func prepareOutputFile(file *os.File) error {
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat: %w", err)
+	}
+
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+
+	err = chmodOutput(file)
+	if err != nil {
+		return fmt.Errorf("setting permissions: %w", err)
+	}
+
+	err = file.Truncate(0)
+	if err != nil {
+		return fmt.Errorf("truncate: %w", err)
+	}
+
+	return nil
+}
+
+// ownerReadWrite is the mode an output file is left with: a merged profile
+// is the security policy of a workload, so it is not readable by everyone on
+// the node by default.
+const ownerReadWrite = 0o600
+
+// writeOutputFile writes content to path with the mode above. A symlink at
+// path is refused rather than followed, so that --output cannot be aimed
+// through one at a file elsewhere, and the mode is set explicitly on a
+// regular file: it applies to one that already exists, which the open mode
+// does not, and is not narrowed further by the umask.
+//
+// Only a regular file is chmoded and truncated. --output may name a device
+// or a FIFO, and "> /dev/null to check the exit code" is an ordinary way to
+// run this; taking a node's /dev/null to mode 0600, which running as root
+// would do, is not something writing a profile should be able to cause. The
+// mode is set before the file is truncated so that a chmod that fails
+// leaves the previous contents in place.
+func writeOutputFile(path string, content []byte) error {
+	// The path is the --output value, which is the caller's own choice;
+	// what needs guarding is that it is not followed through a symlink.
+	file, err := os.OpenFile( //nolint:gosec // the caller named this path
+		path, os.O_WRONLY|os.O_CREATE|oNoFollow, ownerReadWrite,
+	)
+	if err != nil {
+		if isSymlinkRefusal(err) {
+			return fmt.Errorf("open: %w: %s is a symbolic link", err, path)
+		}
+
+		return fmt.Errorf("open: %w", err)
+	}
+
+	err = prepareOutputFile(file)
+	if err != nil {
+		_ = file.Close()
+
+		return err
+	}
+
+	_, err = file.Write(content)
+	if err != nil {
+		_ = file.Close()
+
+		return fmt.Errorf("write: %w", err)
+	}
+
+	err = file.Close()
+	if err != nil {
+		return fmt.Errorf("close: %w", err)
+	}
+
+	return nil
 }
 
 func validateFormat(format string, stderr io.Writer) int {
@@ -271,7 +383,14 @@ func runVersion(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	_, _ = fmt.Fprintf(stdout, "spm %s\n", resolveVersion(version, debug.ReadBuildInfo))
+	// A write failure is reported like every other one, so that a full disk
+	// or a closed pipe does not look like a successful run.
+	_, err := fmt.Fprintf(stdout, "spm %s\n", resolveVersion(version, debug.ReadBuildInfo))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "error: writing output: %v\n", err)
+
+		return 1
+	}
 
 	return 0
 }

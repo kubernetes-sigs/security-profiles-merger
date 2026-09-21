@@ -96,7 +96,7 @@ func fuzzProfile(
 		specs.ActAllow,
 	}
 
-	defaultAction := actions[int(defaultIdx)%len(actions)]
+	defaultAction := fuzzDefault(int(defaultIdx), actions)
 	act1 := actions[int(action1Idx)%len(actions)]
 	act2 := actions[int(action2Idx)%len(actions)]
 
@@ -107,6 +107,9 @@ func fuzzProfile(
 	if name2 == "" {
 		name2 = syscallWrite
 	}
+
+	name1 = notifiableName(act1, name1)
+	name2 = notifiableName(act2, name2)
 
 	if name2 == name1 {
 		name2 = name1 + "_alt"
@@ -151,12 +154,54 @@ func fuzzProfile(
 		Syscalls:      []specs.LinuxSyscall{sc1, sc2},
 	}
 
+	profile.ListenerPath = listenerFor(act1, act2)
+
 	if defaultErrno != 0 {
 		val := uint(defaultErrno)
 		profile.DefaultErrnoRet = &val
 	}
 
 	return profile
+}
+
+// fuzzDefault draws a default action, substituting TRACE for SCMP_ACT_NOTIFY.
+// runc refuses a profile that notifies by default, and Validate rejects it
+// with ErrNotifyUnsupported, so a drawn one would fail every merge rather
+// than exercise it. Substituting keeps the index space the stored corpus was
+// found against, which dropping NOTIFY from the table would shift.
+func fuzzDefault(index int, actions []specs.LinuxSeccompAction) specs.LinuxSeccompAction {
+	action := actions[index%len(actions)]
+	if action == specs.ActNotify {
+		return specs.ActTrace
+	}
+
+	return action
+}
+
+// fuzzListener is the listener a generated profile names when it notifies.
+const fuzzListener = "/run/fuzz-notify.sock"
+
+// listenerFor returns the listener a profile with these entry actions needs:
+// a filter that notifies has somewhere to notify, or runc refuses to create
+// the container for it.
+func listenerFor(actions ...specs.LinuxSeccompAction) string {
+	if slices.Contains(actions, specs.ActNotify) {
+		return fuzzListener
+	}
+
+	return ""
+}
+
+// notifiableName keeps SCMP_ACT_NOTIFY off the write syscall, which runc
+// refuses and Validate rejects with it. The syscall name is arbitrary here,
+// so an entry that draws the combination notifies on writev instead, which
+// keeps the entry in the merge rather than losing the whole input.
+func notifiableName(action specs.LinuxSeccompAction, name string) string {
+	if action == specs.ActNotify && name == syscallWrite {
+		return "writev"
+	}
+
+	return name
 }
 
 func addFuzzSeeds(f *testing.F) {
@@ -818,9 +863,13 @@ func FuzzSyscallListsMatchProfileMerge(f *testing.F) {
 
 		// SCMP_ACT_KILL_PROCESS is the most restrictive action, so it
 		// satisfies the assumption the bare-list functions make.
+		// The listener keeps SCMP_ACT_NOTIFY entries in the profile merge:
+		// without one, Intersect degrades them and Union refuses, neither
+		// of which the bare-list functions model.
 		withDefault := func(syscalls []specs.LinuxSyscall) *specs.LinuxSeccomp {
 			return &specs.LinuxSeccomp{
 				DefaultAction: specs.ActKillProcess,
+				ListenerPath:  fuzzListener,
 				Syscalls:      syscalls,
 			}
 		}

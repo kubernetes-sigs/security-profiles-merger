@@ -1,0 +1,34 @@
+{
+  "executable": {
+    "allowedExecutables": [
+      "/usr/bin/env"
+    ],
+    "allowedLibraries": [
+      "/usr/lib/libc.so"
+    ]
+  },
+  "filesystem": {
+    "readOnlyPaths": [
+      "/etc/ssl/certs"
+    ],
+    "writeOnlyPaths": [
+      "/var/log/app.log"
+    ],
+    "readWritePaths": [
+      "/tmp"
+    ]
+  },
+  "network": {
+    "allowRaw": false,
+    "allowedProtocols": {
+      "allowTcp": true,
+      "allowUdp": false
+    }
+  },
+  "capability": {
+    "allowedCapabilities": [
+      "CHOWN",
+      "NET_ADMIN"
+    ]
+  }
+}

@@ -37,7 +37,8 @@ func TestPolarityOfUnknownFlag(t *testing.T) {
 }
 
 // TestKeepFlagPolarities pins the four polarity and direction combinations
-// against the one-sided and two-sided cases.
+// against the one-sided and two-sided cases, with the listener in the left
+// profile.
 func TestKeepFlagPolarities(t *testing.T) {
 	t.Parallel()
 
@@ -72,14 +73,60 @@ func TestKeepFlagPolarities(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := keepFlag(testCase.polarity, true, false, testCase.intersect)
+			got := keepFlag(testCase.polarity, true, false, testCase.intersect, true)
 			if got != testCase.wantLeft {
 				t.Errorf("keepFlag(left only) = %t, want %t", got, testCase.wantLeft)
 			}
 
-			got = keepFlag(testCase.polarity, true, true, testCase.intersect)
+			got = keepFlag(testCase.polarity, true, true, testCase.intersect, true)
 			if got != testCase.wantBoth {
 				t.Errorf("keepFlag(both) = %t, want %t", got, testCase.wantBoth)
+			}
+		})
+	}
+}
+
+// TestKeepFlagListenerFollowsTheListener pins the listener flag to the
+// profile the listener comes from: a merge takes both from the first profile
+// that sets a listenerPath, so the flag of a profile that provides no
+// listener must not survive on its own.
+func TestKeepFlagListenerFollowsTheListener(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		name             string
+		inLeft, inRight  bool
+		listenerFromLeft bool
+		want             bool
+	}{
+		{name: "left has both", inLeft: true, inRight: false, listenerFromLeft: true, want: true},
+		{
+			name:   "left has the flag, right the listener",
+			inLeft: true, inRight: false, listenerFromLeft: false, want: false,
+		},
+		{
+			name: "right has both", inLeft: false, inRight: true,
+			listenerFromLeft: false, want: true,
+		},
+		{
+			name:   "right has the flag, left the listener",
+			inLeft: false, inRight: true, listenerFromLeft: true, want: false,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			for _, intersect := range []bool{true, false} {
+				got := keepFlag(
+					flagListener, testCase.inLeft, testCase.inRight,
+					intersect, testCase.listenerFromLeft,
+				)
+				if got != testCase.want {
+					t.Errorf(
+						"keepFlag(listener, intersect=%t) = %t, want %t",
+						intersect, got, testCase.want,
+					)
+				}
 			}
 		})
 	}

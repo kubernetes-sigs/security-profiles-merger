@@ -20,6 +20,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"sigs.k8s.io/security-profiles-merger/landlock"
@@ -36,8 +37,8 @@ func TestIntersectEmpty(t *testing.T) {
 	t.Parallel()
 
 	_, err := landlock.Intersect()
-	if err == nil {
-		t.Fatal("expected error for empty profiles")
+	if !errors.Is(err, landlock.ErrNoProfiles) {
+		t.Fatalf("Intersect() = %v, want ErrNoProfiles", err)
 	}
 }
 
@@ -45,8 +46,8 @@ func TestIntersectNil(t *testing.T) {
 	t.Parallel()
 
 	_, err := landlock.Intersect(nil)
-	if err == nil {
-		t.Fatal("expected error for nil profile")
+	if !errors.Is(err, landlock.ErrNilProfile) {
+		t.Fatalf("Intersect(nil) = %v, want ErrNilProfile", err)
 	}
 }
 
@@ -363,12 +364,12 @@ func TestIntersectHandledAccessFSUnion(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	// The result is documented to come out sorted, so the want list is
+	// compared as it is rather than after sorting the result.
 	want := []landlock.FSAccessRight{
 		landlock.FSAccessReadFile,
 		landlock.FSAccessWriteFile,
 	}
-
-	slices.Sort(result.HandledAccessFS)
 
 	if !slices.Equal(result.HandledAccessFS, want) {
 		t.Errorf(
@@ -448,8 +449,8 @@ func TestUnionEmpty(t *testing.T) {
 	t.Parallel()
 
 	_, err := landlock.Union()
-	if err == nil {
-		t.Fatal("expected error for empty profiles")
+	if !errors.Is(err, landlock.ErrNoProfiles) {
+		t.Fatalf("Union() = %v, want ErrNoProfiles", err)
 	}
 }
 
@@ -457,8 +458,8 @@ func TestUnionNil(t *testing.T) {
 	t.Parallel()
 
 	_, err := landlock.Union(nil)
-	if err == nil {
-		t.Fatal("expected error for nil profile")
+	if !errors.Is(err, landlock.ErrNilProfile) {
+		t.Fatalf("Union(nil) = %v, want ErrNilProfile", err)
 	}
 }
 
@@ -839,13 +840,17 @@ func TestNilProfileAtIndex(t *testing.T) {
 	}
 
 	_, err := landlock.Intersect(valid, nil)
-	if err == nil {
-		t.Fatal("expected error for nil profile at index 1")
+	if !errors.Is(err, landlock.ErrNilProfile) {
+		t.Fatalf("Intersect(valid, nil) = %v, want ErrNilProfile", err)
+	}
+
+	if !strings.Contains(err.Error(), "profile 1") {
+		t.Errorf("Intersect error %q does not name the input index", err)
 	}
 
 	_, err = landlock.Union(valid, nil)
-	if err == nil {
-		t.Fatal("expected error for nil profile at index 1 (union)")
+	if !errors.Is(err, landlock.ErrNilProfile) {
+		t.Fatalf("Union(valid, nil) = %v, want ErrNilProfile", err)
 	}
 }
 
@@ -1073,8 +1078,6 @@ func TestIntersectDisjointPathPartiallyHandled(t *testing.T) {
 		landlock.FSAccessWriteFile,
 	}
 
-	slices.Sort(result.PathRules[0].AccessFS)
-
 	if !slices.Equal(result.PathRules[0].AccessFS, wantAccess) {
 		t.Errorf(
 			"AccessFS = %v, want %v",
@@ -1243,6 +1246,84 @@ func TestIntersectAssociativity(t *testing.T) {
 	}
 
 	assertLandlockAssociative(t, landlock.Intersect, profileA, profileB, profileC)
+}
+
+// TestIntersectAssociativityWithRefer covers the fixtures the test above
+// never had: a refer grant used to make the fold keep a rule in one grouping
+// that never appeared in the other, because the redundancy pruning stopped
+// as soon as any rule granted refer. The result is the same ruleset either
+// way, so the output must be the same too.
+func TestIntersectAssociativityWithRefer(t *testing.T) {
+	t.Parallel()
+
+	refer := fsRights{landlock.FSAccessRefer}
+	readRefer := fsRights{landlock.FSAccessReadFile, landlock.FSAccessRefer}
+	dirRefer := fsRights{landlock.FSAccessReadDir, landlock.FSAccessRefer}
+	all := fsRights{
+		landlock.FSAccessReadFile, landlock.FSAccessReadDir, landlock.FSAccessRefer,
+	}
+
+	profileA := fsProfile(all, landlock.PathRule{Path: "/", AccessFS: readRefer})
+	profileB := fsProfile(dirRefer,
+		landlock.PathRule{Path: "/", AccessFS: refer},
+		landlock.PathRule{Path: "/a", AccessFS: refer},
+	)
+	profileC := fsProfile(dirRefer, landlock.PathRule{Path: "/", AccessFS: dirRefer})
+
+	for name, profile := range map[string]*landlock.Profile{
+		"a": profileA, "b": profileB, "c": profileC,
+	} {
+		err := landlock.ValidateStrict(profile)
+		if err != nil {
+			t.Fatalf("ValidateStrict(%s) = %v, want nil", name, err)
+		}
+	}
+
+	assertLandlockAssociative(t, landlock.Intersect, profileA, profileB, profileC)
+
+	// The same holds whatever order a caller folds them in, so a runtime
+	// merging the same set twice gets the same bytes.
+	assertFoldOrderIndependent(t, landlock.Intersect, profileA, profileB, profileC)
+	assertFoldOrderIndependent(t, landlock.Union, profileA, profileB, profileC)
+}
+
+// assertFoldOrderIndependent checks that folding the same profiles in any
+// order yields the same result.
+func assertFoldOrderIndependent(
+	t *testing.T,
+	mergeFn func(...*landlock.Profile) (*landlock.Profile, error),
+	profileA, profileB, profileC *landlock.Profile,
+) {
+	t.Helper()
+
+	orders := [][]*landlock.Profile{
+		{profileA, profileB, profileC},
+		{profileA, profileC, profileB},
+		{profileB, profileA, profileC},
+		{profileB, profileC, profileA},
+		{profileC, profileA, profileB},
+		{profileC, profileB, profileA},
+	}
+
+	var want string
+
+	for idx, order := range orders {
+		result, err := mergeFn(order...)
+		if err != nil {
+			t.Fatalf("merge: %v", err)
+		}
+
+		got := landlock.FormatProfile(result)
+		if idx == 0 {
+			want = got
+
+			continue
+		}
+
+		if got != want {
+			t.Errorf("merge order %d = %s, want %s", idx, got, want)
+		}
+	}
 }
 
 func TestUnionAssociativity(t *testing.T) {
@@ -1459,10 +1540,7 @@ func TestIntersectDeduplicatesNetRules(t *testing.T) {
 	want := []landlock.NetAccessRight{landlock.NetAccessBindTCP, landlock.NetAccessConnectTCP}
 	slices.Sort(want)
 
-	got := slices.Clone(result.NetRules[0].AccessNet)
-	slices.Sort(got)
-
-	if !slices.Equal(got, want) {
+	if got := result.NetRules[0].AccessNet; !slices.Equal(got, want) {
 		t.Errorf("expected access %v, got %v", want, got)
 	}
 }
@@ -1489,10 +1567,7 @@ func TestIntersectDeduplicatesScoped(t *testing.T) {
 
 	want := []landlock.ScopeRight{landlock.ScopeAbstractUnixSocket, landlock.ScopeSignal}
 
-	got := slices.Clone(result.Scoped)
-	slices.Sort(got)
-
-	if !slices.Equal(got, want) {
+	if got := result.Scoped; !slices.Equal(got, want) {
 		t.Errorf("expected scoped %v, got %v", want, got)
 	}
 }

@@ -64,6 +64,19 @@ func TestCondHolds(t *testing.T) {
 			specs.LinuxSeccompArg{Index: 0, Value: 0xf0, ValueTwo: 0x10, Op: specs.OpMaskedEqual},
 			0x2f, false,
 		},
+		// The datum is masked as well, so its bits outside the mask are
+		// ignored rather than making the condition unsatisfiable. The cases
+		// above cannot tell: their datum is a subset of the mask.
+		{
+			"masked ignores datum bits outside the mask",
+			specs.LinuxSeccompArg{Index: 0, Value: 0xf0, ValueTwo: 0x110, Op: specs.OpMaskedEqual},
+			0x1f, true,
+		},
+		{
+			"masked compares datum bits inside the mask",
+			specs.LinuxSeccompArg{Index: 0, Value: 0xf0, ValueTwo: 0x110, Op: specs.OpMaskedEqual},
+			0x2f, false,
+		},
 		{"unknown op never holds", cond("SCMP_CMP_BOGUS", 3), 3, false},
 	}
 

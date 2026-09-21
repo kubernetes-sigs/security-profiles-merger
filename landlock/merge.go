@@ -48,8 +48,36 @@ var (
 // honored against a rule on "/" from the other profile and the result
 // carries the narrower path. Network rules match by exact port. A path rule
 // loses the rights that rules on its ancestors in the result already grant,
-// and is dropped when none remain, unless a rule of the result grants
-// FSAccessRefer, in which case the rules are kept as they are.
+// and is dropped when none remain; a rule granting FSAccessRefer is kept as
+// it is, because the kernel decides a move across directories from the
+// rights each directory collects up to its mount point.
+//
+// FSAccessRefer does not inherit here: the result grants it for a path only
+// when every input has a rule on that exact path granting it. The rights an
+// input collects for a move or link stop at the mount point, so a refer
+// grant on an ancestor need not reach a descendant that lies in another
+// mount, and lowering it onto that descendant would permit a rename the
+// input denies.
+//
+// # Rule paths may come from an untrusted input
+//
+// The result carries the narrower of two rule paths, so a rule of the result
+// can sit on a path only one input named while the access it grants comes
+// from a rule of another input on an ancestor of that path. Resolution here
+// is textual, but the kernel binds a rule to the file the path resolves to,
+// so where the deeper path is a symlink or a bind mount leaving the ancestor
+// hierarchy, the result grants that access somewhere the ancestor's rule
+// never covered: the merged ruleset is then more permissive than the input
+// it came from, on a path that input did not choose. Where one input is an
+// OCI artifact and the other a node baseline, the artifact's author picks
+// those paths and the container may own the files they name.
+//
+// A caller that cannot rule this out should either ask LoweredRulePaths
+// which result rules carry a lowered grant and open exactly those without
+// leaving their declared hierarchy (openat2 with RESOLVE_BENEATH and
+// RESOLVE_NO_SYMLINKS relative to the covering ancestor), or skip the merge
+// and enforce the two rulesets as two landlock_restrict_self layers, which
+// the kernel intersects on the resolved files rather than on path strings.
 //
 // Each input is validated as Validate does, except that duplicate rules and
 // rights are merged rather than rejected; errors name the input's own rule
@@ -247,7 +275,7 @@ func intersectTwo(left, right *Profile) *Profile {
 			effectiveHandledFS(left.HandledAccessFS),
 			effectiveHandledFS(right.HandledAccessFS),
 			pathRuleKey, pathRuleAccess, newPathRule,
-			hierarchyAccess,
+			effectiveFSAccess,
 		),
 		NetRules: intersectRules(
 			left.NetRules, right.NetRules,
@@ -397,6 +425,40 @@ func hierarchyAccess(
 	return ancestorAccess(pathAncestors(path), rules)
 }
 
+// effectiveFSAccess returns the rights a profile grants for a path in an
+// intersection: the rights of the path's own rule and of its ancestors, but
+// FSAccessRefer only when the rule on the path itself grants it.
+//
+// The kernel checks a move or link across directories by comparing the
+// rights each parent collects from rules up to its mount point, so a refer
+// grant on an ancestor does not reach a descendant that lies in another
+// mount. Taking such a grant as permission at the descendant would let the
+// intersection write a refer rule there and allow a rename the input denies
+// whenever a mount boundary sits between the two paths. Resolving refer at
+// the rule path itself is the same reasoning minimizePathRules applies in
+// the other direction, and it only ever grants less.
+//
+// What it does not cover is a key both inputs grant refer on while the
+// other rights of the result there come from an ancestor rule of one input:
+// the kernel collects the whole mask for the refer decision, so those
+// lowered rights can decide a move the ancestor's own mount could not.
+// LoweredRulePaths reports such a key, and resolving it beneath its
+// covering ancestor rules the case out.
+func effectiveFSAccess(
+	path string, rules map[string][]FSAccessRight,
+) []FSAccessRight {
+	access := hierarchyAccess(path, rules)
+	if slices.Contains(rules[path], FSAccessRefer) {
+		return access
+	}
+
+	// hierarchyAccess owns the slice it returns, so this cannot write into
+	// a rule of the input.
+	return slices.DeleteFunc(access, func(right FSAccessRight) bool {
+		return right == FSAccessRefer
+	})
+}
+
 func ancestorAccess(
 	ancestors []string, rules map[string][]FSAccessRight,
 ) []FSAccessRight {
@@ -447,13 +509,20 @@ func pathAncestors(path string) []string {
 // target instead, and dropping its rights only removes access, so
 // intersection may minimize but union must not.
 //
-// Rules are left as they are when any of them grants FSAccessRefer: the
-// kernel checks a move or link across directories by comparing the rights
-// each parent collects from rules up to its mount point, so a right a
-// descendant repeats can decide that check when its ancestor rule lies above
-// the mount point. Without a refer grant such a move is always denied.
+// A rule granting FSAccessRefer is kept as it is: the kernel checks a move
+// or link across directories by comparing the rights each parent collects
+// from rules up to its mount point, so a right such a rule repeats can
+// decide that check when the ancestor granting it lies above the mount
+// point. Other rules are minimized even when the result grants refer
+// elsewhere, which keeps the output of a fold independent of how the inputs
+// were grouped. What that can cost is a move into a directory whose refer
+// grant sits below a mount point while the repeated right comes from above
+// it, and losing it denies a move rather than allowing one.
 func minimizePathRules(rules []PathRule) []PathRule {
-	if len(rules) < 2 || rulesGrant(rules, FSAccessRefer) {
+	// A single rule has no ancestor among the rules to inherit from.
+	const minRules = 2
+
+	if len(rules) < minRules {
 		return rules
 	}
 
@@ -461,6 +530,12 @@ func minimizePathRules(rules []PathRule) []PathRule {
 	result := make([]PathRule, 0, len(rules))
 
 	for _, rule := range rules {
+		if slices.Contains(rule.AccessFS, FSAccessRefer) {
+			result = append(result, rule)
+
+			continue
+		}
+
 		inherited := toSet(ancestorAccess(pathAncestors(rule.Path)[1:], byPath))
 
 		kept := make([]FSAccessRight, 0, len(rule.AccessFS))
@@ -477,6 +552,101 @@ func minimizePathRules(rules []PathRule) []PathRule {
 	}
 
 	return result
+}
+
+// LoweredRulePaths reports the rule paths of a merge result that carry
+// access an input granted only on an ancestor path. A path is reported when
+// some input has no rule on it, yet a rule of that input on one of its
+// ancestors grants a right the result grants there: the merge lowered that
+// input's grant onto the deeper path, which another input named.
+//
+// The paths are cleaned as the merge cleans them, reported once each and
+// sorted. A nil result, an input this package would reject, or a path no
+// grant was lowered onto yields nothing; the function validates nothing and
+// returns no error.
+//
+// Intersect documents why this matters: hierarchy resolution is textual,
+// while the kernel binds a rule to the file its path resolves to, so a
+// lowered grant lands wherever the deeper path resolves, which may be
+// outside the hierarchy the ancestor rule covered and may be chosen by
+// whoever wrote the untrusted input. A caller can open exactly these paths
+// without leaving their declared hierarchy (openat2 with RESOLVE_BENEATH
+// and RESOLVE_NO_SYMLINKS relative to the covering ancestor), refuse a
+// profile that has any, or enforce the inputs as separate Landlock layers
+// instead of merging them. For a Union result the answer is informational:
+// union grants what any input grants, and the input naming the path granted
+// the access there itself.
+func LoweredRulePaths(result *Profile, inputs ...*Profile) []string {
+	if result == nil || len(result.PathRules) == 0 {
+		return nil
+	}
+
+	resultRules := cleanedRuleMap(result.PathRules)
+
+	var lowered []string
+
+	for _, input := range inputs {
+		if input == nil {
+			continue
+		}
+
+		inputRules := cleanedRuleMap(input.PathRules)
+
+		for path, access := range resultRules {
+			if loweredAt(path, access, inputRules) {
+				lowered = append(lowered, path)
+			}
+		}
+	}
+
+	slices.Sort(lowered)
+
+	return nilIfEmpty(slices.Compact(lowered))
+}
+
+// cleanedRuleMap maps every rule's cleaned path to the rights its rules
+// grant, so a profile that was not normalized, where "/etc" and "/etc/" are
+// two rules, is read as the merge reads it.
+func cleanedRuleMap(rules []PathRule) map[string][]FSAccessRight {
+	byPath := make(map[string][]FSAccessRight, len(rules))
+
+	for _, rule := range rules {
+		path := cleanPath(rule.Path)
+		byPath[path] = merge.UnionSlice(byPath[path], rule.AccessFS)
+	}
+
+	return byPath
+}
+
+// loweredAt reports whether the input grants one of the rights only on a
+// strict ancestor of the path. A right the input's own rule on the path
+// grants is not lowered, and neither is one no rule of the input grants at
+// all: that right reached the result from another input.
+func loweredAt(
+	path string, access []FSAccessRight, inputRules map[string][]FSAccessRight,
+) bool {
+	direct := toSet(inputRules[path])
+
+	// The first entry is the path itself, so anything beyond it is a
+	// strict ancestor and a path without one can carry nothing lowered.
+	ancestors := pathAncestors(path)
+	if len(ancestors) == 0 {
+		return false
+	}
+
+	inherited := toSet(ancestorAccess(ancestors[1:], inputRules))
+
+	for _, right := range access {
+		if _, ok := direct[right]; ok {
+			continue
+		}
+
+		if _, ok := inherited[right]; ok {
+			return true
+		}
+	}
+
+	return false
 }
 
 // unionRules is a generic union for keyed rule slices.

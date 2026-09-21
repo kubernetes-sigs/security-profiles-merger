@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -44,15 +45,23 @@ const (
 	testEtcPath     = "/etc"
 	testSyscallRead = "read"
 
-	testUnknownType     = "unknown type"
-	testUnknownFormat   = "unknown format"
-	testNoInput         = "no input"
-	testErrorColon      = "error:"
-	testExactlyTwo      = "exactly 2"
-	testParsingProfile0 = "error: parsing profile 0: "
-	testdataSeccompA    = "testdata/seccomp_a.json"
-	testdataSeccompB    = "testdata/seccomp_b.json"
+	flagArch = "--arch"
+
+	testUnknownType   = "unknown type"
+	testUnknownFormat = "unknown format"
+	testNoInput       = "no input"
+	testErrorColon    = "error:"
+	testExactlyTwo    = "exactly 2"
+	testdataSeccompA  = "testdata/seccomp_a.json"
+	testdataSeccompB  = "testdata/seccomp_b.json"
 )
+
+// parsingError is the prefix of the error a document that cannot be decoded
+// produces. It names the input rather than its position among the
+// arguments, which a "-" expanding a stdin array makes hard to count.
+func parsingError(name string) string {
+	return "error: parsing " + name + ": "
+}
 
 func TestNoArgs(t *testing.T) {
 	t.Parallel()
@@ -128,6 +137,42 @@ func runCapture(
 	code := run(args, stdin, &stdoutBuf, &stderrBuf)
 
 	return code, stdoutBuf.String(), stderrBuf.String()
+}
+
+// rawInputs wraps raw documents the way readInputs would, naming them so
+// that a test can recognize them in an error or warning.
+func rawInputs(docs ...string) []profileInput {
+	inputs := make([]profileInput, len(docs))
+	for idx, doc := range docs {
+		inputs[idx] = profileInput{
+			name: "profile" + strconv.Itoa(idx) + ".json",
+			data: []byte(doc),
+		}
+	}
+
+	return inputs
+}
+
+// inputData returns the raw documents of inputs, for an assertion that only
+// cares about the bytes.
+func inputData(inputs []profileInput) []string {
+	data := make([]string, len(inputs))
+	for idx, input := range inputs {
+		data[idx] = string(input.data)
+	}
+
+	return data
+}
+
+// inputNames returns the source names of inputs, for an assertion about how
+// an error or warning would identify them.
+func inputNames(inputs []profileInput) []string {
+	names := make([]string, len(inputs))
+	for idx, input := range inputs {
+		names[idx] = input.name
+	}
+
+	return names
 }
 
 func writeTemp(t *testing.T, content string) string {

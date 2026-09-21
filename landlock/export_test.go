@@ -38,10 +38,6 @@ func isAncestorOrSelf(ancestor, path string) bool {
 	return strings.HasPrefix(path, ancestor+"/")
 }
 
-// CleanPath exposes cleanPath, so external tests compare paths the way the
-// merge does.
-var CleanPath = cleanPath
-
 // IsAncestorOrSelf exposes isAncestorOrSelf to external tests so the fuzz
 // oracle evaluates path hierarchy exactly like the merge does.
 var IsAncestorOrSelf = isAncestorOrSelf

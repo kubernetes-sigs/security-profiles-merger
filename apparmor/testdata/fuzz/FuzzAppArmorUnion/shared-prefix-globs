@@ -1,0 +1,13 @@
+go test fuzz v1
+uint64(4096)
+string("/shared/*1")
+string("/shared/*2")
+bool(true)
+bool(true)
+bool(false)
+uint64(4096)
+string("/shared/f1")
+string("/shared/f2")
+bool(false)
+bool(true)
+bool(true)

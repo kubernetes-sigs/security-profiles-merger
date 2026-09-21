@@ -111,20 +111,43 @@ func TestIntersectSingleProfile(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(result.Capabilities.AllowedCapabilities) != 2 {
-		t.Errorf("expected 2 capabilities, got %d", len(result.Capabilities.AllowedCapabilities))
-	}
-
-	if len(result.Executable.AllowedExecutables) != 1 {
-		t.Errorf("expected 1 executable, got %d", len(result.Executable.AllowedExecutables))
-	}
-
-	if len(result.Filesystem.ReadOnlyPaths) != 1 {
-		t.Errorf("expected 1 read-only path, got %d", len(result.Filesystem.ReadOnlyPaths))
-	}
+	assertProfileLists(t, result, map[string][]string{
+		"capabilities":     {capNetAdmin, capSysTime},
+		"executables":      {pathBinBash},
+		"libraries":        {pathLibC},
+		"read-only paths":  {pathEtcConfig},
+		"write-only paths": {pathVarLog},
+		"read-write paths": nil,
+	})
 
 	if !*result.Network.AllowRaw {
 		t.Error("AllowRaw should be true")
+	}
+
+	if *result.Network.Protocols.AllowTCP || !*result.Network.Protocols.AllowUDP {
+		t.Errorf("protocols = tcp:%v udp:%v, want tcp:false udp:true",
+			*result.Network.Protocols.AllowTCP, *result.Network.Protocols.AllowUDP)
+	}
+}
+
+// assertProfileLists compares every list of a profile against what it should
+// hold, named the way the field is.
+func assertProfileLists(t *testing.T, profile *apparmor.Profile, want map[string][]string) {
+	t.Helper()
+
+	got := map[string][]string{
+		"capabilities":     profile.Capabilities.AllowedCapabilities,
+		"executables":      profile.Executable.AllowedExecutables,
+		"libraries":        profile.Executable.AllowedLibraries,
+		"read-only paths":  profile.Filesystem.ReadOnlyPaths,
+		"write-only paths": profile.Filesystem.WriteOnlyPaths,
+		"read-write paths": profile.Filesystem.ReadWritePaths,
+	}
+
+	for name, expected := range want {
+		if !slices.Equal(got[name], expected) {
+			t.Errorf("%s = %v, want %v", name, got[name], expected)
+		}
 	}
 }
 
@@ -1300,6 +1323,38 @@ func assertProfileUnchanged(t *testing.T, profile *apparmor.Profile, snap *profi
 	}
 }
 
+// TestIntersectIsNotAssociativeWithGlobs pins the order dependence the
+// Intersect godoc describes. A pattern survives an intersection only where
+// the other side spells it alike or expands over it, so two patterns that
+// cover one literal without covering each other cancel out when they are
+// folded first, taking the literal with them. The associativity tests below
+// use capability-only profiles, where no such thing can happen.
+func TestIntersectIsNotAssociativeWithGlobs(t *testing.T) {
+	t.Parallel()
+
+	profileA := readOnly("/etc/passwd")
+	profileB := readOnly("/a/b/**", "/{etc,var}/**")
+	profileC := readOnly("/e[a-c]/f", "/etc/{**,x}", "/usr/**")
+
+	leftFold := mergeFs(t, apparmor.Intersect, profileA, profileB, profileC)
+	if !slices.Equal(leftFold.ReadOnlyPaths, []string{"/etc/passwd"}) {
+		t.Errorf("Intersect(a, b, c) = %q, want [/etc/passwd]", leftFold.ReadOnlyPaths)
+	}
+
+	inner, err := apparmor.Intersect(profileB, profileC)
+	if err != nil {
+		t.Fatalf("Intersect(b, c): %v", err)
+	}
+
+	grouped := mergeFs(t, apparmor.Intersect, profileA, inner)
+	if len(grouped.ReadOnlyPaths) != 0 {
+		t.Errorf("Intersect(a, Intersect(b, c)) = %q, want nothing", grouped.ReadOnlyPaths)
+	}
+}
+
+// TestIntersectAssociativity covers capability-only profiles, where the fold
+// order cannot matter. TestIntersectGroupingStaysSafe covers what happens
+// with patterns, where it does.
 func TestIntersectAssociativity(t *testing.T) {
 	t.Parallel()
 

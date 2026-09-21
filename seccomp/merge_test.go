@@ -18,7 +18,9 @@ package seccomp_test
 
 import (
 	"cmp"
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -43,8 +45,8 @@ func TestIntersectEmpty(t *testing.T) {
 	t.Parallel()
 
 	_, err := seccomp.Intersect()
-	if err == nil {
-		t.Fatal("expected error for empty profiles")
+	if !errors.Is(err, seccomp.ErrNoProfiles) {
+		t.Fatalf("expected ErrNoProfiles, got: %v", err)
 	}
 }
 
@@ -52,8 +54,8 @@ func TestIntersectNil(t *testing.T) {
 	t.Parallel()
 
 	_, err := seccomp.Intersect(nil)
-	if err == nil {
-		t.Fatal("expected error for nil profile")
+	if !errors.Is(err, seccomp.ErrNilProfile) {
+		t.Fatalf("expected ErrNilProfile, got: %v", err)
 	}
 }
 
@@ -463,14 +465,23 @@ func TestNilProfileAtIndex(t *testing.T) {
 
 	valid := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
 
-	_, err := seccomp.Intersect(valid, nil)
-	if err == nil {
-		t.Fatal("expected error for nil profile at index 1")
-	}
+	for _, merge := range []struct {
+		name  string
+		merge func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error)
+	}{
+		{"intersect", seccomp.Intersect},
+		{"union", seccomp.Union},
+	} {
+		_, err := merge.merge(valid, nil)
+		if !errors.Is(err, seccomp.ErrNilProfile) {
+			t.Errorf("%s: expected ErrNilProfile, got: %v", merge.name, err)
+		}
 
-	_, err = seccomp.Union(valid, nil)
-	if err == nil {
-		t.Fatal("expected error for nil profile at index 1 (union)")
+		// The message names the profile that is nil, which is what makes
+		// the error actionable for a caller holding a list of them.
+		if err == nil || !strings.Contains(err.Error(), "profile 1") {
+			t.Errorf("%s: error should name profile 1: %v", merge.name, err)
+		}
 	}
 }
 
@@ -2931,5 +2942,234 @@ func TestBareSyscallMergesSpellErrnoLikeProfiles(t *testing.T) {
 				t.Errorf("%v: ErrnoRet = %d, want unset", entry.Names, *entry.ErrnoRet)
 			}
 		}
+	}
+}
+
+// TestListenerComesFromTheProfileThatSetsIt pins the coupling between
+// SCMP_ACT_NOTIFY and the listener it needs. The action lattice can carry
+// the action in from either profile, so taking the listener from the left
+// unconditionally would produce a filter that notifies into nothing, which
+// runc refuses to create a container for.
+func TestListenerComesFromTheProfileThatSetsIt(t *testing.T) {
+	t.Parallel()
+
+	notifying := func(listener string) *specs.LinuxSeccomp {
+		return &specs.LinuxSeccomp{
+			DefaultAction:    specs.ActErrno,
+			ListenerPath:     listener,
+			ListenerMetadata: listener + "-meta",
+			Syscalls: []specs.LinuxSyscall{
+				{Names: []string{syscallRead}, Action: specs.ActNotify},
+			},
+		}
+	}
+
+	bare := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
+
+	for _, testCase := range []struct {
+		name        string
+		left, right *specs.LinuxSeccomp
+		want        string
+	}{
+		{name: "left only", left: notifying(listenerSock), right: bare, want: listenerSock},
+		{name: "right only", left: bare, right: notifying(listenerSock), want: listenerSock},
+		{
+			name: "both set one", left: notifying(listenerSock),
+			right: notifying("/run/other.sock"), want: listenerSock,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			for _, merge := range []struct {
+				name  string
+				merge func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error)
+			}{
+				{"intersect", seccomp.Intersect},
+				{"union", seccomp.Union},
+			} {
+				result, err := merge.merge(testCase.left, testCase.right)
+				if err != nil {
+					t.Fatalf("%s: unexpected error: %v", merge.name, err)
+				}
+
+				if result.ListenerPath != testCase.want {
+					t.Errorf(
+						"%s: ListenerPath = %q, want %q",
+						merge.name, result.ListenerPath, testCase.want,
+					)
+				}
+
+				if want := testCase.want + "-meta"; result.ListenerMetadata != want {
+					t.Errorf(
+						"%s: ListenerMetadata = %q, want %q",
+						merge.name, result.ListenerMetadata, want,
+					)
+				}
+			}
+		})
+	}
+}
+
+// TestUnionKeepsNotifyOfTheRightProfile is the case that made the listener
+// selection necessary: the left profile denies, the right one supervises
+// through a listener, and the union keeps the supervised call. Dropping the
+// listener here would turn a call both inputs allow in some form into a
+// container that does not start at all.
+func TestUnionKeepsNotifyOfTheRightProfile(t *testing.T) {
+	t.Parallel()
+
+	left := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
+	right := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		ListenerPath:  listenerSock,
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{syscallRead}, Action: specs.ActNotify},
+		},
+	}
+
+	result, err := seccomp.Union(left, right)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertSyscallAction(t, result, syscallRead, specs.ActNotify)
+
+	if result.ListenerPath != listenerSock {
+		t.Errorf("ListenerPath = %q, want %q", result.ListenerPath, listenerSock)
+	}
+}
+
+// TestMergesRefuseNotifyWithoutListener covers the other half of the
+// coupling: no input names a listener, so no result may notify. Neither
+// merge rewrites the action to make that true, since SCMP_ACT_NOTIFY is the
+// supervisor the caller asked for and both dropping it and turning it into a
+// denial lose that silently. The refusal comes from Validate, which is what
+// keeps an intersection of such a profile from differing from a clone of it.
+func TestMergesRefuseNotifyWithoutListener(t *testing.T) {
+	t.Parallel()
+
+	profile := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{syscallRead}, Action: specs.ActNotify},
+		},
+	}
+	other := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
+
+	for _, merge := range []struct {
+		name  string
+		merge func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error)
+	}{
+		{"intersect", seccomp.Intersect},
+		{"union", seccomp.Union},
+	} {
+		_, err := merge.merge(profile, other)
+		if !errors.Is(err, seccomp.ErrNotifyWithoutListener) {
+			t.Errorf("%s: expected ErrNotifyWithoutListener, got: %v", merge.name, err)
+		}
+	}
+
+	// With a listener both merges succeed and keep the action.
+	profile.ListenerPath = listenerSock
+
+	for _, merge := range []struct {
+		name  string
+		merge func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error)
+	}{
+		{"intersect", seccomp.Intersect},
+		{"union", seccomp.Union},
+	} {
+		result, err := merge.merge(profile, other)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", merge.name, err)
+		}
+
+		if merge.name == "union" {
+			assertSyscallAction(t, result, syscallRead, specs.ActNotify)
+		}
+	}
+}
+
+// TestIntersectOfANotifyingProfileIsAClone pins what the degradation this
+// merge no longer performs used to break: intersecting a single profile is
+// documented as normalizing it, not as rewriting the actions it applies. A
+// baseline that supervises openat through its listener must come back
+// supervising it, since a runtime intersects its baseline with every
+// artifact it pulls, including none.
+func TestIntersectOfANotifyingProfileIsAClone(t *testing.T) {
+	t.Parallel()
+
+	profile := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		ListenerPath:  listenerSock,
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{syscallOpen}, Action: specs.ActNotify},
+		},
+	}
+
+	for _, testCase := range []struct {
+		name  string
+		input []*specs.LinuxSeccomp
+	}{
+		{"alone", []*specs.LinuxSeccomp{profile}},
+		{"with itself", []*specs.LinuxSeccomp{profile, profile}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			result, err := seccomp.Intersect(testCase.input...)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			assertSyscallAction(t, result, syscallOpen, specs.ActNotify)
+
+			if result.ListenerPath != listenerSock {
+				t.Errorf("ListenerPath = %q, want %q", result.ListenerPath, listenerSock)
+			}
+		})
+	}
+}
+
+// TestListenerFlagFollowsTheListener pins
+// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV to the profile the listener comes
+// from: the flag only changes how a notification is received, so it is
+// meaningless without the listener it belongs to.
+func TestListenerFlagFollowsTheListener(t *testing.T) {
+	t.Parallel()
+
+	withFlag := func(listener string) *specs.LinuxSeccomp {
+		return &specs.LinuxSeccomp{
+			DefaultAction: specs.ActErrno,
+			ListenerPath:  listener,
+			Flags:         []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagWaitKillableRecv},
+		}
+	}
+
+	// The left profile carries the flag but no listener, the right one the
+	// listener, so the flag does not survive.
+	result, err := seccomp.Intersect(withFlag(""), &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		ListenerPath:  listenerSock,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if slices.Contains(result.Flags, specs.LinuxSeccompFlagWaitKillableRecv) {
+		t.Errorf("flag survived without its listener: %v", result.Flags)
+	}
+
+	// The profile that provides the listener provides the flag as well.
+	result, err = seccomp.Intersect(
+		&specs.LinuxSeccomp{DefaultAction: specs.ActErrno}, withFlag(listenerSock),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !slices.Contains(result.Flags, specs.LinuxSeccompFlagWaitKillableRecv) {
+		t.Errorf("flag of the listener's profile was dropped: %v", result.Flags)
 	}
 }

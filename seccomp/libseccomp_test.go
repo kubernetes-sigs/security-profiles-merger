@@ -931,7 +931,11 @@ func parallelFor(count int, work func(idx int)) {
 }
 
 // mergeNames are the syscalls randomProfile uses.
-func mergeNames() []string { return []string{"read", "write"} }
+// mergeNames are the syscalls randomProfile draws from. writev rather than
+// write, because runc refuses SCMP_ACT_NOTIFY on write and Validate rejects
+// it with runc, which would keep the drawn profiles out of the merge
+// entirely. libseccomp itself treats the two the same.
+func mergeNames() []string { return []string{"read", "writev"} }
 
 // mergeValues are the argument values randomProfile draws from.
 func mergeValues() []uint64 {
@@ -990,6 +994,13 @@ func randomProfile(
 		}
 
 		profile.Syscalls = append(profile.Syscalls, entry)
+
+		// A filter that notifies needs a listener, or the merge degrades
+		// the action (intersection) or refuses (union), neither of which
+		// says anything about libseccomp.
+		if entry.Action == specs.ActNotify {
+			profile.ListenerPath = "/run/libseccomp-notify.sock"
+		}
 	}
 
 	return profile

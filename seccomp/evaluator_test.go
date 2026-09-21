@@ -58,12 +58,41 @@ func (r rule) sameResult(other rule) bool {
 
 func (r rule) matches(call []uint64) bool {
 	for _, cond := range r.conds {
-		if int(cond.Index) >= len(call) || !seccomp.CondHolds(cond, call[cond.Index]) {
+		if int(cond.Index) >= len(call) || !condHolds(cond, call[cond.Index]) {
 			return false
 		}
 	}
 
 	return true
+}
+
+// condHolds reports whether an argument condition holds for a value, as
+// libseccomp compares it: SCMP_CMP_MASKED_EQ masks both the argument and the
+// datum with the mask in value, and every other operator compares the whole
+// value. libseccomp_test.go checks this reading against libseccomp itself.
+//
+// This is deliberately a second implementation of the operators rather than
+// the merge's own: the safety properties are checked against this evaluator,
+// so an operator the merge reads wrongly must not be read the same way here.
+func condHolds(cond specs.LinuxSeccompArg, value uint64) bool {
+	switch cond.Op {
+	case specs.OpNotEqual:
+		return value != cond.Value
+	case specs.OpLessThan:
+		return value < cond.Value
+	case specs.OpLessEqual:
+		return value <= cond.Value
+	case specs.OpEqualTo:
+		return value == cond.Value
+	case specs.OpGreaterEqual:
+		return value >= cond.Value
+	case specs.OpGreaterThan:
+		return value > cond.Value
+	case specs.OpMaskedEqual:
+		return value&cond.Value == cond.ValueTwo&cond.Value
+	default:
+		return false
+	}
 }
 
 // sameRule reports whether two rules are exact duplicates.

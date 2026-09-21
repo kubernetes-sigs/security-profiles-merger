@@ -358,13 +358,13 @@ func TestIntersectKeepsLeftmostErrnoOverCollapsedConditional(t *testing.T) {
 // TestUnionRaisesStricterOverlapOfRedundantClause pins the raising pass the
 // union runs before dropping the clauses that equal the merged default.
 //
-// Left permits NOTIFY for arg0 < 3 and kills everything else; right kills
-// harder for arg0 <= 2 and permits NOTIFY everywhere else. The merged default
-// is NOTIFY, so the left clause becomes redundant: a runtime skips an entry
+// Left permits TRACE for arg0 < 3 and kills everything else; right kills
+// harder for arg0 <= 2 and permits TRACE everywhere else. The merged default
+// is TRACE, so the left clause becomes redundant: a runtime skips an entry
 // that equals the profile default, which means it cannot shield arg0 < 3 from
 // the stricter right clause that overlaps it. Without raising that clause to
-// NOTIFY, the result would deny arg0 <= 2 as SCMP_ACT_KILL even though both
-// inputs permit those calls as NOTIFY.
+// TRACE, the result would deny arg0 <= 2 as SCMP_ACT_KILL even though both
+// inputs permit those calls as TRACE.
 func TestUnionRaisesStricterOverlapOfRedundantClause(t *testing.T) {
 	t.Parallel()
 
@@ -372,13 +372,13 @@ func TestUnionRaisesStricterOverlapOfRedundantClause(t *testing.T) {
 		DefaultAction: specs.ActKillProcess,
 		Syscalls: []specs.LinuxSyscall{
 			{
-				Names: []string{"read"}, Action: specs.ActNotify,
+				Names: []string{"read"}, Action: specs.ActTrace,
 				Args: []specs.LinuxSeccompArg{{Index: 0, Value: 3, Op: specs.OpLessThan}},
 			},
 		},
 	}
 	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActNotify,
+		DefaultAction: specs.ActTrace,
 		Syscalls: []specs.LinuxSyscall{
 			{
 				Names: []string{"read"}, Action: specs.ActKill,
@@ -393,7 +393,7 @@ func TestUnionRaisesStricterOverlapOfRedundantClause(t *testing.T) {
 	}
 
 	// Every clause ends up at the merged default, so none is emitted.
-	want := "Profile{default:SCMP_ACT_NOTIFY}"
+	want := "Profile{default:SCMP_ACT_TRACE}"
 	if got := seccomp.FormatProfile(result); got != want {
 		t.Errorf("Union = %s, want %s", got, want)
 	}
@@ -537,5 +537,84 @@ func TestMergeCanonicalizesKillThread(t *testing.T) {
 
 	if len(bare) != 1 || bare[0].Action != specs.ActKill || len(bare[0].Names) != 2 {
 		t.Errorf("UnionSyscalls = %+v, want one SCMP_ACT_KILL entry for both names", bare)
+	}
+}
+
+// TestUnionKeepsTheLooserOfIdenticalFilters pins which of two entries with
+// the same argument filter the union keeps. Both match exactly the same
+// calls, so the merge cannot express "either": it keeps the less restrictive
+// one, which is what the union promises. Taking the more restrictive one
+// instead would deny calls the left profile permits, and no oracle built on
+// the restrictiveness lattice can see that, since both results are actions
+// an input applies to the call.
+func TestUnionKeepsTheLooserOfIdenticalFilters(t *testing.T) {
+	t.Parallel()
+
+	filtered := func(action specs.LinuxSeccompAction) *specs.LinuxSeccomp {
+		return &specs.LinuxSeccomp{
+			DefaultAction: specs.ActKillProcess,
+			Syscalls: []specs.LinuxSyscall{{
+				Names:  []string{"read"},
+				Action: action,
+				Args:   []specs.LinuxSeccompArg{argEq(0, 1)},
+			}},
+		}
+	}
+
+	want := "Profile{default:SCMP_ACT_KILL_PROCESS read([0]SCMP_CMP_EQ:1)->SCMP_ACT_ALLOW}"
+
+	for _, order := range []struct {
+		name        string
+		left, right *specs.LinuxSeccomp
+	}{
+		{"looser first", filtered(specs.ActAllow), filtered(specs.ActErrno)},
+		{"stricter first", filtered(specs.ActErrno), filtered(specs.ActAllow)},
+	} {
+		result, err := seccomp.Union(order.left, order.right)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", order.name, err)
+		}
+
+		if got := seccomp.FormatProfile(result); got != want {
+			t.Errorf("%s: Union = %s, want %s", order.name, got, want)
+		}
+	}
+}
+
+// TestUnionKeepsTheErrnoOfTheFallback pins the errno a union hands the
+// calls of a filtered entry that differs from the surrounding action only by
+// its errno value. Such an entry cannot survive next to the unconditional
+// one it would have to be rewritten against, so it folds into it and every
+// call of the syscall gets the fallback's errno. Emitting the entry instead
+// would return EPERM for the filtered calls, which is a different errno than
+// either input applies to them, while the action stays the same everywhere
+// and no safety oracle notices.
+func TestUnionKeepsTheErrnoOfTheFallback(t *testing.T) {
+	t.Parallel()
+
+	errno := uint(2)
+	left := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{"read"}, Action: specs.ActTrace, ErrnoRet: &errno},
+		},
+	}
+	right := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls: []specs.LinuxSyscall{{
+			Names:  []string{"read"},
+			Action: specs.ActTrace,
+			Args:   []specs.LinuxSeccompArg{argEq(0, 1)},
+		}},
+	}
+
+	result, err := seccomp.Union(left, right)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := "Profile{default:SCMP_ACT_ERRNO read->SCMP_ACT_TRACE(errno:2)}"
+	if got := seccomp.FormatProfile(result); got != want {
+		t.Errorf("Union = %s, want %s", got, want)
 	}
 }

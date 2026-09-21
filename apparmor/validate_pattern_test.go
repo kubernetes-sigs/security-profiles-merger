@@ -95,7 +95,7 @@ func TestValidateArtifactAcceptsValidPatterns(t *testing.T) {
 
 	for _, pattern := range []string{
 		nestedAlternation(49), "/etc/{a,}", `/etc/[\]a]`, "/etc/[^^]", "/etc/[-a]",
-		`/etc/\{a\}`, "/etc/a,b", `/etc/\x41`, `/etc/\\`, "/etc/[z-a]", "/etc/[!a]",
+		`/etc/\{a\}`, "/etc/a,b", `/etc/\x41`, `/etc/\\`, "/etc/[z-a]", `/etc/[\!a]`,
 		`/etc/[\*\?]`, "/etc/[{,}]",
 	} {
 		err := apparmor.ValidateArtifact(readOnly(pattern))

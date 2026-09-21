@@ -26,17 +26,10 @@ import (
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
-// The sentinel errors every merge package returns. They live in the profile
-// package so that a caller working with more than one profile type matches
-// them once.
-var (
-	// ErrNoProfiles is returned when no profiles are provided.
-	ErrNoProfiles = spm.ErrNoProfiles
-	// ErrNilProfile is returned when a nil profile is provided.
-	ErrNilProfile = spm.ErrNilProfile
-	// ErrEmptyPath is returned when a path rule contains an empty string.
-	ErrEmptyPath = spm.ErrEmptyPath
-)
+// ErrNoProfiles is returned when no profiles are provided. It lives in the
+// spm package so that a caller working with more than one profile type
+// matches it once.
+var ErrNoProfiles = spm.ErrNoProfiles
 
 // Fold merges a slice of profiles using pairwise reduction. A single profile
 // is cloned; two or more are merged left to right. Profiles must be non-nil:
@@ -250,10 +243,12 @@ func ClonePtr[T any](ptr *T) *T {
 }
 
 // DeduplicateSlice returns a new slice with duplicate elements removed,
-// preserving the order of first occurrence.
+// preserving the order of first occurrence. The result never shares a backing
+// array with items: an empty input yields nil rather than the caller's slice,
+// so appending to the result cannot write into the caller's array.
 func DeduplicateSlice[T comparable](items []T) []T {
 	if len(items) == 0 {
-		return items
+		return nil
 	}
 
 	seen := make(map[T]struct{}, len(items))

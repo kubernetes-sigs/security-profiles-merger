@@ -405,7 +405,30 @@ var evalPatterns = []string{
 // Validate rejects.
 const fsSelectorBits = 2
 
-func evalProfile(fsSelector uint64, execMask uint32) *Profile {
+// evalCapabilities are the capability names the fuzzers select from, one per
+// bit of the capability selector. Eight is enough for the oracle: the merge
+// treats a name as opaque text, so which names they are changes nothing.
+var evalCapabilities = []string{
+	"CHOWN", "NET_ADMIN", "SYS_TIME", "SYS_PTRACE",
+	"NET_RAW", "SETUID", "MKNOD", "BPF",
+}
+
+// capSectionAbsent is the bit of the capability selector that leaves the
+// section out altogether, which to AppArmor denies every capability. The
+// merges reach that case by different routes, so the oracle has to see it.
+const capSectionAbsent = 1 << 8
+
+// Bits of the network selector: the three permissions, and the two ways a
+// profile can leave a permission unsaid.
+const (
+	netRawBit         = 1 << 0
+	netTCPBit         = 1 << 1
+	netUDPBit         = 1 << 2
+	netProtocolsUnset = 1 << 3
+	netSectionAbsent  = 1 << 4
+)
+
+func evalProfile(fsSelector uint64, execMask, capMask uint32, netBits uint8) *Profile {
 	var readOnly, writeOnly, readWrite, executables []string
 
 	for idx, pattern := range evalPatterns {
@@ -433,8 +456,139 @@ func evalProfile(fsSelector uint64, execMask uint32) *Profile {
 			WriteOnlyPaths: writeOnly,
 			ReadWritePaths: readWrite,
 		},
-		Network:      nil,
-		Capabilities: nil,
+		Network:      evalNetwork(netBits),
+		Capabilities: evalCapabilitySection(capMask),
+	}
+}
+
+// evalCapabilitySection builds the capability section a selector names.
+func evalCapabilitySection(capMask uint32) *CapabilityRules {
+	if capMask&capSectionAbsent != 0 {
+		return nil
+	}
+
+	var caps []string
+
+	for idx, name := range evalCapabilities {
+		if capMask&(1<<uint(idx)) != 0 {
+			caps = append(caps, name)
+		}
+	}
+
+	return &CapabilityRules{AllowedCapabilities: caps}
+}
+
+// evalNetwork builds the network section a selector names.
+func evalNetwork(netBits uint8) *NetworkRules {
+	if netBits&netSectionAbsent != 0 {
+		return nil
+	}
+
+	raw := netBits&netRawBit != 0
+	rules := &NetworkRules{AllowRaw: &raw, Protocols: nil}
+
+	if netBits&netProtocolsUnset != 0 {
+		return rules
+	}
+
+	tcp := netBits&netTCPBit != 0
+	udp := netBits&netUDPBit != 0
+	rules.Protocols = &AllowedProtocols{AllowTCP: &tcp, AllowUDP: &udp}
+
+	return rules
+}
+
+// permitsCapability reports whether the profile grants a capability. A
+// section or name it does not carry is a capability it denies, which is what
+// both merges make of an absent section.
+func permitsCapability(profile *Profile, name string) bool {
+	return profile.Capabilities != nil &&
+		slices.Contains(profile.Capabilities.AllowedCapabilities, name)
+}
+
+// netPermission is one of the three network permissions a profile carries.
+type netPermission int
+
+const (
+	netRaw netPermission = iota
+	netTCP
+	netUDP
+)
+
+func (perm netPermission) String() string {
+	switch perm {
+	case netRaw:
+		return "AllowRaw"
+	case netTCP:
+		return "AllowTCP"
+	case netUDP:
+		return "AllowUDP"
+	}
+
+	return "unknown"
+}
+
+// permitsNetwork reports whether the profile grants a network permission.
+// An absent section, an absent protocol block and an unset boolean all deny,
+// as they do to AppArmor.
+func permitsNetwork(profile *Profile, perm netPermission) bool {
+	if profile.Network == nil {
+		return false
+	}
+
+	if perm == netRaw {
+		return profile.Network.AllowRaw != nil && *profile.Network.AllowRaw
+	}
+
+	if profile.Network.Protocols == nil {
+		return false
+	}
+
+	allowed := profile.Network.Protocols.AllowTCP
+	if perm == netUDP {
+		allowed = profile.Network.Protocols.AllowUDP
+	}
+
+	return allowed != nil && *allowed
+}
+
+// assertCapabilityAndNetworkPermissions runs the permission oracle over the
+// sections the file probes do not reach. Both merges are exact there, so the
+// result must grant a capability or a network permission exactly where the
+// inputs together do.
+func assertCapabilityAndNetworkPermissions(
+	t *testing.T, left, right, result *Profile, union bool,
+) {
+	t.Helper()
+
+	combine := func(leftGrants, rightGrants bool) bool {
+		if union {
+			return leftGrants || rightGrants
+		}
+
+		return leftGrants && rightGrants
+	}
+
+	for _, name := range evalCapabilities {
+		want := combine(permitsCapability(left, name), permitsCapability(right, name))
+		if got := permitsCapability(result, name); got != want {
+			t.Fatalf(
+				"merged profile grants %s: %v, inputs: %v\nleft=%s\nright=%s\nresult=%s",
+				name, got, want,
+				FormatProfile(left), FormatProfile(right), FormatProfile(result),
+			)
+		}
+	}
+
+	for _, perm := range []netPermission{netRaw, netTCP, netUDP} {
+		want := combine(permitsNetwork(left, perm), permitsNetwork(right, perm))
+		if got := permitsNetwork(result, perm); got != want {
+			t.Fatalf(
+				"merged profile grants %s: %v, inputs: %v\nleft=%s\nright=%s\nresult=%s",
+				perm, got, want,
+				FormatProfile(left), FormatProfile(right), FormatProfile(result),
+			)
+		}
 	}
 }
 
@@ -483,27 +637,32 @@ func addEvalSeeds(f *testing.F) {
 	f.Helper()
 
 	// Read "/etc/passwd" against read "/etc/**", the literal-under-glob case.
-	f.Add(uint64(0b01), uint32(0), uint64(0b0100), uint32(0))
+	f.Add(uint64(0b01), uint32(0), uint32(0b11), uint8(netRawBit),
+		uint64(0b0100), uint32(0), uint32(0b10), uint8(netTCPBit))
 	// Every pattern read-write on one side, nothing on the other.
-	f.Add(uint64(0xffffffffffffffff), uint32(0xffffffff), uint64(0), uint32(0))
+	f.Add(uint64(0xffffffffffffffff), uint32(0xffffffff), uint32(0xff),
+		uint8(netRawBit|netTCPBit|netUDPBit),
+		uint64(0), uint32(0), uint32(0), uint8(0))
 	// "/**" against a deep literal, the widest glob narrowing to one file.
-	f.Add(uint64(0b11)<<(fsSelectorBits*10), uint32(0),
-		uint64(0b11)<<(fsSelectorBits*13), uint32(1<<13))
+	f.Add(uint64(0b11)<<(fsSelectorBits*10), uint32(0), uint32(0), uint8(0),
+		uint64(0b11)<<(fsSelectorBits*13), uint32(1<<13), uint32(0b1), uint8(netUDPBit))
 	// Two overlapping stars at different depths.
-	f.Add(uint64(0b01)<<(fsSelectorBits*5), uint32(0),
-		uint64(0b10)<<(fsSelectorBits*7), uint32(0))
+	f.Add(uint64(0b01)<<(fsSelectorBits*5), uint32(0), uint32(0b101), uint8(netRawBit),
+		uint64(0b10)<<(fsSelectorBits*7), uint32(0), uint32(0b110), uint8(netRawBit))
 	// "/etc/**" against "/etc/{,**}", which also matches "/etc/".
-	f.Add(uint64(0b01)<<(fsSelectorBits*2), uint32(1<<2),
-		uint64(0b01)<<(fsSelectorBits*14), uint32(1<<14))
+	f.Add(uint64(0b01)<<(fsSelectorBits*2), uint32(1<<2), uint32(capSectionAbsent), uint8(0),
+		uint64(0b01)<<(fsSelectorBits*14), uint32(1<<14), uint32(0b1), uint8(netSectionAbsent))
 	// "/**" against "/{,etc}", which also matches "/".
-	f.Add(uint64(0b11)<<(fsSelectorBits*10), uint32(1<<10),
-		uint64(0b11)<<(fsSelectorBits*20), uint32(1<<20))
+	f.Add(uint64(0b11)<<(fsSelectorBits*10), uint32(1<<10), uint32(0b11),
+		uint8(netProtocolsUnset|netRawBit),
+		uint64(0b11)<<(fsSelectorBits*20), uint32(1<<20), uint32(0b11), uint8(netTCPBit))
 	// "/etc/*" against "/etc/[!s]hadow" and "/etc/.conf" style names.
 	f.Add(uint64(0b01)<<(fsSelectorBits*1)|uint64(0b01)<<(fsSelectorBits*3), uint32(0),
-		uint64(0b01)<<(fsSelectorBits*16), uint32(0))
+		uint32(0), uint8(netSectionAbsent),
+		uint64(0b01)<<(fsSelectorBits*16), uint32(0), uint32(0xff), uint8(0))
 	// "?" against a multibyte name.
-	f.Add(uint64(0b01)<<(fsSelectorBits*17), uint32(1<<17),
-		uint64(0b01)<<(fsSelectorBits*9), uint32(1<<9))
+	f.Add(uint64(0b01)<<(fsSelectorBits*17), uint32(1<<17), uint32(0b1000), uint8(netUDPBit),
+		uint64(0b01)<<(fsSelectorBits*9), uint32(1<<9), uint32(0b1000), uint8(netUDPBit))
 }
 
 // assertPermits runs one safety property over every probe and operation.
@@ -521,19 +680,188 @@ func assertPermits(
 	}
 }
 
+// evalGroupingTriples are profile selectors whose intersection depends on the
+// order the three are folded in. Each is a filesystem selector and an
+// executable mask; the capability and network selectors are the same on every
+// side, since those merge associatively and only the paths do not.
+var evalGroupingTriples = [][3][2]uint64{
+	// The shape that makes the fold order matter: a literal both patterns
+	// match, and two patterns neither of which covers the other, so folding
+	// them first leaves nothing for the literal to survive against.
+	{
+		{0b01, 1},
+		{0b01 << (fsSelectorBits * 1), 1 << 1},
+		{0b01 << (fsSelectorBits * 15), 1 << 15},
+	},
+	// The same shape with an alternation and a class.
+	{
+		{0b01, 1},
+		{0b01 << (fsSelectorBits * 21), 1 << 21},
+		{0b01 << (fsSelectorBits * 22), 1 << 22},
+	},
+	// A literal under a "**", a "**" under a wider one, and a pattern that
+	// covers the literal without covering either "**".
+	{{0b01, 0}, {0b01 << (fsSelectorBits * 2), 0}, {0b01 << (fsSelectorBits * 1), 0}},
+	// "/**" against "/etc/**" against "/etc/*", widest first.
+	{
+		{0b11 << (fsSelectorBits * 10), 1 << 10},
+		{0b11 << (fsSelectorBits * 2), 1 << 2},
+		{0b11 << (fsSelectorBits * 1), 1 << 1},
+	},
+	// Alternations that match their own prefix against plain stars.
+	{
+		{0b01 << (fsSelectorBits * 14), 1 << 14},
+		{0b01 << (fsSelectorBits * 2), 1 << 2},
+		{0b01 << (fsSelectorBits * 20), 1 << 20},
+	},
+	// Deep literals against the patterns that cover them.
+	{
+		{0b11 << (fsSelectorBits * 13), 1 << 13},
+		{0b11 << (fsSelectorBits * 4), 1 << 4},
+		{0b11 << (fsSelectorBits * 7), 1 << 7},
+	},
+	// Many patterns at once on every side, which mixes all of the above.
+	{{0x5555555555555555, 0xffff}, {0xaaaaaaaaaaaaaaaa, 0xff00}, {0xffffffffffff, 0x0f0f}},
+}
+
+// TestIntersectGroupingStaysSafe pins what the order dependence Intersect
+// documents may and may not cost. Folding three profiles left to right can
+// keep a path that grouping them the other way drops, so the results differ;
+// what may never differ is their safety, so every grouping is checked to
+// permit only what all three inputs permit.
+func TestIntersectGroupingStaysSafe(t *testing.T) {
+	t.Parallel()
+
+	// Set once two groupings of one triple give different results, which is
+	// what makes the safety check worth running.
+	ordered := false
+
+	for idx, triple := range evalGroupingTriples {
+		inputs := groupingInputs(triple)
+		results := groupingResults(t, idx, inputs)
+
+		for _, result := range results {
+			for _, other := range results {
+				if FormatProfile(result) != FormatProfile(other) {
+					ordered = true
+				}
+			}
+		}
+
+		for name, result := range results {
+			assertGroupingSafe(t, idx, name, inputs, result)
+		}
+	}
+
+	if !ordered {
+		t.Error(
+			"no grouping of any triple differs from another, so the corpus no " +
+				"longer covers the order dependence Intersect documents",
+		)
+	}
+}
+
+// groupingInputs builds the three profiles of a triple. The capability and
+// network selectors are the same on every side, since those merge
+// associatively and only the paths do not.
+func groupingInputs(triple [3][2]uint64) [3]*Profile {
+	var inputs [3]*Profile
+
+	for side, selector := range triple {
+		inputs[side] = evalProfile(
+			selector[0], uint32(selector[1]), 0b1011, netRawBit|netTCPBit,
+		)
+	}
+
+	return inputs
+}
+
+// groupingResults intersects three profiles in every order and grouping.
+func groupingResults(t *testing.T, idx int, inputs [3]*Profile) map[string]*Profile {
+	t.Helper()
+
+	results := make(map[string]*Profile)
+
+	for name, order := range map[string][]*Profile{
+		"(a,b,c)": {inputs[0], inputs[1], inputs[2]},
+		"(c,b,a)": {inputs[2], inputs[1], inputs[0]},
+		"(b,a,c)": {inputs[1], inputs[0], inputs[2]},
+	} {
+		result, err := Intersect(order...)
+		if err != nil {
+			t.Fatalf("triple %d %s: %v", idx, name, err)
+		}
+
+		results[name] = result
+	}
+
+	// The groupings a left fold cannot express, built by hand.
+	for name, pair := range map[string][2][]*Profile{
+		"a,(b,c)": {{inputs[1], inputs[2]}, {inputs[0]}},
+		"c,(a,b)": {{inputs[0], inputs[1]}, {inputs[2]}},
+	} {
+		inner, err := Intersect(pair[0]...)
+		if err != nil {
+			t.Fatalf("triple %d %s inner: %v", idx, name, err)
+		}
+
+		result, err := Intersect(append(pair[1], inner)...)
+		if err != nil {
+			t.Fatalf("triple %d %s: %v", idx, name, err)
+		}
+
+		results[name] = result
+	}
+
+	return results
+}
+
+// assertGroupingSafe checks one grouping against the safety property every
+// grouping has to keep: it permits only what all three inputs permit.
+func assertGroupingSafe(
+	t *testing.T, idx int, name string, inputs [3]*Profile, result *Profile,
+) {
+	t.Helper()
+
+	for _, access := range []operation{opRead, opWrite, opExec} {
+		for _, probe := range evalProbes {
+			if !permits(result, access, probe) {
+				continue
+			}
+
+			for side, input := range inputs {
+				if !permits(input, access, probe) {
+					t.Fatalf(
+						"triple %d grouped %s permits %s on %q that input %d denies"+
+							"\ninput=%s\nresult=%s",
+						idx, name, access, probe, side,
+						FormatProfile(input), FormatProfile(result),
+					)
+				}
+			}
+		}
+	}
+}
+
 // FuzzAppArmorIntersectPermits asserts the intersection safety property: an
 // operation the merged profile permits is permitted by both inputs.
 func FuzzAppArmorIntersectPermits(f *testing.F) {
 	addEvalSeeds(f)
 
-	f.Fuzz(func(t *testing.T, fsLeft uint64, execLeft uint32, fsRight uint64, execRight uint32) {
-		left := evalProfile(fsLeft, execLeft)
-		right := evalProfile(fsRight, execRight)
+	f.Fuzz(func(
+		t *testing.T,
+		fsLeft uint64, execLeft uint32, capLeft uint32, netLeft uint8,
+		fsRight uint64, execRight uint32, capRight uint32, netRight uint8,
+	) {
+		left := evalProfile(fsLeft, execLeft, capLeft, netLeft)
+		right := evalProfile(fsRight, execRight, capRight, netRight)
 
 		result, err := Intersect(left, right)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
+
+		assertCapabilityAndNetworkPermissions(t, left, right, result, false)
 
 		assertPermits(t, left, right, result, func(
 			t *testing.T, access operation, probe string, left, right, result *Profile,
@@ -562,14 +890,20 @@ func FuzzAppArmorIntersectPermits(f *testing.F) {
 func FuzzAppArmorUnionPermits(f *testing.F) {
 	addEvalSeeds(f)
 
-	f.Fuzz(func(t *testing.T, fsLeft uint64, execLeft uint32, fsRight uint64, execRight uint32) {
-		left := evalProfile(fsLeft, execLeft)
-		right := evalProfile(fsRight, execRight)
+	f.Fuzz(func(
+		t *testing.T,
+		fsLeft uint64, execLeft uint32, capLeft uint32, netLeft uint8,
+		fsRight uint64, execRight uint32, capRight uint32, netRight uint8,
+	) {
+		left := evalProfile(fsLeft, execLeft, capLeft, netLeft)
+		right := evalProfile(fsRight, execRight, capRight, netRight)
 
 		result, err := Union(left, right)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
+
+		assertCapabilityAndNetworkPermissions(t, left, right, result, true)
 
 		assertPermits(t, left, right, result, func(
 			t *testing.T, access operation, probe string, left, right, result *Profile,

@@ -1,0 +1,59 @@
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "architectures": [
+    "SCMP_ARCH_AARCH64",
+    "SCMP_ARCH_ARM",
+    "SCMP_ARCH_S390X",
+    "SCMP_ARCH_X86_64"
+  ],
+  "flags": [
+    "SECCOMP_FILTER_FLAG_LOG",
+    "SECCOMP_FILTER_FLAG_SPEC_ALLOW"
+  ],
+  "listenerPath": "/run/seccomp/notify.sock",
+  "listenerMetadata": "baseline-v1",
+  "syscalls": [
+    {
+      "names": [
+        "clone"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 38
+    },
+    {
+      "names": [
+        "close",
+        "fstat",
+        "open",
+        "openat",
+        "read",
+        "write"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "names": [
+        "ptrace"
+      ],
+      "action": "SCMP_ACT_LOG"
+    },
+    {
+      "names": [
+        "socket"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        {
+          "index": 0,
+          "value": 1,
+          "op": "SCMP_CMP_EQ"
+        },
+        {
+          "index": 1,
+          "value": 2,
+          "op": "SCMP_CMP_EQ"
+        }
+      ]
+    }
+  ]
+}

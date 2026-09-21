@@ -201,7 +201,9 @@ func TestDuplicateKeysWarnAndReject(t *testing.T) {
 	t.Parallel()
 
 	file := writeTemp(t, testDuplicateProfile)
-	warning := `warning: profile 0: duplicate key "defaultAction"`
+	// The warning names the file, so that one of a thousand arguments can
+	// be found without counting.
+	warning := `warning: ` + file + `: duplicate key "defaultAction"`
 
 	for _, args := range [][]string{
 		{cmdValidate, file},
@@ -224,7 +226,7 @@ func TestDuplicateKeysWarnAndReject(t *testing.T) {
 			t.Fatalf("%s: exit code = %d, want 1: %s", flag, code, stderr)
 		}
 
-		want := `error: parsing profile 0: duplicate key "defaultAction"`
+		want := `error: parsing ` + file + `: duplicate key "defaultAction"`
 		if !strings.Contains(stderr, want) || stdout != "" {
 			t.Errorf("%s: stdout = %q, stderr = %q, want %q", flag, stdout, stderr, want)
 		}
@@ -250,7 +252,7 @@ func TestDuplicateKeysDifferingInCaseAreRejected(t *testing.T) {
 			t.Fatalf("%s: exit code = %d, want 1: %s", flag, code, stderr)
 		}
 
-		want := `error: parsing profile 0: duplicate key "DefaultAction"`
+		want := `error: parsing ` + file + `: duplicate key "DefaultAction"`
 		if !strings.Contains(stderr, want) || stdout != "" {
 			t.Errorf("%s: stdout = %q, stderr = %q, want %q", flag, stdout, stderr, want)
 		}

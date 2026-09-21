@@ -1,0 +1,13 @@
+go test fuzz v1
+uint64(4096)
+string("/tmp/x r,\n  /etc/shadow rw")
+string("/abc def")
+bool(true)
+bool(true)
+bool(false)
+uint64(4096)
+string("/tmp/x r,\n  /etc/shadow rw")
+string("/abc def")
+bool(false)
+bool(true)
+bool(true)

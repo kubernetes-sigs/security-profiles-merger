@@ -1,0 +1,66 @@
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "architectures": [
+    "SCMP_ARCH_X86_64"
+  ],
+  "flags": [
+    "SECCOMP_FILTER_FLAG_LOG"
+  ],
+  "listenerPath": "/run/seccomp/notify.sock",
+  "listenerMetadata": "baseline-v1",
+  "syscalls": [
+    {
+      "names": [
+        "clone"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 38
+    },
+    {
+      "names": [
+        "close",
+        "open",
+        "ptrace"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 13
+    },
+    {
+      "names": [
+        "kill"
+      ],
+      "action": "SCMP_ACT_KILL_PROCESS"
+    },
+    {
+      "names": [
+        "openat"
+      ],
+      "action": "SCMP_ACT_LOG"
+    },
+    {
+      "names": [
+        "read",
+        "write"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "names": [
+        "socket"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        {
+          "index": 0,
+          "value": 1,
+          "op": "SCMP_CMP_EQ"
+        },
+        {
+          "index": 1,
+          "value": 2,
+          "op": "SCMP_CMP_EQ"
+        }
+      ]
+    }
+  ]
+}

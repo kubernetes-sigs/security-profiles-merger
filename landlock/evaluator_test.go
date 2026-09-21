@@ -56,6 +56,11 @@ func evalCovers(rulePath, file string) bool {
 // needs a rule on the file or on one of its ancestors. As in the kernel, a
 // ruleset handling any filesystem right denies refer even when it does not
 // list it, and then no rule can grant it.
+//
+// Refer is the one right that does not inherit: the kernel collects the
+// rights deciding a move or link only up to the mount point of the
+// directory, so an ancestor's grant need not reach a descendant, and the
+// merge takes refer from a rule on the path itself. The model follows it.
 func evalPermits(
 	profile *landlock.Profile, file string, right landlock.FSAccessRight,
 ) bool {
@@ -66,7 +71,19 @@ func evalPermits(
 	}
 
 	for _, rule := range profile.PathRules {
-		if evalCovers(rule.Path, file) && slices.Contains(rule.AccessFS, right) {
+		if !slices.Contains(rule.AccessFS, right) {
+			continue
+		}
+
+		if right == landlock.FSAccessRefer {
+			if rule.Path == file {
+				return true
+			}
+
+			continue
+		}
+
+		if evalCovers(rule.Path, file) {
 			return true
 		}
 	}
@@ -120,9 +137,9 @@ func evalProfile(handledMask uint8, ruleMask uint32) *landlock.Profile {
 			}
 		}
 
-		// A rule may only grant handled rights, which is what the kernel
-		// accepts and what ValidateStrict checks.
-		access = intersectRights(access, profile.HandledAccessFS)
+		// The rights are taken as the mask gives them, unhandled ones
+		// included: the kernel rejects such a rule and the merge prunes it,
+		// which is a case the model has to cover.
 		if len(access) == 0 {
 			continue
 		}
@@ -134,20 +151,6 @@ func evalProfile(handledMask uint8, ruleMask uint32) *landlock.Profile {
 	}
 
 	return profile
-}
-
-func intersectRights(
-	rights, handled []landlock.FSAccessRight,
-) []landlock.FSAccessRight {
-	var kept []landlock.FSAccessRight
-
-	for _, right := range rights {
-		if slices.Contains(handled, right) {
-			kept = append(kept, right)
-		}
-	}
-
-	return kept
 }
 
 func addEvalSeeds(f *testing.F) {

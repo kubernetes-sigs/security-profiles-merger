@@ -1,0 +1,84 @@
+{
+  "equal": false,
+  "defaultErrnoRet": {
+    "left": null,
+    "right": 13
+  },
+  "architectures": {
+    "added": [
+      "SCMP_ARCH_S390X"
+    ],
+    "removed": [
+      "SCMP_ARCH_AARCH64",
+      "SCMP_ARCH_ARM"
+    ]
+  },
+  "flags": {
+    "removed": [
+      "SECCOMP_FILTER_FLAG_SPEC_ALLOW"
+    ]
+  },
+  "listenerPath": {
+    "left": "/run/seccomp/notify.sock",
+    "right": "/run/seccomp/other.sock"
+  },
+  "listenerMetadata": {
+    "left": "baseline-v1",
+    "right": "artifact-v2"
+  },
+  "syscalls": {
+    "added": [
+      {
+        "name": "fstat",
+        "action": "SCMP_ACT_ALLOW"
+      },
+      {
+        "name": "kill",
+        "action": "SCMP_ACT_KILL_PROCESS"
+      }
+    ],
+    "removed": [
+      {
+        "name": "close",
+        "action": "SCMP_ACT_ALLOW"
+      },
+      {
+        "name": "open",
+        "action": "SCMP_ACT_ALLOW"
+      },
+      {
+        "name": "ptrace",
+        "action": "SCMP_ACT_LOG"
+      }
+    ],
+    "changed": [
+      {
+        "name": "clone",
+        "left": [
+          {
+            "action": "SCMP_ACT_ERRNO",
+            "errnoRet": 38
+          }
+        ],
+        "right": [
+          {
+            "action": "SCMP_ACT_ERRNO"
+          }
+        ]
+      },
+      {
+        "name": "openat",
+        "left": [
+          {
+            "action": "SCMP_ACT_ALLOW"
+          }
+        ],
+        "right": [
+          {
+            "action": "SCMP_ACT_LOG"
+          }
+        ]
+      }
+    ]
+  }
+}

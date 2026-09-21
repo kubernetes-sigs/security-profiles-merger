@@ -1,6 +1,11 @@
 ---
 version: "2"
 run:
+  # The cgo bridge and the tests that check the model against libseccomp
+  # itself sit behind this tag, so without it roughly a fifth of the tree
+  # is never analyzed. The exclusions below only apply under it too.
+  build-tags:
+    - libseccomp
   concurrency: 6
 linters:
   default: none
