@@ -42,68 +42,54 @@ var (
 // they were given fails validation, naming its position among the arguments.
 type InputError = spm.InputError
 
-// Intersect merges multiple AppArmor profiles via intersection: the resulting
-// profile permits an operation only if all input profiles permit it.
-// Capabilities are intersected, file access rules are intersected, and network
-// permissions use AND semantics.
-//
-// Capability names are upper-cased in the result and compared with ASCII
-// case folding, so a profile naming "chown" and one naming "CHOWN" name one
-// capability and the result spells it "CHOWN". The folding is deliberately
-// not Unicode's: U+017F and U+0131 upper-case into "S" and "I", which would
-// let a name spelled with one of them merge into a real capability.
-// apparmor_parser accepts capability names in lower case only, so a consumer
-// rendering the result as "capability <name>," rules must lower-case each
-// name first (see CapabilityRules).
+// Intersect merges multiple AppArmor profiles via intersection: the
+// resulting profile permits an operation only if every input permits it.
+// Capabilities and file access rules are intersected, and network
+// permissions use AND semantics. This is the merge KEP-6061 defines for a
+// CRI runtime combining an artifact with its baseline.
 //
 // A nil section or network boolean is treated as an explicit empty section
-// or false, since to AppArmor an absent section denies everything it covers,
-// and the result carries it explicitly. Intersecting against a profile that
-// omits a section therefore permits nothing in that section.
+// or false, since to AppArmor an absent section denies everything it
+// covers, and the result carries every section explicitly. Capability names
+// are compared with ASCII case folding and returned upper-cased, which a
+// consumer must lower-case before rendering them as rules (see
+// CapabilityRules). A literal path survives where a glob of every other
+// input matches it; the Filesystem merge section of the package
+// documentation gives the rules for globs.
 //
 // More than two profiles are folded from left to right, and with patterns
-// involved the result depends on that order: a pattern survives only where
-// the other side spells it alike, which two spellings of one pattern count
-// as, or expands over it with a "**" rooted above it, so a pattern an
-// intermediate result has already dropped can no longer narrow a literal a
-// later profile brings. Intersect(a, b, c) may therefore permit more or less
-// than Intersect(a, Intersect(b, c)) does. Every grouping is safe: whatever
-// the order, the result permits only what every input permits, and the
-// difference is which of the permitted paths survive as rules.
+// involved the result depends on that order, but every grouping is safe:
+// the result permits only what every input permits. Matching paths against
+// patterns is bounded, and past the budget a list keeps only the paths both
+// sides spell alike, which permits no more than the exact intersection
+// would (see the Cost bounds section).
 //
-// The cost of matching paths against patterns is bounded: past an internal
-// budget on the product of the literal and pattern counts of the two sides,
-// or on the product of the bytes those paths hold, a category keeps only the
-// paths both sides spell alike, which permits no more than the exact
-// intersection would. ValidateArtifact bounds the number of paths a profile
-// may hold (MaxArtifactPaths) so that a profile a runtime accepts, of paths
-// a few dozen bytes long, stays inside the budget against a node baseline of
-// a few kilobytes of paths. A profile of long paths, or two artifacts of
-// that size merged with each other, may not, and is then merged
-// conservatively.
-//
-// This implements the profile merging semantics defined in KEP-6061 for CRI
-// runtimes merging OCI-pulled profiles with node baselines.
+// Each input is validated as the Validation section of the package
+// documentation describes, and a failure is returned as an InputError
+// naming the input.
 func Intersect(profiles ...*Profile) (*Profile, error) {
 	return foldProfiles(profiles, intersectStrategy{})
 }
 
 // Union merges multiple AppArmor profiles via union: the resulting profile
-// permits an operation if any input profile permits it. Capabilities are
-// combined, file access rules are combined, and network permissions use OR
-// semantics. A nil section defers to the other profile, which for a union
-// grants the same as an empty one would. Capability names are upper-cased in
-// the result as they are by Intersect.
+// permits an operation if any input permits it. Capabilities and file
+// access rules are combined, and network permissions use OR semantics. This
+// is the merge the Security Profiles Operator uses to combine recorded
+// profiles.
 //
-// The cost of matching paths against patterns is bounded as it is for
-// Intersect. Past the budget a category keeps every path of both sides with
-// the permissions its own side grants it, which permits exactly what the
-// reduced union permits: the literals the reduction drops or raises are the
-// ones a pattern of the other side already covers, and that pattern is kept
-// either way.
+// A nil section defers to the other profile, which for a union grants the
+// same as an empty one would. Capability names are upper-cased as they are
+// by Intersect. A literal of one profile that a glob of the other covers is
+// dropped, or takes the glob's permissions where the glob grants only part
+// of them, so a write-only literal under a read-only glob becomes
+// read-write; the Filesystem merge section of the package documentation has
+// the details. The union of two profiles depends neither on their order
+// nor on the order of their paths.
 //
-// This implements the merge semantics used by the Security Profiles Operator
-// for combining recorded profiles.
+// Matching paths against patterns is bounded as it is for Intersect. Past
+// the budget a list keeps every path of both sides with the permissions its
+// own side grants it, which permits exactly what the reduced union permits
+// (see the Cost bounds section). Inputs are validated as for Intersect.
 func Union(profiles ...*Profile) (*Profile, error) {
 	return foldProfiles(profiles, unionStrategy{})
 }

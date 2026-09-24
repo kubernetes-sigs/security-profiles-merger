@@ -41,14 +41,16 @@ var (
 // that are not valid UTF-8, and data behind the profile. A document that is
 // not a JSON object, such as null, is rejected too.
 //
-// Each loses something a reader of an untrusted profile must not lose. A
-// misspelled or unknown member drops the rule it was meant to carry. A
-// repeated member is read as its last occurrence here and as its first
-// elsewhere, so a scanner and the runtime can read one document as two
-// profiles. A byte that is not valid UTF-8 is replaced with U+FFFD, so
-// names that differ only there decode alike and merge into one rule. Use
-// this instead of json.Unmarshal wherever the document comes from somewhere
-// else, and validate the result with ValidateArtifact afterwards.
+// Each loses something a reader of an artifact must not lose. A misspelled
+// or unknown member drops the rule it was meant to carry: a member such as
+// "Filesystem" or "readonlyPaths" names a field only ignoring case, so
+// encoding/json fills the field from it while a reader comparing names
+// exactly drops it. A repeated member is read as its last occurrence here
+// and as its first elsewhere, so a scanner and the runtime can read one
+// document as two profiles. A byte that is not valid UTF-8 is replaced with
+// U+FFFD, so names that differ only there decode alike and merge into one
+// rule. Use this instead of json.Unmarshal to decode an artifact, and
+// validate the result with ValidateArtifact afterwards.
 //
 // Unlike json.Unmarshal, the document is decoded into a fresh Profile that
 // replaces *profile only once every check has passed: a member the document

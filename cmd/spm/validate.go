@@ -52,8 +52,8 @@ func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	)
 	artifact := flags.Bool(
 		"artifact", false,
-		"validate as an untrusted OCI artifact the way container runtimes do, "+
-			"rejecting repeated and misspelled fields and invalid UTF-8",
+		"validate as an artifact, the untrusted profile a container runtime "+
+			"pulls, rejecting repeated and misspelled fields and invalid UTF-8",
 	)
 	format := flags.String("format", formatJSON, "output format: json, human")
 	output := flags.String(

@@ -12,11 +12,12 @@ A standalone Go library for merging security profiles
 
 <!-- toc -->
 - [Overview](#overview)
+- [Documentation](#documentation)
 - [Installation](#installation)
 - [Packages](#packages)
 - [API stability](#api-stability)
 - [Usage](#usage)
-  - [CRI runtime: merge OCI-pulled profile with node baseline (intersection)](#cri-runtime-merge-oci-pulled-profile-with-node-baseline-intersection)
+  - [CRI runtime: intersect an artifact with the baseline](#cri-runtime-intersect-an-artifact-with-the-baseline)
   - [Security Profiles Operator: combine recorded profiles (union)](#security-profiles-operator-combine-recorded-profiles-union)
   - [AppArmor profile merge](#apparmor-profile-merge)
   - [Landlock profile merge](#landlock-profile-merge)
@@ -34,7 +35,8 @@ This library provides core operations on security profiles:
 
 - **Intersect**: Produces an effective profile that permits an operation only if
   all input profiles permit it. Used by CRI runtimes (CRI-O, containerd) to
-  merge OCI-pulled profiles with node baselines per
+  merge an artifact, a profile pulled from a registry, with the runtime's
+  baseline per
   [KEP-6061](https://github.com/kubernetes/enhancements/issues/6061).
 - **Union**: Produces a profile that permits an operation if any input profile
   permits it. Used by the
@@ -42,6 +44,16 @@ This library provides core operations on security profiles:
   to merge recorded profiles.
 - **Diff**: Compares two profiles and returns a structured diff describing what
   changed between them.
+
+## Documentation
+
+| Audience | Start here |
+|----------|------------|
+| Runtime integrators | [docs/integration.md](docs/integration.md): who is trusted, the runtime flow, limits, errors, what each model leaves out |
+| Security reviewers | [Guarantees and limits of the model](docs/integration.md#guarantees-and-limits-of-the-model) |
+| Go callers | [docs/api.md](docs/api.md), an index of each package, and the [Go documentation](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger), the source of truth for behavior |
+| Command-line users | [docs/cli.md](docs/cli.md) |
+| Contributors | [CONTRIBUTING.md](CONTRIBUTING.md) and [RELEASE.md](RELEASE.md) |
 
 ## Installation
 
@@ -53,12 +65,9 @@ go get sigs.k8s.io/security-profiles-merger
 
 Each package provides `Intersect`, `Union`, `Validate`, `ValidateStrict`,
 `ValidateArtifact`, `UnmarshalStrict`, `FormatProfile`, `Diff`, and
-`FormatDiff` functions.
-`ValidateArtifact` runs the checks a runtime applies to a profile it did not
-author, such as one pulled from an OCI artifact
-([KEP-6061](https://github.com/kubernetes/enhancements/issues/6061)). For the
-full API reference (functions, errors, types, and merge semantics), see
-[docs/api.md](docs/api.md).
+`FormatDiff` functions. `ValidateArtifact` runs the checks a runtime applies
+to an artifact, a profile it did not author
+([KEP-6061](https://github.com/kubernetes/enhancements/issues/6061)).
 
 - **[seccomp](docs/api.md#seccomp)** - Operates on `specs.LinuxSeccomp` from the
   [OCI runtime-spec](https://github.com/opencontainers/runtime-spec).
@@ -66,14 +75,9 @@ full API reference (functions, errors, types, and merge semantics), see
   in this package.
 - **[landlock](docs/api.md#landlock)** - Merges Linux unprivileged sandboxing
   rulesets.
-- **[spm](docs/api.md#spm)** - The declarations the three have in common:
-  `SliceDiff`, `InputError`, the sentinel errors, and `Diff`, the one method
-  their diff results share. Nothing needs to import it, since each package
-  re-exports what it uses under its own name. Import it to match
-  `ErrNilProfile` without picking one of the three arbitrarily, or to hold a
-  diff whose profile type was decided elsewhere. It is deliberately small: the
-  three profile types have no common shape, so anything that does more than
-  name a diff or a sentinel needs to know which type it has.
+- **[spm](docs/api.md#spm)** - What the three have in common (`SliceDiff`,
+  `InputError`, `MaxPathLen`, the shared sentinel errors and `Diff`); each
+  package re-exports it, so no import is needed.
 
 All exported functions are safe to call from several goroutines at once, so a
 runtime may merge profiles for concurrent container starts without
@@ -85,87 +89,44 @@ The module is pre-1.0, so the API may still change. Until v1.0.0:
 
 - Breaking changes are confined to minor version bumps (`v0.X.0`) and called
   out in the release notes; patch releases (`v0.X.Y`) never break callers.
-- Merge results may change within a minor version when a semantic turns out
-  to be wrong about what a runtime loads, since matching the runtime is the
-  point of the library. Such changes are called out in the release notes too.
+- A change to merge results, or one that rejects input an earlier release
+  accepted, also makes the release a minor one, even when it corrects a
+  semantic that was wrong about what a runtime loads. Such changes are called
+  out in the release notes too.
 - The shape of the merge semantics themselves, that `Intersect` never permits
   more than any input and `Union` never permits less, is not going to change.
 
 ## Usage
 
-### CRI runtime: merge OCI-pulled profile with node baseline (intersection)
+### CRI runtime: intersect an artifact with the baseline
 
-[docs/integration.md](docs/integration.md) walks through this flow: who is
-trusted, the limits, how to read a validation error, and what each model
-leaves to the caller.
+A runtime decodes the artifact strictly, validates it as an artifact, and
+loads only the intersection with its baseline, which comes first.
+[docs/integration.md](docs/integration.md#the-runtime-flow) is the complete
+flow, including the baseline check at config load, the pod spec's own
+profile as a middle input, and how to tell a bad baseline from a bad artifact.
 
 ```go
-// At config load: the baseline is trusted but should be well-formed.
-if err := seccomp.ValidateStrict(nodeBaseline); err != nil {
-    return err
+artifact := new(specs.LinuxSeccomp)
+if err := seccomp.UnmarshalStrict(artifactBytes, artifact); err != nil {
+    return err // a permanent rejection
 }
-
-// At pull time: decode strictly, since encoding/json accepts repeated and
-// unknown members that two readers of one document read differently, then
-// reject what a runtime must not accept from an artifact.
-ociPulledProfile := new(specs.LinuxSeccomp)
-if err := seccomp.UnmarshalStrict(artifactBytes, ociPulledProfile); err != nil {
-    return err // report as a permanent rejection
+if err := seccomp.ValidateArtifact(artifact); err != nil {
+    return err // a permanent rejection
 }
-
-if err := seccomp.ValidateArtifact(ociPulledProfile); err != nil {
-    return err // report as a permanent rejection
-}
-
-// At apply time, inputs go from most to least trusted: the runtime
-// baseline, the optional pod-spec base profile, then the artifact.
-// Tie-breaks such as errno values favor the earlier input. Architectures
-// need no preparation: as in runc and crun, every profile covers the native
-// architecture plus the ones it lists, and the merge intersects the lists.
-// Every input must be non-nil (a nil profile fails with ErrNilProfile), so
-// the pod-spec profile is only passed when the pod sets one.
-inputs := []*specs.LinuxSeccomp{nodeBaseline}
-if podBaseProfile != nil {
-    inputs = append(inputs, podBaseProfile)
-}
-inputs = append(inputs, ociPulledProfile)
-effective, err := seccomp.Intersect(inputs...)
+effective, err := seccomp.Intersect(baseline, artifact)
 if err != nil {
-    // An *spm.InputError (errors.As) names the input that failed by its
-    // index: 0 is the baseline, a node configuration error rather than a
-    // bad artifact.
-    return err
-}
-
-// effective permits only what every input permits, judged by what runc and
-// crun load through libseccomp: rules whose effect depends on libseccomp's
-// order of evaluation are read at their most restrictive, and the result
-// only contains rules libseccomp evaluates exactly. What the merge took away
-// from the artifact is visible in the diff, for logging or metrics. Diff
-// compares profiles by the rules a runtime loads from them, so it is equal
-// when the baseline changed nothing and the merge kept the artifact's rules.
-// Diff implies the architecture of the running program; a caller comparing
-// profiles for another node names it with seccomp.DiffForArch instead.
-constrained, err := seccomp.Diff(ociPulledProfile, effective)
-if err != nil {
-    return err
-}
-if !constrained.Equal {
-    log.Printf("artifact constrained by baseline: %s", seccomp.FormatDiff(constrained))
+    return err // an *spm.InputError names the input that failed
 }
 ```
 
-`ValidateStrict` is the strictest of the three and rejects everything
-`ValidateArtifact` rejects, which includes `SCMP_ACT_NOTIFY` and the listener
-settings that go with it. A node baseline that legitimately runs a
-notification listener, setting `listenerPath` and answering
-`SCMP_ACT_NOTIFY`, is therefore checked with `Validate` rather than
-`ValidateStrict`: those settings name node-local resources, which is exactly
-why an artifact must not carry them and a baseline may. `Validate` does
-require the two to travel together, since runc refuses a filter that notifies
-into nothing: a profile answering `SCMP_ACT_NOTIFY` must name the
-`listenerPath` that answers it, and the merge takes that listener from the
-first profile that sets one rather than rewriting an action to do without it.
+`effective` permits only what every input permits, judged by what runc and
+crun load through libseccomp. Architectures need no preparation: as in runc
+and crun, every profile covers the native architecture plus the ones it
+lists, and the merge intersects the lists. `Intersect` drops a 32-bit or
+multiplexing architecture the result only lists, and the native architecture
+is that of the running program, so run the merge on the node that loads the
+result.
 
 ### Security Profiles Operator: combine recorded profiles (union)
 
@@ -178,18 +139,19 @@ if err != nil {
 log.Print(seccomp.FormatProfile(combined))
 ```
 
+Input order decides tie-breaks such as errno values; see
+[Combining recordings](docs/integration.md#combining-recordings-union).
+
 ### AppArmor profile merge
 
 ```go
 // A section a profile omits denies everything it covers, as it does in
 // AppArmor, so a baseline without a capability section grants no
-// capability to the intersection. Diff compares the same way, so
-// normalizing a profile is never reported as a constraint.
-aaEffective, err := apparmor.Intersect(baseProfile, ociProfile)
+// capability to the intersection.
+aaEffective, err := apparmor.Intersect(baseline, artifact)
 if err != nil {
     return err
 }
-// aaEffective permits only what both profiles permit.
 log.Print(apparmor.FormatProfile(aaEffective))
 
 // Capability names come back upper-cased ("CHOWN"), while apparmor_parser
@@ -211,17 +173,13 @@ log.Print(apparmor.FormatProfile(aaCombined))
 ### Landlock profile merge
 
 ```go
-llEffective, err := landlock.Intersect(baseRuleset, ociRuleset)
+llEffective, err := landlock.Intersect(baseline, artifact)
 if err != nil {
     return err
 }
 
-// A kernel rejects a right its ABI does not know, so a caller targeting a
-// specific node can check the merged ruleset against that node's version.
-// A node reporting a version newer than this library knows is accepted:
-// ABI versions are cumulative, so every right here exists there and the
-// check clamps to landlock.LatestABIVersion. Only a version below ABIV1
-// names no kernel, and is rejected with ErrUnknownABIVersion.
+// A kernel rejects a right its ABI does not know, so check the result
+// against the ABI version of the node that applies it.
 if err := landlock.ValidateForABI(llEffective, nodeABI); err != nil {
     return err
 }
@@ -244,6 +202,9 @@ for custom profiles:
 spm merge --type seccomp --strategy intersect \
   examples/seccomp_baseline.json examples/seccomp_application.json
 
+spm merge --type seccomp --strategy union \
+  examples/seccomp_recording_1.json examples/seccomp_recording_2.json
+
 spm diff --type apparmor --format human \
   examples/apparmor_baseline.json examples/apparmor_application.json
 
@@ -257,7 +218,7 @@ writing Go code:
 
 ```sh
 spm merge --type seccomp --strategy intersect baseline.json artifact.json
-spm validate --artifact pulled-profile.json
+spm validate --artifact artifact.json
 spm diff baseline.json merged.json
 ```
 
@@ -272,9 +233,8 @@ and what `--output` guards against.
 Download a pre-built binary from the
 [releases page](https://github.com/kubernetes-sigs/security-profiles-merger/releases).
 Each release covers Linux on `amd64`, `arm64`, `ppc64le` and `s390x`, and
-macOS and Windows on `amd64` and `arm64`: Kubernetes ships `ppc64le` and
-`s390x`, which exist on Linux only. Each release includes cosign-signed
-checksums, SBOMs, and build provenance attestations.
+macOS and Windows on `amd64` and `arm64` (see [RELEASE.md](RELEASE.md)), and
+includes cosign-signed checksums, SBOMs, and build provenance attestations.
 
 To verify a downloaded binary:
 
@@ -308,11 +268,10 @@ make build   # produces build/spm
 ## Contributing
 
 [CONTRIBUTING.md](CONTRIBUTING.md) is where to start: it describes how the
-four layers of the codebase fit together, lists the `make` targets that
-reproduce what CI runs, and explains how the merge semantics are checked
-against libseccomp, apparmor_parser and the kernel. That last part is the one
-a change to a merge has to keep passing, since every semantic here rests on
-the claim that a profile is loaded the way the runtime loads it.
+layers of the codebase fit together, lists the `make` targets that reproduce
+what CI runs, and explains how the merge semantics are checked (against
+independent evaluators, and for seccomp against libseccomp itself), which a
+change to a merge has to keep passing.
 
 - [code-of-conduct.md](code-of-conduct.md) governs participation, as it does
   everywhere in the Kubernetes community.
