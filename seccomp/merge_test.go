@@ -3249,6 +3249,9 @@ func TestListenerFlagFollowsTheListener(t *testing.T) {
 // inputs said and buy nothing, since no collapse threatens the filters.
 func TestErrnoStaysAsWrittenInAnExactShape(t *testing.T) {
 	t.Parallel()
+	// On an architecture multiplexing socket(2), both rules end up with the
+	// same filter on socketcall(2), where libseccomp refuses them.
+	requireWideNative(t)
 
 	eperm, enosys := uint(1), uint(38)
 

@@ -1,0 +1,13 @@
+go test fuzz v1
+uint64(4096)
+string("///\\x2fetc/passwd")
+string("////\\057**")
+bool(true)
+bool(true)
+bool(false)
+uint64(4096)
+string("/etc/passwd")
+string("///\\d047etc/*x")
+bool(false)
+bool(true)
+bool(true)

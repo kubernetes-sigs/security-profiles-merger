@@ -1537,6 +1537,90 @@ func TestNormalizeGlobPathPrefix(t *testing.T) {
 	}
 }
 
+// TestMergeEscapedSlashRuns covers a run of slashes that holds an escape
+// denoting "/". apparmor_parser resolves escapes before it collapses slashes,
+// so `///\x2fetc/passwd` names "/etc/passwd": the merge must keep that
+// meaning rather than collapse the written slashes first and turn the rule
+// into one for "//etc/passwd".
+func TestMergeEscapedSlashRuns(t *testing.T) {
+	t.Parallel()
+
+	fsProfile := func(paths ...string) *apparmor.Profile {
+		return &apparmor.Profile{
+			Executable: nil,
+			Filesystem: &apparmor.FilesystemRules{
+				ReadOnlyPaths:  paths,
+				WriteOnlyPaths: nil,
+				ReadWritePaths: nil,
+			},
+			Network:      nil,
+			Capabilities: nil,
+		}
+	}
+
+	for _, testCase := range []struct {
+		name        string
+		left, right []string
+		union, both []string
+	}{
+		{
+			name: "hex escape", left: []string{`///\x2fetc/passwd`}, right: []string{"/etc/passwd"},
+			union: []string{"/etc/passwd"}, both: []string{"/etc/passwd"},
+		},
+		{
+			name: "octal escape", left: []string{`///\057etc/passwd`}, right: []string{"/etc/passwd"},
+			union: []string{"/etc/passwd"}, both: []string{"/etc/passwd"},
+		},
+		{
+			name: "decimal escape", left: []string{`///\d047etc/passwd`}, right: []string{"/etc/passwd"},
+			union: []string{"/etc/passwd"}, both: []string{"/etc/passwd"},
+		},
+		{
+			name: "escape after the leading slashes", left: []string{`////\x2f**`}, right: []string{"/etc/passwd"},
+			union: []string{"/**"}, both: []string{"/etc/passwd"},
+		},
+		{
+			name: "escape inside the path", left: []string{`/etc//\x2fpasswd`}, right: []string{"/etc/passwd"},
+			union: []string{"/etc/passwd"}, both: []string{"/etc/passwd"},
+		},
+		{
+			name: "glob after the leading slashes", left: []string{`///\x2f*x`}, right: []string{"/ax"},
+			union: []string{"/*x"}, both: []string{"/ax"},
+		},
+		{
+			name: "escape keeps a leading double slash", left: []string{`/\x2fetc/passwd`},
+			right: []string{"/etc/passwd"},
+			union: []string{`/\x2fetc/passwd`, "/etc/passwd"}, both: nil,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			union, err := apparmor.Union(fsProfile(testCase.left...), fsProfile(testCase.right...))
+			if err != nil {
+				t.Fatalf("Union: %v", err)
+			}
+
+			if !slices.Equal(union.Filesystem.ReadOnlyPaths, testCase.union) {
+				t.Errorf("Union ReadOnlyPaths = %q, want %q",
+					union.Filesystem.ReadOnlyPaths, testCase.union)
+			}
+
+			both, err := apparmor.Intersect(
+				fsProfile(testCase.left...), fsProfile(testCase.right...),
+			)
+			if err != nil {
+				t.Fatalf("Intersect: %v", err)
+			}
+
+			if !slices.Equal(both.Filesystem.ReadOnlyPaths, testCase.both) {
+				t.Errorf("Intersect ReadOnlyPaths = %q, want %q",
+					both.Filesystem.ReadOnlyPaths, testCase.both)
+			}
+		})
+	}
+}
+
 func TestDeduplicateCapabilities(t *testing.T) {
 	t.Parallel()
 

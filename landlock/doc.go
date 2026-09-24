@@ -116,9 +116,11 @@ limitations under the License.
 // move that input denies. So where an input grants a right the result does
 // not, the result drops refer from the rules on that path and its
 // ancestors, unless the input grants the right on every path the result
-// grants refer on (then the right never denies a move in that input). Where
-// it drops refer, the result may deny moves and links that every input
-// allows.
+// grants refer on (then the right never denies a move in that input). It
+// then also drops refer from every rule on a path no input's own rule
+// grants refer on: such a rule only inherited it and may name a regular
+// file, where the kernel refuses refer. Where it drops refer, the result
+// may deny moves and links that every input allows.
 //
 // A union has the opposite problem: a right one input grants at a
 // destination can deny a move another input allows, and a single ruleset

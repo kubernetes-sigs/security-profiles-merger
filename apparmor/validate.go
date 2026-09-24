@@ -507,7 +507,8 @@ func validateLoadablePaths(profile *Profile) []error {
 
 	visitPathLists(profile, func(context string, paths []string) {
 		// Normalizing never changes whether a path is absolute, which
-		// characters it holds, or which escapes it spells, so those checks
+		// characters it holds, or which escapes it spells beyond dropping
+		// escaped slashes from a run of slashes, so those checks
 		// read the raw paths and report them as written. The pattern checks
 		// apply to the normalized form, which is what the merge matches.
 		normalized := normalizePaths(paths)

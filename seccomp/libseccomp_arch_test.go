@@ -130,6 +130,7 @@ func randomArchProfile(rng *rand.Rand, def specs.LinuxSeccompAction) *specs.Linu
 
 	profile := profileOf(def)
 	profile.Architectures = lists[rng.IntN(len(lists))]
+	profile.DefaultErrnoRet = randomErrno(rng, def)
 	values := archValues()
 
 	for range rng.IntN(maxEntries) {
@@ -137,6 +138,7 @@ func randomArchProfile(rng *rand.Rand, def specs.LinuxSeccompAction) *specs.Linu
 			archNames()[rng.IntN(len(archNames()))],
 			actions[rng.IntN(len(actions))],
 		)
+		entry.ErrnoRet = randomErrno(rng, entry.Action)
 
 		for range rng.IntN(maxArgs) {
 			value := values[rng.IntN(5)]
@@ -153,6 +155,20 @@ func randomArchProfile(rng *rand.Rand, def specs.LinuxSeccompAction) *specs.Linu
 	}
 
 	return profile
+}
+
+// randomErrno draws EPERM or ENOSYS for SCMP_ACT_ERRNO, so that rules and
+// defaults differ in their errno only, and nil otherwise.
+func randomErrno(rng *rand.Rand, action specs.LinuxSeccompAction) *uint {
+	if action != specs.ActErrno {
+		return nil
+	}
+
+	const enosys = 38
+
+	errnos := []*uint{nil, uintPtr(1), uintPtr(enosys)}
+
+	return errnos[rng.IntN(len(errnos))]
 }
 
 // archMergeCase merges a pair as profileMergeCase does, and for each foreign
@@ -376,6 +392,76 @@ func TestModelMatchesLibseccompForArchitectureFindings(t *testing.T) {
 			onArchs(profileOf(specs.ActErrno,
 				filtered("socket", specs.ActAllow, arg(0, specs.OpEqualTo, 2)),
 			), specs.ArchX86, specs.ArchPPC64LE),
+		},
+		// Rules testing the second argument keep it on the multiplexer and
+		// decide socketcall(SYS_SOCKET, ...) there as they decide socket(2),
+		// so a result keeping them keeps x86 as well.
+		{
+			onArchs(profileOf(specs.ActErrno,
+				filtered("socket", specs.ActAllow, arg(1, specs.OpEqualTo, 1)),
+				errnoFiltered("socket", 92, arg(1, specs.OpNotEqual, 1)),
+			), specs.ArchX86, specs.ArchPPC64LE),
+			onArchs(profileOf(specs.ActErrno,
+				filtered("socket", specs.ActAllow, arg(1, specs.OpEqualTo, 1)),
+				errnoFiltered("socket", 92, arg(1, specs.OpNotEqual, 1)),
+			), specs.ArchX86, specs.ArchPPC64LE),
+		},
+		{
+			onArchs(profileOf(specs.ActAllow), specs.ArchX86, specs.ArchPPC64LE),
+			onArchs(profileOf(specs.ActErrno,
+				filtered("socket", specs.ActAllow, arg(1, specs.OpEqualTo, 1)),
+				errnoFiltered("socket", 92, arg(1, specs.OpNotEqual, 1)),
+				filtered("connect", specs.ActAllow, arg(1, specs.OpGreaterThan, 2)),
+			), specs.ArchX86, specs.ArchPPC64LE),
+		},
+		// The result denies socketcall(2) with another errno than its
+		// default, and drops that rule so that it hides no socket rule.
+		{
+			onArchs(&specs.LinuxSeccomp{
+				DefaultAction:   specs.ActErrno,
+				DefaultErrnoRet: uintPtr(38),
+				Syscalls: []specs.LinuxSyscall{
+					filtered("socketcall", specs.ActAllow),
+					filtered("socket", specs.ActAllow, arg(1, specs.OpEqualTo, 1)),
+				},
+			}, specs.ArchX86, specs.ArchPPC64LE),
+			onArchs(profileOf(specs.ActErrno,
+				filtered("socket", specs.ActAllow),
+				filtered("connect", specs.ActLog),
+			), specs.ArchX86, specs.ArchPPC64LE),
+		},
+		// With conditional socketcall rules, libseccomp gives
+		// socketcall(0, ...) the result of the socket rule, which neither
+		// rule matches, so a result without socketcall rules may not apply
+		// its default there.
+		{
+			onArchs(profileOf(specs.ActErrno,
+				filtered("socket", specs.ActAllow),
+				filtered("socketcall", specs.ActKill,
+					arg(1, specs.OpNotEqual, 1<<32|1), arg(0, specs.OpNotEqual, 2)),
+			), specs.ArchPPC64LE),
+			onArchs(profileOf(specs.ActErrno,
+				filtered("socketcall", specs.ActKill,
+					arg(0, specs.OpGreaterEqual, 4), arg(0, specs.OpEqualTo, 0)),
+			)),
+		},
+		// The same gives socketcall(SYS_CONNECT, ...) the result of the
+		// socket rule.
+		{
+			onArchs(&specs.LinuxSeccomp{
+				DefaultAction:   specs.ActErrno,
+				DefaultErrnoRet: uintPtr(1),
+				Syscalls: []specs.LinuxSyscall{
+					filtered("socket", specs.ActLog),
+					filtered("socket", specs.ActKillProcess, arg(1, specs.OpNotEqual, 1)),
+					errnoFiltered("socketcall", 38,
+						arg(0, specs.OpNotEqual, 2), arg(1, specs.OpLessThan, 0)),
+				},
+			}, specs.ArchX86),
+			onArchs(profileOf(specs.ActLog,
+				filtered("socket", specs.ActErrno),
+				filtered("connect", specs.ActTrace, arg(1, specs.OpLessEqual, 1)),
+			), specs.ArchX86),
 		},
 		// A multiplexer rule of one input hides the other input's socket
 		// rule, which denies socketcall(SYS_SOCKET, ...).

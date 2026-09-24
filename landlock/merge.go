@@ -446,6 +446,15 @@ func effectiveFSAccess(
 // Rights change only at rule paths, so any path answers as the deepest rule
 // path above it does, and asking at the rule paths of every input covers
 // every directory.
+//
+// Removing refer from a path must not leave it on the rules beneath it that
+// carry it only because the merge lowered an ancestor's grant onto a path an
+// input named for other rights. Such a path may be a regular file, and the
+// kernel refuses refer on a rule for anything but a directory. So refer is
+// kept only on the rule paths some input grants it on itself, which that
+// input's own rule proves are directories. Before any removal, every rule
+// granting refer has an ancestor rule of that kind granting it too, so this
+// changes nothing there; beneath a removal it only denies more.
 func dropUnsafeRefer(rules []PathRule, inputs []*Profile) []PathRule {
 	resultRules := ruleMap(rules, pathRuleKey, pathRuleAccess)
 
@@ -469,7 +478,7 @@ func dropUnsafeRefer(rules []PathRule, inputs []*Profile) []PathRule {
 		return rules
 	}
 
-	return stripRefer(rules, unsafe)
+	return stripRefer(rules, unsafe, inputs)
 }
 
 // markUnsafeRefer adds to unsafe each path of referAt where the input
@@ -501,13 +510,22 @@ func markUnsafeRefer(
 }
 
 // stripRefer removes FSAccessRefer from the rules on each of the paths and
-// on their ancestors, and drops the rules left without rights.
-func stripRefer(rules []PathRule, paths map[string]struct{}) []PathRule {
+// on their ancestors, and from every rule on a path where no input's own
+// rule grants it, then drops the rules left without rights.
+func stripRefer(rules []PathRule, paths map[string]struct{}, inputs []*Profile) []PathRule {
 	strip := make(map[string]struct{})
 
 	for path := range paths {
 		for _, ancestor := range pathAncestors(path) {
 			strip[ancestor] = struct{}{}
+		}
+	}
+
+	granted := referRulePaths(inputs)
+
+	for _, rule := range rules {
+		if _, ok := granted[rule.Path]; !ok {
+			strip[rule.Path] = struct{}{}
 		}
 	}
 
@@ -529,6 +547,21 @@ func stripRefer(rules []PathRule, paths map[string]struct{}) []PathRule {
 	}
 
 	return result
+}
+
+// referRulePaths returns the paths of the input rules granting refer.
+func referRulePaths(inputs []*Profile) map[string]struct{} {
+	paths := make(map[string]struct{})
+
+	for _, input := range inputs {
+		for _, rule := range input.PathRules {
+			if slices.Contains(rule.AccessFS, FSAccessRefer) {
+				paths[rule.Path] = struct{}{}
+			}
+		}
+	}
+
+	return paths
 }
 
 // unhandleMoveConflicts removes from the handled filesystem rights of a

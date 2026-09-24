@@ -18,6 +18,7 @@ package landlock_test
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -310,6 +311,58 @@ func TestIntersectReferGainsNoRight(t *testing.T) {
 	)
 	assertMergeFormat(t, "Intersect", landlock.Intersect,
 		"Profile{fs:refer,write_file /top/mnt/dst(refer) /top/mnt/src(refer)}", above, inside)
+}
+
+// Dropping refer where the result could gain a move must also drop the
+// refer that rules beneath that path carry only because the merge lowered
+// an ancestor's grant onto them. Such a path, here /etc/passwd, was named
+// for file rights and may be a regular file, on which the kernel refuses
+// refer with EINVAL.
+func TestIntersectDropsLoweredRefer(t *testing.T) {
+	t.Parallel()
+
+	refer := fsRights{landlock.FSAccessRefer}
+	readWrite := fsRights{landlock.FSAccessReadFile, landlock.FSAccessWriteFile}
+	write := fsRights{landlock.FSAccessWriteFile}
+
+	left := fsProfile(fsRights{
+		landlock.FSAccessReadFile, landlock.FSAccessWriteFile, landlock.FSAccessRefer,
+	},
+		landlock.PathRule{Path: "/", AccessFS: refer},
+		landlock.PathRule{Path: "/etc/passwd", AccessFS: readWrite},
+	)
+	right := fsProfile(fsRights{landlock.FSAccessWriteFile, landlock.FSAccessRefer},
+		landlock.PathRule{Path: "/", AccessFS: refer},
+		landlock.PathRule{Path: "/etc", AccessFS: write},
+	)
+
+	want := "Profile{fs:read_file,refer,write_file /etc/passwd(read_file,write_file)}"
+	result := assertMergeFormat(t, "Intersect", landlock.Intersect, want, left, right)
+	assertMergeFormat(t, "Intersect", landlock.Intersect, want, right, left)
+
+	for _, rule := range result.PathRules {
+		if slices.Contains(rule.AccessFS, landlock.FSAccessRefer) {
+			t.Errorf("rule on %q grants refer, which no input grants there", rule.Path)
+		}
+	}
+
+	err := landlock.ValidateStrict(result)
+	if err != nil {
+		t.Errorf("ValidateStrict(result) = %v, want nil", err)
+	}
+
+	// A path an input grants refer on itself is a directory, so refer
+	// stays there even beneath a path that loses it.
+	dir := fsProfile(fsRights{
+		landlock.FSAccessReadFile, landlock.FSAccessWriteFile, landlock.FSAccessRefer,
+	},
+		landlock.PathRule{Path: "/", AccessFS: refer},
+		landlock.PathRule{Path: "/etc/sub", AccessFS: fsRights{
+			landlock.FSAccessReadFile, landlock.FSAccessWriteFile, landlock.FSAccessRefer,
+		}},
+	)
+	assertMergeFormat(t, "Intersect", landlock.Intersect,
+		"Profile{fs:read_file,refer,write_file /etc/sub(read_file,refer,write_file)}", dir, right)
 }
 
 // A union granting a right at the destination of a move that an input

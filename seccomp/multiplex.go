@@ -36,17 +36,21 @@ import (
 // elsewhere. socket ALLOW if a0 == 2 therefore becomes socketcall ALLOW if
 // a0 == 1, which allows every socket(2) made through socketcall.
 //
-// The rules of one syscall thus decide two paths, and what they filter on
-// one path says little about the other. Rules with different results for
-// one sub-call are refused with EEXIST unless the multiplexer has an
-// unconditional rule of its own added first, which then decides every call
-// of the multiplexer and hides the multiplexed rules. Checked against
-// libseccomp 2.6.1.
+// The rules of one syscall thus decide two paths. Under the sub-call test,
+// libseccomp builds the multiplexed rules into a tree as it builds the rules
+// of a syscall, so rules that test no first argument decide the multiplexer
+// path of their sub-call as they decide the direct path. Rules that test it
+// can end up with the same filter there, or with one that is a prefix of
+// another's: with different results, libseccomp then refuses the rule with
+// EEXIST or drops one of them, depending on the order they are added in,
+// unless the multiplexer has an unconditional rule of its own added first,
+// which then decides every call of the multiplexer and hides the
+// multiplexed rules. Checked against libseccomp 2.6.1.
 //
 // The merge therefore reads the multiplexer path of each of these syscalls
 // separately (see multiplexInput.view) and settles a result whose
-// multiplexer path would permit more (intersection) or less (union) than an
-// input's (see settleMultiplexed).
+// multiplexer path would be refused, or would permit more (intersection) or
+// less (union) than an input's (see settleMultiplexed).
 
 const (
 	socketMultiplexer = "socketcall"
@@ -121,15 +125,75 @@ type multiplexRules struct {
 	unconditional *clause
 	// conditional reports whether a conditional rule was loaded.
 	conditional bool
-	// beyondFirst reports whether a rule tests an argument other than the
-	// first. The multiplexed rule keeps such a condition, so it does not
-	// match every call of its sub-call.
-	beyondFirst bool
+	// firstArg reports whether a rule tests the first argument, which the
+	// multiplexed rule replaces by the sub-call.
+	firstArg bool
+	// wholeSubcall reports whether a rule tests no argument but the first,
+	// so that its multiplexed rule matches every call of its sub-call.
+	wholeSubcall bool
+	// mixed reports whether the rules have different results.
+	mixed bool
+	// multiplexed holds the distinct multiplexed rules, without the
+	// sub-call test, and seen their clauseKey.
+	multiplexed []clause
+	seen        map[string]struct{}
 	// keys holds the action and filter of every rule, so that two profiles
 	// loading the same rules can be recognized as such. The errno is left
 	// out: a call gets the same action from the same rules whatever errno
 	// they report, and the merge judges safety by action.
 	keys map[string]struct{}
+}
+
+// add records one rule of the syscall.
+func (r *multiplexRules) add(next clause) {
+	if len(r.multiplexed) > 0 && !next.sameResult(r.multiplexed[0]) {
+		r.mixed = true
+	}
+
+	r.results = r.results.fold(next)
+	r.keys[actionKey(next)] = struct{}{}
+
+	multiplexed := next
+	multiplexed.args = slices.DeleteFunc(
+		slices.Clone(next.args),
+		func(arg specs.LinuxSeccompArg) bool { return arg.Index == 0 },
+	)
+	multiplexed.errnoRet = merge.ClonePtr(next.errnoRet)
+
+	r.firstArg = r.firstArg || len(multiplexed.args) < len(next.args)
+	r.wholeSubcall = r.wholeSubcall || multiplexed.unconditional()
+
+	if key := clauseKey(multiplexed); !hasKey(r.seen, key) {
+		r.seen[key] = struct{}{}
+		r.multiplexed = append(r.multiplexed, multiplexed)
+	}
+
+	if next.unconditional() {
+		if r.unconditional == nil {
+			first := next
+			first.errnoRet = merge.ClonePtr(next.errnoRet)
+			r.unconditional = &first
+		}
+
+		return
+	}
+
+	r.conditional = true
+}
+
+func hasKey(set map[string]struct{}, key string) bool {
+	_, ok := set[key]
+
+	return ok
+}
+
+// refused reports whether libseccomp may refuse the multiplexed rules or
+// drop one of them depending on the order they are added in: rules with
+// different results where one of them matches the whole sub-call, or that
+// do not form a safe shape without the sub-call test. Otherwise it builds
+// them as it builds the rules of a syscall in that shape.
+func (r *multiplexRules) refused() bool {
+	return r.mixed && (r.wholeSubcall || !safeShape(r.multiplexed))
 }
 
 // collectMultiplexRules reads the rules a profile loads for the multiplexers
@@ -153,32 +217,17 @@ func collectMultiplexRules(
 				results:       nil,
 				unconditional: nil,
 				conditional:   false,
-				beyondFirst:   false,
+				firstArg:      false,
+				wholeSubcall:  false,
+				mixed:         false,
+				multiplexed:   nil,
+				seen:          make(map[string]struct{}),
 				keys:          make(map[string]struct{}),
 			}
 			rules[name] = current
 		}
 
-		current.results = current.results.fold(next)
-		current.keys[actionKey(next)] = struct{}{}
-
-		if next.unconditional() {
-			if current.unconditional == nil {
-				first := next
-				first.errnoRet = merge.ClonePtr(next.errnoRet)
-				current.unconditional = &first
-			}
-
-			return
-		}
-
-		current.conditional = true
-
-		if slices.ContainsFunc(next.args, func(arg specs.LinuxSeccompArg) bool {
-			return arg.Index != 0
-		}) {
-			current.beyondFirst = true
-		}
+		current.add(next)
 	}
 
 	// Only the entries naming one of these syscalls are expanded, so a
@@ -209,36 +258,94 @@ func newMultiplexInput(syscalls []specs.LinuxSyscall, def *clause) multiplexInpu
 
 // view returns the results a call of the multiplexer for the given
 // syscall's sub-call can get, as their extremes. An unconditional rule of
-// the multiplexer decides every such call. Otherwise the call gets the
-// result of a multiplexer rule, of a multiplexed rule of the syscall, or the
-// default; the default is left out only when the multiplexer has no rules
-// and every rule of the syscall matches the whole sub-call, which it does
-// when it tests no argument but the first, which the sub-call number
-// replaces. Whatever order libseccomp evaluates the rules in, the call gets
-// one of these results, so this bounds it in both directions.
+// the multiplexer decides every such call, and with conditional ones, the
+// call can get any result the multiplexer path has (see anyCall).
+// Otherwise the call gets the result of a multiplexed rule of the syscall,
+// or the default, which is left out when a rule of the syscall matches the
+// whole sub-call, which it does when it tests no argument but the first,
+// which the sub-call number replaces: libseccomp then either lets that rule
+// decide the sub-call, drops the others, or refuses them. Whatever order
+// libseccomp evaluates the rules in, the call gets one of these results, so
+// this bounds it in both directions.
 func (in multiplexInput) view(name string) *clauseSummary {
-	target := in.rules[multiplexedSyscalls[name]]
+	multiplexer := multiplexedSyscalls[name]
+
+	target := in.rules[multiplexer]
 	if target != nil && target.unconditional != nil {
 		return (*clauseSummary)(nil).fold(*target.unconditional)
+	}
+
+	if target != nil {
+		return in.anyCall(multiplexer)
 	}
 
 	own := in.rules[name]
 
 	var view *clauseSummary
 
-	if target != nil {
-		view = view.foldSummary(target.results)
-	}
-
 	if own != nil {
 		view = view.foldSummary(own.results)
 	}
 
-	if target != nil || own == nil || own.beyondFirst {
+	if own == nil || !own.wholeSubcall {
 		view = view.fold(*in.def)
 	}
 
 	return view
+}
+
+// anyCall returns the results any call of a multiplexer with conditional
+// rules and no unconditional one can get: libseccomp builds those rules into
+// one tree with the multiplexed rules, which it evaluates in its own order
+// and does not always compile to a program matching them, so a call can end
+// up with the result of any of these rules, whatever its sub-call, or with
+// the default.
+func (in multiplexInput) anyCall(multiplexer string) *clauseSummary {
+	view := (*clauseSummary)(nil).foldSummary(in.rules[multiplexer].results)
+
+	for _, name := range multiplexedBy(multiplexer) {
+		if own := in.rules[name]; own != nil {
+			view = view.foldSummary(own.results)
+		}
+	}
+
+	return view.fold(*in.def)
+}
+
+// pickAnyCall moves a clause deciding calls of the multiplexer that no
+// multiplexed rule of the result decides to the safe side of what those
+// calls get in every input with conditional rules for it, where they can
+// get the result of a multiplexed rule too (see anyCall). The direct path
+// reads the multiplexer of such an input by its own rules only.
+func (m ruleMerger) pickAnyCall(
+	current clause, multiplexer string, inputs []multiplexInput,
+) clause {
+	for _, input := range inputs {
+		if rules := input.rules[multiplexer]; rules != nil && rules.unconditional == nil {
+			current = m.pickClause(current, input.anyCall(multiplexer).pick(m.intersect))
+		}
+	}
+
+	return current
+}
+
+// sameDirect reports whether the multiplexer path of a syscall decides
+// every call in both inputs as their direct path decides the syscall with
+// any first argument: neither input has a rule for the multiplexer, and no
+// rule of the syscall tests the first argument, so its multiplexed rules
+// are its rules under the sub-call test. The direct path of a merge result
+// is on the safe side of every input's, call by call, so this carries over
+// to the multiplexer path, which extremes cannot show when the rules filter
+// on more than the sub-call.
+func (in multiplexInput) sameDirect(other multiplexInput, name string) bool {
+	target := multiplexedSyscalls[name]
+	if in.rules[target] != nil || other.rules[target] != nil {
+		return false
+	}
+
+	own, others := in.rules[name], other.rules[name]
+
+	return (own == nil || !own.firstArg) && (others == nil || !others.firstArg)
 }
 
 // sameRules reports whether the multiplexer path of a syscall applies the
@@ -269,10 +376,12 @@ func (m ruleMerger) within(result, bound clause) bool {
 }
 
 // covers reports whether the multiplexer path of a syscall in the result is
-// on the safe side of the same path in an input: the result's view in its
-// least safe extreme against the input's view in its safest.
+// on the safe side of the same path in an input: call by call where both
+// read it as their direct path or load the same rules, and otherwise by the
+// result's view in its least safe extreme against the input's view in its
+// safest.
 func (m ruleMerger) covers(result, input multiplexInput, name string) bool {
-	if result.sameRules(input, name) {
+	if result.sameRules(input, name) || result.sameDirect(input, name) {
 		return true
 	}
 
@@ -292,25 +401,31 @@ func (m ruleMerger) covers(result, input multiplexInput, name string) bool {
 // multiplexer collapses to one unconditional rule when it has conditional
 // rules or its unconditional rule is on the wrong side of an input: the
 // clause collapse picks for its rules, moved to the safe side of every
-// input's view of every sub-call. Where that is the default, the rule is
-// dropped and the multiplexed rules decide again. A multiplexed syscall
-// then collapses the same way when its rules have different results, which
-// libseccomp refuses on the multiplexer, or, without a multiplexer rule
-// hiding them, when its view is on the wrong side of an input's; the
+// input's view of every sub-call. An input with conditional multiplexer
+// rules can give any call of the multiplexer the result of a multiplexed
+// rule (see anyCall), so the rule, or the default of a result without one,
+// must be on the safe side of that as well, and a result gets such a rule
+// where its default is not. Where the rule is the default, it is dropped
+// and the multiplexed rules decide again. A multiplexed syscall then
+// collapses the same way when libseccomp may refuse its multiplexed rules
+// (see multiplexRules.refused), or, without a multiplexer rule hiding them,
+// when its multiplexer path is on the wrong side of an input's; the
 // collapsed rule decides its whole sub-call, so the view becomes that
 // rule. Every rule a collapse picks is on the safe side of what it
 // replaces, so the direct path stays safe. The second result reports
-// whether anything had to be settled.
+// whether anything had to be settled, rather than only dropped where that
+// is more precise (see settleMultiplexer).
 func (m ruleMerger) settleMultiplexed(
 	syscalls []specs.LinuxSyscall, def *clause, inputs []multiplexInput,
 ) ([]specs.LinuxSyscall, bool) {
 	result := newMultiplexInput(syscalls, def)
 	replaced := make(map[string]*clause)
+	unhidden := make(map[string]bool)
 
 	for _, target := range []string{ipcMultiplexer, socketMultiplexer} {
 		names := multiplexedBy(target)
 
-		hiding := m.settleMultiplexer(result, target, names, inputs, replaced)
+		hiding := m.settleMultiplexer(result, target, names, inputs, replaced, unhidden)
 
 		for _, name := range names {
 			m.settleMultiplexedSyscall(result, name, hiding, inputs, replaced)
@@ -331,22 +446,49 @@ func (m ruleMerger) settleMultiplexed(
 		settled = appendRules(settled, name, def, replaced[name], nil)
 	}
 
-	return settled, true
+	return settled, len(replaced) > len(unhidden)
 }
 
 // settleMultiplexer settles the multiplexer's own rules and reports whether
 // the result keeps an unconditional multiplexer rule, which hides every
-// multiplexed rule.
+// multiplexed rule. Such a rule comes from the direct merge of the
+// multiplexer, where an errno the inputs' defaults differ in can decide
+// whether the result spells it out at all, and it can hide what the
+// multiplexed rules would permit (intersection) or deny (union) as the
+// inputs do. A rule that is safe to keep but differs from the default in
+// its errno only is therefore dropped where that is safe too (see unhides),
+// which unhidden records, since it settles nothing.
 func (m ruleMerger) settleMultiplexer(
 	result multiplexInput, target string, names []string,
-	inputs []multiplexInput, replaced map[string]*clause,
+	inputs []multiplexInput, replaced map[string]*clause, unhidden map[string]bool,
 ) bool {
 	current := result.rules[target]
 	if current == nil {
-		return false
+		// The default decides every call of the multiplexer that no
+		// multiplexed rule of the result decides.
+		if m.pickAnyCall(*result.def, target, inputs).sameResult(*result.def) {
+			return false
+		}
+
+		collapsed := m.pickAnyCall(*result.def, target, inputs)
+		for _, name := range names {
+			collapsed = m.pickInputs(collapsed, name, inputs)
+		}
+
+		result.replace(target, collapsed, replaced)
+
+		return replaced[target] != nil
 	}
 
-	if !current.conditional && m.hidesSafely(*current.unconditional, names, inputs) {
+	if !current.conditional && m.hidesSafely(*current.unconditional, names, inputs) &&
+		m.pickAnyCall(*current.unconditional, target, inputs).sameResult(*current.unconditional) {
+		if m.unhides(result, target, names, inputs) {
+			replaced[target] = nil
+			unhidden[target] = true
+
+			return false
+		}
+
 		return true
 	}
 
@@ -355,6 +497,8 @@ func (m ruleMerger) settleMultiplexer(
 		collapsed = m.pickClause(collapsed, *result.def)
 	}
 
+	collapsed = m.pickAnyCall(collapsed, target, inputs)
+
 	for _, name := range names {
 		collapsed = m.pickInputs(collapsed, name, inputs)
 	}
@@ -362,6 +506,49 @@ func (m ruleMerger) settleMultiplexer(
 	result.replace(target, collapsed, replaced)
 
 	return replaced[target] != nil
+}
+
+// unhides reports whether the result's unconditional multiplexer rule is
+// better dropped, and drops it from result if so. The rule must apply the
+// default's action, which then decides every call of the multiplexer that
+// no multiplexed rule decides. The multiplexed rules decide the sub-calls
+// then: they must not be refused, must be on the safe side of every input's
+// multiplexer path, nowhere more restrictive (intersection) or more
+// permissive (union) than the rule, and somewhere different from it.
+func (m ruleMerger) unhides(
+	result multiplexInput, target string, names []string, inputs []multiplexInput,
+) bool {
+	rule := *result.rules[target].unconditional
+	if !actionsEquivalent(rule.action, result.def.action) {
+		return false
+	}
+
+	saved := result.rules[target]
+	delete(result.rules, target)
+
+	gains := false
+
+	for _, name := range names {
+		own := result.rules[name]
+		view := result.view(name)
+
+		if own != nil && own.refused() || !m.within(rule, view.pick(m.intersect)) ||
+			slices.ContainsFunc(inputs, func(input multiplexInput) bool {
+				return !m.covers(result, input, name)
+			}) {
+			result.rules[target] = saved
+
+			return false
+		}
+
+		gains = gains || !actionsEquivalent(view.pick(!m.intersect).action, rule.action)
+	}
+
+	if !gains {
+		result.rules[target] = saved
+	}
+
+	return gains
 }
 
 // replace records the unconditional rule that replaces the rules of a
@@ -382,7 +569,11 @@ func (in multiplexInput) replace(name string, rule clause, replaced map[string]*
 		results:       (*clauseSummary)(nil).fold(rule),
 		unconditional: &rule,
 		conditional:   false,
-		beyondFirst:   false,
+		firstArg:      false,
+		wholeSubcall:  true,
+		mixed:         false,
+		multiplexed:   []clause{rule},
+		seen:          map[string]struct{}{clauseKey(rule): {}},
 		keys:          map[string]struct{}{actionKey(rule): {}},
 	}
 }
@@ -419,9 +610,9 @@ func (m ruleMerger) settleMultiplexedSyscall(
 	inputs []multiplexInput, replaced map[string]*clause,
 ) {
 	own := result.rules[name]
-	mixed := own != nil && !own.results.strictest.sameResult(own.results.loosest)
+	refused := own != nil && own.refused()
 
-	if !mixed && (hiding || !slices.ContainsFunc(inputs, func(input multiplexInput) bool {
+	if !refused && (hiding || !slices.ContainsFunc(inputs, func(input multiplexInput) bool {
 		return !m.covers(result, input, name)
 	})) {
 		return
