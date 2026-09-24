@@ -913,12 +913,13 @@ func deduplicateProfile(profile *Profile) {
 }
 
 // normalizePath collapses repeated slashes, as apparmor_parser does before
-// compiling a rule. It keeps a trailing slash, which distinguishes a
+// compiling a rule, counting an escaped slash as one (see
+// filterRawSlashes). It keeps a trailing slash, which distinguishes a
 // directory rule from a file rule, and leaves "." and ".." components alone:
 // the kernel hands AppArmor canonical paths, so a rule containing them
 // matches nothing, and resolving them would make the rule grant more.
 func normalizePath(path string) string {
-	return filterSlashes(path)
+	return filterRawSlashes(path)
 }
 
 func normalizePaths(paths []string) []string {

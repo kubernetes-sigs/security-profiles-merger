@@ -378,6 +378,126 @@ func TestMergeKeepsMultiplexedRulesThatAreSafe(t *testing.T) {
 	requireEqualProfiles(t, result, self)
 }
 
+// errnoFiltered is a rule denying a syscall with the given errno.
+func errnoFiltered(name string, errno uint, args ...specs.LinuxSeccompArg) specs.LinuxSyscall {
+	entry := filtered(name, specs.ActErrno, args...)
+	entry.ErrnoRet = uintPtr(errno)
+
+	return entry
+}
+
+// levelPair is a recording's setsockopt rules: libseccomp adds them to
+// socketcall under the sub-call test with their condition on the second
+// argument kept, where they differ, so it loads them and they decide
+// socketcall(SYS_SETSOCKOPT, ...) as they decide setsockopt(2).
+func levelPair(archs ...specs.Arch) *specs.LinuxSeccomp {
+	return on(profileOf(specs.ActErrno,
+		filtered("setsockopt", specs.ActAllow, arg(1, specs.OpEqualTo, 1)),
+		errnoFiltered("setsockopt", 92, arg(1, specs.OpNotEqual, 1)),
+	), archs...)
+}
+
+func TestMergeKeepsMultiplexedRulesTestingOtherArguments(t *testing.T) {
+	t.Parallel()
+
+	archs := []specs.Arch{specs.ArchX86_64, specs.ArchX86, specs.ArchPPC64LE}
+	recording := levelPair(archs...)
+	allowAll := on(profileOf(specs.ActAllow), archs...)
+
+	for _, native := range []specs.Arch{specs.ArchX86_64, specs.ArchX86} {
+		for name, merge := range map[string]func() (*specs.LinuxSeccomp, error){
+			"Intersect(p)": func() (*specs.LinuxSeccomp, error) {
+				return seccomp.IntersectOn(native, recording)
+			},
+			"Intersect(p, p)": func() (*specs.LinuxSeccomp, error) {
+				return seccomp.IntersectOn(native, recording, recording)
+			},
+			"Intersect(allow, p)": func() (*specs.LinuxSeccomp, error) {
+				return seccomp.IntersectOn(native, allowAll, recording)
+			},
+			"Union(p, p)": func() (*specs.LinuxSeccomp, error) {
+				return seccomp.UnionOn(native, recording, recording)
+			},
+		} {
+			result, err := merge()
+			if err != nil {
+				t.Fatalf("%s on %s: %v", name, native, err)
+			}
+
+			requireEqualProfiles(t, result, recording)
+		}
+	}
+
+	// Rules that differ only in the first argument end up with the same
+	// filter on the multiplexer, where libseccomp refuses them.
+	families := on(profileOf(specs.ActErrno,
+		filtered("socket", specs.ActAllow, arg(0, specs.OpEqualTo, 2)),
+		errnoFiltered("socket", 97, arg(0, specs.OpEqualTo, 40)),
+	), specs.ArchX86_64, specs.ArchX86)
+
+	result, err := seccomp.IntersectOn(specs.ArchX86_64, families, families)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	requireEqualProfiles(t, result, on(profileOf(specs.ActErrno,
+		filtered("socket", specs.ActAllow, arg(0, specs.OpEqualTo, 2)),
+		errnoFiltered("socket", 97, arg(0, specs.OpEqualTo, 40)),
+	), specs.ArchX86_64))
+
+	// Rules differing in their errno only are refused as well, and where
+	// x86 is native, socket(2) collapses to one of them.
+	errnos := on(profileOf(specs.ActAllow,
+		errnoFiltered("socket", 1, arg(0, specs.OpEqualTo, 2)),
+		errnoFiltered("socket", 38, arg(0, specs.OpEqualTo, 10)),
+	), specs.ArchX86)
+
+	result, err = seccomp.IntersectOn(specs.ArchX86, errnos, errnos)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	requireEqualProfiles(t, result, on(profileOf(specs.ActAllow,
+		errnoFiltered("socket", 38),
+	), specs.ArchX86))
+}
+
+func TestIntersectUnhidesMultiplexedRules(t *testing.T) {
+	t.Parallel()
+
+	// A baseline allowing socketcall(2) with ENOSYS as its default, and a
+	// recording allowing socket(2) with EPERM as its default: the result
+	// denies socketcall(2) with EPERM in the first order and needs a rule
+	// for it, which would hide the socket rule on the multiplexer although
+	// both inputs allow socketcall(SYS_SOCKET, ...). The rule is dropped
+	// instead, which only changes the errno other socketcall(2) calls get.
+	baseline := on(&specs.LinuxSeccomp{
+		DefaultAction:   specs.ActErrno,
+		DefaultErrnoRet: uintPtr(38),
+		Syscalls: []specs.LinuxSyscall{
+			filtered("socketcall", specs.ActAllow),
+			filtered("socket", specs.ActAllow),
+		},
+	}, specs.ArchX86)
+	recording := on(profileOf(specs.ActErrno,
+		filtered("socket", specs.ActAllow),
+	), specs.ArchX86)
+
+	for _, native := range []specs.Arch{specs.ArchX86_64, specs.ArchX86} {
+		for _, pair := range [][2]*specs.LinuxSeccomp{{baseline, recording}, {recording, baseline}} {
+			result, err := seccomp.IntersectOn(native, pair[0], pair[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			want := on(profileOf(specs.ActErrno, filtered("socket", specs.ActAllow)), specs.ArchX86)
+			want.DefaultErrnoRet = pair[0].DefaultErrnoRet
+
+			requireEqualProfiles(t, result, want)
+		}
+	}
+}
+
 func requireEqualProfiles(t *testing.T, got, want *specs.LinuxSeccomp) {
 	t.Helper()
 

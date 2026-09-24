@@ -133,6 +133,29 @@ func TestValidateDuplicateWriteOnlyAndReadWrite(t *testing.T) {
 	}
 }
 
+// TestValidateDuplicateThroughEscapedSlash checks that an escaped slash in a
+// run of slashes counts as one of the run, as it does to apparmor_parser:
+// `///\x2fetc/config` names the file "/etc/config" names.
+func TestValidateDuplicateThroughEscapedSlash(t *testing.T) {
+	t.Parallel()
+
+	profile := &apparmor.Profile{
+		Executable: nil,
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths:  []string{`///\x2fetc/config`},
+			WriteOnlyPaths: nil,
+			ReadWritePaths: []string{pathEtcConfig},
+		},
+		Network:      nil,
+		Capabilities: nil,
+	}
+
+	err := apparmor.Validate(profile)
+	if !errors.Is(err, apparmor.ErrDuplicatePath) {
+		t.Errorf("expected ErrDuplicatePath, got: %v", err)
+	}
+}
+
 func TestValidateMultipleDuplicates(t *testing.T) {
 	t.Parallel()
 

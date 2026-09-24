@@ -395,6 +395,47 @@ func TestFilterSlashes(t *testing.T) {
 	}
 }
 
+// TestFilterRawSlashes checks that collapsing slashes in a path as written
+// counts an escape denoting "/" as a slash, since the parser resolves escapes
+// before it filters slashes, and that the result means to the parser what the
+// path does.
+func TestFilterRawSlashes(t *testing.T) {
+	t.Parallel()
+
+	for input, want := range map[string]string{
+		`/etc//passwd`:       `/etc/passwd`,
+		`//etc`:              `//etc`,
+		`///\x2fetc/passwd`:  `/etc/passwd`,
+		`///\057etc/passwd`:  `/etc/passwd`,
+		`///\d047etc/passwd`: `/etc/passwd`,
+		`////\x2f**`:         `/**`,
+		`////\x2f`:           `/`,
+		`///\x2f*x`:          `/*x`,
+		`/\x2fetc`:           `/\x2fetc`,
+		`//\x2fetc`:          `/etc`,
+		`\x2f/etc`:           `\x2f/etc`,
+		`\x2f//etc`:          `\x2fetc`,
+		`/a//\x2fb`:          `/a/b`,
+		`/a\x2F\x2f/b`:       `/a\x2Fb`,
+		`/a\57//1`:           `/a\571`,
+		`///\/etc`:           `/\/etc`,
+		`/a\\x2f//b`:         `/a\\x2f/b`,
+		`/a\x2a//b`:          `/a\x2a/b`,
+		`/a\`:                `/a\`,
+	} {
+		got := filterRawSlashes(input)
+		if got != want {
+			t.Errorf("filterRawSlashes(%q) = %q, want %q", input, got, want)
+		}
+
+		if parsed, wantParsed := filterSlashes(decodeEscapes(got)),
+			filterSlashes(decodeEscapes(input)); parsed != wantParsed {
+			t.Errorf("filterRawSlashes(%q) = %q, which the parser reads as %q, not %q",
+				input, got, parsed, wantParsed)
+		}
+	}
+}
+
 func TestDecodeEscapes(t *testing.T) {
 	t.Parallel()
 

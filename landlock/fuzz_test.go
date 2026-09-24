@@ -497,6 +497,8 @@ func assertResultShape(t *testing.T, result *landlock.Profile, inputs ...*landlo
 		t.Errorf("merge result does not validate: %v", err)
 	}
 
+	assertReferFromInputRules(t, result, inputs...)
+
 	if !slices.IsSortedFunc(result.PathRules, func(a, b landlock.PathRule) int {
 		return cmp.Compare(a.Path, b.Path)
 	}) {
@@ -519,6 +521,38 @@ func assertResultShape(t *testing.T, result *landlock.Profile, inputs ...*landlo
 	err = landlock.ValidateStrict(result)
 	if err != nil {
 		t.Errorf("merge result is not loadable: %v\nresult=%s", err, landlock.FormatProfile(result))
+	}
+}
+
+// assertReferFromInputRules checks that every rule of the result granting
+// refer sits on a path where a rule of some input grants refer itself. The
+// kernel accepts refer only on a rule for a directory, which the merge
+// cannot see; a path an input grants refer on is one, while a path an input
+// named for other rights may be a regular file.
+func assertReferFromInputRules(
+	t *testing.T, result *landlock.Profile, inputs ...*landlock.Profile,
+) {
+	t.Helper()
+
+	granted := make(map[string]struct{})
+
+	for _, input := range inputs {
+		for _, rule := range input.PathRules {
+			if slices.Contains(rule.AccessFS, landlock.FSAccessRefer) {
+				granted[oracleCleanPath(rule.Path)] = struct{}{}
+			}
+		}
+	}
+
+	for _, rule := range result.PathRules {
+		if !slices.Contains(rule.AccessFS, landlock.FSAccessRefer) {
+			continue
+		}
+
+		if _, ok := granted[rule.Path]; !ok {
+			t.Errorf("result grants refer on %q, where no input rule grants it\nresult=%s",
+				rule.Path, landlock.FormatProfile(result))
+		}
 	}
 }
 

@@ -169,11 +169,13 @@ limitations under the License.
 // Paths are normalized as the parser's filter_slashes normalizes them: a
 // path starting with exactly two slashes keeps them ("//a//b" becomes
 // "//a/b"), and every other run of slashes collapses into one ("///a"
-// becomes "/a"). A trailing slash is kept, which distinguishes a directory
-// rule from a file rule. "." and ".." components are not resolved: the
-// kernel hands AppArmor canonical paths, so a rule such as
-// "/etc/../etc/passwd" matches nothing, and resolving it would make it grant
-// "/etc/passwd". The merge keeps such paths as written.
+// becomes "/a"). As in the parser, an escape that encodes a slash (\x2f,
+// \057, \d047) counts as one, so `///\x2fetc` becomes "/etc". A trailing
+// slash is kept, which distinguishes a directory rule from a file rule. "."
+// and ".." components are not resolved: the kernel hands AppArmor canonical
+// paths, so a rule such as "/etc/../etc/passwd" matches nothing, and
+// resolving it would make it grant "/etc/passwd". The merge keeps such paths
+// as written.
 //
 // Two spellings of one path are one rule. The validators compare paths with
 // repeated slashes collapsed and escapes resolved, so "/tmp/A" and
@@ -182,10 +184,10 @@ limitations under the License.
 // profiles spelling one rule differently are given a common spelling before
 // they are merged, so intersecting a profile listing "/tmp/A" with one
 // listing `/tmp/\x41` keeps the file both grant. The spelling kept is one an
-// input holds, never one derived from the decoded name, and among them one
-// that stays renderable as a rule, then the shortest: deriving it could
-// produce a path ValidateArtifact rejects ([ErrUnquotablePath]) from inputs
-// it accepts.
+// input holds once its slash runs are filtered, never one derived from the
+// decoded name, and among them one that stays renderable as a rule, then the
+// shortest: deriving it could produce a path ValidateArtifact rejects
+// ([ErrUnquotablePath]) from inputs it accepts.
 //
 // # Paths the validators reject
 //

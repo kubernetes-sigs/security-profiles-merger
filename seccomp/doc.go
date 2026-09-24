@@ -263,22 +263,33 @@ limitations under the License.
 // libseccomp adds every rule of such a syscall to the multiplexer a second
 // time, with the condition on the first argument replaced by the sub-call
 // number and the others kept: socket ALLOW if a0 == 2 allows every socket(2)
-// made through socketcall. Rules with different results for one sub-call
+// made through socketcall, while setsockopt ALLOW if a1 == 1 and ERRNO if
+// a1 != 1 still decide socketcall(SYS_SETSOCKOPT) by its second argument.
+// Two copies with the same filter and different results, errno included,
 // are refused with EEXIST, and an unconditional rule on the multiplexer
-// decides all of its calls. The merges read that path of every input as the
-// results a call can get there: the multiplexer's unconditional rule if it
-// has one, and otherwise the results of its rules and of the syscall's, and
-// the default unless the syscall's rules all match the whole sub-call. A
-// result that would permit more ([Intersect]) or less ([Union]) on that path
-// than an input, or hold rules libseccomp refuses there (different results
-// for one of these syscalls, or conditional rules on the multiplexer), is
-// settled. [Intersect] drops the multiplexing architectures from the list
-// where the native architecture does not multiplex. Otherwise, and always
-// for [Union], the multiplexer and each affected syscall collapse to one
+// decides all of its calls. Where neither profile has multiplexer rules and
+// no rule of the syscall tests the first argument, the path decides each
+// call as the syscall does, and the merges keep it as they keep the
+// syscall. Otherwise they read that path of every input as the results a
+// call can get there: the multiplexer's unconditional rule if it has one;
+// with conditional multiplexer rules, the results of those, of every
+// syscall the multiplexer carries and of the default; and otherwise the
+// results of the syscall's rules, and the default unless one of them
+// matches the whole sub-call. A result that would permit more ([Intersect])
+// or less ([Union]) on that path than an input, or hold rules libseccomp
+// may refuse there (different results for one of these syscalls where a
+// rule matches the whole sub-call or the rules form no safe shape without
+// the first argument, or conditional rules on the multiplexer), is settled.
+// [Intersect] drops the multiplexing architectures from the list where the
+// native architecture does not multiplex. Otherwise, and always for
+// [Union], the multiplexer and each affected syscall collapse to one
 // unconditional rule in the merge direction, combining their actions with
 // what the inputs apply on that path, which also removes the filters from
-// the direct syscall. [ValidateArtifact] does not model which of these rule
-// sets libseccomp refuses.
+// the direct syscall. An unconditional multiplexer rule that differs from
+// the default only in its errno, and would hide multiplexed rules, is
+// dropped instead of settling where those rules then decide every sub-call
+// safely. [ValidateArtifact] does not model which of these rule sets
+// libseccomp refuses.
 //
 // Dropping an architecture from the list does not remove it from a filter
 // where it is native, so [Intersect] is meant to run on the node that loads
@@ -362,7 +373,7 @@ limitations under the License.
 // same architectures as p and the same SECCOMP_FILTER_FLAG_SPEC_ALLOW
 // setting, compares equal to p when p is in safe shapes, needs no settling
 // for a multiplexing architecture (it has no conditional socketcall or ipc
-// rules, and no rules with different results for a syscall they carry) and,
+// rules, and none libseccomp may refuse there, as described above) and,
 // where it covers a 32-bit architecture, loads no value above 32 bits. The
 // same holds for Union(p, q) with default SCMP_ACT_KILL_PROCESS, where q
 // also needs the same SECCOMP_FILTER_FLAG_LOG setting, since union keeps

@@ -258,12 +258,8 @@ func (m ruleMerger) settleArchitectures(
 		read = append(read, newMultiplexInput(input.Syscalls, defaultClause(input)))
 	}
 
-	settled, changed := m.settleMultiplexed(result.Syscalls, def, read)
-	if !changed {
-		return
-	}
-
-	if m.intersect && !multiplexingArchitectures[m.native] {
+	settled, unsafe := m.settleMultiplexed(result.Syscalls, def, read)
+	if unsafe && m.intersect && !multiplexingArchitectures[m.native] {
 		result.Architectures = withoutAny(result.Architectures, multiplexingArchitectures)
 
 		return

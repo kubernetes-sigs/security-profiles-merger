@@ -290,6 +290,7 @@ func FuzzLandlockIntersectPermitsAt(f *testing.F) {
 		}
 
 		assertIntersectMoves(t, []*landlock.Profile{left, right}, result)
+		assertReferFromInputRules(t, result, left, right)
 	})
 }
 
@@ -398,6 +399,8 @@ func TestMergeManyPermitsAt(t *testing.T) {
 		}
 
 		assertManyPermitsAt(t, profiles, intersected, united)
+		assertReferFromInputRules(t, intersected, profiles...)
+		assertReferFromInputRules(t, united, profiles...)
 		assertIntersectMoves(t, profiles, intersected)
 		assertUnionMoves(t, profiles, united)
 	}
