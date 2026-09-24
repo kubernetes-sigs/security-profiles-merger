@@ -17,6 +17,7 @@ limitations under the License.
 package seccomp_test
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -24,6 +25,131 @@ import (
 
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
+
+// Example shows the flow of a CRI runtime: validate the baseline once when
+// its configuration loads, decode and validate each artifact, intersect the
+// two, and load the result. The diff shows what the baseline took away.
+func Example() {
+	// At configuration load: check that the baseline loads at all. The
+	// defaults runtimes ship fail ValidateStrict, and ValidateArtifact
+	// rejects a notification listener.
+	baseline := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{"close", "read", "write"}, Action: specs.ActAllow},
+		},
+	}
+
+	err := seccomp.Validate(baseline)
+	if err != nil {
+		panic(err)
+	}
+
+	// For every container that references an artifact.
+	data := []byte(`{
+		"defaultAction": "SCMP_ACT_ERRNO",
+		"syscalls": [
+			{"names": ["read", "write", "mkdir"], "action": "SCMP_ACT_ALLOW"}
+		]
+	}`)
+
+	var artifact specs.LinuxSeccomp
+
+	err = seccomp.UnmarshalStrict(data, &artifact)
+	if err != nil {
+		panic(err)
+	}
+
+	err = seccomp.ValidateArtifact(&artifact)
+	if err != nil {
+		panic(err)
+	}
+
+	// Intersect runs Validate on both inputs and reports a failure as an
+	// *seccomp.InputError naming the input's index.
+	result, err := seccomp.Intersect(baseline, &artifact)
+	if err != nil {
+		var inputErr *seccomp.InputError
+		if errors.As(err, &inputErr) {
+			fmt.Println("input", inputErr.Index, "is invalid")
+		}
+
+		panic(err)
+	}
+
+	for _, sc := range result.Syscalls {
+		fmt.Println(strings.Join(sc.Names, ","), "->", sc.Action)
+	}
+
+	diff, err := seccomp.Diff(&artifact, result)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(seccomp.FormatDiff(diff))
+
+	// Output:
+	// read,write -> SCMP_ACT_ALLOW
+	// Diff{-mkdir->SCMP_ACT_ALLOW}
+}
+
+func ExampleUnmarshalStrict() {
+	// The second "action" is read by encoding/json and ignored by a reader
+	// that takes the first, so the document means two different profiles.
+	data := []byte(`{
+		"defaultAction": "SCMP_ACT_ERRNO",
+		"syscalls": [
+			{"names": ["ptrace"], "action": "SCMP_ACT_ERRNO", "action": "SCMP_ACT_ALLOW"}
+		]
+	}`)
+
+	var profile specs.LinuxSeccomp
+
+	err := seccomp.UnmarshalStrict(data, &profile)
+	fmt.Println(errors.Is(err, seccomp.ErrDuplicateKey))
+	fmt.Println(err)
+
+	// Output:
+	// true
+	// duplicate key "syscalls[0].action"
+}
+
+func ExampleDiffForArch() {
+	// Both profiles filter the native architecture of an arm64 node, whether
+	// or not they list it, so only s390x differs there.
+	left := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Architectures: []specs.Arch{specs.ArchAARCH64},
+	}
+
+	right := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Architectures: []specs.Arch{specs.ArchS390X},
+	}
+
+	diff, err := seccomp.DiffForArch(specs.ArchAARCH64, left, right)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println("added:", diff.Architectures.Added)
+	fmt.Println("removed:", diff.Architectures.Removed)
+
+	// Without a native architecture the lists compare as written.
+	diff, err = seccomp.DiffForArch("", left, right)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println("added:", diff.Architectures.Added)
+	fmt.Println("removed:", diff.Architectures.Removed)
+
+	// Output:
+	// added: [SCMP_ARCH_S390X]
+	// removed: []
+	// added: [SCMP_ARCH_S390X]
+	// removed: [SCMP_ARCH_AARCH64]
+}
 
 func ExampleIntersect() {
 	baseline := &specs.LinuxSeccomp{

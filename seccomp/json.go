@@ -50,8 +50,8 @@ var (
 // elsewhere, so a scanner and the runtime can read one document as two
 // profiles. A byte that is not valid UTF-8 is replaced with U+FFFD, so
 // names that differ only there decode alike and merge into one rule. Use
-// this instead of json.Unmarshal wherever the document comes from somewhere
-// else, and validate the result with ValidateArtifact afterwards.
+// this instead of json.Unmarshal for an artifact, and validate the result
+// with ValidateArtifact afterwards.
 //
 // The document is decoded into a fresh profile, which replaces the one
 // given only when decoding succeeds: a member the document omits is zero in

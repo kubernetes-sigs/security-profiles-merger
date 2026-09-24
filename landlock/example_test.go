@@ -17,6 +17,7 @@ limitations under the License.
 package landlock_test
 
 import (
+	"errors"
 	"fmt"
 
 	"sigs.k8s.io/security-profiles-merger/landlock"
@@ -270,4 +271,145 @@ func ExampleUnion() {
 	// HandledAccessFS: [read_file write_file]
 	// Path: /etc -> [read_file]
 	// Path: /home -> [write_file]
+}
+
+func ExampleUnmarshalStrict() {
+	// A member this version of the format does not know, perhaps one a
+	// newer version uses to handle a further right, is refused rather than
+	// dropped: dropping it would make the profile look more permissive.
+	data := []byte(`{"handledAccessFs": ["read_file"], "handledAccessFuture": ["x"]}`)
+
+	var profile landlock.Profile
+
+	err := landlock.UnmarshalStrict(data, &profile)
+	fmt.Println(errors.Is(err, landlock.ErrUnknownField))
+
+	err = landlock.UnmarshalStrict([]byte(`{"handledAccessFs": ["read_file"]}`), &profile)
+	fmt.Println(err, profile.HandledAccessFS)
+
+	// Output:
+	// true
+	// <nil> [read_file]
+}
+
+func ExampleValidateArtifact() {
+	artifact := &landlock.Profile{
+		HandledAccessFS: []landlock.FSAccessRight{
+			landlock.FSAccessReadFile,
+		},
+		HandledAccessNet: nil,
+		Scoped:           nil,
+		PathRules: []landlock.PathRule{{
+			Path:     "etc",
+			AccessFS: nil,
+		}},
+		NetRules: nil,
+	}
+
+	// The merge accepts the profile, but a kernel would not load it.
+	fmt.Println(landlock.Validate(artifact))
+
+	err := landlock.ValidateArtifact(artifact)
+	fmt.Println(errors.Is(err, landlock.ErrRelativePath))
+	fmt.Println(errors.Is(err, landlock.ErrEmptyRule))
+
+	// Output:
+	// <nil>
+	// true
+	// true
+}
+
+func ExampleLoweredRulePaths() {
+	baseline := &landlock.Profile{
+		HandledAccessFS: []landlock.FSAccessRight{
+			landlock.FSAccessReadFile,
+			landlock.FSAccessWriteFile,
+		},
+		HandledAccessNet: nil,
+		Scoped:           nil,
+		PathRules: []landlock.PathRule{{
+			Path: "/srv",
+			AccessFS: []landlock.FSAccessRight{
+				landlock.FSAccessReadFile,
+				landlock.FSAccessWriteFile,
+			},
+		}},
+		NetRules: nil,
+	}
+
+	// The artifact names a deeper path, which the container may control.
+	artifact := &landlock.Profile{
+		HandledAccessFS: []landlock.FSAccessRight{
+			landlock.FSAccessReadFile,
+			landlock.FSAccessWriteFile,
+		},
+		HandledAccessNet: nil,
+		Scoped:           nil,
+		PathRules: []landlock.PathRule{{
+			Path: "/srv/data/link",
+			AccessFS: []landlock.FSAccessRight{
+				landlock.FSAccessReadFile,
+				landlock.FSAccessWriteFile,
+			},
+		}},
+		NetRules: nil,
+	}
+
+	result, err := landlock.Intersect(baseline, artifact)
+	if err != nil {
+		panic(err)
+	}
+
+	// The result grants the baseline's access on the artifact's path, so
+	// the runtime must open it without following symlinks out of /srv, or
+	// refuse the artifact.
+	fmt.Println(landlock.LoweredRulePaths(result, baseline, artifact))
+
+	// Output:
+	// [/srv/data/link]
+}
+
+func ExampleRequiredABIVersion() {
+	profile := &landlock.Profile{
+		HandledAccessFS: []landlock.FSAccessRight{
+			landlock.FSAccessReadFile,
+			landlock.FSAccessTruncate,
+		},
+		HandledAccessNet: []landlock.NetAccessRight{
+			landlock.NetAccessBindTCP,
+		},
+		Scoped:    nil,
+		PathRules: nil,
+		NetRules:  nil,
+	}
+
+	fmt.Println(landlock.RequiredABIVersion(profile) == landlock.ABIV4)
+
+	// Output:
+	// true
+}
+
+func ExampleValidateForABI() {
+	profile := &landlock.Profile{
+		HandledAccessFS: []landlock.FSAccessRight{
+			landlock.FSAccessReadFile,
+			landlock.FSAccessTruncate,
+		},
+		HandledAccessNet: nil,
+		Scoped:           nil,
+		PathRules:        nil,
+		NetRules:         nil,
+	}
+
+	// truncate needs ABI version 3, so a node reporting version 2 would
+	// reject the ruleset.
+	err := landlock.ValidateForABI(profile, landlock.ABIV2)
+	fmt.Println(errors.Is(err, landlock.ErrUnsupportedABIRight))
+
+	// A version newer than this package knows is read as the latest one.
+	fmt.Println(landlock.ValidateForABI(profile, landlock.LatestABIVersion+1))
+
+	// Output:
+	// true
+	// <nil>
 }

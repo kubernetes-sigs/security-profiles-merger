@@ -42,14 +42,14 @@ var (
 // profile. A document that is not a JSON object, such as null, is rejected
 // too.
 //
-// Each loses something a reader of an untrusted profile must not lose. A
+// Each loses something a reader of an artifact must not lose. A
 // member a newer version of this format uses to handle a further access
 // right is dropped, and the profile then looks like one that does not
 // handle it, which is the permissive direction. A repeated member is read
 // as its last occurrence here and as its first elsewhere, so a scanner and
 // the runtime can read one document as two profiles. Use this instead of
-// json.Unmarshal wherever the document comes from somewhere else, and
-// validate the result with ValidateArtifact afterwards.
+// json.Unmarshal to decode an artifact, and validate the result with
+// ValidateArtifact afterwards.
 //
 // The document is decoded into a fresh Profile, which replaces the one
 // given only when decoding succeeds: a member the document omits is zero in

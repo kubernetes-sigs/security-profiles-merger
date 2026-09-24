@@ -49,7 +49,8 @@ type ProfileDiff struct {
 	NetRules *NetRulesDiff `json:"netRules,omitempty"`
 }
 
-// IsEqual returns whether the two compared profiles are identical.
+// IsEqual reports whether the two compared profiles are equivalent after
+// normalization, as Equal does.
 func (d ProfileDiff) IsEqual() bool { return d.Equal }
 
 // RightsDiff represents added and removed items in a rights set.
@@ -91,8 +92,18 @@ type NetRuleChange struct {
 // "/var//data/" and "/var/data" are treated as identical. ".." components
 // are kept, since the kernel resolves them against the file system. Rights
 // are compared as sets and reported sorted.
-// Unlike Intersect and Union, Diff does not validate profiles before comparing.
-// Returns ErrNilProfile if either profile is nil.
+//
+// Diff compares rules as written, not the access they grant through the
+// hierarchy. Intersect removes from a rule the rights its ancestors in the
+// result already grant, and drops the rule when none remain, so Diff
+// reports it as changed or removed although the access is the same:
+// Diff(p, Intersect(p, p)) is unequal whenever an ancestor rule of p grants
+// a right of a deeper rule. To tell whether a baseline constrained an
+// artifact, compare the access each grants on the paths of interest rather
+// than Diff equality.
+//
+// Unlike Intersect and Union, Diff does not validate profiles before
+// comparing. Returns ErrNilProfile if either profile is nil.
 func Diff(left, right *Profile) (*ProfileDiff, error) {
 	if left == nil || right == nil {
 		return nil, ErrNilProfile

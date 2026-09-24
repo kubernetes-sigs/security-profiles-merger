@@ -17,6 +17,7 @@ limitations under the License.
 package apparmor_test
 
 import (
+	"errors"
 	"fmt"
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
@@ -223,4 +224,52 @@ func ExampleUnion() {
 
 	// Output:
 	// Capabilities: [NET_ADMIN SYS_TIME]
+}
+
+func ExampleUnmarshalStrict() {
+	// "readonlyPaths" names ReadOnlyPaths only ignoring case: encoding/json
+	// would fill the field, while a reader comparing names exactly drops it.
+	data := []byte(`{"filesystem": {"readonlyPaths": ["/etc/hosts"]}}`)
+
+	var profile apparmor.Profile
+
+	err := apparmor.UnmarshalStrict(data, &profile)
+	fmt.Println(errors.Is(err, apparmor.ErrMisspelledField))
+
+	err = apparmor.UnmarshalStrict(
+		[]byte(`{"filesystem": {"readOnlyPaths": ["/etc/hosts"]}}`), &profile,
+	)
+	fmt.Println(err, profile.Filesystem.ReadOnlyPaths)
+
+	// Output:
+	// true
+	// <nil> [/etc/hosts]
+}
+
+func ExampleValidateArtifact() {
+	artifact := &apparmor.Profile{
+		Executable: nil,
+		Filesystem: &apparmor.FilesystemRules{
+			// A newline would end the rule a consumer renders and start
+			// one the artifact's author chose.
+			ReadOnlyPaths:  []string{"/etc/hosts\n/** rw"},
+			WriteOnlyPaths: nil,
+			ReadWritePaths: []string{"tmp/cache"},
+		},
+		Network: nil,
+		Capabilities: &apparmor.CapabilityRules{
+			AllowedCapabilities: []string{"chown"},
+		},
+	}
+
+	fmt.Println(apparmor.Validate(artifact))
+
+	err := apparmor.ValidateArtifact(artifact)
+	fmt.Println(errors.Is(err, apparmor.ErrUnquotablePath))
+	fmt.Println(errors.Is(err, apparmor.ErrRelativePath))
+
+	// Output:
+	// <nil>
+	// true
+	// true
 }

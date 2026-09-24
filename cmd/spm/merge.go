@@ -38,11 +38,13 @@ array of profiles.
 
 --validate names the checks to run on the inputs before merging: one mode
 for all of them, or one mode per input, separated by commas. A container
-runtime merging a pulled profile into its node baseline uses
---validate strict,artifact.
+runtime merging an artifact into its baseline uses --validate
+default,artifact: the defaults runtimes ship fail strict, which also
+rejects a notification listener.
 
-Input order decides tie-breaks: a value only one profile can carry, such as
-errnoRet, listenerPath or listenerMetadata, is taken from the earlier input.
+Input order decides seccomp tie-breaks: errnoRet follows the earlier input
+where actions tie, and listenerPath and listenerMetadata come from the first
+input that sets a listenerPath.
 
 Options:
 `

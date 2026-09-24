@@ -44,103 +44,63 @@ var (
 // they were given fails validation, naming its position among the arguments.
 type InputError = spm.InputError
 
-// Intersect merges multiple Landlock profiles via intersection: the resulting
-// profile restricts access to the intersection of what all input profiles
-// allow. HandledAccessFS and HandledAccessNet are unioned (handling more rights
-// makes the ruleset more restrictive overall, because unhandled rights are
-// implicitly allowed).
+// Intersect merges multiple Landlock profiles via intersection: the
+// resulting profile permits access only where every input permits it. This
+// is the merge KEP-6061 defines for a CRI runtime combining an artifact
+// with its baseline.
 //
-// A right is granted for a path or port only if every profile permits it
-// there: either the profile does not handle the right, or one of its rules
-// grants it. As in the kernel, a profile handling any filesystem right also
-// denies FSAccessRefer by default, whether or not it lists it. Path rules
-// apply to the whole hierarchy beneath their path, so a rule on "/etc" is
-// honored against a rule on "/" from the other profile and the result
-// carries the narrower path. Network rules match by exact port. A path rule
-// loses the rights that rules on its ancestors in the result already grant,
-// and is dropped when none remain.
+// The handled access sets and scoped sets are unioned, since an unhandled
+// right is implicitly allowed. A right is granted for a path or port only
+// if every input permits it there, either by not handling it or through a
+// rule; a path rule covers the hierarchy beneath its path, so the result
+// carries the narrower of two rule paths, and a rule loses the rights its
+// ancestors in the result already grant. As in the kernel, a profile
+// handling any filesystem right denies FSAccessRefer unless a rule grants
+// it, and the result drops refer where it would allow a move an input
+// denies, so it may deny moves and links that every input allows. See the
+// Handled access, Refer and Rule paths sections of the package
+// documentation.
 //
-// FSAccessRefer inherits like every other right, across mount points too,
-// but it is not a grant of its own. The kernel allows moving or linking a
-// file into another directory only when both directories grant refer and,
-// in every layer, the destination grants no handled right the source (or a
-// rule on the file itself) does not: a file keeps its rights when it moves
-// but never gains one. An input can deny a move through a right it grants
-// at the destination but not at the source, and the result may not grant
-// that right at the destination because another input denies it there. So
-// where an input grants a right the result does not, the result drops refer
-// from the rules on that path and its ancestors, unless the input grants
-// the right on every path the result grants refer on. Where it drops refer,
-// the result may deny moves and links that every input allows.
+// Hierarchy resolution is textual, so a rule of the result can carry an
+// ancestor's access onto a deeper path another input chose, which the
+// kernel binds to whatever that path resolves to. A caller merging an
+// artifact must check LoweredRulePaths or enforce the inputs as separate
+// layers; see the Lowered rule paths section.
 //
-// # Rule paths may come from an untrusted input
-//
-// The result carries the narrower of two rule paths, so a rule of the result
-// can sit on a path only one input named while the access it grants comes
-// from a rule of another input on an ancestor of that path. Resolution here
-// is textual, but the kernel binds a rule to the file the path resolves to,
-// so where the deeper path is a symlink or a bind mount leaving the ancestor
-// hierarchy, the result grants that access somewhere the ancestor's rule
-// never covered: the merged ruleset is then more permissive than the input
-// it came from, on a path that input did not choose. Where one input is an
-// OCI artifact and the other a node baseline, the artifact's author picks
-// those paths and the container may own the files they name.
-//
-// A caller that cannot rule this out should either ask LoweredRulePaths
-// which result rules carry a lowered grant and open exactly those without
-// leaving their declared hierarchy (openat2 with RESOLVE_BENEATH and
-// RESOLVE_NO_SYMLINKS relative to the covering ancestor), or skip the merge
-// and enforce the two rulesets as two landlock_restrict_self layers, which
-// the kernel intersects on the resolved files rather than on path strings.
-//
-// Each input is validated as Validate does, except that duplicate rules and
-// rights are merged rather than rejected; errors name the input's own rule
-// indices. A result that handles and scopes nothing, which happens only when
-// no input handles or scopes anything, restricts nothing; the kernel refuses
-// to load it, and ValidateArtifact reports it with ErrEmptyRuleset.
+// Each input is checked with Validate, which lets duplicate rules and
+// rights pass; the merge folds them. A failure is returned as an InputError
+// naming the input. A result that handles and scopes nothing, which happens
+// only when no input handles or scopes anything, restricts nothing; the
+// kernel refuses to load it, and ValidateArtifact reports it with
+// ErrEmptyRuleset.
 func Intersect(profiles ...*Profile) (*Profile, error) {
 	return foldProfiles(profiles, intersectTwo, finishIntersect)
 }
 
 // Union merges multiple Landlock profiles via union: the resulting profile
-// permits access if any input profile permits it. HandledAccessFS and
-// HandledAccessNet are intersected (handling fewer rights makes the ruleset
-// less restrictive, because unhandled rights are implicitly allowed). Path and
-// network rules for entries present in both profiles have their access rights
-// unioned. Entries present in only one profile are kept, even where a rule
-// on an ancestor path grants the same rights: the kernel binds a rule to the
-// file the path resolves to, so a nested path that is a symlink covers a
-// different hierarchy, and dropping its rule would deny access an input
-// grants.
+// permits access if any input permits it. This is the merge the Security
+// Profiles Operator uses to combine recorded profiles.
 //
-// Every profile handling a filesystem right denies FSAccessRefer by default,
-// so when all inputs handle filesystem rights the result denies it too: it
-// lists FSAccessRefer when every input lists it, when a rule grants it, or
-// when the inputs share no other handled filesystem right. In that last case
-// the result needs Landlock ABI version 2 even if the inputs did not, because
-// no other handled right is left to keep FSAccessRefer denied.
+// The handled access sets and scoped sets are intersected, since handling
+// fewer rights restricts less. Rules for one path or port have their rights
+// unioned, and a rule only one input holds is kept, even where a rule on an
+// ancestor grants the same rights, since a nested path that is a symlink
+// covers a different hierarchy. Rights outside the merged handled sets are
+// pruned from rules, as Intersect prunes them.
 //
-// A move or link into another directory is not a union of grants: the
-// kernel denies it when the destination grants a handled right the source
-// does not, so a right another input grants at the destination can deny a
-// move the input granting refer allows. A single ruleset cannot always
-// express both, so the result stops handling such a right: it no longer
-// lists it and every rule loses it, which permits it everywhere and more
-// than any input does. This happens only for a right the result grants on
-// some path where an input granting refer there does not, while that input
-// grants refer on another path where the result does not grant the right,
-// and may allow moving a file from the second path to the first. The check
-// is conservative and may stop handling a right no allowed move needs.
-// FSAccessRefer itself stays handled, so it remains denied where no input
-// grants it.
+// When every input handles a filesystem right the result denies
+// FSAccessRefer too, and it may need ABIV2 to list refer where the inputs
+// share no other handled filesystem right. Where a right one input grants
+// at a destination would deny a move another input allows, the result stops
+// handling that right, which permits it everywhere and more than any input
+// does. See the Handled access, Refer and ABI versions sections of the
+// package documentation.
 //
-// Rights that end up outside the merged handled sets are pruned from rules,
-// since they are implicitly allowed anyway and the kernel rejects rules that
-// grant unhandled rights. Both Intersect and Union apply this. A result that
-// handles and scopes nothing, for example the union of a profile handling
-// only filesystem rights with one handling only network rights, restricts
-// nothing; the kernel refuses to load it, and ValidateArtifact reports it
-// with ErrEmptyRuleset.
+// Inputs are validated as for Intersect. A result that handles and scopes
+// nothing, for example the union of a profile handling only filesystem
+// rights with one handling only network rights, restricts nothing; the
+// kernel refuses to load it, and ValidateArtifact reports it with
+// ErrEmptyRuleset.
 func Union(profiles ...*Profile) (*Profile, error) {
 	return foldProfiles(profiles, unionTwo, finishUnion)
 }
@@ -841,17 +801,17 @@ func minimizePathRules(rules []PathRule) []PathRule {
 // grant was lowered onto yields nothing; the function validates nothing and
 // returns no error.
 //
-// Intersect documents why this matters: hierarchy resolution is textual,
-// while the kernel binds a rule to the file its path resolves to, so a
-// lowered grant lands wherever the deeper path resolves, which may be
-// outside the hierarchy the ancestor rule covered and may be chosen by
-// whoever wrote the untrusted input. A caller can open exactly these paths
-// without leaving their declared hierarchy (openat2 with RESOLVE_BENEATH
-// and RESOLVE_NO_SYMLINKS relative to the covering ancestor), refuse a
-// profile that has any, or enforce the inputs as separate Landlock layers
-// instead of merging them. For a Union result the answer is informational:
-// union grants what any input grants, and the input naming the path granted
-// the access there itself.
+// The Lowered rule paths section of the package documentation explains why
+// this matters: hierarchy resolution is textual, while the kernel binds a
+// rule to the file its path resolves to, so a lowered grant lands wherever
+// the deeper path resolves, which may be outside the hierarchy the ancestor
+// rule covered and may be chosen by the author of an artifact. A caller can
+// open exactly these paths without leaving their declared hierarchy (openat2
+// with RESOLVE_BENEATH and RESOLVE_NO_SYMLINKS relative to the covering
+// ancestor), refuse a profile that has any, or enforce the inputs as
+// separate Landlock layers instead of merging them. For a Union result the
+// answer is informational: union grants what any input grants, and the
+// input naming the path granted the access there itself.
 func LoweredRulePaths(result *Profile, inputs ...*Profile) []string {
 	if result == nil || len(result.PathRules) == 0 {
 		return nil

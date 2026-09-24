@@ -32,7 +32,9 @@ import (
 
 // ProfileDiff describes the differences between two seccomp profiles.
 type ProfileDiff struct {
-	// Equal is true when the two profiles are identical.
+	// Equal is true when the two profiles load the same filter, compared in
+	// the normalized form Diff describes, even where they are spelled
+	// differently.
 	Equal bool `json:"equal"`
 
 	// DefaultAction is set when the default actions differ.
@@ -57,7 +59,8 @@ type ProfileDiff struct {
 	Syscalls *SyscallsDiff `json:"syscalls,omitempty"`
 }
 
-// IsEqual returns whether the two compared profiles are identical.
+// IsEqual reports Equal: whether the two profiles compare equal in the
+// normalized form Diff describes.
 func (d ProfileDiff) IsEqual() bool { return d.Equal }
 
 // ActionDiff represents a change in seccomp action.
@@ -111,46 +114,26 @@ type SyscallDetail struct {
 	Args     []specs.LinuxSeccompArg  `json:"args,omitempty"`
 }
 
-// Diff compares two seccomp profiles and returns a structured diff.
-// Unlike Intersect and Union, Diff does not validate profiles before comparing.
+// Diff compares two seccomp profiles by the rules a runtime loads from them
+// and returns a structured diff. Unlike Intersect and Union, it does not
+// validate the profiles. It returns ErrNilProfile if either profile is nil.
 //
-// Profiles are compared by the rules a runtime loads from them, as described
-// for Intersect: entries equal to the profile default are ignored, an
-// unconditional entry hides the conditional entries for its syscall and the
-// first one wins, several conditions on one argument index are alternatives,
-// conditions compare as libseccomp evaluates them, exact duplicates are
-// dropped, and SCMP_ACT_KILL_THREAD equals SCMP_ACT_KILL. Errno values are
-// compared the way runtimes apply them: an unset errnoRet on SCMP_ACT_ERRNO
-// or SCMP_ACT_TRACE equals EPERM, and errnoRet on any other action is
-// ignored. The diff reports entries in that form, with EPERM spelled as
-// unset. Rules are not rewritten beyond that: two rules with the same filter
-// and different results both remain, as does a rule that libseccomp's order
-// of evaluation never reaches. A profile and its merge result therefore
-// compare equal when the merge kept every syscall in its loaded form, and
-// Diff(p, Intersect(p)) reports exactly what Intersect settled: the syscalls
-// whose rules it collapsed because they do not form a safe shape, and for a
-// profile covering an architecture that multiplexes the socket and SysV IPC
-// syscalls, the rules or architectures it settled for that (see Intersect).
-//
-// Diff compares the rules a runtime adds, not whether libseccomp accepts
-// them: it refuses some rule sets depending on the order of their entries
-// (see ValidateArtifact), so two profiles holding the same rules in a
-// different order compare equal although a runtime may load only one of
-// them.
-//
-// A syscall past the internal budget on the rules a profile is read as (see
-// Intersect) is listed by the two actions a collapse of it could pick
-// rather than by its rules. Different rules can share those, so such a
-// syscall is reported as changed unless both profiles load the same rules
-// for it from entries in the same order, even where the entries listed for
-// it are the same on both sides.
+// Entries are normalized as a merge reads them: entries equal to the
+// profile default are ignored, an unconditional entry hides the conditional
+// entries for its syscall, conditions compare as libseccomp evaluates them,
+// exact duplicates are dropped, and errno values and SCMP_ACT_KILL_THREAD
+// are canonicalized. Rules are not rewritten beyond that, so
+// Diff(p, Intersect(p)) reports exactly what Intersect settled. Diff does
+// not check whether libseccomp accepts the rules: two profiles holding the
+// same rules in a different order compare equal although a runtime may
+// load only one of them. A syscall past the read budget is compared by the
+// entries that load it rather than by its rules.
 //
 // Architectures are compared with the architecture of the running program
-// (see NativeArchitecture) implied on both sides, as runtimes always cover
-// the native one. A profile destined for another architecture therefore
-// compares differently here than it would on the target node; use
-// DiffForArch to name that architecture explicitly.
-// Returns ErrNilProfile if either profile is nil.
+// (see NativeArchitecture) implied on both sides, so a profile destined for
+// another architecture compares differently here than on the target node;
+// use DiffForArch to name that architecture. See the Diff section of the
+// package documentation.
 func Diff(left, right *specs.LinuxSeccomp) (*ProfileDiff, error) {
 	native, ok := NativeArchitecture()
 	if !ok {
