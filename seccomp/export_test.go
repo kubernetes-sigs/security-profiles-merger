@@ -25,6 +25,23 @@ import (
 // they happen to run on.
 var NativeArchitectures = nativeArchitectures
 
+// IntersectOn and UnionOn merge as Intersect and Union do on a node whose
+// native architecture is the given one, so that the libseccomp tests can
+// check the settling a node of another architecture applies.
+func IntersectOn(native specs.Arch, profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
+	rules := intersectRules()
+	rules.native = native
+
+	return foldProfiles(profiles, rules)
+}
+
+func UnionOn(native specs.Arch, profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
+	rules := unionRules()
+	rules.native = native
+
+	return foldProfiles(profiles, rules)
+}
+
 // SafeShape exposes the classification the merge applies to the rules a
 // runtime loads for one syscall of a profile, so that the libseccomp tests
 // can check it against the evaluator and against libseccomp.

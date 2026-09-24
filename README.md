@@ -52,7 +52,8 @@ go get sigs.k8s.io/security-profiles-merger
 ## Packages
 
 Each package provides `Intersect`, `Union`, `Validate`, `ValidateStrict`,
-`ValidateArtifact`, `FormatProfile`, `Diff`, and `FormatDiff` functions.
+`ValidateArtifact`, `UnmarshalStrict`, `FormatProfile`, `Diff`, and
+`FormatDiff` functions.
 `ValidateArtifact` runs the checks a runtime applies to a profile it did not
 author, such as one pulled from an OCI artifact
 ([KEP-6061](https://github.com/kubernetes/enhancements/issues/6061)). For the
@@ -67,12 +68,12 @@ full API reference (functions, errors, types, and merge semantics), see
   rulesets.
 - **[spm](docs/api.md#spm)** - The declarations the three have in common:
   `SliceDiff`, `InputError`, the sentinel errors, and `Diff`, the one method
-  their diff results share. Nothing needs to import it, since each package re-exports
-  what it uses under its own name. Import it to match `ErrNilProfile` without
-  picking one of the three arbitrarily, or to hold a diff whose profile type
-  was decided elsewhere. It is deliberately small: the three profile types
-  have no common shape, so anything that does more than name a diff or a
-  sentinel needs to know which type it has.
+  their diff results share. Nothing needs to import it, since each package
+  re-exports what it uses under its own name. Import it to match
+  `ErrNilProfile` without picking one of the three arbitrarily, or to hold a
+  diff whose profile type was decided elsewhere. It is deliberately small: the
+  three profile types have no common shape, so anything that does more than
+  name a diff or a sentinel needs to know which type it has.
 
 All exported functions are safe to call from several goroutines at once, so a
 runtime may merge profiles for concurrent container starts without
@@ -130,6 +131,9 @@ if podBaseProfile != nil {
 inputs = append(inputs, ociPulledProfile)
 effective, err := seccomp.Intersect(inputs...)
 if err != nil {
+    // An *spm.InputError (errors.As) names the input that failed by its
+    // index: 0 is the baseline, a node configuration error rather than a
+    // bad artifact.
     return err
 }
 
@@ -187,6 +191,14 @@ if err != nil {
 }
 // aaEffective permits only what both profiles permit.
 log.Print(apparmor.FormatProfile(aaEffective))
+
+// Capability names come back upper-cased ("CHOWN"), while apparmor_parser
+// accepts only lower-case ones, so lower-case them when rendering rules.
+if aaEffective.Capabilities != nil {
+    for _, name := range aaEffective.Capabilities.AllowedCapabilities {
+        fmt.Fprintf(&rules, "  capability %s,\n", strings.ToLower(name))
+    }
+}
 
 aaCombined, err := apparmor.Union(recorded1, recorded2)
 if err != nil {

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
@@ -331,6 +332,14 @@ func TestFormatSliceDiff(t *testing.T) {
 			added:   nil,
 			want:    "x:",
 		},
+		{
+			// Unquoted, this would read as three capabilities.
+			name:    "an item holding the separator",
+			prefix:  "caps",
+			removed: nil,
+			added:   []string{"KILL,-CHOWN,+SYS_ADMIN"},
+			want:    `caps:+"KILL,-CHOWN,+SYS_ADMIN"`,
+		},
 	}
 
 	for _, test := range tests {
@@ -617,5 +626,41 @@ func TestIsAbsPath(t *testing.T) {
 		if merge.IsAbsPath(rel) {
 			t.Errorf("IsAbsPath(%q) = true, want false", rel)
 		}
+	}
+}
+
+func TestSafeText(t *testing.T) {
+	t.Parallel()
+
+	for value, want := range map[string]string{
+		"":              "",
+		"read":          "read",
+		"/etc/tty[0-9]": "/etc/tty[0-9]",
+		"stdin[1]":      "stdin[1]",
+		"a,b":           `"a,b"`,
+		"/etc/{a,b}":    `"/etc/{a,b}"`,
+		"/etc/{a":       `"/etc/{a"`,
+		"a b":           `"a b"`,
+		"a\tb":          `"a\tb"`,
+		`a"b`:           `"a\"b"`,
+		"x(1)":          `"x(1)"`,
+		"x->y":          `"x->y"`,
+		"<none>":        `"<none>"`,
+		"EQ:1":          `"EQ:1"`,
+		"x\x1b[31m":     `"x\x1b[31m"`,
+		"\xff":          `"\xff"`,
+	} {
+		if got := merge.SafeText(value); got != want {
+			t.Errorf("SafeText(%q) = %s, want %s", value, got, want)
+		}
+	}
+
+	// Rendered as a list, one path with an alternation and two paths that
+	// split it differ.
+	one := strings.Join(merge.SafeTexts([]string{"/etc/{a,b}"}), ",")
+	two := strings.Join(merge.SafeTexts([]string{"/etc/{a", "b}"}), ",")
+
+	if one == two {
+		t.Errorf("SafeTexts renders one path and two paths alike: %s", one)
 	}
 }

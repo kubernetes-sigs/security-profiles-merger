@@ -79,9 +79,11 @@ limitations under the License.
 // # Concurrency
 //
 // Every exported function is safe to call from several goroutines at once.
-// The package keeps one internal cache of analyzed glob patterns, guarded by
-// its own lock, which is the only state shared between calls; it changes no
-// result, only the work a repeated pattern costs. It does hold the pattern
+// The functions never modify their arguments, except UnmarshalStrict, which
+// replaces the profile it is given when decoding succeeds. The package keeps
+// one internal cache of analyzed glob patterns, guarded by its own lock,
+// which is the only state shared between calls; it changes no result, only
+// the work a repeated pattern costs. It does hold the pattern
 // text of the profiles it analyzed, bounded by its own size limits and
 // evicted as newer patterns arrive, so a process merging untrusted profiles
 // keeps some of their paths in memory after a call returns. Concurrent calls

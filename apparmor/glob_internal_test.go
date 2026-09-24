@@ -355,10 +355,9 @@ func TestStarComponentRule(t *testing.T) {
 // quadratic scan of these patterns takes seconds.
 // TestUnbalancedPatternsScanInLinearTime bounds the wall time of analyzing
 // huge patterns. Coverage counters slow the scanning loops several times
-// over, so the bound is only checked without coverage.
+// over, so the bound is only checked without coverage, and the test runs
+// before the parallel ones so that they do not share its wall time.
 func TestUnbalancedPatternsScanInLinearTime(t *testing.T) {
-	t.Parallel()
-
 	const size = 1 << 20
 
 	for _, char := range []string{"{", "[", "}", "]", `\`, "{a,", "[a", "*", "/*"} {

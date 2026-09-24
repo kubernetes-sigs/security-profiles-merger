@@ -122,6 +122,16 @@ var (
 	// ValidateStrict when the profile as a whole loads more than
 	// MaxArtifactClauses rules.
 	ErrTooManyProfileClauses = errors.New("too many rules in profile")
+	// ErrValueTooWide is returned by ValidateArtifact and ValidateStrict
+	// when an argument condition compares against a value or mask above 32
+	// bits while the filter covers a 32-bit architecture: one the profile
+	// lists, or the native architecture of the running program, which
+	// runtimes always add. libseccomp compares only the lower 32 bits there,
+	// so SCMP_CMP_EQ against 0x100000005 matches 5 for a 32-bit caller, and
+	// a SCMP_CMP_MASKED_EQ whose mask sets only upper bits matches every
+	// call. valueTwo counts only where libseccomp reads it, within the mask
+	// of a SCMP_CMP_MASKED_EQ.
+	ErrValueTooWide = errors.New("argument value above 32 bits on a 32-bit architecture")
 	// ErrNotifyUnsupported is returned by Validate when SCMP_ACT_NOTIFY
 	// appears where runc refuses it outright: as the default action, or on
 	// the write syscall. libseccomp accepts both, so this is a runtime
@@ -321,7 +331,11 @@ func ValidateStrict(profile *specs.LinuxSeccomp) error {
 // defaultErrnoRet on an action other than SCMP_ACT_ERRNO or SCMP_ACT_TRACE
 // (ErrUnusedErrnoRet): runc ignores the value, but crun refuses the profile.
 // valueTwo on an operator other than SCMP_CMP_MASKED_EQ is accepted, as
-// runtimes ignore it.
+// runtimes ignore it. A condition against a value or mask above 32 bits is
+// rejected when the filter covers a 32-bit architecture, one the profile
+// lists or the native architecture of the running program
+// (ErrValueTooWide): libseccomp compares only the lower 32 bits there, so
+// the condition would say one thing and test another for a 32-bit caller.
 //
 // Duplicate syscall names are allowed, as the OCI runtime-spec permits them
 // and Intersect handles them, but no syscall may appear in more than
@@ -354,8 +368,12 @@ func ValidateStrict(profile *specs.LinuxSeccomp) error {
 //
 // A profile that passes may still hold rules sharing one result that
 // libseccomp evaluates in its own order, miscompiles, or never finishes
-// adding. Intersect reads such rules conservatively and never emits them, so
-// runtimes should load the merge result rather than the artifact itself.
+// adding. On an architecture that multiplexes the socket and SysV IPC
+// syscalls (see Intersect), libseccomp may also refuse rules with different
+// results for one of those syscalls, or for it and its multiplexer, which
+// these checks do not model. Intersect reads such rules conservatively and
+// never emits them, so runtimes should load the merge result rather than the
+// artifact itself.
 //
 // ValidateArtifact does not compare the profile against a baseline; callers
 // intersect the result with their baseline afterwards.
@@ -375,7 +393,33 @@ func artifactChecks() []profileCheck {
 		validateEntryCount,
 		validateProfileClauses,
 		validateUnusedErrnoRet,
+		validateValueWidth,
 	}
+}
+
+// validateValueWidth reports conditions against a value above 32 bits when
+// the filter covers a 32-bit architecture (see ErrValueTooWide). Values are
+// read as libseccomp reads them, so a valueTwo it ignores or masks away does
+// not count.
+func validateValueWidth(profile *specs.LinuxSeccomp) error {
+	if !coversAny(profile.Architectures, narrowArchitectures, runningArchitecture()) {
+		return nil
+	}
+
+	var errs []error
+
+	for idx := range profile.Syscalls {
+		for argIdx, arg := range profile.Syscalls[idx].Args {
+			if wideArg(canonicalArg(arg)) {
+				errs = append(errs, fmt.Errorf(
+					"syscall entry %d arg %d: %w (value %#x, valueTwo %#x)",
+					idx, argIdx, ErrValueTooWide, arg.Value, arg.ValueTwo,
+				))
+			}
+		}
+	}
+
+	return merge.JoinLimited(errs...)
 }
 
 type profileCheck func(profile *specs.LinuxSeccomp) error

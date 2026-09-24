@@ -20,12 +20,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"reflect"
 	"slices"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/internal/strictjson"
 	"sigs.k8s.io/security-profiles-merger/landlock"
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 	"sigs.k8s.io/security-profiles-merger/spm"
@@ -38,11 +40,11 @@ const (
 	// modeDefault runs the checks the merge path applies.
 	modeDefault validateMode = iota
 	// modeStrict adds the checks for user-authored profiles and rejects
-	// unknown and repeated JSON members.
+	// unknown, repeated and misspelled JSON members.
 	modeStrict
 	// modeArtifact runs the checks runtimes apply to untrusted artifacts and
-	// rejects repeated JSON members, which other parsers may read
-	// differently.
+	// rejects repeated and misspelled JSON members, which other parsers may
+	// read differently.
 	modeArtifact
 )
 
@@ -72,6 +74,9 @@ func (mode validateMode) decodePolicy() decodePolicy {
 	return decodePolicy{
 		rejectUnknown:    mode == modeStrict,
 		rejectDuplicates: mode == modeStrict || mode == modeArtifact,
+		// A member whose name matches a field only ignoring case is read
+		// here and dropped by a runtime that compares names exactly.
+		rejectMisspelled: mode == modeStrict || mode == modeArtifact,
 		// Bytes that are not valid UTF-8 make two different profiles decode
 		// alike, which is a hazard for a user-authored profile and a sign of
 		// a crafted one in an artifact.
@@ -336,8 +341,8 @@ func checkTypeMatchesInputs(
 
 		_, _ = fmt.Fprintf(
 			stderr,
-			"error: %s holds a %s profile, not the %s --type names\n",
-			merge.SafeText(input.name), detected[0], profileType,
+			"error: %s holds %s %s profile, not the %s --type names\n",
+			merge.SafeName(input.name), article(detected[0]), detected[0], profileType,
 		)
 
 		return exitUsage
@@ -355,7 +360,7 @@ func reportTypeConflict(conflict *typeConflict, stderr io.Writer) {
 		_, _ = fmt.Fprintf(
 			stderr,
 			"error: %s mixes profile types (%s and %s), use --type\n",
-			merge.SafeText(conflict.input), conflict.first, conflict.second,
+			merge.SafeName(conflict.input), conflict.first, conflict.second,
 		)
 
 		return
@@ -444,6 +449,12 @@ func checkParsable(inputs []profileInput) error {
 		var fields map[string]json.RawMessage
 
 		err := json.Unmarshal(input.data, &fields)
+		// null decodes into a map as a nil map, and is no more a profile
+		// than any other value that is not an object.
+		if err == nil && fields == nil {
+			return fmt.Errorf("parsing %s: %w", merge.SafeName(input.name), errNotAnObject)
+		}
+
 		if err != nil {
 			// The decoder names the Go type it was decoding into, which
 			// says nothing to someone holding a profile. What it was asked
@@ -453,7 +464,7 @@ func checkParsable(inputs []profileInput) error {
 			// object" would point at the wrong thing.
 			if json.Valid(input.data) {
 				return fmt.Errorf(
-					"parsing %s: %w", merge.SafeText(input.name), errNotAnObject,
+					"parsing %s: %w", merge.SafeName(input.name), errNotAnObject,
 				)
 			}
 
@@ -464,25 +475,28 @@ func checkParsable(inputs []profileInput) error {
 	return nil
 }
 
-// detectKeys lists the members that reveal each profile type, in the order
-// the types are reported.
+// detectTypes lists the profile types in the order they are reported, each
+// with the Go type its documents decode into.
 //
 //nolint:gochecknoglobals // immutable lookup table
-var detectKeys = []struct {
+var detectTypes = []struct {
 	profileType string
-	keys        []string
+	target      reflect.Type
 }{
-	{typeSeccomp, []string{"defaultAction"}},
-	{typeLandlock, []string{
-		"handledAccessFs", "handledAccessNet", "pathRules", "netRules", "scoped",
-	}},
-	{typeAppArmor, []string{"executable", "filesystem", "capability", "network"}},
+	{typeSeccomp, reflect.TypeFor[specs.LinuxSeccomp]()},
+	{typeLandlock, reflect.TypeFor[landlock.Profile]()},
+	{typeAppArmor, reflect.TypeFor[apparmor.Profile]()},
 }
 
 // detectOneProfileType returns every profile type whose members the document
-// carries, in detectKeys order. More than one means the document is
+// carries, in detectTypes order. More than one means the document is
 // ambiguous: returning only the first would silently drop the members of the
 // others, so the caller reports it instead.
+//
+// Every top-level member is matched against every type the way the decoder
+// matches it, ignoring case: "Syscalls" fills the seccomp field, so a
+// document holding it is a seccomp profile whatever else it is. The types
+// share no member names, so a member reveals at most one of them.
 func detectOneProfileType(raw []byte) []string {
 	var fields map[string]json.RawMessage
 
@@ -493,9 +507,9 @@ func detectOneProfileType(raw []byte) []string {
 
 	var found []string
 
-	for _, candidate := range detectKeys {
-		for _, key := range candidate.keys {
-			if _, ok := fields[key]; ok {
+	for _, candidate := range detectTypes {
+		for key := range fields {
+			if strictjson.HasField(candidate.target, key) {
 				found = append(found, candidate.profileType)
 
 				break
@@ -504,4 +518,13 @@ func detectOneProfileType(raw []byte) []string {
 	}
 
 	return found
+}
+
+// article returns the indefinite article for a profile type name.
+func article(profileType string) string {
+	if profileType == typeAppArmor {
+		return "an"
+	}
+
+	return "a"
 }

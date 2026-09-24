@@ -233,10 +233,16 @@ type safetyDirection struct {
 	bound func(input verdict) specs.LinuxSeccompAction
 }
 
+// The oracle judges calls the way a 64-bit architecture that multiplexes
+// nothing loads them, so both directions merge as on an x86_64 node: on a
+// native 32-bit or multiplexing architecture the merge settles rules the
+// oracle would read exactly, which libseccomp_arch_test.go checks instead.
 func intersectSafety() safetyDirection {
 	return safetyDirection{
-		name:  "intersect",
-		merge: seccomp.Intersect,
+		name: "intersect",
+		merge: func(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
+			return seccomp.IntersectOn(specs.ArchX86_64, profiles...)
+		},
 		bare:  seccomp.IntersectSyscalls,
 		safe:  permitsAtMost,
 		bound: func(input verdict) specs.LinuxSeccompAction { return input.strictest },
@@ -245,8 +251,10 @@ func intersectSafety() safetyDirection {
 
 func unionSafety() safetyDirection {
 	return safetyDirection{
-		name:  "union",
-		merge: seccomp.Union,
+		name: "union",
+		merge: func(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
+			return seccomp.UnionOn(specs.ArchX86_64, profiles...)
+		},
 		bare:  seccomp.UnionSyscalls,
 		safe:  permitsAtLeast,
 		bound: func(input verdict) specs.LinuxSeccompAction { return input.loosest },

@@ -14,7 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package main implements the spm CLI for merging and validating security profiles.
+// Package main implements the spm CLI for merging, validating and diffing
+// security profiles.
 package main
 
 import (
@@ -22,6 +23,8 @@ import (
 	"io"
 	"os"
 	"runtime/debug"
+
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
 // version is set at build time through -ldflags. A binary built without it,
@@ -120,7 +123,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 		return 0
 	default:
-		_, _ = fmt.Fprintf(stderr, "unknown command: %s\n\n%s", args[0], usage)
+		_, _ = fmt.Fprintf(stderr, "unknown command: %s\n\n%s", merge.SafeName(args[0]), usage)
 
 		return exitUsage
 	}
@@ -139,7 +142,7 @@ func runHelp(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case cmdMerge, cmdValidate, cmdDiff, cmdVersion:
 		return run([]string{args[0], flagHelp}, stdin, stdout, stderr)
 	default:
-		_, _ = fmt.Fprintf(stderr, "unknown command: %s\n\n%s", args[0], usage)
+		_, _ = fmt.Fprintf(stderr, "unknown command: %s\n\n%s", merge.SafeName(args[0]), usage)
 
 		return exitUsage
 	}

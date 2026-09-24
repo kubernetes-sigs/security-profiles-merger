@@ -24,6 +24,11 @@ import "os"
 // behaves as it always has there.
 const oNoFollow = 0
 
+// refuseSymlinks is false where the platform has no O_NOFOLLOW: a symlink at
+// the --output path is followed there, as it always has been, and only a
+// regular file it leads to is replaced.
+const refuseSymlinks = false
+
 // chmodOutput does nothing where the permission bits of a file do not carry
 // the meaning ownerReadWrite gives them.
 func chmodOutput(_ *os.File) error {

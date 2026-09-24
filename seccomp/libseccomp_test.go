@@ -311,9 +311,19 @@ func runProgram(
 ) (specs.LinuxSeccompAction, *uint) {
 	t.Helper()
 
+	return runProgramArch(t, prog, libseccomp.NativeAuditArch(), number, args)
+}
+
+// runProgramArch is runProgram for a call of the architecture with the
+// given AUDIT_ARCH value.
+func runProgramArch(
+	t *testing.T, prog []libseccomp.Instruction, auditArch uint32, number int32, args []uint64,
+) (specs.LinuxSeccompAction, *uint) {
+	t.Helper()
+
 	data := seccompData{
 		nr:   number,
-		arch: libseccomp.NativeAuditArch(),
+		arch: auditArch,
 		args: [seccompArgCount]uint64{},
 	}
 	copy(data.args[:], args)

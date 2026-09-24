@@ -20,8 +20,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
 func writeOutput(
@@ -67,32 +70,6 @@ func flushOutput(path string, content []byte, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// prepareOutputFile sets the mode of a regular output file and empties it,
-// in that order. A file that is not regular is left alone: its mode belongs
-// to whoever created it, and truncating a device or a FIFO is not meaningful.
-func prepareOutputFile(file *os.File) error {
-	info, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("stat: %w", err)
-	}
-
-	if !info.Mode().IsRegular() {
-		return nil
-	}
-
-	err = chmodOutput(file)
-	if err != nil {
-		return fmt.Errorf("setting permissions: %w", err)
-	}
-
-	err = file.Truncate(0)
-	if err != nil {
-		return fmt.Errorf("truncate: %w", err)
-	}
-
-	return nil
-}
-
 // ownerReadWrite is the mode an output file is left with: a merged profile
 // is the security policy of a workload, so it is not readable by everyone on
 // the node by default.
@@ -102,52 +79,183 @@ const ownerReadWrite = 0o600
 // is refused rather than followed.
 var errSymlinkOutput = errors.New("refusing to write through a symbolic link")
 
-// writeOutputFile writes content to path with the mode above. A symlink at
-// path is refused rather than followed, so that --output cannot be aimed
-// through one at a file elsewhere, and the mode is set explicitly on a
-// regular file: it applies to one that already exists, which the open mode
-// does not, and is not narrowed further by the umask.
+// writeOutputFile writes content to path. A symlink at path is refused
+// rather than followed where the platform can tell (see refuseSymlinks), so
+// that --output cannot be aimed through one at a file elsewhere.
 //
-// Only a regular file is chmoded and truncated. --output may name a device
-// or a FIFO, and "> /dev/null to check the exit code" is an ordinary way to
-// run this; taking a node's /dev/null to mode 0600, which running as root
-// would do, is not something writing a profile should be able to cause. The
-// mode is set before the file is truncated so that a chmod that fails
-// leaves the previous contents in place.
+// A regular file, or one that does not exist yet, is replaced rather than
+// written in place: the content goes to a new file beside it, which is
+// synced and then renamed over path. A write that fails half way, on a full
+// disk say, then leaves the previous file whole instead of truncated, and a
+// reader never sees half a profile. The new file has the mode above,
+// whatever the umask and whatever mode the file it replaces had.
+//
+// Anything else is written in place and left as it is. --output may name a
+// device or a FIFO, and "> /dev/null to check the exit code" is an ordinary
+// way to run this; replacing a node's /dev/null, or taking it to mode 0600,
+// which running as root would do, is not something writing a profile should
+// be able to cause.
 func writeOutputFile(path string, content []byte) error {
-	// The path is the --output value, which is the caller's own choice;
-	// what needs guarding is that it is not followed through a symlink.
+	info, err := os.Lstat(path)
+
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return replaceOutputFile(path, content)
+	case err != nil:
+		return bareFileError(err)
+	case info.Mode()&fs.ModeSymlink != 0 && refuseSymlinks:
+		return symlinkError(path)
+	case info.Mode()&fs.ModeSymlink != 0:
+		// Followed where symlinks are not refused: what is replaced or
+		// written is the file the link leads to, not the link.
+		target, evalErr := filepath.EvalSymlinks(path)
+		if evalErr != nil {
+			return bareFileError(evalErr)
+		}
+
+		return writeOutputFile(target, content)
+	case info.Mode().IsRegular():
+		err = checkWritable(path)
+		if err != nil {
+			return err
+		}
+
+		return replaceOutputFile(path, content)
+	default:
+		return writeInPlace(path, content)
+	}
+}
+
+// checkWritable opens an existing output file for writing and closes it
+// again, without writing anything. Replacing the file only needs write
+// access to its directory, and a file the caller cannot write, such as one
+// made read-only to keep it, is refused as it was when it was written in
+// place.
+func checkWritable(path string) error {
 	file, err := os.OpenFile( //nolint:gosec // the caller named this path
-		path, os.O_WRONLY|os.O_CREATE|oNoFollow, ownerReadWrite,
+		path, os.O_WRONLY|oNoFollow, 0,
 	)
 	if err != nil {
 		if isSymlinkRefusal(err) {
-			return fmt.Errorf(
-				"%w: %s is a symbolic link; write to its target, or to stdout with -",
-				errSymlinkOutput, path,
-			)
+			return symlinkError(path)
 		}
 
 		return bareFileError(err)
 	}
 
-	err = prepareOutputFile(file)
+	return bareFileError(file.Close())
+}
+
+// symlinkError reports an --output path that is a symbolic link.
+func symlinkError(path string) error {
+	return fmt.Errorf(
+		"%w: %s is a symbolic link; write to its target, or to stdout with -",
+		errSymlinkOutput, merge.SafeName(path),
+	)
+}
+
+// replaceOutputFile writes content to a new file in the directory of path
+// and renames it over path. The new file is created exclusively, so it is
+// never one that someone else put there first, and removed again when
+// anything fails. Rename replaces a symlink that appeared at path since it
+// was checked rather than following it.
+func replaceOutputFile(path string, content []byte) error {
+	temp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp*")
 	if err != nil {
-		_ = file.Close()
+		return bareFileError(err)
+	}
+
+	tempPath := temp.Name()
+
+	err = writeTempFile(temp, content)
+	if err == nil {
+		err = os.Rename(tempPath, path)
+		if err != nil {
+			err = fmt.Errorf("rename: %w", bareLinkError(err))
+		}
+	}
+
+	if err != nil {
+		_ = os.Remove(tempPath)
 
 		return err
+	}
+
+	return nil
+}
+
+// bareLinkError strips the paths an *os.LinkError carries, as bareFileError
+// does for one path: the caller names the output itself.
+func bareLinkError(err error) error {
+	var linkErr *os.LinkError
+	if errors.As(err, &linkErr) {
+		return linkErr.Err
+	}
+
+	return err
+}
+
+// writeTempFile sets the mode of the new file, writes and syncs content,
+// and closes the file, which it does whether or not anything failed.
+func writeTempFile(temp *os.File, content []byte) error {
+	err := chmodOutput(temp)
+	if err != nil {
+		_ = temp.Close()
+
+		return fmt.Errorf("setting permissions: %w", err)
+	}
+
+	_, err = temp.Write(content)
+	if err != nil {
+		_ = temp.Close()
+
+		return fmt.Errorf("write: %w", bareFileError(err))
+	}
+
+	// The rename must not become visible before the data it points at.
+	err = temp.Sync()
+	if err != nil {
+		_ = temp.Close()
+
+		return fmt.Errorf("sync: %w", bareFileError(err))
+	}
+
+	err = temp.Close()
+	if err != nil {
+		return fmt.Errorf("close: %w", bareFileError(err))
+	}
+
+	return nil
+}
+
+// writeInPlace writes content to a file that is not regular, such as a
+// device or a FIFO, without changing its mode. It is opened without
+// following a symlink, so that one put at path since it was checked is
+// refused too.
+func writeInPlace(path string, content []byte) error {
+	// The path is the --output value, which is the caller's own choice;
+	// what needs guarding is that it is not followed through a symlink.
+	file, err := os.OpenFile( //nolint:gosec // the caller named this path
+		path, os.O_WRONLY|oNoFollow, 0,
+	)
+	if err != nil {
+		if isSymlinkRefusal(err) {
+			return symlinkError(path)
+		}
+
+		return bareFileError(err)
 	}
 
 	_, err = file.Write(content)
 	if err != nil {
 		_ = file.Close()
 
-		return fmt.Errorf("write: %w", err)
+		return fmt.Errorf("write: %w", bareFileError(err))
 	}
 
 	err = file.Close()
 	if err != nil {
-		return fmt.Errorf("close: %w", err)
+		return fmt.Errorf("close: %w", bareFileError(err))
 	}
 
 	return nil

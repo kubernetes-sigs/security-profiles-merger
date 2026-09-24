@@ -17,12 +17,15 @@ limitations under the License.
 package strictjson_test
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 	"sigs.k8s.io/security-profiles-merger/landlock"
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 	"sigs.k8s.io/security-profiles-merger/spm"
@@ -118,4 +121,118 @@ func TestUnmarshalStrictFoldsNamesLikeTheDecoder(t *testing.T) {
 	if err != nil {
 		t.Errorf("a surrogate pair = %v, want nil", err)
 	}
+}
+
+// TestUnmarshalStrictRefusesMisspelledMembers covers members that name a
+// field only ignoring case. encoding/json reads them, so no rule is lost
+// here, but a reader comparing names exactly, as a C runtime does, drops
+// them: the syscalls a scanner approved and the ones the runtime installs
+// differ. Every nesting level is checked, and every package refuses them.
+func TestUnmarshalStrictRefusesMisspelledMembers(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		what     string
+		document string
+		decode   func([]byte) error
+	}{
+		{
+			what: "a folded letter at the top",
+			document: `{"defaultAction":"SCMP_ACT_ALLOW",` +
+				`"ſyscalls":[{"names":["ptrace"],"action":"SCMP_ACT_ERRNO"}]}`,
+			decode: decodeSeccomp,
+		},
+		{
+			what:     "another case at the top",
+			document: `{"defaultAction":"SCMP_ACT_ALLOW","Syscalls":[]}`,
+			decode:   decodeSeccomp,
+		},
+		{
+			what: "another case in a rule",
+			document: `{"defaultAction":"SCMP_ACT_ALLOW",` +
+				`"syscalls":[{"names":["ptrace"],"ACTION":"SCMP_ACT_ERRNO"}]}`,
+			decode: decodeSeccomp,
+		},
+		{
+			what:     "another case in a nested object",
+			document: `{"capability":{"AllowedCapabilities":["CHOWN"]}}`,
+			decode: func(data []byte) error {
+				return apparmor.UnmarshalStrict(data, new(apparmor.Profile))
+			},
+		},
+		{
+			what:     "another case in a landlock rule",
+			document: `{"pathRules":[{"Path":"/usr","accessFs":["read_file"]}]}`,
+			decode: func(data []byte) error {
+				return landlock.UnmarshalStrict(data, new(landlock.Profile))
+			},
+		},
+	} {
+		err := testCase.decode([]byte(testCase.document))
+		if !errors.Is(err, spm.ErrMisspelledField) {
+			t.Errorf("%s = %v, want %v", testCase.what, err, spm.ErrMisspelledField)
+		}
+	}
+
+	// A folded duplicate is still reported as one, which comes first.
+	err := decodeSeccomp([]byte(
+		`{"defaultAction":"SCMP_ACT_ALLOW","DefaultAction":"SCMP_ACT_KILL"}`,
+	))
+	if !errors.Is(err, spm.ErrDuplicateKey) {
+		t.Errorf("a folded duplicate = %v, want %v", err, spm.ErrDuplicateKey)
+	}
+
+	// A string value spelled like a field is not a member.
+	err = decodeSeccomp([]byte(
+		`{"defaultAction":"SCMP_ACT_ALLOW","listenerPath":"Syscalls"}`,
+	))
+	if err != nil {
+		t.Errorf("a value spelled like a field = %v, want nil", err)
+	}
+}
+
+// TestUnmarshalStrictRefusesNull covers a document that is null, which
+// encoding/json decodes into a struct as nothing at all: without a check it
+// is an empty profile, where every other value that is not an object fails.
+func TestUnmarshalStrictRefusesNull(t *testing.T) {
+	t.Parallel()
+
+	for _, document := range []string{"null", " \n null \t", "[]", `"x"`, "1"} {
+		err := decodeSeccomp([]byte(document))
+		if err == nil {
+			t.Errorf("%q = nil, want an error", document)
+		}
+	}
+
+	err := decodeSeccomp([]byte(" {} "))
+	if err != nil {
+		t.Errorf("an empty object = %v, want nil", err)
+	}
+}
+
+// TestUnmarshalStrictBoundsDecoderErrors covers a decoder error quoting a
+// literal whose length the document chooses.
+func TestUnmarshalStrictBoundsDecoderErrors(t *testing.T) {
+	t.Parallel()
+
+	huge := strings.Repeat("9", 1<<20)
+
+	err := decodeSeccomp([]byte(`{"defaultErrnoRet":` + huge + `}`))
+	if err == nil {
+		t.Fatal("an out-of-range number = nil, want an error")
+	}
+
+	if len(err.Error()) > merge.MaxMessageBytes+64 {
+		t.Errorf("error is %d bytes, want at most %d", len(err.Error()), merge.MaxMessageBytes+64)
+	}
+
+	var typeErr *json.UnmarshalTypeError
+	if !errors.As(err, &typeErr) {
+		t.Errorf("error %T no longer wraps the decoder's error", err)
+	}
+}
+
+func decodeSeccomp(data []byte) error {
+	//nolint:wrapcheck // the tests match the error itself
+	return seccomp.UnmarshalStrict(data, new(specs.LinuxSeccomp))
 }

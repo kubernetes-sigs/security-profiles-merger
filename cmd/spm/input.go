@@ -26,6 +26,8 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
 const (
@@ -35,21 +37,22 @@ const (
 	// per-file bound still allows maxInputFiles * maxInputSize to be read
 	// into memory at once.
 	maxTotalInputSize = 64 << 20
-	// maxMessageBytes bounds a message built from input the caller did not
-	// write, such as the literal a JSON decoder quotes back.
-	maxMessageBytes = 512
 )
 
 var (
 	errDuplicateStdin = errors.New("stdin (\"-\") can only be specified once")
 	errTooManyFiles   = fmt.Errorf("too many input files (max %d)", maxInputFiles)
 	errTooManyStdin   = fmt.Errorf("too many profiles on stdin (max %d)", maxInputFiles)
-	errEmptyInput     = errors.New("no input provided")
-	errStdinTooLarge  = fmt.Errorf("stdin input exceeds %d bytes", maxInputSize)
-	errFileTooLarge   = fmt.Errorf("file exceeds %d byte limit", maxInputSize)
-	errInputTooLarge  = fmt.Errorf("inputs exceed %d bytes in total", maxTotalInputSize)
-	errNotAnObject    = errors.New("not a JSON object")
-	errDecode         = errors.New("decoding failed")
+	errTooManyInputs  = fmt.Errorf(
+		"too many profiles (max %d, counting each element of a stdin array and each file)",
+		maxInputFiles,
+	)
+	errEmptyInput    = errors.New("no input provided")
+	errStdinTooLarge = fmt.Errorf("stdin input exceeds %d bytes", maxInputSize)
+	errFileTooLarge  = fmt.Errorf("file exceeds %d byte limit", maxInputSize)
+	errInputTooLarge = fmt.Errorf("inputs exceed %d bytes in total", maxTotalInputSize)
+	errNotAnObject   = errors.New("not a JSON object")
+	errDecode        = errors.New("decoding failed")
 )
 
 // stdinName is how an input read from stdin is named in errors and
@@ -76,7 +79,7 @@ type profileInput struct {
 // so they exit like every other usage error.
 func readErrorExit(err error) int {
 	for _, sentinel := range []error{
-		errDuplicateStdin, errTooManyFiles, errTooManyStdin,
+		errDuplicateStdin, errTooManyFiles, errTooManyStdin, errTooManyInputs,
 		errFileTooLarge, errStdinTooLarge, errInputTooLarge,
 	} {
 		if errors.Is(err, sentinel) {
@@ -113,7 +116,8 @@ func readInputs(paths []string, stdin io.Reader) ([]profileInput, error) {
 
 			stdinUsed = true
 
-			items, err := readFromStdin(stdin)
+			// Every other argument is one more profile.
+			items, err := readStdinArgument(stdin, len(paths)-1)
 			if err != nil {
 				return nil, err
 			}
@@ -126,7 +130,7 @@ func readInputs(paths []string, stdin io.Reader) ([]profileInput, error) {
 		} else {
 			data, err := readFileWithLimit(path)
 			if err != nil {
-				return nil, fmt.Errorf("reading %s: %w", path, err)
+				return nil, fmt.Errorf("reading %s: %w", merge.SafeName(path), err)
 			}
 
 			added = len(data)
@@ -140,6 +144,23 @@ func readInputs(paths []string, stdin io.Reader) ([]profileInput, error) {
 	}
 
 	return result, nil
+}
+
+// readStdinArgument reads the profiles of a "-" argument given beside others
+// that bring one profile each. A stdin array brings up to maxInputFiles
+// profiles of its own, so the bound is on the profiles rather than on the
+// arguments.
+func readStdinArgument(stdin io.Reader, others int) ([]profileInput, error) {
+	items, err := readFromStdin(stdin)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(items)+others > maxInputFiles {
+		return nil, errTooManyInputs
+	}
+
+	return items, nil
 }
 
 // readFileWithLimit reads a file of at most maxInputSize bytes. The failure

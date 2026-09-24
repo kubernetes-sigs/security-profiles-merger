@@ -58,6 +58,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"unsafe"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -93,6 +94,52 @@ func SyscallNumber(name string) (int32, error) {
 	defer C.free(unsafe.Pointer(cname))
 
 	number := C.seccomp_syscall_resolve_name(cname)
+	if number == C.__NR_SCMP_ERROR {
+		return 0, fmt.Errorf("%w: %q", ErrUnknownSyscall, name)
+	}
+
+	return int32(number), nil
+}
+
+// ErrUnknownArch is returned when libseccomp does not know an architecture.
+var ErrUnknownArch = errors.New("unknown architecture")
+
+// archToken resolves a profile architecture the way runc does: the name
+// without its SCMP_ARCH_ prefix, in lower case, is libseccomp's name for it.
+func archToken(arch specs.Arch) (C.uint32_t, error) {
+	name := C.CString(strings.ToLower(strings.TrimPrefix(string(arch), "SCMP_ARCH_")))
+	defer C.free(unsafe.Pointer(name))
+
+	token := C.seccomp_arch_resolve_name(name)
+	if token == 0 {
+		return 0, fmt.Errorf("%w: %q", ErrUnknownArch, arch)
+	}
+
+	return token, nil
+}
+
+// AuditArch returns the value a filter compares the arch field of
+// seccomp_data with for the given architecture, which libseccomp's token
+// for it is on every architecture but x32.
+func AuditArch(arch specs.Arch) (uint32, error) {
+	token, err := archToken(arch)
+
+	return uint32(token), err
+}
+
+// SyscallNumberArch resolves a syscall name for the given architecture the
+// way libseccomp does. A negative number is one libseccomp makes up for a
+// syscall the architecture does not have, which no call can carry.
+func SyscallNumberArch(name string, arch specs.Arch) (int32, error) {
+	token, err := archToken(arch)
+	if err != nil {
+		return 0, err
+	}
+
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+
+	number := C.seccomp_syscall_resolve_name_arch(token, cname)
 	if number == C.__NR_SCMP_ERROR {
 		return 0, fmt.Errorf("%w: %q", ErrUnknownSyscall, name)
 	}
@@ -323,6 +370,20 @@ func withFilter(profile *specs.LinuxSeccomp, use func(ctx C.scmp_filter_ctx) err
 	}
 
 	defer C.seccomp_release(ctx)
+
+	// runc adds every listed architecture to the filter, which already
+	// covers the native one.
+	for _, arch := range profile.Architectures {
+		token, err := archToken(arch)
+		if err != nil {
+			return err
+		}
+
+		code := C.seccomp_arch_add(ctx, token)
+		if code != 0 && code != -C.EEXIST {
+			return fmt.Errorf("%w: adding %s: %d", ErrRuleRejected, arch, int(code))
+		}
+	}
 
 	for _, entry := range profile.Syscalls {
 		for _, name := range entry.Names {

@@ -235,11 +235,9 @@ func TestUnionKeepsReferGrant(t *testing.T) {
 	read := fsRights{landlock.FSAccessReadFile}
 	readRefer := fsRights{landlock.FSAccessReadFile, landlock.FSAccessRefer}
 	left := fsProfile(read, landlock.PathRule{Path: "/a", AccessFS: read})
-	right := fsProfile(readRefer, landlock.PathRule{
-		Path: "/", AccessFS: fsRights{landlock.FSAccessRefer},
-	})
+	right := fsProfile(readRefer, landlock.PathRule{Path: "/", AccessFS: readRefer})
 
-	want := "Profile{fs:read_file,refer /(refer) /a(read_file)}"
+	want := "Profile{fs:read_file,refer /(read_file,refer) /a(read_file)}"
 	assertMergeFormat(t, "Union", landlock.Union, want, left, right)
 	assertMergeFormat(t, "Union", landlock.Union, want, right, left)
 
@@ -259,6 +257,87 @@ func TestUnionKeepsReferGrant(t *testing.T) {
 	if !errors.Is(err, landlock.ErrEmptyRuleset) {
 		t.Errorf("ValidateArtifact(empty union) = %v, want ErrEmptyRuleset", err)
 	}
+}
+
+// The kernel allows moving a file into another directory only when the
+// destination grants no handled right the source does not. An intersection
+// that loses such a right at the destination, because another input denies
+// it there, must not allow the move the input granting it denies.
+func TestIntersectReferGainsNoRight(t *testing.T) {
+	t.Parallel()
+
+	refer := fsRights{landlock.FSAccessRefer}
+	writeRefer := fsRights{landlock.FSAccessWriteFile, landlock.FSAccessRefer}
+
+	// The left input denies moving /src/f to /dst, which would gain write;
+	// the result grants no write on /dst, so it drops refer there.
+	gains := fsProfile(writeRefer,
+		landlock.PathRule{Path: "/src", AccessFS: refer},
+		landlock.PathRule{Path: "/dst", AccessFS: writeRefer},
+	)
+	plain := fsProfile(writeRefer,
+		landlock.PathRule{Path: "/src", AccessFS: refer},
+		landlock.PathRule{Path: "/dst", AccessFS: refer},
+	)
+	want := "Profile{fs:refer,write_file /src(refer)}"
+	assertMergeFormat(t, "Intersect", landlock.Intersect, want, gains, plain)
+	assertMergeFormat(t, "Intersect", landlock.Intersect, want, plain, gains)
+
+	// Granting write on every refer path, the input never denies a move
+	// for it, and refer stays.
+	both := fsProfile(writeRefer,
+		landlock.PathRule{Path: "/src", AccessFS: writeRefer},
+		landlock.PathRule{Path: "/dst", AccessFS: writeRefer},
+	)
+	assertMergeFormat(t, "Intersect", landlock.Intersect,
+		"Profile{fs:refer,write_file /dst(refer) /src(refer)}", both, plain)
+
+	// Refer inherited from an ancestor is dropped at the ancestor.
+	root := fsProfile(writeRefer,
+		landlock.PathRule{Path: "/", AccessFS: refer},
+		landlock.PathRule{Path: "/dst", AccessFS: writeRefer},
+	)
+	assertMergeFormat(t, "Intersect", landlock.Intersect,
+		"Profile{fs:refer,write_file}", root,
+		fsProfile(writeRefer, landlock.PathRule{Path: "/", AccessFS: refer}))
+
+	// A refer grant above a mount point covers moves inside the mount, so
+	// one on an ancestor honors the other input's grants beneath it.
+	above := fsProfile(writeRefer, landlock.PathRule{Path: "/top", AccessFS: refer})
+	inside := fsProfile(writeRefer,
+		landlock.PathRule{Path: "/top/mnt/src", AccessFS: refer},
+		landlock.PathRule{Path: "/top/mnt/dst", AccessFS: refer},
+	)
+	assertMergeFormat(t, "Intersect", landlock.Intersect,
+		"Profile{fs:refer,write_file /top/mnt/dst(refer) /top/mnt/src(refer)}", above, inside)
+}
+
+// A union granting a right at the destination of a move that an input
+// allows would deny the move, since the file would gain the right. It stops
+// handling that right instead.
+func TestUnionUnhandlesMoveConflict(t *testing.T) {
+	t.Parallel()
+
+	all := fsRights{landlock.FSAccessReadFile, landlock.FSAccessWriteFile, landlock.FSAccessRefer}
+	readRefer := fsRights{landlock.FSAccessReadFile, landlock.FSAccessRefer}
+	write := fsRights{landlock.FSAccessWriteFile}
+
+	// The left input allows moving /src/f to /dst; the right grants write
+	// on /dst, which /src/f would gain there.
+	mover := fsProfile(all,
+		landlock.PathRule{Path: "/src", AccessFS: readRefer},
+		landlock.PathRule{Path: "/dst", AccessFS: fsRights{landlock.FSAccessRefer}},
+	)
+	writer := fsProfile(all, landlock.PathRule{Path: "/dst", AccessFS: write})
+	want := "Profile{fs:read_file,refer /dst(refer) /src(read_file,refer)}"
+	assertMergeFormat(t, "Union", landlock.Union, want, mover, writer)
+	assertMergeFormat(t, "Union", landlock.Union, want, writer, mover)
+
+	// Write on /src instead only matters for a move into /src, which the
+	// left input denies anyway, since the file would gain read.
+	assertMergeFormat(t, "Union", landlock.Union,
+		"Profile{fs:read_file,refer,write_file /dst(refer) /src(read_file,refer,write_file)}",
+		mover, fsProfile(all, landlock.PathRule{Path: "/src", AccessFS: write}))
 }
 
 func TestMergeRejectsParentComponents(t *testing.T) {
@@ -420,10 +499,9 @@ func TestMergeOutputIsMinimal(t *testing.T) {
 	assertMergeFormat(t, "Intersect", landlock.Intersect,
 		"Profile{fs:read_dir,read_file /(read_dir) /etc/passwd(read_file)}", dirs, file)
 
-	// A rule granting refer is kept as it is, because the rights collected
-	// up to a mount point decide whether a file may move there. A rule
-	// without a refer grant is minimized as any other, which keeps the
-	// output independent of how a fold grouped its inputs.
+	// A rule granting refer is minimized as any other: the kernel decides a
+	// move from the rights each directory inherits, past its mount point up
+	// to the real root, so a repeated right decides nothing.
 	readRefer := fsRights{landlock.FSAccessReadFile, landlock.FSAccessRefer}
 	referRules := fsProfile(readRefer,
 		landlock.PathRule{Path: "/", AccessFS: readRefer},
@@ -437,7 +515,7 @@ func TestMergeOutputIsMinimal(t *testing.T) {
 		landlock.PathRule{Path: "/etc", AccessFS: readRefer},
 	)
 	assertMergeFormat(t, "Intersect", landlock.Intersect,
-		"Profile{fs:read_file,refer /(read_file) /etc(read_file,refer)}", nestedRefer)
+		"Profile{fs:read_file,refer /(read_file) /etc(refer)}", nestedRefer)
 }
 
 // TestUnionKeepsNestedRules covers rules whose path may be a symlink: on

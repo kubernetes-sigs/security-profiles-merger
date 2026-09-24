@@ -236,3 +236,56 @@ func TestJoinLimitedBoundsANestedReport(t *testing.T) {
 		t.Errorf("small report = %v", small)
 	}
 }
+
+// TestBoundsArePinned pins the bounds by value: every other test derives its
+// expectation from the constants, so a changed bound would pass them all.
+func TestBoundsArePinned(t *testing.T) {
+	t.Parallel()
+
+	if merge.MaxQuotedBytes != 64 {
+		t.Errorf("MaxQuotedBytes = %d, want 64", merge.MaxQuotedBytes)
+	}
+
+	if merge.MaxMessageBytes != 512 {
+		t.Errorf("MaxMessageBytes = %d, want 512", merge.MaxMessageBytes)
+	}
+
+	want := `"` + strings.Repeat("x", 64) + `"...`
+	if got := merge.QuoteBounded(strings.Repeat("x", 65)); got != want {
+		t.Errorf("QuoteBounded of 65 bytes = %s, want %s", got, want)
+	}
+}
+
+func TestBoundedText(t *testing.T) {
+	t.Parallel()
+
+	short := strings.Repeat("x", merge.MaxMessageBytes)
+	if got := merge.BoundedText(short); got != short {
+		t.Errorf("BoundedText at the limit = %d bytes, want it unchanged", len(got))
+	}
+
+	// A two-byte rune straddling the limit is dropped whole.
+	long := strings.Repeat("x", merge.MaxMessageBytes-1) + "\u00e4" + strings.Repeat("x", 1<<20)
+
+	got := merge.BoundedText(long)
+	if got != strings.Repeat("x", merge.MaxMessageBytes-1)+"..." {
+		t.Errorf("BoundedText = %d bytes ending %q", len(got), got[len(got)-8:])
+	}
+
+	if !utf8.ValidString(got) {
+		t.Error("BoundedText split a rune")
+	}
+
+	err := merge.BoundedError(fmt.Errorf("wrapped: %w %s", errProblem, long))
+	if !errors.Is(err, errProblem) {
+		t.Errorf("BoundedError = %v, want it to wrap %v", err, errProblem)
+	}
+
+	if len(err.Error()) > merge.MaxMessageBytes+len("...") {
+		t.Errorf("BoundedError message is %d bytes", len(err.Error()))
+	}
+
+	if merge.BoundedError(nil) != nil {
+		t.Error("BoundedError(nil) != nil")
+	}
+}

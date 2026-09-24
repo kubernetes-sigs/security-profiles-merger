@@ -760,6 +760,36 @@ func TestValidateRejectsVariables(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsEscapedVariables covers a variable whose "@" or "{" is
+// spelled as an escape. The parser resolves escapes before it expands
+// variables, so the path references one all the same.
+func TestValidateRejectsEscapedVariables(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{`/\x40{HOME}/x`, `/\100{HOME}/x`, `/\d064{HOME}/x`} {
+		profile := readOnly(path)
+
+		err := apparmor.Validate(profile)
+		if !errors.Is(err, apparmor.ErrUnsupportedVariable) {
+			t.Errorf("Validate(%q) = %v, want ErrUnsupportedVariable", path, err)
+		}
+
+		_, err = apparmor.Union(profile, readOnly("/etc/passwd"))
+		if !errors.Is(err, apparmor.ErrUnsupportedVariable) {
+			t.Errorf("Union(%q) = %v, want ErrUnsupportedVariable", path, err)
+		}
+	}
+
+	// An escaped backslash before "@" leaves the "@" as written, and an
+	// escaped "{" stays escaped: neither spells a variable.
+	for _, path := range []string{`/a\\x40{b,c}`, `/a@\{b`} {
+		err := apparmor.Validate(readOnly(path))
+		if errors.Is(err, apparmor.ErrUnsupportedVariable) {
+			t.Errorf("Validate(%q) = %v, want no ErrUnsupportedVariable", path, err)
+		}
+	}
+}
+
 func TestValidateStrictRejectsRelativePaths(t *testing.T) {
 	t.Parallel()
 

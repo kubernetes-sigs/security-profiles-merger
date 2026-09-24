@@ -68,11 +68,16 @@ The same five calls exist in `apparmor` and `landlock`.
 1. **Decode with `UnmarshalStrict`.** It refuses a member repeated within one
    object (`ErrDuplicateKey`, compared ignoring case, as `encoding/json`
    matches members to fields), a member the profile type has no field for
-   (`ErrUnknownField`), a byte that is not valid UTF-8 (`ErrInvalidUTF8`) and
-   data behind the document (`ErrUnexpectedData`). `encoding/json` keeps the
-   last of two repeated members while other parsers keep the first, so a
-   scanner that approved the artifact and the runtime that loads it can read
-   two different profiles out of one document.
+   (`ErrUnknownField`), a member that names a field only ignoring case
+   (`ErrMisspelledField`), a byte that is not valid UTF-8 (`ErrInvalidUTF8`),
+   data behind the document (`ErrUnexpectedData`) and a document that is not
+   an object, such as `null`. `encoding/json` keeps the last of two repeated
+   members while other parsers keep the first, and fills a field from
+   `"Syscalls"` or `"\u017fyscalls"` where a reader that compares names
+   exactly drops them, so a scanner that approved the artifact and the
+   runtime that loads it can read two different profiles out of one
+   document. Every message is bounded, since the decoder quotes back literals
+   whose length the document chooses.
 2. **Validate with `ValidateArtifact`**, not `Validate`. `Validate` is the
    precondition of the merge and checks nothing about size, loadability or
    what an untrusted profile must not control. `ValidateStrict` is for a
@@ -94,10 +99,10 @@ The same five calls exist in `apparmor` and `landlock`.
 counts before doing any other work, so that an over-large artifact is rejected
 where the reason can be reported rather than merged slowly. `seccomp` reports
 its limits in the same bounded report as every other finding, so a profile
-with 32 earlier problems matches `ErrMoreProblems` instead of the limit. `Validate` applies none of them except the path
-length; the merge bounds its own work and falls back to a conservative result
-past its budget, which is safe but not what a caller wants to find out from a
-slow container start.
+with 32 earlier problems matches `ErrMoreProblems` instead of the limit.
+`Validate` applies none of them except the path length; the merge bounds its
+own work and falls back to a conservative result past its budget, which is
+safe but not what a caller wants to find out from a slow container start.
 
 | Package | Limit | Value | Error |
 | --- | --- | --- | --- |
@@ -123,6 +128,10 @@ the error matches `ErrMoreProblems` instead of listing the rest, so
 of `ErrMoreProblems` as "and possibly others" before dispatching on another
 sentinel, and do not branch on the absence of one.
 
+A merge wraps the report of the input that failed in an `spm.InputError`,
+whose `Index` says which one it was; `errors.Is` sees through it to the
+sentinels, so the same dispatch works on a merge failure.
+
 Every value a message quotes from a profile is bounded in length and escaped,
 so an error is safe to log as it is.
 
@@ -140,10 +149,35 @@ what it is given at face value.
   either, so two profiles listing one executable intersect to a shared
   permission even where their modes differ. See
   [Scope](api.md#scope) for the full list.
-- **seccomp: 32-bit architectures.** The safety guarantees hold for the
-  program libseccomp compiles for a 64-bit architecture. For a 32-bit one it
-  compares only the lower 32 bits of an argument, which the merge does not
-  model beyond refusing the shapes where that matters.
+- **AppArmor: capability names come out upper-case.** The merge compares
+  capability names case-insensitively and returns them upper-cased
+  (`CHOWN`), while apparmor_parser accepts only lower-case names. A consumer
+  rendering a result as `capability <name>,` rules must lower-case each name
+  first, or the profile does not load. See
+  [Capability names](api.md#capability-names).
+- **seccomp: 32-bit and multiplexing architectures, and where the merge
+  runs.** The model reads the program libseccomp compiles for a 64-bit
+  architecture on which every syscall is called directly. On a 32-bit
+  architecture libseccomp compares only the lower 32 bits of a value, so
+  `ValidateArtifact` rejects a condition against a wider value
+  (`ErrValueTooWide`) when the filter covers one. Where socket and SysV IPC
+  calls also go through `socketcall(2)` and `ipc(2)`, libseccomp copies the
+  rules onto the multiplexer with the first argument's condition replaced.
+  `Intersect` settles both by dropping an affected architecture the result
+  only lists, which leaves its calls to `SCMP_ACT_KILL`, or, where the native
+  architecture is affected, by collapsing the syscall to one unconditional
+  rule; `Union` collapses the syscall to its least restrictive action. The
+  native architecture is that of the running program, so what
+  `ValidateArtifact` accepts and what the merges return depend on where they
+  run: call them on the node that loads the result, and use `DiffForArch`
+  when comparing profiles for another node.
+- **Landlock: refer.** The kernel allows a move or link into another
+  directory only when both grant `refer` and the file gains no handled right
+  at its destination, which a single ruleset cannot always express for two
+  inputs. `Intersect` then drops `refer` where the result would allow a move
+  an input denies, so it may deny moves every input allows, and `Union` stops
+  handling a right that would deny a move an input allows, which permits that
+  right everywhere.
 - **Landlock: symlinks and bind mounts.** Hierarchy resolution is textual,
   while the kernel binds a rule to the file its path resolves to. See below.
 
@@ -160,8 +194,12 @@ the artifact's author chose the path.
 effective, err := landlock.Intersect(baseline, artifact)
 // ...
 for _, path := range landlock.LoweredRulePaths(effective, baseline, artifact) {
-    // Open with openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS) relative to
-    // the baseline rule that covers it, or refuse the profile.
+    // openBeneath is the runtime's own: it opens path with
+    // openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS) relative to the baseline
+    // rule that covers it. Where that fails, refuse the profile.
+    if err := openBeneath(path); err != nil {
+        return fmt.Errorf("lowered rule path %q: %w", path, err)
+    }
 }
 ```
 

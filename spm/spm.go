@@ -95,6 +95,12 @@ var (
 	// to carry, and a member of a newer format is lost in the permissive
 	// direction.
 	ErrUnknownField = errors.New("unknown field")
+	// ErrMisspelledField is returned by UnmarshalStrict of every package
+	// when a member names a field only ignoring case, such as "Syscalls"
+	// or "\u017fyscalls" for "syscalls". encoding/json fills the field from
+	// it, while a reader that compares names exactly drops it, so the two
+	// read different rules from one profile.
+	ErrMisspelledField = errors.New("misspelled field")
 	// ErrInvalidUTF8 is returned by UnmarshalStrict of every package when
 	// the document holds a byte that is not valid UTF-8, or a \u escape
 	// spelling half a surrogate pair. encoding/json replaces both with

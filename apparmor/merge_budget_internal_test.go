@@ -19,6 +19,7 @@ package apparmor
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,9 +62,9 @@ func budgetProfile(paths ...string) *Profile {
 // at this size the merge took seconds before the budget. Coverage counters
 // and the race detector multiply the cost of the loops, so the bound is only
 // checked without them.
+//
+//nolint:paralleltest // a wall-clock bound, so it runs before the parallel tests
 func TestMergesStayWithinTheirPairBudget(t *testing.T) {
-	t.Parallel()
-
 	// Twice the count the budget admits under one prefix, so that the
 	// fallback runs and the exact merge does not.
 	literals, globs := budgetShape(2048)
@@ -158,8 +159,12 @@ func TestPairBudgetIgnoresLiteralOnlyProfiles(t *testing.T) {
 	t.Parallel()
 
 	literals, _ := budgetShape(4096)
+	longLiterals := sideSize{
+		literals: len(literals), globs: 0,
+		literalBytes: len(literals) * maxGlobPatternLen, globBytes: 0,
+	}
 
-	if exceedsPairBudget(len(literals), 0, len(literals), 0, maxGlobPatternLen) {
+	if exceedsPairBudget(longLiterals, longLiterals) {
 		t.Error("a merge of literals alone exceeds the pair budget")
 	}
 
@@ -173,35 +178,146 @@ func TestPairBudgetIgnoresLiteralOnlyProfiles(t *testing.T) {
 	}
 }
 
+// uniformSide is the size of a side of literals and globs of one length.
+func uniformSide(literals, globs, length int) sideSize {
+	return sideSize{
+		literals: literals, globs: globs,
+		literalBytes: literals * length, globBytes: globs * length,
+	}
+}
+
 // TestPairBudgetAdmitsArtifactSizedProfiles pins the relation between the
-// budget and MaxArtifactPaths: the worst split of a profile a runtime accepts
-// is merged exactly against another of that size.
+// budgets and MaxArtifactPaths: a profile a runtime accepts is merged exactly
+// against a node baseline, however it splits its paths.
 func TestPairBudgetAdmitsArtifactSizedProfiles(t *testing.T) {
 	t.Parallel()
 
-	half := MaxArtifactPaths / 2
+	baselinePaths := baselinePathBytes / typicalPathLen
 
-	if exceedsPairBudget(half, half, half, half, typicalPathLen) {
+	for _, testCase := range []struct {
+		name               string
+		artifact, baseline sideSize
+	}{
+		{
+			"literals against globs",
+			uniformSide(MaxArtifactPaths, 0, typicalPathLen),
+			uniformSide(0, baselinePaths, typicalPathLen),
+		},
+		{
+			"globs against literals",
+			uniformSide(0, MaxArtifactPaths, typicalPathLen),
+			uniformSide(baselinePaths, 0, typicalPathLen),
+		},
+		{
+			"halves",
+			uniformSide(MaxArtifactPaths/2, MaxArtifactPaths/2, typicalPathLen),
+			uniformSide(baselinePaths/2, baselinePaths/2, typicalPathLen),
+		},
+	} {
+		if exceedsPairBudget(testCase.artifact, testCase.baseline) {
+			t.Errorf("%s: an artifact against a baseline exceeds the budget", testCase.name)
+		}
+	}
+
+	// Two profiles of MaxArtifactPaths short paths stay inside the pair
+	// bound, which assumes nothing of the lengths.
+	half := MaxArtifactPaths / 2
+	short := uniformSide(half, half, 16)
+
+	if exceedsPairBudget(short, short) {
 		t.Errorf(
 			"two profiles of %d paths exceed the pair budget of %d",
 			MaxArtifactPaths, maxMergePathPairs,
 		)
 	}
 
-	// The same profiles of long paths do not: a comparison costs the bytes
-	// it compares, and at MaxPathLen every pair costs 64 times what the
-	// pair bound assumes.
-	if !exceedsPairBudget(half, half, half, half, maxGlobPatternLen) {
+	// The same profiles of long paths do not: a comparison costs up to the
+	// product of the two lengths.
+	long := uniformSide(half, half, maxGlobPatternLen)
+
+	if !exceedsPairBudget(long, long) {
 		t.Errorf(
 			"two profiles of %d paths of %d bytes stay inside the work budget of %d",
 			MaxArtifactPaths, maxGlobPatternLen, maxMergePathWork,
 		)
 	}
+}
 
-	// A profile of a handful of paths is never weighed out of the exact
-	// merge, however long its paths are.
-	if exceedsPairBudget(16, 16, 16, 16, maxGlobPatternLen) {
-		t.Error("a profile of 32 paths exceeds the work budget")
+// regexWorkShape builds the shape that costs a regular expression the most
+// per pair: patterns of thousands of stars, each a thread the matcher keeps
+// alive at every byte of a name of thousands of bytes it cannot match. Each
+// literal starts with the literal prefix of one pattern, so every pattern is
+// run over a fifteenth of the literals to the end. Both profiles pass
+// ValidateArtifact.
+func regexWorkShape() (*Profile, *Profile) {
+	const (
+		patterns = 15
+		literals = 1000
+		stars    = 2040
+	)
+
+	globs := make([]string, 0, patterns)
+	for idx := range patterns {
+		globs = append(globs, fmt.Sprintf("/p/%c", 'A'+idx)+strings.Repeat("*a", stars)+"*b")
+	}
+
+	names := make([]string, 0, literals)
+	for idx := range literals {
+		names = append(names, fmt.Sprintf(
+			"/p/%c%s%04d", 'A'+idx%patterns, strings.Repeat("a", 2*stars), idx,
+		))
+	}
+
+	return budgetProfile(globs...), budgetProfile(names...)
+}
+
+// TestMergesBoundTheirRegexWork bounds the wall time of a merge whose pairs
+// fit the pair budget but whose comparisons are each as costly as a pattern
+// and a name can make them: before the work was weighed by the product of
+// the lengths, this intersection took over a minute and a half.
+//
+//nolint:paralleltest // a wall-clock bound, so it runs before the parallel tests
+func TestMergesBoundTheirRegexWork(t *testing.T) {
+	globs, names := regexWorkShape()
+
+	for _, profile := range []*Profile{globs, names} {
+		err := ValidateArtifact(profile)
+		if err != nil {
+			t.Fatalf("ValidateArtifact: %v", err)
+		}
+	}
+
+	for name, mergeFn := range map[string]func(...*Profile) (*Profile, error){
+		"Intersect": Intersect,
+		"Union":     Union,
+	} {
+		start := time.Now()
+
+		result, err := mergeFn(globs, names)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+
+		elapsed := time.Since(start)
+		if testutil.UninstrumentedRun() && elapsed > 2*time.Second {
+			t.Errorf("%s took %v", name, elapsed)
+		}
+
+		// Past the budget the intersection keeps what both sides spell
+		// alike, which is nothing here, and the union keeps every path.
+		got := 0
+		if result.Filesystem != nil {
+			got = len(result.Filesystem.ReadOnlyPaths)
+		}
+
+		want := 0
+		if name == "Union" {
+			want = len(globs.Filesystem.ReadOnlyPaths) + len(names.Filesystem.ReadOnlyPaths)
+		}
+
+		if got != want {
+			t.Errorf("%s kept %d paths, want %d", name, got, want)
+		}
 	}
 }
 

@@ -367,3 +367,76 @@ func TestUnknownFieldsPrefersShallowerField(t *testing.T) {
 		t.Errorf("UnknownFields = %v, want none", got)
 	}
 }
+
+// FuzzMisspelledFields checks that the scan MisspelledFieldsOf runs before
+// its walk never skips a walk that would find something.
+func FuzzMisspelledFields(f *testing.F) {
+	addJSONFuzzSeeds(f)
+	f.Add(`{"ſyscalls":[{"names":["x"],"ACTION":"y"}]}`)
+
+	f.Fuzz(func(t *testing.T, raw string) {
+		paths, omitted := MisspelledFieldsOf[specs.LinuxSeccomp]([]byte(raw))
+		walked := walkFields([]byte(raw), reflect.TypeFor[specs.LinuxSeccomp]())
+
+		if !slices.Equal(paths, walked.misspelled.paths) || omitted != walked.misspelled.omitted {
+			t.Errorf(
+				"MisspelledFieldsOf(%q) = %v, the walk alone finds %v",
+				raw, paths, walked.misspelled.paths,
+			)
+		}
+	})
+}
+
+// walkSpelledA and walkSpelledB spell one folded name differently, so the
+// scan cannot tell a misspelling from the name by comparing with one
+// spelling.
+type walkSpelledA struct {
+	Inner walkSpelledB `json:"inner"`
+	Name  string       `json:"name"`
+}
+
+type walkSpelledB struct {
+	Name string `json:"NAME"` //nolint:tagliatelle // a second spelling is the point
+}
+
+func TestMisspelledFieldsOfDifferentSpellings(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		raw  string
+		want []string
+	}{
+		{`{"name":"x","inner":{"NAME":"y"}}`, nil},
+		{`{"NAME":"x"}`, []string{"NAME"}},
+		{`{"inner":{"name":"y"}}`, []string{"inner.name"}},
+		{`{"Inner":{"Name":"y"}}`, []string{"Inner", "Inner.Name"}},
+	} {
+		got, _ := MisspelledFieldsOf[walkSpelledA]([]byte(testCase.raw))
+		if !slices.Equal(got, testCase.want) {
+			t.Errorf("MisspelledFieldsOf(%s) = %v, want %v", testCase.raw, got, testCase.want)
+		}
+	}
+}
+
+func TestHasField(t *testing.T) {
+	t.Parallel()
+
+	target := reflect.TypeFor[*specs.LinuxSeccomp]()
+
+	for name, want := range map[string]bool{
+		"syscalls":      true,
+		"Syscalls":      true,
+		"ſyscalls":      true,
+		"DEFAULTACTION": true,
+		"names":         false,
+		"":              false,
+	} {
+		if got := HasField(target, name); got != want {
+			t.Errorf("HasField(%q) = %v, want %v", name, got, want)
+		}
+	}
+
+	if HasField(reflect.TypeFor[string](), "x") {
+		t.Error("HasField of a string type = true, want false")
+	}
+}

@@ -26,6 +26,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
 // newFlagSet returns a flag set for a subcommand whose errors go to stderr.
@@ -90,8 +92,9 @@ func flagNamed(flags *flag.FlagSet, name string) bool {
 // after which everything is a file name. Only a "--" the flag parser would
 // consume counts: one after the first operand is an operand itself, and a
 // flag value that happens to be "--" is not a separator either, so the scan
-// stops at the first argument that is neither a flag nor a flag's value.
-func argsSeparated(args []string) bool {
+// follows the parser, stopping at the first argument that is neither a flag
+// nor a flag's value.
+func argsSeparated(flags *flag.FlagSet, args []string) bool {
 	for idx := 0; idx < len(args); idx++ {
 		arg := args[idx]
 
@@ -103,14 +106,30 @@ func argsSeparated(args []string) bool {
 			return false
 		}
 
-		// A flag given as "-name value" takes the next argument; one given
-		// as "-name=value" does not.
-		if !strings.Contains(arg, "=") && idx+1 < len(args) {
+		// A flag given as "-name value" takes the next argument unless it
+		// is a boolean one; one given as "-name=value" never does.
+		if !strings.Contains(arg, "=") && takesValue(flags, arg) {
 			idx++
 		}
 	}
 
 	return false
+}
+
+// takesValue reports whether the flag an argument such as "--name" names
+// reads the next argument as its value. A boolean flag does not, and a flag
+// the set does not know stopped the parser before it got here.
+func takesValue(flags *flag.FlagSet, arg string) bool {
+	name := strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-")
+
+	known := flags.Lookup(name)
+	if known == nil {
+		return false
+	}
+
+	boolFlag, isBool := known.Value.(interface{ IsBoolFlag() bool })
+
+	return !isBool || !boolFlag.IsBoolFlag()
 }
 
 // checkFlagOrder rejects flags placed after file arguments. The flag package
@@ -137,7 +156,7 @@ func checkFlagOrder(args []string, separated bool, stderr io.Writer) int {
 			_, _ = fmt.Fprintf(
 				stderr,
 				"error: %s is not a file (flags must precede file arguments)\n",
-				arg,
+				merge.SafeName(arg),
 			)
 
 			return exitUsage

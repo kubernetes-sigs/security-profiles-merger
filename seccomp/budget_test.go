@@ -137,9 +137,9 @@ func TestUnionOverBudgetNeverPermitsLess(t *testing.T) {
 // TestIntersectArtifactSizedContestedProfile is the shape the per-syscall
 // entry cap alone does not bound: many syscalls, each at the cap, on both
 // sides. Before the clause budget this took tens of seconds and gigabytes.
+//
+//nolint:paralleltest // a wall-clock bound, so it runs before the parallel tests
 func TestIntersectArtifactSizedContestedProfile(t *testing.T) {
-	t.Parallel()
-
 	const (
 		syscalls       = 100
 		generousBudget = 5 * time.Second
@@ -387,9 +387,9 @@ func multiNameEntry(names, conditions int) specs.LinuxSyscall {
 // and gigabytes: the entries are never expanded per name past the budget, so
 // the work stays proportional to the profile rather than to the rules it
 // asks for, and the syscalls collapse in the safe direction of each merge.
+//
+//nolint:paralleltest // a wall-clock bound, so it runs before the parallel tests
 func TestMergeBoundsMultiNameExpansion(t *testing.T) {
-	t.Parallel()
-
 	const (
 		names          = 40000
 		conditions     = 256
@@ -453,9 +453,9 @@ func TestMergeBoundsMultiNameExpansion(t *testing.T) {
 // TestValidateArtifactRejectsMultiNameExpansion is the other half: a runtime
 // never merges such a profile in the first place, since the rules it loads
 // are past what an artifact may ask for.
+//
+//nolint:paralleltest // a wall-clock bound, so it runs before the parallel tests
 func TestValidateArtifactRejectsMultiNameExpansion(t *testing.T) {
-	t.Parallel()
-
 	const (
 		names          = 40000
 		conditions     = 256

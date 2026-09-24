@@ -1467,3 +1467,57 @@ func TestFormatDiffQuotesUnsafeBytes(t *testing.T) {
 		}
 	}
 }
+
+// manyReadRules returns a profile allowing read for each of count values of
+// its first argument, starting at first: more rules than the merge reads a
+// profile as, so read is summarized.
+func manyReadRules(count int, first uint64) *specs.LinuxSeccomp {
+	profile := profileOf(specs.ActErrno)
+
+	for idx := range uint64(count) {
+		profile.Syscalls = append(profile.Syscalls,
+			filtered(syscallRead, specs.ActAllow, arg(0, specs.OpEqualTo, first+idx)))
+	}
+
+	return profile
+}
+
+// TestDiffComparesSummarizedSyscallsByRules pins that a syscall past the
+// budget on the rules a profile is read as is compared by its rules: both
+// sides are listed by the two actions a collapse could pick, which the
+// rules here share although they allow different calls.
+func TestDiffComparesSummarizedSyscallsByRules(t *testing.T) {
+	t.Parallel()
+
+	const count = 70000
+
+	left := manyReadRules(count, 0)
+	right := manyReadRules(count, 1)
+
+	diff, err := seccomp.Diff(left, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if diff.Equal || diff.Syscalls == nil || len(diff.Syscalls.Changed) != 1 ||
+		diff.Syscalls.Changed[0].Name != syscallRead {
+		t.Fatalf("Diff of different rules = %s, want read changed", seccomp.FormatDiff(diff))
+	}
+
+	if seccomp.DiffSyscalls(left.Syscalls, right.Syscalls) == nil {
+		t.Fatal("DiffSyscalls of different rules reports them equal")
+	}
+
+	// The same rules compare equal, including where an entry repeats one.
+	same := manyReadRules(count, 0)
+	same.Syscalls = append(same.Syscalls, same.Syscalls[0])
+
+	diff, err = seccomp.Diff(left, same)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !diff.Equal {
+		t.Fatalf("Diff of the same rules = %s, want equal", seccomp.FormatDiff(diff))
+	}
+}

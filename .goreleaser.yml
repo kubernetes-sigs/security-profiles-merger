@@ -62,3 +62,8 @@ sboms:
 
 changelog:
   use: github-native
+
+# A tag with a prerelease suffix, such as v0.6.0-rc.1, is published as a
+# prerelease rather than as the latest release.
+release:
+  prerelease: auto

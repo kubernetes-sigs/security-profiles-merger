@@ -4,6 +4,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # release.yml calls this workflow as its gate, so that a tag passes
+  # exactly the checks a pull request does.
+  workflow_call:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -12,11 +15,23 @@ concurrency:
 permissions:
   contents: read
 
+# go.mod's go line is the oldest Go the library supports, and the jobs that
+# use go-version-file test that floor. The release binaries are built with
+# this one instead, a current stable release, so that they do not ship a
+# standard library with known vulnerabilities; the jobs that build, test or
+# scan what ships use it. release.yml carries the same pin and
+# dependencies.yaml tracks both.
+env:
+  GO_VERSION: "1.27.1"
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -29,8 +44,11 @@ jobs:
   # libseccomp answers is test-libseccomp's question, not this job's.
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -44,8 +62,11 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -67,11 +88,29 @@ jobs:
   test-bounds:
     name: test / bounds
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      - run: go test -count=1 ./...
+
+  # The same plain run on the Go the release binaries are built with, which
+  # is not the floor the jobs above test.
+  test-release-go:
+    name: test / release go
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
       - run: go test -count=1 ./...
 
   # The runners are all 64-bit, so a word-size mistake compiles here and
@@ -81,12 +120,15 @@ jobs:
   vet-arch:
     name: vet / linux-${{ matrix.goarch }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         goarch: ["386", "arm", "arm64", "s390x", "ppc64le"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -109,6 +151,7 @@ jobs:
   test-libseccomp:
     name: test-libseccomp / ${{ matrix.version }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -119,6 +162,8 @@ jobs:
             sha256: 501f66c667225d53791b97e1d7cf85ab764c297d04881f60f38f451c4b0ee1be
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -157,6 +202,7 @@ jobs:
   test-cross:
     name: test / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -164,6 +210,8 @@ jobs:
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -177,6 +225,8 @@ jobs:
       matrix: ${{ steps.find.outputs.matrix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - id: find
         run: |
           set -euo pipefail
@@ -220,6 +270,8 @@ jobs:
         fuzz: ${{ fromJSON(needs.fuzz-prepare.outputs.matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -251,6 +303,7 @@ jobs:
 
   benchmark:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     name: benchmark / ${{ matrix.name }}
     strategy:
       fail-fast: false
@@ -266,6 +319,8 @@ jobs:
             package: ./internal/merge/
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -312,27 +367,38 @@ jobs:
 
   govulncheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
-      # govulncheck may need a newer Go than the module's floor; let go run
-      # fetch the toolchain its module requires instead of pinning it here.
+          go-version: ${{ env.GO_VERSION }}
+      # govulncheck reports standard library vulnerabilities for the Go it
+      # runs under, so it runs under the Go the release is built with. local
+      # keeps go run from switching to another toolchain, and so to another
+      # standard library, should govulncheck ever require a newer one.
       - run: make govulncheck
         env:
-          GOTOOLCHAIN: auto
+          GOTOOLCHAIN: local
 
   typos:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: crate-ci/typos@512fc24f32f44ab01972217aaaf3dc86ec234d53 # v1.50.2
 
   tidy:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -340,8 +406,11 @@ jobs:
 
   mdtoc:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -349,8 +418,11 @@ jobs:
 
   golden:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -358,28 +430,33 @@ jobs:
 
   dependencies:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      # zeitgeist, like govulncheck, needs a newer Go than the module's
-      # floor; let go run fetch the toolchain its module requires.
+      # zeitgeist needs a newer Go than the module's floor; let go run
+      # fetch the toolchain its module requires.
       - run: make verify-dependencies
         env:
           GOTOOLCHAIN: auto
 
   snapshot:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       GORELEASER_VERSION: v2.18.1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
       - uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           syft-version: v1.51.1

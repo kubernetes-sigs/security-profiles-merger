@@ -19,6 +19,7 @@ package apparmor
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
@@ -87,7 +88,8 @@ var (
 	// variable such as @{HOME}. Variables are expanded by the AppArmor
 	// parser from definitions this package does not have, so it cannot tell
 	// which files such a path covers and would match it as a literal "@"
-	// followed by an alternation.
+	// followed by an alternation. The parser resolves escapes before it
+	// expands variables, so `\x40{HOME}` is reported as well.
 	ErrUnsupportedVariable = errors.New("AppArmor variables are not supported")
 
 	// ErrRelativePath is returned by ValidateStrict and ValidateArtifact
@@ -104,7 +106,10 @@ var (
 	// while "/tmp/a b" does not load at all. Beyond not loading, such a path
 	// is how an untrusted profile smuggles rules into a consumer that writes
 	// its paths into a profile file: a newline ends the rule the consumer
-	// renders and starts one the profile author chose.
+	// renders and starts one the profile author chose. A backslash the
+	// lexer does not read as an escape is reported too: one after a comma,
+	// as in `/a,\ b`, where the space ends the path all the same, and one
+	// that ends the path, which escapes the space rendered after it.
 	ErrUnquotablePath = errors.New("path contains a character that must be escaped")
 
 	// ErrNulInPath is returned by ValidateStrict and ValidateArtifact when a
@@ -118,10 +123,9 @@ var (
 
 	// ErrInvalidCapabilityName is returned by ValidateArtifact and
 	// ValidateStrict when a capability name holds a character that cannot
-	// spell one. A capability
-	// is a word of letters, digits and "_", so a name holding anything else
-	// does not load, and, like a path, is how an untrusted profile smuggles
-	// rules into a consumer that renders it.
+	// spell one. A capability is a word of letters, digits and "_", so a
+	// name holding anything else does not load, and, like a path, is how an
+	// untrusted profile smuggles rules into a consumer that renders it.
 	//
 	// ValidateArtifact checks the spelling but not the name: a name this
 	// package does not know may be one a newer kernel does. ValidateStrict
@@ -150,8 +154,8 @@ const MaxPathLen = spm.MaxPathLen
 
 // MaxArtifactPaths bounds how many paths a profile accepted by
 // ValidateArtifact or ValidateStrict may hold, counted over every path list
-// of the profile.
-// Profiles of the size KEP-6061 recommends runtimes accept name a few dozen.
+// of the profile. Profiles of the size KEP-6061 recommends runtimes accept
+// name a few dozen.
 //
 // A merge matches the literal paths of one profile against the patterns of
 // the other, which costs one comparison per pair, so the work grows with the
@@ -159,8 +163,11 @@ const MaxPathLen = spm.MaxPathLen
 // bound that work themselves and fall back to a conservative result past
 // their budget, so no profile can hold a runtime in a merge; this cap
 // rejects an over-large profile up front instead, where the reason can still
-// be reported, and keeps every accepted profile inside the merge's budget
-// when it is merged with another profile of this size.
+// be reported. It keeps an accepted profile inside the merge's pair budget
+// when it is merged with another profile of this size, and inside its work
+// budget, which weighs a comparison by the lengths of the pattern and the
+// name, when its paths are a few dozen bytes long and it is merged with a
+// node baseline of a few kilobytes of paths.
 const MaxArtifactPaths = 1024
 
 // MaxArtifactPatternBytes bounds the total length of the glob patterns of a
@@ -174,8 +181,12 @@ const MaxArtifactPaths = 1024
 // patterns do not fit it is recompiled instead of reused: a profile of a
 // thousand four-kilobyte patterns spent 38 seconds in ValidateArtifact and
 // 14 in a merge against a four-rule baseline, none of it in matching. The
-// bound admits two profiles of this size at once and leaves room for a node
-// baseline, so a profile a runtime accepts is compiled once.
+// byte bound admits two profiles of this size at once and leaves room for a
+// node baseline. The cache also holds at most 1024 patterns, as many as
+// MaxArtifactPaths admits, so a profile a runtime accepts is compiled once
+// unless it and the profiles merged with it spell more patterns than that
+// together; past it a quarter of the cache is evicted, and an evicted
+// pattern is compiled again when it is next used.
 //
 // Profiles of the size KEP-6061 recommends runtimes accept spell a few
 // patterns of a few dozen bytes each.
@@ -687,10 +698,14 @@ func rejectPaths(
 	return errs
 }
 
-// validateNoVariables reports paths that reference an AppArmor variable.
+// validateNoVariables reports paths that reference an AppArmor variable. The
+// parser resolves escapes before it expands variables, so `\x40{HOME}`
+// references one as much as "@{HOME}" does: the check looks at the path with
+// its escapes resolved too.
 func validateNoVariables(context string, paths []string) []error {
 	return rejectPaths(context, paths, func(path string) bool {
-		return strings.Contains(path, "@{")
+		return strings.Contains(path, "@{") ||
+			strings.Contains(decodeEscapes(path), "@{")
 	}, ErrUnsupportedVariable, true)
 }
 
@@ -710,6 +725,23 @@ func validateAbsolutePaths(context string, paths []string) []error {
 // does not go on, which hasUnquotableChar decides per occurrence.
 const unquotableChars = " \t\r\n\"!,"
 
+// lexerPath is the token apparmor_parser's lexer (parser_lex.l) reads as the
+// path of a file rule, anchored so that it has to span the whole path:
+//
+//	ID_CHARS  [^ \t\r\n"!,]
+//	ID        {ID_CHARS}|(,{ID_CHARS})|(\\[ ]|\\\t|\\\"|\\!|\\,)
+//	LABEL     (\/|...){ID}*
+//
+// A backslash is an ID_CHARS character of its own, and a comma takes the
+// character after it as a plain one, never as the start of an escape. The
+// lexer takes the longest run of IDs, so where no split of the path into IDs
+// exists, the token a consumer renders ends inside the path and the rest is
+// read as profile syntax: in `/tmp/x,\ r,capability,/y` the comma takes the
+// backslash, the space ends the token, and "r,capability,/y" follows it as
+// rules. QUOTED_ID, the form a double quote opens, is never how a consumer
+// renders a path and so does not apply.
+var lexerPath = regexp.MustCompile(`^(?:[^ \t\r\n"!,]|,[^ \t\r\n"!,]|\\[ \t"!,])+$`)
+
 // hasUnquotableChar reports whether a path holds a character of that set
 // unescaped. A backslash makes the character after it part of the path,
 // which is how a profile spells a path holding a space or a comma, and the
@@ -726,7 +758,15 @@ const unquotableChars = " \t\r\n\"!,"
 // ends mid-path and a second rule of the path author's choosing. The two-
 // character forms spell the same paths safely (\n, \r, \t, or \x0a), so
 // nothing is lost by refusing this one.
+//
+// Pairing each backslash with the next byte is how the merge reads a path,
+// not how the lexer splits it, so the path also has to be one token to the
+// lexer (see splitsLexerToken).
 func hasUnquotableChar(path string) bool {
+	if splitsLexerToken(path) {
+		return true
+	}
+
 	for idx := 0; idx < len(path); idx++ {
 		char := path[idx]
 
@@ -747,6 +787,16 @@ func hasUnquotableChar(path string) bool {
 	}
 
 	return false
+}
+
+// splitsLexerToken reports whether apparmor_parser's lexer, reading the path
+// as a consumer renders it in "  <path> <perms>,", would end the path's token
+// anywhere but at its end: where the path is not a run of IDs (see
+// lexerPath), or where it ends in a backslash, which the lexer reads as
+// escaping the space after the path, so that even `/a\\` runs on into the
+// permissions that follow it.
+func splitsLexerToken(path string) bool {
+	return strings.HasSuffix(path, `\`) || !lexerPath.MatchString(path)
 }
 
 // isControlByte reports whether a byte is one no rule can carry in the

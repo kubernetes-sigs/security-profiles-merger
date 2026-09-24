@@ -484,7 +484,9 @@ func validateLoadableProfile(profile *Profile, checkDuplicates bool) error {
 
 // RequiredABIVersion returns the lowest Landlock ABI version supporting every
 // access right the profile uses, or ABIV1 for a profile that uses none.
-// Rights this package does not know are ignored; Validate reports them.
+// Rights this package does not know are ignored; Validate reports them. It
+// returns no error, so a nil profile, which uses no right either, yields
+// ABIV1 too; validate the profile first where nil must be rejected.
 func RequiredABIVersion(profile *Profile) ABIVersion {
 	if profile == nil {
 		return ABIV1
@@ -549,10 +551,6 @@ func ValidateForABI(profile *Profile, abi ABIVersion) error {
 
 		return merge.JoinLimited(errs...)
 	}
-
-	// Every right this package knows is supported from LatestABIVersion on,
-	// so there is nothing left to report beyond it.
-	abi = min(abi, LatestABIVersion)
 
 	if profile == nil {
 		return merge.JoinLimited(errs...)

@@ -35,15 +35,15 @@ func argEq(index uint, value uint64) specs.LinuxSeccompArg {
 func TestIntersectUnconditionalDoesNotShadowConditionalDeny(t *testing.T) {
 	t.Parallel()
 
-	// Left denies socket(arg0 == 1); right logs socket unconditionally.
-	// Emitting "socket -> LOG" next to "socket(arg0 == 1) -> ERRNO" would
+	// Left denies ioctl(arg0 == 1); right logs ioctl unconditionally.
+	// Emitting "ioctl -> LOG" next to "ioctl(arg0 == 1) -> ERRNO" would
 	// let libseccomp drop the conditional entry and permit the denied call.
 	left := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActAllow,
 		Syscalls: []specs.LinuxSyscall{
 			{
 				Names: []string{
-					"socket",
+					"ioctl",
 				},
 				Action: specs.ActErrno,
 				Args:   []specs.LinuxSeccompArg{argEq(0, 1)},
@@ -52,7 +52,7 @@ func TestIntersectUnconditionalDoesNotShadowConditionalDeny(t *testing.T) {
 	}
 	right := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
-		Syscalls:      []specs.LinuxSyscall{{Names: []string{"socket"}, Action: specs.ActLog}},
+		Syscalls:      []specs.LinuxSyscall{{Names: []string{"ioctl"}, Action: specs.ActLog}},
 	}
 
 	for _, order := range [][]*specs.LinuxSeccomp{{left, right}, {right, left}} {
@@ -62,8 +62,8 @@ func TestIntersectUnconditionalDoesNotShadowConditionalDeny(t *testing.T) {
 		}
 
 		want := "Profile{default:SCMP_ACT_ERRNO " +
-			"socket([0]SCMP_CMP_EQ:1)->SCMP_ACT_ERRNO " +
-			"socket([0]SCMP_CMP_NE:1)->SCMP_ACT_LOG}"
+			"ioctl([0]SCMP_CMP_EQ:1)->SCMP_ACT_ERRNO " +
+			"ioctl([0]SCMP_CMP_NE:1)->SCMP_ACT_LOG}"
 		if got := seccomp.FormatProfile(result); got != want {
 			t.Errorf("Intersect = %s, want %s", got, want)
 		}
@@ -75,14 +75,14 @@ func TestUnionUnconditionalDoesNotShadowConditionalAllow(t *testing.T) {
 
 	left := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
-		Syscalls:      []specs.LinuxSyscall{{Names: []string{"socket"}, Action: specs.ActLog}},
+		Syscalls:      []specs.LinuxSyscall{{Names: []string{"ioctl"}, Action: specs.ActLog}},
 	}
 	right := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
 		Syscalls: []specs.LinuxSyscall{
 			{
 				Names: []string{
-					"socket",
+					"ioctl",
 				},
 				Action: specs.ActAllow,
 				Args:   []specs.LinuxSeccompArg{argEq(0, 1)},
@@ -96,8 +96,8 @@ func TestUnionUnconditionalDoesNotShadowConditionalAllow(t *testing.T) {
 	}
 
 	want := "Profile{default:SCMP_ACT_ERRNO " +
-		"socket([0]SCMP_CMP_EQ:1)->SCMP_ACT_ALLOW " +
-		"socket([0]SCMP_CMP_NE:1)->SCMP_ACT_LOG}"
+		"ioctl([0]SCMP_CMP_EQ:1)->SCMP_ACT_ALLOW " +
+		"ioctl([0]SCMP_CMP_NE:1)->SCMP_ACT_LOG}"
 	if got := seccomp.FormatProfile(result); got != want {
 		t.Errorf("Union = %s, want %s", got, want)
 	}

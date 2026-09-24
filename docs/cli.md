@@ -1,9 +1,10 @@
 # The spm command
 
 The `spm` command-line tool provides profile merging and validation without
-writing Go code. Flags must precede file arguments. Run `spm help <command>`
-for the options of a command. Without file arguments, commands read from
-stdin, unless stdin is a terminal.
+writing Go code. Flags must precede file arguments, and `--` ends them, so
+that every argument after it is a file name even when it starts with `-`.
+Run `spm help <command>` for the options of a command. Without file
+arguments, commands read from stdin, unless stdin is a terminal.
 
 
 <!-- toc -->
@@ -22,15 +23,16 @@ The same code means the same thing in every subcommand:
 |------|---------|
 | `0` | Success. For `diff`, the two profiles are equal |
 | `1` | The profile is bad: it does not parse, does not validate, or its output could not be written. For `diff`, `1` means *different* and nothing else |
-| `2` | Usage error: an unknown command, flag, type, format, strategy, architecture or `--validate` mode; `--arch` for a profile type that has no architectures; a flag after the file arguments; an input larger than the limits below; too many inputs; stdin named twice; a profile type that cannot be detected, that the inputs disagree on, or that `--type` names against what an input holds. For `diff`, every failure, since `1` is taken |
+| `2` | Usage error: an unknown command, flag, type, format, strategy, architecture or `--validate` mode; a missing `--strategy`; flags that cannot be combined; a `--validate` list whose length does not match the inputs; `--arch` for a profile type that has no architectures; a flag after the file arguments; no file arguments while stdin is a terminal; an input larger than the limits below; too many inputs; stdin named twice; a profile type that cannot be detected, that the inputs disagree on, or that `--type` names against what an input holds. For `diff`, every failure, since `1` is taken |
 
 The split is between "you invoked it wrong", which no profile can cause, and
 "the profile is wrong", which is the answer the command was asked for. So
 naming stdin twice (`spm merge - -`), passing more than 1000 file arguments,
-piping a JSON array of more than 1000 profiles, or handing it a file over
-10 MiB or inputs over 64 MiB in total all exit `2`, even though each is
-discovered while reading the inputs: the profile was never read, so nothing
-about it is known to be wrong.
+piping a JSON array of more than 1000 profiles, passing more than 1000
+profiles in total (each element of a stdin array counts, and so does each
+file beside it), or handing it a file over 10 MiB or inputs over 64 MiB in
+total all exit `2`, even though each is discovered while reading the inputs:
+the profile was never read, so nothing about it is known to be wrong.
 
 ## Merge profiles
 
@@ -39,12 +41,14 @@ spm merge --type seccomp --strategy intersect baseline.json oci.json
 spm merge --type apparmor --strategy union recording1.json recording2.json
 ```
 
-Without `--type`, the type is detected from the fields the profiles carry and
-noted on stderr; `--no-detect-note` suppresses that note, and errors and
-warnings still go there. Inputs that mix profile types are rejected, since
-merging them would drop whatever the chosen type has no field for. One
-document that carries the members of two types is rejected the same way
-(`error: <input> mixes profile types (seccomp and apparmor), use --type`),
+Without `--type`, the type is detected from the fields the profiles carry,
+matched ignoring case as the decoder matches them, and noted on stderr;
+`--no-detect-note` suppresses that note, and errors and warnings still go
+there. Every top-level field counts, not only `defaultAction`: a profile of
+`syscalls` alone is a seccomp profile. Inputs that mix profile types are
+rejected, since merging them would drop whatever the chosen type has no field
+for. One document that carries the members of two types is rejected the same
+way (`error: <input> mixes profile types (seccomp and apparmor), use --type`),
 rather than resolved by a fixed precedence: picking the first match would
 have validated an AppArmor profile that happens to carry a `defaultAction`
 member as an almost empty seccomp profile, and `--output` would have written
@@ -69,10 +73,10 @@ spm merge --type seccomp --strategy intersect --validate strict,artifact \
 The baseline is checked the way a user-authored profile deserves and the
 pulled profile the way a runtime checks one it did not author; the merge only
 runs if both pass. One difference from the library flow remains: `artifact`
-rejects repeated members and invalid UTF-8 but only warns about a member the
-profile type has no field for, where `UnmarshalStrict` refuses it. A runtime
-that must refuse such an artifact treats the warning on stderr as a failure
-or decodes with the library.
+rejects repeated and misspelled members and invalid UTF-8 but only warns
+about a member the profile type has no field for, where `UnmarshalStrict`
+refuses it. A runtime that must refuse such an artifact treats the warning on
+stderr as a failure or decodes with the library.
 
 Profiles can also be read from stdin, as a single profile or a JSON array of
 profiles:
@@ -90,15 +94,20 @@ spm merge --type seccomp --strategy intersect baseline.json - < recording.json
 Use `--format=human` for human-readable output via `FormatProfile`, and
 `--output` to write the result to a file instead of stdout; `--output -`
 means stdout, as `-` means stdin for an input. The file is only written once
-the merge has succeeded, so a failed run never truncates it. A regular file
-is written with mode `0600` whether it is created or already existed, and
-regardless of the umask, since a merged profile can name node-local paths; a
-device or FIFO keeps the mode it has, so `--output /dev/null` leaves that
-node alone. A symbolic link as the final path component is refused rather
-than followed, which is why `--output /dev/stdout` is refused as well: use
+the merge has succeeded, and a regular file is never written in place: the
+result goes to a new file in the same directory, which is synced and renamed
+over the old one, so a failed run, even one that fails while writing, leaves
+the previous file whole. That needs write access to the directory, and the
+new file does not keep the old one's owner or hard links. A device or FIFO
+is written in place and keeps the mode it has, so `--output /dev/null`
+leaves that node alone. On Unix, a regular file is left with mode `0600`
+regardless of the umask, since a merged profile can name node-local paths,
+and a symbolic link as the final path component is refused rather than
+followed, which is why `--output /dev/stdout` is refused as well: use
 `--output -` or shell redirection for that. A symlinked *directory* in the
 path is followed, so the guard is about the file `--output` names, not about
-the route to it:
+the route to it. Elsewhere the file keeps the permissions the platform gives
+it and a symbolic link is followed to the file it names:
 
 ```sh
 spm merge --type seccomp --strategy intersect --format human a.json b.json
@@ -121,9 +130,12 @@ silently drop the rule it was meant to carry. A field repeated within the same
 JSON object, including one that differs only in capitalization, is ambiguous:
 spm, like other Go programs, matches field names case-insensitively and keeps
 the last value, while other parsers may keep the first or treat the spellings
-as different fields. All commands warn about such fields on
-stderr. `validate --strict` rejects both, and `validate --artifact` rejects
-repeated fields.
+as different fields. For the same reason a field spelled only in another
+case, such as `Syscalls` or `ſyscalls` (U+017F folds to `s`), is misspelled:
+spm reads it and a runtime comparing names exactly drops it. All commands
+warn about such fields on stderr. `validate --strict` rejects all three, and
+`validate --artifact` rejects repeated and misspelled fields. A document that
+is not a JSON object, `null` included, is not a profile and fails to parse.
 
 Bytes that are not valid UTF-8 are rejected the same way. `encoding/json`
 replaces them with U+FFFD, so two profiles whose syscall names differ only in
@@ -136,7 +148,9 @@ oversight.
 
 Every error and warning names the input it came from: a file by its path as
 written, stdin by `stdin`, and one element of a JSON array on stdin by
-`stdin[i]`.
+`stdin[i]`. A file name is quoted, with its bytes escaped, only when it holds
+a character that does not print as itself, such as a control byte; spaces and
+punctuation in a name are left alone.
 
 ```
 error: parsing baseline.json: decoding failed: unexpected end of JSON input
@@ -167,6 +181,12 @@ Use `--format=human` for human-readable output:
 spm validate --type seccomp --format human profile.json
 ```
 
+A value is quoted in the human format when printing it as it is could be
+misread: when it holds a control character or a byte that is not valid UTF-8,
+whitespace, or the punctuation the format is built from (`,` `"` `{` `}` `(` `)` `<` `>` `:`). An AppArmor
+path such as `/etc/{a,b}` is therefore printed as `"/etc/{a,b}"`, so that it
+cannot be mistaken for the two paths `/etc/{a` and `b}`.
+
 Validation writes the profiles on success (exit 0) and prints errors to
 stderr when a profile is invalid or cannot be read (exit 1); usage errors
 exit 2, as listed under [Exit codes](#exit-codes). Use `--strict` for
@@ -178,8 +198,8 @@ spm validate --type seccomp --quiet profile.json
 ```
 
 `--quiet` suppresses the profile output and the note about an auto-detected
-profile type, so it cannot be combined with `--output` or `--format`. Errors and warnings
-still go to stderr. To keep the note off stderr while still writing the
+profile type, so it cannot be combined with `--output` or `--format`. Errors
+and warnings still go to stderr. To keep the note off stderr while still writing the
 profiles, use `--no-detect-note`, which `merge` and `diff` also accept:
 without it, `spm validate profile.json > clean.json` cannot produce a clean
 stderr in a CI log without also passing `--type`, which defeats

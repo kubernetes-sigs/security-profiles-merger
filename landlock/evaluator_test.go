@@ -18,6 +18,7 @@ package landlock_test
 
 import (
 	"math/rand/v2"
+	"path"
 	"slices"
 	"strings"
 	"testing"
@@ -36,6 +37,13 @@ import (
 //
 //   - Intersect never permits an access that any input denies.
 //   - Union never denies an access that any input permits.
+//
+// Both hold for moves and links too, which the kernel decides from two
+// paths at once and evalMove models. To keep them there, Intersect may deny
+// refer on a path where every input permits it, and Union may stop handling
+// a right every input handles, so on a single path an intersection may be
+// stricter than its inputs (for refer only) and a union more permissive
+// (for rights it no longer handles only).
 
 // evalCovers reports whether a rule path covers a file, which it does when
 // the file is the path itself or sits beneath it.
@@ -57,10 +65,9 @@ func evalCovers(rulePath, file string) bool {
 // ruleset handling any filesystem right denies refer even when it does not
 // list it, and then no rule can grant it.
 //
-// Refer is the one right that does not inherit: the kernel collects the
-// rights deciding a move or link only up to the mount point of the
-// directory, so an ancestor's grant need not reach a descendant, and the
-// merge takes refer from a rule on the path itself. The model follows it.
+// Refer inherits like every other right, across mount points too: the
+// kernel walks from each directory of a move past its mount point up to
+// the real root.
 func evalPermits(
 	profile *landlock.Profile, file string, right landlock.FSAccessRight,
 ) bool {
@@ -71,24 +78,86 @@ func evalPermits(
 	}
 
 	for _, rule := range profile.PathRules {
-		if !slices.Contains(rule.AccessFS, right) {
-			continue
-		}
-
-		if right == landlock.FSAccessRefer {
-			if rule.Path == file {
-				return true
-			}
-
-			continue
-		}
-
-		if evalCovers(rule.Path, file) {
+		if slices.Contains(rule.AccessFS, right) && evalCovers(rule.Path, file) {
 			return true
 		}
 	}
 
 	return false
+}
+
+// evalHandles reports whether the profile denies the right unless a rule
+// grants it.
+func evalHandles(profile *landlock.Profile, right landlock.FSAccessRight) bool {
+	if right == landlock.FSAccessRefer {
+		return len(profile.HandledAccessFS) > 0
+	}
+
+	return slices.Contains(profile.HandledAccessFS, right)
+}
+
+// evalMove reports whether the profile allows moving or linking the file
+// into the directory dst, which is not the file's own parent. It follows
+// the kernel's current_check_refer_path: both directories need refer, and
+// every handled right dst grants must be granted at the file's parent or by
+// a rule on the file itself, so the file gains no right by moving. For a
+// file that is not a directory only the rights applying to files count.
+func evalMove(profile *landlock.Profile, file, dst string, dir bool) bool {
+	src := path.Dir(file)
+
+	if !evalPermits(profile, src, landlock.FSAccessRefer) ||
+		!evalPermits(profile, dst, landlock.FSAccessRefer) {
+		return false
+	}
+
+	for _, right := range profile.HandledAccessFS {
+		if !dir && !slices.Contains(evalFileRights, right) {
+			continue
+		}
+
+		if evalPermits(profile, dst, right) && !evalPermits(profile, src, right) &&
+			!evalOwnRule(profile, file, right) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// evalOwnRule reports whether a rule on exactly the file grants the handled
+// right. The kernel counts such a grant at the source of a move.
+func evalOwnRule(profile *landlock.Profile, file string, right landlock.FSAccessRight) bool {
+	if !slices.Contains(profile.HandledAccessFS, right) {
+		return false
+	}
+
+	for _, rule := range profile.PathRules {
+		if rule.Path == file && slices.Contains(rule.AccessFS, right) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// evalMoves calls check for every move among the probes: each probe but the
+// root, as a file and as a directory, into each probe that is neither its
+// parent nor the probe itself or beneath it.
+func evalMoves(check func(file, dst string, dir bool)) {
+	for _, file := range evalProbes {
+		if file == "/" {
+			continue
+		}
+
+		for _, dst := range evalProbes {
+			if dst == path.Dir(file) || evalCovers(file, dst) {
+				continue
+			}
+
+			check(file, dst, false)
+			check(file, dst, true)
+		}
+	}
 }
 
 // evalRulePaths are the paths rules are written on, and evalProbes the files
@@ -106,6 +175,12 @@ var (
 		landlock.FSAccessWriteFile,
 		landlock.FSAccessReadDir,
 		landlock.FSAccessRefer,
+	}
+	// evalFileRights are the rights of evalRights that apply to a file that
+	// is not a directory, which the kernel calls ACCESS_FILE.
+	evalFileRights = []landlock.FSAccessRight{
+		landlock.FSAccessReadFile,
+		landlock.FSAccessWriteFile,
 	}
 )
 
@@ -170,11 +245,17 @@ func addEvalSeeds(f *testing.F) {
 	// One side lists refer and grants it with read at the root; the other
 	// handles read only and grants nothing.
 	f.Add(uint8(0b1001), uint32(0b1001), uint8(0b1), uint32(0))
+	// Both grant refer on /etc and /var, one also write on /var: a move
+	// from /etc to /var gains write there, which that side denies.
+	f.Add(uint8(0b1010), uint32(0b1000<<4|0b1010<<12), uint8(0b1010), uint32(0b1000<<4|0b1000<<12))
+	// One side grants refer with read on /etc and refer on /var, the other
+	// write on /var: the union must still allow a move from /etc to /var.
+	f.Add(uint8(0b1011), uint32(0b1001<<4|0b1000<<12), uint8(0b1011), uint32(0b10<<12))
 }
 
 // FuzzLandlockIntersectPermitsAt asserts the intersection safety property at
-// concrete files: an access the merged ruleset permits is permitted by both
-// inputs.
+// concrete files: an access or a move the merged ruleset permits is
+// permitted by both inputs.
 func FuzzLandlockIntersectPermitsAt(f *testing.F) {
 	addEvalSeeds(f)
 
@@ -207,11 +288,14 @@ func FuzzLandlockIntersectPermitsAt(f *testing.F) {
 				)
 			}
 		}
+
+		assertIntersectMoves(t, []*landlock.Profile{left, right}, result)
 	})
 }
 
 // FuzzLandlockUnionPermitsAt asserts the union safety property at concrete
-// files: an access either input permits is permitted by the merged ruleset.
+// files: an access or a move either input permits is permitted by the
+// merged ruleset.
 func FuzzLandlockUnionPermitsAt(f *testing.F) {
 	addEvalSeeds(f)
 
@@ -244,19 +328,61 @@ func FuzzLandlockUnionPermitsAt(f *testing.F) {
 				)
 			}
 		}
+
+		assertUnionMoves(t, []*landlock.Profile{left, right}, result)
 	})
 }
 
-// TestMergeManyPermitsAt checks folds of three and more inputs at the probe
+// assertIntersectMoves checks that the intersection allows no move or link
+// among the probes that an input denies.
+func assertIntersectMoves(t *testing.T, inputs []*landlock.Profile, result *landlock.Profile) {
+	t.Helper()
+
+	evalMoves(func(file, dst string, dir bool) {
+		if !evalMove(result, file, dst, dir) {
+			return
+		}
+
+		for _, input := range inputs {
+			if !evalMove(input, file, dst, dir) {
+				t.Fatalf("Intersect allows moving %q (dir %v) into %q, which %s denies\nresult=%s",
+					file, dir, dst, landlock.FormatProfile(input), landlock.FormatProfile(result))
+			}
+		}
+	})
+}
+
+// assertUnionMoves checks that the union allows every move or link among
+// the probes that an input allows.
+func assertUnionMoves(t *testing.T, inputs []*landlock.Profile, result *landlock.Profile) {
+	t.Helper()
+
+	evalMoves(func(file, dst string, dir bool) {
+		if evalMove(result, file, dst, dir) {
+			return
+		}
+
+		for _, input := range inputs {
+			if evalMove(input, file, dst, dir) {
+				t.Fatalf("Union denies moving %q (dir %v) into %q, which %s allows\nresult=%s",
+					file, dir, dst, landlock.FormatProfile(input), landlock.FormatProfile(result))
+			}
+		}
+	})
+}
+
+// TestMergeManyPermitsAt checks folds of two and more inputs at the probe
 // files, where the pairwise fold must still yield exactly the access every
-// input (Intersect) or any input (Union) permits.
+// input (Intersect) or any input (Union) permits, apart from the refer and
+// handled-right exceptions the file comment describes, and must decide
+// moves as the safety properties require.
 func TestMergeManyPermitsAt(t *testing.T) {
 	t.Parallel()
 
 	rng := rand.New(rand.NewPCG(1, 2))
 
-	for range 2000 {
-		profiles := make([]*landlock.Profile, 3+rng.IntN(2))
+	for range 4000 {
+		profiles := make([]*landlock.Profile, 2+rng.IntN(3))
 		for idx := range profiles {
 			profiles[idx] = evalProfile(uint8(rng.UintN(16)), rng.Uint32())
 		}
@@ -272,6 +398,8 @@ func TestMergeManyPermitsAt(t *testing.T) {
 		}
 
 		assertManyPermitsAt(t, profiles, intersected, united)
+		assertIntersectMoves(t, profiles, intersected)
+		assertUnionMoves(t, profiles, united)
 	}
 }
 
@@ -282,23 +410,35 @@ func assertManyPermitsAt(
 
 	for _, probe := range evalProbes {
 		for _, access := range evalRights {
-			every, some := true, false
+			every, some := evalCombined(profiles, probe, access)
 
-			for _, profile := range profiles {
-				permitted := evalPermits(profile, probe, access)
-				every = every && permitted
-				some = some || permitted
-			}
-
-			if got := evalPermits(intersected, probe, access); got != every {
+			got := evalPermits(intersected, probe, access)
+			if got != every && (got || access != landlock.FSAccessRefer) {
 				t.Fatalf("Intersect permits %q at %q = %v, want %v\ninputs=%v\nresult=%s",
 					access, probe, got, every, profiles, landlock.FormatProfile(intersected))
 			}
 
-			if got := evalPermits(united, probe, access); got != some {
+			got = evalPermits(united, probe, access)
+			if got != some && (!got || evalHandles(united, access)) {
 				t.Fatalf("Union permits %q at %q = %v, want %v\ninputs=%v\nresult=%s",
 					access, probe, got, some, profiles, landlock.FormatProfile(united))
 			}
 		}
 	}
+}
+
+// evalCombined reports whether every profile and whether some profile
+// permits the access at the file.
+func evalCombined(
+	profiles []*landlock.Profile, file string, right landlock.FSAccessRight,
+) (bool, bool) {
+	every, some := true, false
+
+	for _, profile := range profiles {
+		permitted := evalPermits(profile, file, right)
+		every = every && permitted
+		some = some || permitted
+	}
+
+	return every, some
 }

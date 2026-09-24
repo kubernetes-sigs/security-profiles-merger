@@ -2961,14 +2961,14 @@ func TestErrnoOnlyDifferenceKeepsTheFilters(t *testing.T) {
 	spelled := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActAllow,
 		Syscalls: []specs.LinuxSyscall{{
-			Names: []string{syscallSocket}, Action: specs.ActErrno, ErrnoRet: &enosys,
+			Names: []string{syscallClone}, Action: specs.ActErrno, ErrnoRet: &enosys,
 			Args: []specs.LinuxSeccompArg{{Index: 0, Op: specs.OpEqualTo, Value: 10}},
 		}},
 	}
 	implicit := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActAllow,
 		Syscalls: []specs.LinuxSyscall{{
-			Names: []string{syscallSocket}, Action: specs.ActErrno,
+			Names: []string{syscallClone}, Action: specs.ActErrno,
 			Args: []specs.LinuxSeccompArg{{Index: 1, Op: specs.OpEqualTo, Value: 3}},
 		}},
 	}
