@@ -17,11 +17,11 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"slices"
-	"unicode/utf8"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 	"sigs.k8s.io/security-profiles-merger/internal/strictjson"
@@ -35,6 +35,9 @@ type decodePolicy struct {
 	rejectUnknown bool
 	// rejectDuplicates rejects members repeated within one object.
 	rejectDuplicates bool
+	// rejectMisspelled rejects members that name a field only ignoring
+	// case.
+	rejectMisspelled bool
 	// rejectInvalidUTF8 rejects bytes that are not valid UTF-8.
 	rejectInvalidUTF8 bool
 }
@@ -45,6 +48,7 @@ func lenientDecode(inputs int) []decodePolicy {
 	return slices.Repeat([]decodePolicy{{
 		rejectUnknown:     false,
 		rejectDuplicates:  false,
+		rejectMisspelled:  false,
 		rejectInvalidUTF8: false,
 	}}, inputs)
 }
@@ -52,9 +56,10 @@ func lenientDecode(inputs int) []decodePolicy {
 // unmarshalAll decodes every raw profile under its own policy, given one per
 // input. A member the profile type has no field for, such as a misspelled
 // key, silently drops the rule it was meant to carry; a member repeated
-// within one object is read differently by different parsers; and a byte
-// that is not valid UTF-8 is replaced with U+FFFD, which makes profiles that
-// differ in their bytes decode to the same rules. Each is an error when that
+// within one object is read differently by different parsers, and so is one
+// whose name matches a field only ignoring case; and a byte that is not
+// valid UTF-8 is replaced with U+FFFD, which makes profiles that differ in
+// their bytes decode to the same rules. Each is an error when that
 // input's policy rejects it and a warning on stderr otherwise.
 func unmarshalAll[T any](
 	inputs []profileInput, policies []decodePolicy, stderr io.Writer,
@@ -70,8 +75,15 @@ func unmarshalAll[T any](
 			return nil, decodeError(input.name, err)
 		}
 
+		// null decodes into a struct as nothing at all; every other value
+		// but an object failed above.
+		if !isJSONObject(input.data) {
+			return nil, fmt.Errorf("parsing %s: %w", merge.SafeName(input.name), errNotAnObject)
+		}
+
 		duplicates, moreDuplicates := strictjson.DuplicateKeys(input.data)
 		unknown, moreUnknown := strictjson.UnknownFieldsOf[T](input.data)
+		misspelled, moreMisspelled := strictjson.MisspelledFieldsOf[T](input.data)
 
 		checks := []struct {
 			err    error
@@ -85,6 +97,10 @@ func unmarshalAll[T any](
 				strictjson.PathsError(spm.ErrUnknownField, unknown, moreUnknown),
 				policy.rejectUnknown,
 			},
+			{
+				strictjson.PathsError(spm.ErrMisspelledField, misspelled, moreMisspelled),
+				policy.rejectMisspelled,
+			},
 			{strictjson.InvalidUTF8(input.data), policy.rejectInvalidUTF8},
 		}
 
@@ -94,10 +110,10 @@ func unmarshalAll[T any](
 			}
 
 			if check.reject {
-				return nil, fmt.Errorf("parsing %s: %w", merge.SafeText(input.name), check.err)
+				return nil, fmt.Errorf("parsing %s: %w", merge.SafeName(input.name), check.err)
 			}
 
-			_, _ = fmt.Fprintf(stderr, "warning: %s: %v\n", merge.SafeText(input.name), check.err)
+			_, _ = fmt.Fprintf(stderr, "warning: %s: %v\n", merge.SafeName(input.name), check.err)
 		}
 
 		profiles[idx] = profile
@@ -114,21 +130,12 @@ func unmarshalAll[T any](
 func decodeError(name string, err error) error {
 	return fmt.Errorf(
 		"parsing %s: %w: %s",
-		merge.SafeText(name), errDecode, boundedText(err.Error()),
+		merge.SafeName(name), errDecode, merge.BoundedText(err.Error()),
 	)
 }
 
-// boundedText truncates a message to maxMessageBytes on a rune boundary,
-// marking the elision so that it is never mistaken for the message.
-func boundedText(text string) string {
-	if len(text) <= maxMessageBytes {
-		return text
-	}
-
-	end := maxMessageBytes
-	for end > 0 && !utf8.RuneStart(text[end]) {
-		end--
-	}
-
-	return text[:end] + "..."
+// isJSONObject reports whether a document that decoded without error is an
+// object rather than null.
+func isJSONObject(data []byte) bool {
+	return bytes.HasPrefix(bytes.TrimLeft(data, " \t\r\n"), []byte("{"))
 }

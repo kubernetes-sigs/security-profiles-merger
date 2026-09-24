@@ -30,9 +30,11 @@ import (
 // where the platform has it.
 const oNoFollow = syscall.O_NOFOLLOW
 
-// chmodOutput sets the mode of an output file that may already have existed
-// with a wider one. The open mode only applies to a file being created, and
-// is narrowed by the umask even then.
+// refuseSymlinks is true where a symlink at the --output path is refused.
+const refuseSymlinks = true
+
+// chmodOutput sets the mode of a new output file exactly, since the mode it
+// was created with is narrowed by the umask.
 func chmodOutput(file *os.File) error {
 	err := file.Chmod(ownerReadWrite)
 	if err != nil {

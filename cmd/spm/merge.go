@@ -93,7 +93,7 @@ func runMerge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	if code := checkFlagOrder(flags.Args(), argsSeparated(args), stderr); code != 0 {
+	if code := checkFlagOrder(flags.Args(), argsSeparated(flags, args), stderr); code != 0 {
 		return code
 	}
 
@@ -280,7 +280,7 @@ func nameMergeFailure(err error, inputs []profileInput) error {
 		return err
 	}
 
-	return fmt.Errorf("%s: %w", merge.SafeText(inputs[inputErr.Index].name), inputErr.Err)
+	return fmt.Errorf("%s: %w", merge.SafeName(inputs[inputErr.Index].name), inputErr.Err)
 }
 
 // checkInputs runs each input's own validation and reports whether any
@@ -298,7 +298,7 @@ func checkInputs[T any](
 
 		err := checks[idx](profile)
 		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "error: %s: %v\n", merge.SafeText(inputs[idx].name), err)
+			_, _ = fmt.Fprintf(stderr, "error: %s: %v\n", merge.SafeName(inputs[idx].name), err)
 
 			failed = true
 		}

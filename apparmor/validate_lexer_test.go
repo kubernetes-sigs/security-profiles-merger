@@ -43,6 +43,14 @@ func TestValidateArtifactRejectsUnquotablePaths(t *testing.T) {
 		// resolves no escape whose second byte is one, so both bytes reach
 		// the rule and the newline ends it wherever a consumer renders it.
 		"/tmp/a\\\nb", "/tmp/a\\\rb", "/tmp/a\\\tb",
+		// A comma takes the byte after it as a plain character, so a
+		// backslash there escapes nothing: the lexer's token ends at the
+		// space and the rest of the path is read as profile syntax.
+		`/a,\ b`, `/tmp/x,\ #include/etc/shadow`, `/tmp/x,\ r,capability,/y`,
+		`/a,\,`, `/a,\"b`,
+		// A trailing backslash escapes the space a consumer renders after
+		// the path, so the token runs on into the permissions.
+		`/a\\`, `/a\`, `/a/\\\\`,
 	} {
 		t.Run(path, func(t *testing.T) {
 			t.Parallel()
@@ -78,6 +86,9 @@ func TestValidateArtifactAcceptsEscapedPaths(t *testing.T) {
 		// The two-character forms of the same control characters, which the
 		// parser does resolve, so the rule carries no raw byte.
 		`/tmp/a\tb`, `/tmp/a\nb`, `/tmp/a\rb`, `/tmp/a\x0ab`,
+		// A backslash the lexer reads as a plain character, where the path
+		// goes on after it.
+		`/tmp/a\\b`, `/a,\\b`, `/a,\,b`,
 	} {
 		t.Run(path, func(t *testing.T) {
 			t.Parallel()

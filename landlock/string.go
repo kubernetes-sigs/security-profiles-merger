@@ -25,15 +25,16 @@ import (
 
 // FormatProfile returns a human-readable representation of a Landlock profile.
 func FormatProfile(profile *Profile) string {
-	if profile == nil {
-		return "Profile{<nil>}"
-	}
-
 	return profile.String()
 }
 
-// String returns a human-readable representation of the profile.
-func (p Profile) String() string {
+// String returns a human-readable representation of the profile, which is
+// "Profile{<nil>}" for a nil profile.
+func (p *Profile) String() string {
+	if p == nil {
+		return "Profile{<nil>}"
+	}
+
 	var parts []string
 
 	if len(p.HandledAccessFS) > 0 {

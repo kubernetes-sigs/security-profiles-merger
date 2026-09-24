@@ -52,6 +52,9 @@ type InputError = spm.InputError
 // capability and the result spells it "CHOWN". The folding is deliberately
 // not Unicode's: U+017F and U+0131 upper-case into "S" and "I", which would
 // let a name spelled with one of them merge into a real capability.
+// apparmor_parser accepts capability names in lower case only, so a consumer
+// rendering the result as "capability <name>," rules must lower-case each
+// name first (see CapabilityRules).
 //
 // A nil section or network boolean is treated as an explicit empty section
 // or false, since to AppArmor an absent section denies everything it covers,
@@ -63,18 +66,21 @@ type InputError = spm.InputError
 // the other side spells it alike, which two spellings of one pattern count
 // as, or expands over it with a "**" rooted above it, so a pattern an
 // intermediate result has already dropped can no longer narrow a literal a
-// later profile brings. Intersect(a, b, c) may therefore
-// permit more or less than Intersect(a, Intersect(b, c)) does. Every
-// grouping is safe: whatever the order, the result permits only what every
-// input permits, and the difference is which of the permitted paths survive
-// as rules.
+// later profile brings. Intersect(a, b, c) may therefore permit more or less
+// than Intersect(a, Intersect(b, c)) does. Every grouping is safe: whatever
+// the order, the result permits only what every input permits, and the
+// difference is which of the permitted paths survive as rules.
 //
 // The cost of matching paths against patterns is bounded: past an internal
 // budget on the product of the literal and pattern counts of the two sides,
-// a category keeps only the paths both sides spell alike, which permits no
-// more than the exact intersection would. ValidateArtifact bounds the number
-// of paths a profile may hold (MaxArtifactPaths) so that a profile a runtime
-// accepts stays inside the budget.
+// or on the product of the bytes those paths hold, a category keeps only the
+// paths both sides spell alike, which permits no more than the exact
+// intersection would. ValidateArtifact bounds the number of paths a profile
+// may hold (MaxArtifactPaths) so that a profile a runtime accepts, of paths
+// a few dozen bytes long, stays inside the budget against a node baseline of
+// a few kilobytes of paths. A profile of long paths, or two artifacts of
+// that size merged with each other, may not, and is then merged
+// conservatively.
 //
 // This implements the profile merging semantics defined in KEP-6061 for CRI
 // runtimes merging OCI-pulled profiles with node baselines.
@@ -86,7 +92,8 @@ func Intersect(profiles ...*Profile) (*Profile, error) {
 // permits an operation if any input profile permits it. Capabilities are
 // combined, file access rules are combined, and network permissions use OR
 // semantics. A nil section defers to the other profile, which for a union
-// grants the same as an empty one would.
+// grants the same as an empty one would. Capability names are upper-cased in
+// the result as they are by Intersect.
 //
 // The cost of matching paths against patterns is bounded as it is for
 // Intersect. Past the budget a category keeps every path of both sides with
@@ -532,11 +539,7 @@ func intersectPerms(leftPerms, rightPerms map[string]fsPermission) map[string]fs
 	leftSide := buildFsSide(leftPerms)
 	rightSide := buildFsSide(rightPerms)
 
-	if exceedsPairBudget(
-		len(leftSide.literals), len(leftSide.globs),
-		len(rightSide.literals), len(rightSide.globs),
-		max(leftSide.longest, rightSide.longest),
-	) {
+	if exceedsPairBudget(leftSide.size(), rightSide.size()) {
 		addVerbatimGlobs(leftSide, rightSide, merged)
 
 		return merged
@@ -693,11 +696,7 @@ func unionPerms(left, right map[string]fsPermission) map[string]fsPermission {
 	leftSide := buildFsSide(left)
 	rightSide := buildFsSide(right)
 
-	if exceedsPairBudget(
-		len(leftSide.literals), len(leftSide.globs),
-		len(rightSide.literals), len(rightSide.globs),
-		max(leftSide.longest, rightSide.longest),
-	) {
+	if exceedsPairBudget(leftSide.size(), rightSide.size()) {
 		return unionVerbatim(left, right)
 	}
 

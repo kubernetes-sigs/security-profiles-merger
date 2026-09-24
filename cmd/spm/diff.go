@@ -152,7 +152,7 @@ func runDiff(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	if code := validateDiffFlags(
-		flags.Args(), argsSeparated(args), opts.format, opts.profileType, stderr,
+		flags.Args(), argsSeparated(flags, args), opts.format, opts.profileType, stderr,
 	); code != 0 {
 		return code
 	}

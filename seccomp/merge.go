@@ -112,9 +112,39 @@ type InputError = spm.InputError
 // an artifact well below that budget (MaxArtifactClauses), so an accepted
 // artifact is always merged rule by rule.
 //
-// These guarantees hold for the program libseccomp compiles for a 64-bit
-// architecture. For a 32-bit architecture, libseccomp compares only the
-// lower 32 bits of each argument value, which the merge does not model.
+// These guarantees also hold on the architectures where libseccomp compiles
+// something other than what the model reads (see the package documentation),
+// at a cost in precision. An architecture counts when a profile lists it or
+// when it is the native architecture of the running program, which runtimes
+// always add; Intersect is meant to run on the node that loads its result,
+// since dropping an architecture from the list, as described below, does
+// not remove it from a filter where it is native.
+//
+// Where the result covers a 32-bit architecture and an input loads a
+// condition against a value above 32 bits, which libseccomp truncates there,
+// Intersect drops the 32-bit architectures from the result's list: the
+// filter then applies libseccomp's action for an unlisted architecture,
+// SCMP_ACT_KILL, to their calls, as it does to an architecture one input
+// leaves out, while the rules keep their filters on the architectures that
+// remain. Where the native architecture is a 32-bit one, a syscall carrying
+// such a condition is read as one unconditional rule instead, as a rule set
+// outside the safe shapes is.
+//
+// Where the result covers an architecture that multiplexes the socket and
+// SysV IPC syscalls, the rules of each also decide its calls through
+// socketcall(2) or ipc(2), with the condition on the first argument replaced
+// by the sub-call number. Intersect reads that path of every input as the
+// results a call can get there: the multiplexer's unconditional rule if it
+// has one, and otherwise the results of its rules and of the syscall's, and
+// the default unless the syscall's rules all match the whole sub-call. A
+// result that would permit more on that path than an input, or hold rules
+// libseccomp refuses there (different results for one of these syscalls,
+// or conditional rules on the multiplexer), has the multiplexing
+// architectures dropped from its list. Where the native architecture
+// multiplexes, the multiplexer and each affected syscall collapse to one
+// unconditional rule instead, with the most restrictive of their actions
+// and of what the inputs apply on that path, so the direct syscall loses
+// its filters too.
 //
 // ListenerPath and ListenerMetadata are taken from the first profile that
 // sets a ListenerPath, since SCMP_ACT_NOTIFY and the listener belong
@@ -135,7 +165,8 @@ type InputError = spm.InputError
 // always covers the native architecture, and the listed architectures are
 // added to it. An empty list therefore means "native only" and a non-empty
 // list means "native plus these", so the intersection is the plain set
-// intersection of the lists, which may be empty. Since the native
+// intersection of the lists, which may be empty, less the architectures
+// dropped as described above. Since the native
 // architecture is always implied, a list need not name it, and a profile
 // that lists only foreign architectures is still valid.
 //
@@ -156,10 +187,12 @@ type InputError = spm.InputError
 //
 // A single profile is normalized without merging: it is reduced to the rules
 // a runtime loads from it, and syscalls whose conditional rules do not form a
-// safe shape collapse as described above. Diff compares profiles in the same
-// form but without collapsing, so Diff(p, Intersect(p)) is equal exactly
-// when every syscall of p is in a safe shape, and otherwise reports the
-// collapsed syscalls.
+// safe shape collapse as described above. Its multiplexer path is settled as
+// described above as well; the rules it keeps are the ones the profile
+// loads, so values above 32 bits need no settling. Diff compares profiles in
+// the same form but without collapsing, so Diff(p, Intersect(p)) is equal
+// exactly when every syscall of p is in a safe shape and nothing needed
+// settling on the multiplexer path, and otherwise reports what changed.
 //
 // Syscall entries in the result are grouped: names sharing the same action,
 // errno, and argument filters are emitted as one entry, sorted by name, then
@@ -197,6 +230,17 @@ func Intersect(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 // When two profiles share the same default or syscall action, DefaultErrnoRet
 // and per-syscall ErrnoRet are taken from the earlier (leftmost) profile.
 // Errno values are compared and spelled as described for Intersect.
+//
+// On the architectures described for Intersect, Union settles the other
+// way, and always by collapsing, since dropping an architecture an input
+// covers would deny calls that input permits: where the result covers a
+// 32-bit architecture, a syscall carrying a condition against a value above
+// 32 bits is read as one unconditional rule with the least restrictive of
+// its actions and the default, and where it covers a multiplexing
+// architecture, the multiplexer and each syscall whose multiplexer path
+// would permit less than an input's, or hold rules libseccomp refuses there,
+// collapse to their least restrictive action and what the inputs apply on
+// that path.
 //
 // Flags mirror Intersect: SECCOMP_FILTER_FLAG_SPEC_ALLOW survives if any
 // profile sets it, SECCOMP_FILTER_FLAG_LOG only if every profile does, and
@@ -261,10 +305,15 @@ func foldProfiles(
 // a runtime loads from them and settled for the merge direction (see
 // settledSyscalls), errno values and SCMP_ACT_KILL_THREAD are spelled
 // canonically, and the other fields are copied.
+//
+// The rules it keeps are the ones the profile loads, so they mean on a
+// 32-bit architecture what the profile means there, and need no narrow
+// reading. Its multiplexer path is settled like a merge result's, since a
+// syscall the settling collapses changes that path as well.
 func normalizeProfile(profile *specs.LinuxSeccomp, rules ruleMerger) *specs.LinuxSeccomp {
 	def := defaultClause(profile)
 
-	return &specs.LinuxSeccomp{
+	normalized := &specs.LinuxSeccomp{
 		DefaultAction:    def.action,
 		DefaultErrnoRet:  outputErrno(def.action, def.errnoRet),
 		Architectures:    merge.DeduplicateSlice(profile.Architectures),
@@ -273,6 +322,10 @@ func normalizeProfile(profile *specs.LinuxSeccomp, rules ruleMerger) *specs.Linu
 		ListenerMetadata: profile.ListenerMetadata,
 		Syscalls:         settledSyscalls(&rules, profile.Syscalls, def),
 	}
+
+	rules.settleArchitectures(normalized, def, profile)
+
+	return normalized
 }
 
 func mergeTwo(
@@ -308,9 +361,89 @@ func mergeTwo(
 		merged.Architectures = merge.UnionSlice(left.Architectures, right.Architectures)
 	}
 
+	if coversAny(merged.Architectures, narrowArchitectures, rules.native) &&
+		(loadsWideValue(left) || loadsWideValue(right)) {
+		if rules.intersect && !narrowArchitectures[rules.native] {
+			merged.Architectures = withoutAny(merged.Architectures, narrowArchitectures)
+		} else {
+			rules.narrow = true
+		}
+	}
+
 	merged.Syscalls = rules.mergeProfileSyscalls(left, right, &mergedDefault)
 
+	rules.settleArchitectures(merged, &mergedDefault, left, right)
+
 	return merged
+}
+
+// settleArchitectures makes a result safe on the multiplexer path of the
+// socket and SysV IPC syscalls when it covers an architecture that
+// multiplexes them (see settleMultiplexed). Where it has to settle anything,
+// intersection drops the multiplexing architectures from the list instead
+// when it can, which is when the native architecture does not multiplex:
+// the filter then applies libseccomp's action for an unlisted architecture,
+// SCMP_ACT_KILL, to every call of those architectures, as the plain
+// intersection of the lists does for an architecture one input leaves out,
+// and keeps the rules of the syscalls intact for the architectures that
+// remain. A collapse would deny or allow a syscall everywhere to settle one
+// architecture. Union cannot drop an architecture an input covers, so it
+// collapses.
+func (m ruleMerger) settleArchitectures(
+	result *specs.LinuxSeccomp, def *clause, inputs ...*specs.LinuxSeccomp,
+) {
+	if !coversAny(result.Architectures, multiplexingArchitectures, m.native) {
+		return
+	}
+
+	read := make([]multiplexInput, 0, len(inputs))
+	for _, input := range inputs {
+		read = append(read, newMultiplexInput(input.Syscalls, defaultClause(input)))
+	}
+
+	settled, changed := m.settleMultiplexed(result.Syscalls, def, read)
+	if !changed {
+		return
+	}
+
+	if m.intersect && !multiplexingArchitectures[m.native] {
+		result.Architectures = withoutAny(result.Architectures, multiplexingArchitectures)
+
+		return
+	}
+
+	result.Syscalls = settled
+}
+
+// loadsWideValue reports whether a profile loads a rule comparing an
+// argument against a value or mask above 32 bits, as libseccomp reads the
+// condition (see canonicalArg). It looks at the entries without expanding
+// them into rules: every condition of an entry that loads any rule ends up
+// in one.
+func loadsWideValue(profile *specs.LinuxSeccomp) bool {
+	def := defaultClause(profile)
+
+	for idx := range profile.Syscalls {
+		entry := &profile.Syscalls[idx]
+		if len(entry.Names) == 0 || entryClauseCount(entry, def) == 0 {
+			continue
+		}
+
+		if slices.ContainsFunc(entry.Args, func(arg specs.LinuxSeccompArg) bool {
+			return wideArg(canonicalArg(arg))
+		}) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// withoutAny returns the architectures not in the set.
+func withoutAny(archs []specs.Arch, set map[specs.Arch]bool) []specs.Arch {
+	return slices.DeleteFunc(slices.Clone(archs), func(arch specs.Arch) bool {
+		return set[arch]
+	})
 }
 
 // resolveListener keeps SCMP_ACT_NOTIFY and the listener together in the
@@ -445,6 +578,13 @@ func groupKey(entry *specs.LinuxSyscall) string {
 // work. Entries sharing the same action, errno, and argument filters are
 // grouped into one multi-name entry, sorted by name.
 //
+// Without a profile there are no architectures either, so the lists are
+// read the way the model reads a 64-bit architecture that calls every
+// syscall directly. A result loaded for a 32-bit architecture or one that
+// multiplexes the socket and SysV IPC syscalls needs the settling Union
+// applies to a profile (see Intersect), which a caller gets by merging whole
+// profiles instead.
+//
 // This function does not validate its inputs. Callers should ensure that
 // actions are known and that every entry has at least one name, or call
 // Validate on the enclosing profile first.
@@ -469,6 +609,13 @@ func UnionSyscalls(left, right []specs.LinuxSyscall) []specs.LinuxSyscall {
 // Intersect, the syscall is dropped, which leaves it to the default. Entries
 // sharing the same action, errno, and argument filters are grouped into one
 // multi-name entry, sorted by name.
+//
+// Without a profile there are no architectures either, so the lists are
+// read the way the model reads a 64-bit architecture that calls every
+// syscall directly. A result loaded for a 32-bit architecture or one that
+// multiplexes the socket and SysV IPC syscalls needs the settling Intersect
+// applies to a profile (see Intersect), which a caller gets by merging whole
+// profiles instead.
 //
 // This function does not validate its inputs. Callers should ensure that
 // actions are known and that every entry has at least one name, or call

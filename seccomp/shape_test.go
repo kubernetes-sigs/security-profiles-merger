@@ -447,9 +447,9 @@ func TestIntersectArtifactAtClauseBoundKeepsFilters(t *testing.T) {
 // TestIntersectAtPairwiseBudgetIsFast bounds the wall time of merges at the
 // pairwise budget. Coverage counters slow the merge loops several times over,
 // so the bound is only checked without coverage.
+//
+//nolint:paralleltest // a wall-clock bound, so it runs before the parallel tests
 func TestIntersectAtPairwiseBudgetIsFast(t *testing.T) {
-	t.Parallel()
-
 	const (
 		syscalls       = 100
 		perSide        = 64
@@ -622,9 +622,8 @@ func TestValidateArtifactCountsRulesAsLoaded(t *testing.T) {
 	}
 }
 
+//nolint:paralleltest // a wall-clock bound, so it runs before the parallel tests
 func TestValidateArtifactStaysFastOnHugeEntries(t *testing.T) {
-	t.Parallel()
-
 	const (
 		args           = 200000
 		generousBudget = 2 * time.Second

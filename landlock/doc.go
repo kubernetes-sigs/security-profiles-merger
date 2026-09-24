@@ -45,7 +45,7 @@ limitations under the License.
 //
 // Every exported function is safe to call from several goroutines at once.
 // The functions hold no state between calls and never modify their
-// arguments, except UnmarshalStrict, which decodes into the profile it is
-// given, so concurrent calls only need their profiles not to be written to
-// at the same time from elsewhere.
+// arguments, except UnmarshalStrict, which replaces the profile it is given
+// when decoding succeeds, so concurrent calls only need their profiles not
+// to be written to at the same time from elsewhere.
 package landlock

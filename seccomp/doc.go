@@ -91,14 +91,35 @@ limitations under the License.
 // same way.
 //
 // The model covers the program libseccomp compiles for a 64-bit
-// architecture. For a 32-bit architecture listed in a profile, libseccomp
-// compares only the lower 32 bits of each value, which the model does not
-// follow.
+// architecture on which every syscall is called directly. Two effects of
+// other architectures are read separately, for an architecture a profile
+// lists and for the native architecture of the running program, which
+// runtimes always add (see NativeArchitecture):
+//
+//   - On a 32-bit architecture (x86, x32, arm, 32-bit and n32 MIPS, ppc,
+//     s390, parisc, m68k, sh), libseccomp compares only the lower 32 bits of
+//     each value and mask, so a condition against a value above 32 bits
+//     tests something else there than it says: SCMP_CMP_EQ against
+//     0x100000005 matches 5. ValidateArtifact rejects such a condition
+//     (ErrValueTooWide), and the merges settle it (see Intersect).
+//   - On x86, 32-bit MIPS, ppc, ppc64, ppc64le, s390, s390x, m68k and sh, the
+//     socket and SysV IPC syscalls are reached through socketcall(2) and
+//     ipc(2) as well, and libseccomp adds every rule of such a syscall to the
+//     multiplexer a second time, with the condition on the first argument
+//     replaced by the sub-call number and the others kept: socket ALLOW if
+//     a0 == 2 allows every socket(2) made through socketcall. The merges
+//     read that path separately and settle a result that would be unsafe on
+//     it (see Intersect).
+//
+// Both were checked against libseccomp 2.6.1 for every architecture it
+// knows, and the libseccomp tests of this package check merge results on x86
+// and ppc64le against it.
 //
 // # Concurrency
 //
 // Every exported function is safe to call from several goroutines at once.
 // The functions hold no state between calls and never modify their
-// arguments, so concurrent calls only need their profiles not to be written
-// to at the same time from elsewhere.
+// arguments, except UnmarshalStrict, which replaces the profile it is given
+// with the decoded one when decoding succeeds, so concurrent calls only need
+// their profiles not to be written to at the same time from elsewhere.
 package seccomp

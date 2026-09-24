@@ -40,10 +40,10 @@ for the command, [cli.md](cli.md); for full Go documentation, the
 Every exported function of `seccomp`, `apparmor` and `landlock` is safe to
 call from several goroutines at once, so a CRI runtime may merge profiles for
 concurrent container starts without serializing them. The functions hold no
-state between calls and never modify their arguments, except
-`landlock.UnmarshalStrict`, which decodes into the profile it is given;
-concurrent calls only need their profiles not to be written to at the same
-time from elsewhere.
+state between calls and never modify their arguments, except each package's
+`UnmarshalStrict`, which replaces the profile it is given with the decoded one
+when decoding succeeds; concurrent calls only need their profiles not to be
+written to at the same time from elsewhere.
 
 The one piece of state shared between calls is an internal cache of analyzed
 glob patterns in `apparmor`, guarded by its own lock. It changes no result,
@@ -79,7 +79,7 @@ whose profile type was decided elsewhere.
 | `ErrRelativePath` | A path does not start with `/` (`apparmor`, `landlock`) |
 | `ErrPathTooLong` | A path is longer than `MaxPathLen` (`apparmor`, `landlock`) |
 | `ErrMoreProblems` | A validation report left failures out; see [reading a validation error](integration.md#reading-a-validation-error) |
-| `ErrDuplicateKey`, `ErrUnknownField`, `ErrInvalidUTF8`, `ErrUnexpectedData` | What each package's `UnmarshalStrict` refuses and `encoding/json` accepts |
+| `ErrDuplicateKey`, `ErrUnknownField`, `ErrMisspelledField`, `ErrInvalidUTF8`, `ErrUnexpectedData` | What each package's `UnmarshalStrict` refuses and `encoding/json` accepts |
 
 The package is deliberately this small, and it is not an abstraction over
 profiles. The three profile types have no common shape, and no operation over
@@ -116,11 +116,11 @@ import "sigs.k8s.io/security-profiles-merger/seccomp"
 | `NativeArchitecture` | The seccomp architecture of the running program, from `runtime.GOARCH` |
 | `Validate` | Check for what a runtime needs to load the profile at all: known actions, non-empty syscall names, known arg operators, arg indices in range, known architectures and flags, and `SCMP_ACT_NOTIFY` only where runc loads it (`ErrNotifyUnsupported`: not as the default action, not on `write`; `ErrNotifyWithoutListener`: not without a `listenerPath`). `errnoRet` is deliberately not range-checked here |
 | `ValidateStrict` | All ValidateArtifact checks plus duplicate syscall names (reported once per name that several entries use and once per entry that repeats a name within itself) and `valueTwo` on operators that ignore it. It is the strictest of the three, so `Validate` ⊆ `ValidateArtifact` ⊆ `ValidateStrict` holds here as it does in apparmor and landlock |
-| `ValidateArtifact` | Validate plus the checks an untrusted OCI artifact needs to load on every runtime: duplicate architectures and flags, errno values above 4095 on actions that return them, and `errnoRet` on actions that ignore it (crun refuses those); rejects `SCMP_ACT_NOTIFY`, the listener settings (`listenerPath`, `listenerMetadata`, `SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV`), profiles past any of the four [limits](#limits), and conflicting rules for one syscall (see [conflicting rules](#merge-semantics)); allows duplicate syscall names and ignores `valueTwo` where runtimes ignore it |
+| `ValidateArtifact` | Validate plus the checks an untrusted OCI artifact needs to load on every runtime: duplicate architectures and flags, errno values above 4095 on actions that return them, and `errnoRet` on actions that ignore it (crun refuses those); rejects `SCMP_ACT_NOTIFY`, the listener settings (`listenerPath`, `listenerMetadata`, `SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV`), syscall names holding a control character (`ErrInvalidSyscallName`), values above 32 bits where the filter covers a 32-bit architecture (`ErrValueTooWide`), profiles past any of the four [limits](#limits), and conflicting rules for one syscall (see [conflicting rules](#merge-semantics)); allows duplicate syscall names and ignores `valueTwo` where runtimes ignore it |
 | `FormatProfile` | Human-readable representation of a seccomp profile |
 | `Diff` | Structured diff between two profiles, compared by what a runtime loads from them (see merge semantics), with the running program's architecture implied |
 | `DiffForArch` | `Diff` against a named native architecture, for profiles destined for a node that may not match the caller |
-| `UnmarshalStrict` | Decode a profile and refuse what `encoding/json` accepts silently: members repeated within one object (`ErrDuplicateKey`, ignoring case), members no field reads (`ErrUnknownField`), invalid UTF-8 (`ErrInvalidUTF8`) and data behind the profile (`ErrUnexpectedData`). Where a profile from somewhere else should enter |
+| `UnmarshalStrict` | Decode a profile and refuse what `encoding/json` accepts silently: members repeated within one object (`ErrDuplicateKey`, ignoring case), members no field reads (`ErrUnknownField`), members that name a field only ignoring case (`ErrMisspelledField`), invalid UTF-8 (`ErrInvalidUTF8`), data behind the profile (`ErrUnexpectedData`) and a document that is not an object, such as `null`. Where a profile from somewhere else should enter |
 | `FormatDiff` | Human-readable representation of a profile diff |
 
 See [pkg.go.dev](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp)
@@ -146,9 +146,15 @@ Sentinel errors (`ErrNoProfiles`, `ErrNilProfile`, `ErrUnknownAction`,
 `ErrTooManyClauses`, `ErrTooManyNames`, `ErrTooManyProfileClauses`,
 `ErrErrnoOutOfRange`, `ErrUnusedValueTwo`, `ErrUnusedErrnoRet`,
 `ErrConflictingEntries`, `ErrNotifyUnsupported`, `ErrNotifyWithoutListener`,
-`ErrInvalidSyscallName`, `ErrMoreProblems`)
-are documented in the
+`ErrInvalidSyscallName`, `ErrValueTooWide`, `ErrMoreProblems`, and the five
+`UnmarshalStrict` returns) are documented in the
 [package reference](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#pkg-variables).
+
+`ErrUnexpectedData`, `ErrDuplicateKey`, `ErrUnknownField`,
+`ErrMisspelledField` and `ErrInvalidUTF8` are what `UnmarshalStrict` refuses
+and `encoding/json` accepts. For a seccomp profile a misspelled or unknown
+member drops the rule it was meant to carry, and a repeated member lets a
+scanner and the runtime read one document as two profiles.
 
 These are worth naming here, because they report a condition rather than a
 malformed field:
@@ -170,6 +176,21 @@ malformed field:
   name holds a NUL byte or another control character. A runtime resolves a
   name through libseccomp's C API, where a NUL ends it, so `"re\x00ad"` is
   added there as `read` while this package keeps the two names apart.
+- `ErrMisspelledField` (`UnmarshalStrict`, like `ErrDuplicateKey`,
+  `ErrUnknownField`, `ErrInvalidUTF8` and `ErrUnexpectedData`, which the
+  package re-exports from `spm`): a member names a field only ignoring case,
+  such as `"Syscalls"`, `"ACTION"` or `"\u017fyscalls"` (U+017F folds to
+  `s`). `encoding/json` fills the field from it, while a runtime that
+  compares names exactly, as a C JSON reader does, drops the member and the
+  rules it carries, so a scanner and the runtime read two profiles out of one
+  document.
+- `ErrValueTooWide` (`ValidateArtifact`, `ValidateStrict`): a condition
+  compares against a value or mask above 32 bits while the filter covers a
+  32-bit architecture, one the profile lists or the native architecture of
+  the running program. libseccomp compares only the lower 32 bits there, so
+  `SCMP_CMP_EQ` against `0x100000005` matches `5` for a 32-bit caller.
+  `valueTwo` counts only where libseccomp reads it, within the mask of a
+  `SCMP_CMP_MASKED_EQ`.
 - `ErrMoreProblems` (every validator of every package, and the shared
   `spm.ErrMoreProblems`): the report lists some failures and left others
   out. Every validator bounds how many it names, since a profile holds as
@@ -201,18 +222,23 @@ default add none. Why all four are needed is explained under
   the native architecture, and the listed architectures are added to it. An
   empty list means "native only" and a non-empty list means "native plus
   these", so intersection is the plain set intersection of the lists, which
-  may be empty, and union combines them. A list need not name the native
-  architecture, and a profile listing only foreign architectures is valid.
-  The merge needs no help from the caller here, but `Diff` does: it implies
-  the architecture of the running program, so the same two profiles compare
-  differently depending on where the comparison runs. Use `DiffForArch` to
-  name the target architecture, or the empty `specs.Arch` to imply none.
-  `Intersect`'s architecture claim is exact. `Union`'s is exact about the set
-  covered but not about the behaviour: on an architecture only one input
-  lists, that input's filter applies the merged rules while the other input's
-  filter would have applied libseccomp's action for an unlisted architecture,
-  `SCMP_ACT_KILL`. That is the permissive direction, so the union guarantee
-  holds, but the result is not the rule-by-rule union there.
+  may be empty, less the 32-bit or multiplexing architectures `Intersect`
+  drops as described under architecture scope below, and union combines
+  them. A list need not name the native architecture, and a profile listing
+  only foreign architectures is valid. The merges and `Diff` take the native
+  architecture to be the one of the running program. For the merges that
+  only matters for the settling described under architecture scope, which
+  is why `Intersect` is meant to run on the node that loads its result. For
+  `Diff` it means the same two profiles compare differently depending on
+  where the comparison runs. Use `DiffForArch` to name the target
+  architecture, or the empty `specs.Arch` to imply none. `Intersect`'s
+  architecture claim is exact apart from those drops. `Union`'s is exact
+  about the set covered but not about the behaviour: on an architecture only
+  one input lists, that input's filter applies the merged rules while the
+  other input's filter would have applied libseccomp's action for an
+  unlisted architecture, `SCMP_ACT_KILL`. That is the permissive direction,
+  so the union guarantee holds, but the result is not the rule-by-rule union
+  there.
 - Flags are merged by what they do, so that a merged profile never loosens a
   baseline. `SECCOMP_FILTER_FLAG_SPEC_ALLOW` disables a mitigation: intersection
   keeps it only if every profile sets it, union if any does.
@@ -267,6 +293,10 @@ default add none. Why all four are needed is explained under
 - A single profile is normalized without merging: `Intersect(p)` and
   `Union(p)` reduce it to the rules a runtime loads, and collapse syscalls
   that are not in a safe shape as described above, in their direction.
+  They settle the multiplexer path as a merge does (see architecture scope),
+  but keep values above 32 bits: the rules they keep are the ones the
+  profile loads, so they mean on a 32-bit architecture what the profile
+  means there.
 - Argument filters during intersection: for each call, the more restrictive
   action of the two profiles is chosen. Filters on different argument indices
   are conjoined into one entry, identical filters are kept, and filters that
@@ -296,9 +326,10 @@ default add none. Why all four are needed is explained under
   least restrictive action, which is safe for union. The product budget
   admits `MaxArtifactClausesPerSyscall` rules against a dozen filtered rules
   on the other side. Past either budget, the collapse is the same
-  conservative rewrite as above, so `Intersect` still never permits more than any input and `Union`
-  never permits less. `MaxArtifactEntriesPerSyscall` and
-  `MaxArtifactClausesPerSyscall` bound one syscall of an artifact, so that
+  conservative rewrite as above, so `Intersect` still never permits more
+  than any input and `Union` never permits less.
+  `MaxArtifactEntriesPerSyscall` and `MaxArtifactClausesPerSyscall` bound one
+  syscall of an artifact, so that
   `ValidateArtifact` reports an artifact too large to merge precisely
   instead of the merge silently denying the syscall.
 - The profile as a whole is bounded too, which the per-syscall caps do not
@@ -353,10 +384,55 @@ default add none. Why all four are needed is explained under
   evaluates in its own order or never finishes adding; the merge reads those
   conservatively and never emits them, so runtimes should load the merge
   result rather than the artifact itself.
-- Scope: the model and the guarantees cover the program libseccomp compiles
-  for a 64-bit architecture. On a 32-bit architecture libseccomp compares
-  only the lower 32 bits of each argument value, which the merge does not
-  model; profiles for such architectures should keep values within 32 bits.
+- Architecture scope: the model covers the program libseccomp compiles for a
+  64-bit architecture that calls every syscall directly. Two effects of
+  other architectures are handled separately, for an architecture a profile
+  lists and for the native architecture of the running program, which
+  runtimes always add. Both were checked against libseccomp 2.6.1 for every
+  architecture it knows, and the libseccomp tests check merge results on
+  x86 and ppc64le against it.
+  - 32-bit comparisons: on x86, x32, arm, 32-bit and n32 MIPS, ppc, s390,
+    parisc, m68k and sh, libseccomp compares only the lower 32 bits of each
+    value and mask, so `SCMP_CMP_EQ` against `0x100000005` matches `5`, and
+    a `SCMP_CMP_MASKED_EQ` whose mask sets only upper bits matches every
+    call. `ValidateArtifact` rejects such a condition with
+    `ErrValueTooWide`. Where a result covers such an architecture and an
+    input loads such a condition, `Intersect` drops the 32-bit
+    architectures from the result's list, so their calls get libseccomp's
+    action for an unlisted architecture (`SCMP_ACT_KILL`) while the rules
+    keep their filters elsewhere; where the native architecture is a 32-bit
+    one, it reads the affected syscalls as one unconditional rule instead,
+    as it reads a rule set outside the safe shapes. `Union` always does the
+    latter, in its direction, since dropping an architecture an input
+    covers would deny what that input permits.
+  - Multiplexed syscalls: on x86, 32-bit MIPS, ppc, ppc64, ppc64le, s390,
+    s390x, m68k and sh, the socket syscalls (`socket`, `bind`, `connect`,
+    `listen`, `accept`, `accept4`, `getsockname`, `getpeername`,
+    `socketpair`, `send`, `recv`, `sendto`, `recvfrom`, `shutdown`,
+    `setsockopt`, `getsockopt`, `sendmsg`, `recvmsg`, `recvmmsg`,
+    `sendmmsg`) and SysV IPC syscalls (`semop`, `semget`, `semctl`,
+    `semtimedop`, `msgsnd`, `msgrcv`, `msgget`, `msgctl`, `shmat`, `shmdt`,
+    `shmget`, `shmctl`) are reached through `socketcall` and `ipc` as well.
+    libseccomp adds every rule of such a syscall to the multiplexer a second
+    time, with the condition on the first argument replaced by the sub-call
+    number and the other conditions kept, so `socket` `ALLOW` if
+    `arg0 == 2` allows every `socket` made through `socketcall`. Rules with
+    different results for one sub-call are refused with `EEXIST`, and an
+    unconditional rule on the multiplexer decides all of its calls. The
+    merges read that path of every input as the set of results a call can
+    get there. A result that would permit more (`Intersect`) or less
+    (`Union`) on it than an input, or hold rules libseccomp refuses there,
+    is settled: `Intersect` drops the multiplexing architectures from the
+    list where the native architecture does not multiplex, and otherwise,
+    like `Union`, collapses the multiplexer and each affected syscall to one
+    unconditional rule in its direction, which also removes the filters from
+    the direct syscall. `ValidateArtifact` does not model which of these
+    rule sets libseccomp refuses.
+  - The native architecture is the one of the running program, so
+    `Intersect` is meant to run on the node that loads its result: dropping
+    an architecture from the list does not remove it from a filter where it
+    is native. `IntersectSyscalls` and `UnionSyscalls` know no
+    architectures and apply neither settling.
 - Precision: both directions are conservative rather than exact where filters
   interact. Intersection lowers a conditional entry by every overlapping entry
   of the other side, even one covering only part of its region, and both
@@ -366,8 +442,8 @@ default add none. Why all four are needed is explained under
   `ALLOW` traps every `read`, since the second profile's rules are not in a
   safe shape, although only calls with `arg1 == 1` need to trap and the
   others could fail with `ERRNO`; and the union of the same inputs allows
-  every `read`, although both deny `arg0 in {0, 2, 3, 4}`. The safety properties above always hold; only the
-  tightness varies.
+  every `read`, although both deny `arg0 in {0, 2, 3, 4}`. The safety
+  properties above always hold; only the tightness varies.
 - `SCMP_ACT_KILL_THREAD` is spelled `SCMP_ACT_KILL` in results, as libseccomp
   defines them as the same action.
 - Output grouping: entries sharing the same action, errno, and argument filters
@@ -414,11 +490,23 @@ default add none. Why all four are needed is explained under
   that, since libseccomp's order, not the rules alone, decides between
   overlapping rules. Architectures are compared with the native architecture
   implied on both sides, as runtimes always cover it. `Diff(p, Intersect(p))`
-  is equal exactly when every syscall of `p` is in a safe shape, and
-  otherwise reports the syscalls the merge collapsed. `Intersect(p, q)`,
-  where `q` has default `SCMP_ACT_ALLOW`, no syscalls, the same
-  architectures as `p` and the same `SECCOMP_FILTER_FLAG_SPEC_ALLOW`
-  setting, compares equal to `p` when `p` is in safe shapes. The same holds
+  is equal exactly when every syscall of `p` is in a safe shape and nothing
+  needed settling for a multiplexing architecture, and otherwise reports
+  what the merge changed. `Diff` compares the rules a runtime adds, not
+  whether libseccomp accepts them: two profiles holding the same rules in a
+  different order compare equal although libseccomp may refuse one of them
+  with `EEXIST`, which depends on the order. A syscall past the budget on
+  the rules a profile is read as is listed by the two actions a collapse of
+  it could pick, which different rules can share, so it is reported as
+  changed unless both profiles load the same rules for it from entries in
+  the same order, even where the entries listed for it are the same.
+  `Intersect(p, q)`, where `q` has default `SCMP_ACT_ALLOW`, no syscalls,
+  the same architectures as `p` and the same
+  `SECCOMP_FILTER_FLAG_SPEC_ALLOW` setting, compares equal to `p` when `p`
+  is in safe shapes and needs no settling for a multiplexing architecture
+  (it has no conditional `socketcall` or `ipc` rules, and no rules with
+  different results for a syscall they carry) and, where it covers a 32-bit
+  architecture, loads no value above 32 bits. The same holds
   for `Union(p, q)` with default `SCMP_ACT_KILL_PROCESS`, where `q` also
   needs the same `SECCOMP_FILTER_FLAG_LOG` setting, since union keeps that
   flag only if both profiles set it. With other architectures, flags or
@@ -454,11 +542,11 @@ import "sigs.k8s.io/security-profiles-merger/apparmor"
 | `Union` | Merge via union; all rules combined, network OR |
 | `Validate` | Check for empty paths, paths over 4096 bytes, AppArmor variables, paths listed more than once within or across filesystem categories (compared as the merge matches them: repeated slashes collapsed and escapes resolved), and empty or duplicate capabilities |
 | `ValidateStrict` | All ValidateArtifact checks, the cap on the number of paths included, plus unknown capability names (`ErrUnknownCapability`) and duplicate executables/libraries. It is the strictest of the three, so `Validate` ⊆ `ValidateArtifact` ⊆ `ValidateStrict` holds here as it does in seccomp and landlock |
-| `ValidateArtifact` | Validate plus what a runtime could not load or would silently drop in an untrusted profile: relative paths (`ErrRelativePath`), patterns apparmor_parser rejects (`ErrInvalidGlob`), glob patterns over the matcher's limits (`ErrGlobTooComplex`), `.` or `..` components (`ErrDotComponent`), NUL bytes and the escapes that denote them (`ErrNulInPath`), characters apparmor_parser's lexer does not accept unescaped in a path (`ErrUnquotablePath`), capability names outside `[A-Za-z0-9_]` (`ErrInvalidCapabilityName`), and profiles holding more than `MaxArtifactPaths` paths (`ErrTooManyPaths`, checked first and on its own); duplicate executable and library paths are accepted, while duplicate filesystem paths and capabilities are rejected as in Validate |
+| `ValidateArtifact` | Validate plus what a runtime could not load or would silently drop in an untrusted profile: relative paths (`ErrRelativePath`), patterns apparmor_parser rejects (`ErrInvalidGlob`), glob patterns over the matcher's limits (`ErrGlobTooComplex`), `.` or `..` components (`ErrDotComponent`), NUL bytes and the escapes that denote them (`ErrNulInPath`), characters apparmor_parser's lexer does not accept unescaped in a path (`ErrUnquotablePath`), capability names outside `[A-Za-z0-9_]` (`ErrInvalidCapabilityName`), and profiles past the [limits](#limits-1) (`ErrTooManyPaths`, `ErrTooManyPatternBytes`, `ErrTooManyCapabilities`, checked first and on their own); duplicate executable and library paths are accepted, while duplicate filesystem paths and capabilities are rejected as in Validate |
 | `FormatProfile` | Human-readable representation of an AppArmor profile |
 | `IsGlobPattern` | Report whether a path contains AppArmor glob tokens |
 | `Diff` | Structured diff between two profiles, compared by what AppArmor loads from them (see nil vs empty semantics) |
-| `UnmarshalStrict` | Decode a profile and refuse what `encoding/json` accepts silently: members repeated within one object (`ErrDuplicateKey`, ignoring case), members no field reads (`ErrUnknownField`), invalid UTF-8 (`ErrInvalidUTF8`) and data behind the profile (`ErrUnexpectedData`). Where a profile from somewhere else should enter |
+| `UnmarshalStrict` | Decode a profile and refuse what `encoding/json` accepts silently: members repeated within one object (`ErrDuplicateKey`, ignoring case), members no field reads (`ErrUnknownField`), members that name a field only ignoring case (`ErrMisspelledField`), invalid UTF-8 (`ErrInvalidUTF8`), data behind the profile (`ErrUnexpectedData`) and a document that is not an object, such as `null`. Where a profile from somewhere else should enter |
 | `FormatDiff` | Human-readable representation of a profile diff |
 
 See [pkg.go.dev](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor)
@@ -472,8 +560,10 @@ Core types (`Profile`, `CapabilityRules`, `ExecutableRules`, `FilesystemRules`,
 documented in the
 [package reference](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#Profile).
 
-`Profile`, `ExecutableRules`, `FilesystemRules`, `NetworkRules`, and
+`*Profile`, `ExecutableRules`, `FilesystemRules`, `NetworkRules`, and
 `CapabilityRules` implement `fmt.Stringer` for human-readable formatting.
+`Profile.String` has a pointer receiver so that a nil profile formats as
+`Profile{<nil>}`, as `FormatProfile(nil)` does, rather than panicking.
 
 ### Scope
 
@@ -509,9 +599,21 @@ Sentinel errors (`ErrNoProfiles`, `ErrNilProfile`, `ErrEmptyPath`,
 `ErrUnknownCapability`, `ErrInvalidCapabilityName`,
 `ErrDuplicateExecutablePath`, `ErrRelativePath`, `ErrInvalidGlob`,
 `ErrGlobTooComplex`, `ErrDotComponent`, `ErrUnquotablePath`, `ErrNulInPath`,
-`ErrTooManyPaths`, `ErrTooManyPatternBytes`, `ErrTooManyCapabilities`, and
-`ErrMoreProblems`) are documented
+`ErrTooManyPaths`, `ErrTooManyPatternBytes`, `ErrTooManyCapabilities`,
+`ErrMoreProblems`, and the five `UnmarshalStrict` returns) are documented
 in the [package reference](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#pkg-variables).
+
+`ErrUnexpectedData`, `ErrDuplicateKey`, `ErrUnknownField`,
+`ErrMisspelledField` and `ErrInvalidUTF8` are what `UnmarshalStrict` refuses
+and `encoding/json` accepts. For an AppArmor profile a misspelled or unknown
+member drops the rule it was meant to carry, and a repeated member lets a
+scanner and the runtime read one document as two profiles.
+
+`ErrMisspelledField` is the `UnmarshalStrict` return that is easiest to
+miss: a member such as `"Filesystem"` or `"readonlyPaths"` names a field only
+ignoring case. `encoding/json` fills the field from it, while a reader that
+compares names exactly drops it, so the two read different rules out of one
+profile.
 
 Validation failures are collected and returned together, with two
 qualifications: an oversized path is reported on its own, since every other
@@ -528,7 +630,7 @@ the merge bounds its own work.
 
 | Constant | Value | Bounds |
 | --- | --- | --- |
-| `MaxArtifactPaths` | 1024 | Paths, counted over every path list of the profile (`ErrTooManyPaths`). Two profiles of this size stay inside the merge's pair budget, so an accepted profile is merged exactly; see [glob patterns](#glob-patterns) |
+| `MaxArtifactPaths` | 1024 | Paths, counted over every path list of the profile (`ErrTooManyPaths`). Two profiles of this size stay inside the merge's pair budget, and a profile of this many paths a few dozen bytes long stays inside its work budget against a node baseline of a few kilobytes of paths, so such a profile is merged exactly; see [glob patterns](#glob-patterns) |
 | `MaxArtifactPatternBytes` | 64 KiB | The glob patterns of a profile in total (`ErrTooManyPatternBytes`). A compiled pattern is cached, and the cache is bounded as anything holding profile data must be, so patterns that do not fit it are recompiled on every use. The bound admits two profiles and a baseline at once |
 | `MaxArtifactCapabilities` | 512 | Capability names (`ErrTooManyCapabilities`), the one section nothing else bounds, since a name need not be one this package knows |
 | `MaxPathLen` | 4096 | One path, in every validator (`ErrPathTooLong`): the longest pattern the matcher compiles and longer than any Linux path |
@@ -543,10 +645,14 @@ Capability names are compared with ASCII case folding, not Unicode folding:
 by Unicode rules would let a name spelled with one of them pass
 `ValidateStrict` as a known capability and be merged into the real one. The
 merge upper-cases the names it keeps, so a result spells them `CHOWN` rather
-than `chown`.
+than `chown`. apparmor_parser accepts capability names in lower case only
+(`capability chown,`), so a consumer that renders a result as
+`capability <name>,` rules must lower-case each name first; written as the
+merge returns them, the rules do not load.
 
-Capability names are otherwise opaque to the merge: an intersection keeps one only when every profile grants it, and a
-union keeps every name either profile grants. `Validate` accepts any name,
+Capability names are otherwise opaque to the merge: an intersection keeps one
+only when every profile grants it, and a union keeps every name either profile
+grants. `Validate` accepts any name,
 because the kernel gains capabilities over time and failing a merge because
 one input names a capability newer than this package would leave callers
 unable to merge at all. `ValidateStrict` reports names outside the known set
@@ -634,8 +740,14 @@ of the profile author's choosing. A backslash protects only a character that
 can be written in a rule: the parser resolves no escape whose second byte is
 a control character, so a backslash followed by a raw newline leaves both
 bytes in the path and is reported too. The two-character forms (`\n`, `\r`,
-`\t`, or `\x0a`) spell those paths safely. `Validate` and the merge functions accept
-such a path and treat it as opaque text. Note the consequence for classes:
+`\t`, or `\x0a`) spell those paths safely. A backslash also escapes only
+where the lexer reads it as the start of an escape: after a comma the lexer
+takes the next byte as a plain character, so in `/a,\ b` the space still ends
+the path and the rest is read as profile syntax, and a path ending in a
+backslash (including an escaped one, `/a\\`) escapes the space a consumer
+renders after it. Both are reported with `ErrUnquotablePath`. `Validate` and
+the merge functions accept such a path and treat it as opaque text. Note the
+consequence for classes:
 a class written `[!a]` is unloadable, since the negation AppArmor accepts is
 `[^a]` and a literal `!` in a class has to be escaped (`[\!a]`).
 
@@ -679,19 +791,25 @@ also takes their permissions, so a write-only literal under a read-only glob
 of the other profile becomes read-write. A literal both profiles list is
 kept with the permissions they list. A profile's own globs never prune or
 promote its own literals, so a single profile's paths are kept as written
-(`Union(p, p)` keeps the paths of `p`), and the result depends neither on the order of
-the two profiles nor on the order of the paths within them.
+(`Union(p, p)` keeps the paths of `p`), and the result depends neither on
+the order of the two profiles nor on the order of the paths within them.
 
 Matching literals against patterns costs one comparison per pair, and the
 prefix index only separates patterns rooted in different directories, so a
 profile whose patterns share one prefix costs the product of the two path
-counts. Both merges bound that work. Past the bound an intersection keeps
-only the paths both sides spell alike, which permits no more than the exact
-intersection would, and a union keeps every path of both sides with the
-permissions its own side grants, which permits exactly what the reduced union
-does. `ValidateArtifact` and `ValidateStrict` reject a profile holding more
-than `MaxArtifactPaths` (1024) paths with `ErrTooManyPaths`, so a profile a
-runtime accepts is always merged exactly.
+counts. One comparison in turn costs up to the length of the pattern times
+the length of the name, so the work summed over every pair is up to the
+product of the bytes the two sides hold. Both merges bound the number of
+pairs and that work. Past either bound an intersection keeps only the paths
+both sides spell alike, which permits no more than the exact intersection
+would, and a union keeps every path of both sides with the permissions its
+own side grants, which permits exactly what the reduced union does.
+`ValidateArtifact` and `ValidateStrict` reject a profile holding more than
+`MaxArtifactPaths` (1024) paths with `ErrTooManyPaths`, so a profile a
+runtime accepts is merged exactly against a node baseline of a few kilobytes
+of paths as long as its own paths are a few dozen bytes long. Two such
+profiles merged with each other, or a profile of long paths, may be merged
+conservatively instead.
 
 Folding more than two profiles goes left to right, and with patterns involved
 the result depends on that order: a pattern survives only where the other side
@@ -718,9 +836,11 @@ dropped on intersection and kept verbatim on union; `ValidateStrict` and
 single profile drops unmatchable patterns too, so `Intersect(p)` equals
 `Intersect(p, p)`. AppArmor variables such as `@{HOME}` are not supported:
 their expansion is unknown to this package, so `Validate` rejects paths
-containing `@{` with `ErrUnsupportedVariable`. File rules must use absolute
-paths; `ValidateStrict` and `ValidateArtifact` report paths that do not
-start with `/` with `ErrRelativePath`.
+containing `@{` with `ErrUnsupportedVariable`, also where the `@` is spelled
+as an escape (`\x40{HOME}`), since the parser resolves escapes before it
+expands variables. File rules must use absolute paths; `ValidateStrict` and
+`ValidateArtifact` report paths that do not start with `/` with
+`ErrRelativePath`.
 
 ### Nil vs empty semantics
 
@@ -737,8 +857,8 @@ differs, as a section nil on both sides stays nil.
 sockets and one that forbids them are equal, and `Diff(p, Intersect(p))` is
 equal unless `p` has patterns the matcher cannot use, which the
 intersection drops: the explicit sections an intersection writes are not
-reported as a change. A caller logging what a baseline took away from an artifact
-therefore sees only real constraints.
+reported as a change. A caller logging what a baseline took away from an
+artifact therefore sees only real constraints.
 
 ### Filesystem merge
 
@@ -769,9 +889,9 @@ import "sigs.k8s.io/security-profiles-merger/landlock"
 | `ValidateStrict` | For user-authored profiles: all ValidateArtifact checks, the cap on the number of rules included, plus duplicate rules and rights, which no other validator reports |
 | `ValidateArtifact` | For untrusted profiles: known rights and valid paths, plus what a kernel could not load: relative paths, rules granting unhandled rights, rules granting no right, and rulesets that handle and scope nothing; duplicates are accepted, as the kernel and the merge fold them |
 | `ValidateForABI` | All Validate checks plus rights the given Landlock ABI version does not know. A version newer than `LatestABIVersion` is treated as `LatestABIVersion`, since ABI versions are cumulative; only a version below `ABIV1` is rejected, with `ErrUnknownABIVersion`. It does not check loadability otherwise; combine it with ValidateArtifact or ValidateStrict for that |
-| `RequiredABIVersion` | The lowest Landlock ABI version supporting every right a profile uses |
+| `RequiredABIVersion` | The lowest Landlock ABI version supporting every right a profile uses. It returns no error, so a nil profile, which uses no right, yields `ABIV1`; validate the profile first to reject nil |
 | `LoweredRulePaths` | The result rule paths that carry access an input granted only on an ancestor path |
-| `UnmarshalStrict` | Decode a profile and refuse what `encoding/json` accepts silently: members repeated within one object (`ErrDuplicateKey`, ignoring case), members no field reads (`ErrUnknownField`), invalid UTF-8 (`ErrInvalidUTF8`) and data behind the profile (`ErrUnexpectedData`). Where a profile from somewhere else should enter |
+| `UnmarshalStrict` | Decode a profile and refuse what `encoding/json` accepts silently: members repeated within one object (`ErrDuplicateKey`, ignoring case), members no field reads (`ErrUnknownField`), members that name a field only ignoring case (`ErrMisspelledField`), invalid UTF-8 (`ErrInvalidUTF8`), data behind the profile (`ErrUnexpectedData`) and a document that is not an object, such as `null`. Where a profile from somewhere else should enter |
 | `FormatProfile` | Human-readable representation of a Landlock profile |
 | `Diff` | Structured diff between two profiles |
 | `FormatDiff` | Human-readable representation of a profile diff |
@@ -793,8 +913,9 @@ names the Landlock ABI version that introduced it. The kernel rejects rights
 it does not know, so a profile should only use rights the target ABI
 supports.
 
-`Profile`, `PathRule`, and `NetRule` implement `fmt.Stringer` for human-readable
-formatting.
+`*Profile`, `PathRule`, and `NetRule` implement `fmt.Stringer` for
+human-readable formatting; a nil `*Profile` formats as `Profile{<nil>}`, as
+`FormatProfile` does.
 
 ### Errors
 
@@ -802,17 +923,20 @@ Sentinel errors (`ErrNoProfiles`, `ErrNilProfile`, `ErrUnknownRight`,
 `ErrDuplicateRule`, `ErrEmptyPath`, `ErrPathTooLong`, `ErrInvalidPath`,
 `ErrParentPath`, `ErrUnhandledRight`, `ErrDuplicateRight`, `ErrRelativePath`,
 `ErrEmptyRule`, `ErrEmptyRuleset`, `ErrUnsupportedABIRight`,
-`ErrUnknownABIVersion`, `ErrTooManyRules`, `ErrMoreProblems`, and the four
+`ErrUnknownABIVersion`, `ErrTooManyRules`, `ErrMoreProblems`, and the five
 `UnmarshalStrict` returns) are documented in the
 [package reference](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#pkg-variables).
 
-`ErrUnexpectedData`, `ErrDuplicateKey`, `ErrUnknownField` and
-`ErrInvalidUTF8` are what `UnmarshalStrict` refuses and `encoding/json`
-accepts. For a Landlock profile an unknown member is the costly one: a member
-a newer version of the format uses to handle a further access right would be
-dropped, and the profile then looks like one that does not handle it, which
-is the permissive direction. `ErrMoreProblems` reports that a validator left
-failures out, which every validator does past a bound.
+`ErrUnexpectedData`, `ErrDuplicateKey`, `ErrUnknownField`,
+`ErrMisspelledField` and `ErrInvalidUTF8` are what `UnmarshalStrict` refuses
+and `encoding/json` accepts. A misspelled member, one that names a field only
+ignoring case such as `"HandledAccessFs"`, is read here and dropped by a
+reader that compares names exactly. For a Landlock profile an unknown member
+is the costly one: a member a newer version of the format uses to handle a
+further access right would be dropped, and the profile then looks like one
+that does not handle it, which is the permissive direction. `ErrMoreProblems`
+reports that a validator left failures out, which every validator does past a
+bound.
 
 ### Limits
 
@@ -841,20 +965,39 @@ intersected), when a rule grants it, or when the inputs share no other
 handled filesystem right; otherwise it stays implicit, so the result needs
 no newer ABI than necessary.
 
-In an intersection `refer` does not inherit down the hierarchy: the result
-grants it for a path only when every input has a rule on that exact path
-granting it. The kernel collects the rights deciding a move or link only up to
-the mount point of the directory, so an ancestor's `refer` grant need not
-reach a descendant in another mount, and lowering it onto that descendant
-would allow a rename the input denies.
+`refer` inherits down the hierarchy like every other right, across mount
+points too: the kernel collects the rights of both directories of a move up to
+their mount point and then continues above it, up to the real root. What sets
+`refer` apart is that it is not a grant of its own. The kernel allows moving
+or linking a file into another directory only when both directories grant
+`refer` and, in every layer, the destination grants no handled right the
+source (or a rule on the file itself) does not. A file keeps its rights when
+it moves but never gains one.
+
+An intersection may not grant a right at a destination that one input grants
+there, because another input denies it, and would then allow a move that
+input denies. So where an input grants a right the result does not, the result
+drops `refer` from the rules on that path and its ancestors, unless the input
+grants the right on every path the result grants `refer` on (then the right
+never denies a move in that input). Where it drops `refer`, the result may deny
+moves and links that every input allows.
+
+A union has the opposite problem: a right one input grants at a destination
+can deny a move another input allows, and a single ruleset cannot always
+express both. The union then stops handling that right, which permits it
+everywhere. It does so only for a right the union misses on one directory and
+grants on another, where both grant `refer` in some input, that input does
+not grant the right on the second, and that input may allow a move between
+them. The check is conservative, so it may unhandle a right no allowed move
+needs, and `refer` itself always stays handled.
 
 A merge result that handles and scopes nothing restricts nothing. `Intersect`
 returns one only when no input handles or scopes anything, and `Union` when
 the inputs share no handled or scoped right, counting the implicit `refer`
 denial (for example when one handles only filesystem rights and the other
-only network rights). The kernel refuses to
-create such a ruleset, and `ValidateArtifact` reports it with
-`ErrEmptyRuleset`; a runtime should apply no Landlock ruleset instead.
+only network rights). The kernel refuses to create such a ruleset, and
+`ValidateArtifact` reports it with `ErrEmptyRuleset`; a runtime should apply no
+Landlock ruleset instead.
 
 ### ABI versions
 
@@ -905,13 +1048,9 @@ grant, and is dropped when none remain, so intersecting `/` (read) with
 yields only `/etc` (read). Union keeps such rules: the kernel binds a rule to
 the file its path resolves to, so a nested path that is a symlink, such as
 `/var/run` on many distributions, covers a different hierarchy, and dropping
-its rule would deny access an input grants. A rule that grants `refer` is kept
-as it is, because the kernel decides a move across directories from the rights
-each directory collects up to its mount point, and a right such a rule repeats
-can decide that check when the ancestor granting it lies above the mount
-point. Other rules are minimized even when the result grants `refer`
-elsewhere, which keeps the output of a fold independent of how the inputs were
-grouped. Merge results therefore pass `ValidateStrict` when the inputs use
+its rule would deny access an input grants. A rule that grants `refer` is
+minimized as any other, since the kernel decides a move from the same
+inherited rights. Merge results pass `ValidateStrict` when the inputs use
 absolute paths and the result handles or scopes at least one right.
 
 Paths are cleaned before merging and before duplicate detection in

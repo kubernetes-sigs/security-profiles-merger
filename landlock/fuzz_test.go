@@ -479,7 +479,7 @@ func assertIntersectInvariants(
 
 	assertResultShape(t, result, left, right)
 	assertPathsFromInputs(t, result, left, right)
-	assertFSExact(t, "intersect", both, result, left, right)
+	assertFSExact(t, "intersect", both, intersectExempt, result, left, right)
 	assertNetExact(t, "intersect", both, result, left, right)
 	assertHandledFromInputs(t, result, left, right)
 	assertHandledCoversInputs(t, result, left, right)
@@ -687,11 +687,6 @@ func assertUnionScopedCoversCommon(
 // filesystem right. A denied right is permitted where a rule on the path or
 // one of its ancestors grants it; a rule can only grant a right the profile
 // lists as handled, since the kernel refuses any other grant.
-//
-// Refer does not inherit. The kernel decides a move or link from the rights
-// each directory collects up to its mount point, so an ancestor's grant
-// need not reach a descendant, and the merge reads refer from a rule on the
-// path itself.
 func fsPermits(profile *landlock.Profile, path string, right landlock.FSAccessRight) bool {
 	handled := fsRightSet(profile.HandledAccessFS)
 
@@ -711,17 +706,7 @@ func fsPermits(profile *landlock.Profile, path string, right landlock.FSAccessRi
 			continue
 		}
 
-		rulePath := oracleCleanPath(rule.Path)
-
-		if right == landlock.FSAccessRefer {
-			if rulePath == path {
-				return true
-			}
-
-			continue
-		}
-
-		if landlock.IsAncestorOrSelf(rulePath, path) {
+		if landlock.IsAncestorOrSelf(oracleCleanPath(rule.Path), path) {
 			return true
 		}
 	}
@@ -747,11 +732,13 @@ func netPermits(profile *landlock.Profile, port uint16, right landlock.NetAccess
 
 // assertFSExact checks at every probe path and for every right that the
 // result permits exactly what combine makes of the inputs' answers: both for
-// an intersection, either for a union.
+// an intersection, either for a union. exempt names the answers a merge may
+// give instead to keep moves and links safe, which evaluator_test.go checks.
 func assertFSExact(
 	t *testing.T,
 	name string,
 	combine func(left, right bool) bool,
+	exempt func(result *landlock.Profile, right landlock.FSAccessRight, got bool) bool,
 	result, left, right *landlock.Profile,
 ) {
 	t.Helper()
@@ -759,7 +746,7 @@ func assertFSExact(
 	for _, path := range probePaths(left, right, result) {
 		for _, access := range allFSRights() {
 			want := combine(fsPermits(left, path, access), fsPermits(right, path, access))
-			if got := fsPermits(result, path, access); got != want {
+			if got := fsPermits(result, path, access); got != want && !exempt(result, access, got) {
 				t.Errorf(
 					"%s permits %q at %q = %v, want %v\nleft=%s\nright=%s\nresult=%s",
 					name, access, path, got, want,
@@ -810,7 +797,7 @@ func assertUnionInvariants(
 	assertResultShape(t, result, left, right)
 	assertPathsFromInputs(t, result, left, right)
 	assertUnionKeepsInputPaths(t, result, left, right)
-	assertFSExact(t, "union", either, result, left, right)
+	assertFSExact(t, "union", either, unionExempt, result, left, right)
 	assertNetExact(t, "union", either, result, left, right)
 	assertUnionHandledSubset(t, result, left, right)
 	assertUnionHandledCoversCommon(t, result, left, right)
@@ -927,6 +914,36 @@ func assertUnionHandledCoversCommon(
 	assertUnionHandledCoversCommonNet(t, result, left, right)
 }
 
+// intersectExempt allows an intersection to deny refer where both inputs
+// permit it, which it does where a move could gain a right an input denies.
+func intersectExempt(_ *landlock.Profile, right landlock.FSAccessRight, got bool) bool {
+	return !got && right == landlock.FSAccessRefer
+}
+
+// unionExempt allows a union to permit a right neither input permits once
+// it stops handling it, which it does where the right could deny a move an
+// input allows.
+func unionExempt(result *landlock.Profile, right landlock.FSAccessRight, got bool) bool {
+	return got && right != landlock.FSAccessRefer &&
+		!slices.Contains(result.HandledAccessFS, right)
+}
+
+// grantsRefer reports whether a profile has a loadable rule granting refer,
+// which a union needs before it stops handling a right both inputs handle.
+func grantsRefer(profile *landlock.Profile) bool {
+	if !slices.Contains(profile.HandledAccessFS, landlock.FSAccessRefer) {
+		return false
+	}
+
+	for _, rule := range profile.PathRules {
+		if slices.Contains(rule.AccessFS, landlock.FSAccessRefer) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func assertUnionHandledCoversCommonFS(
 	t *testing.T,
 	result, left, right *landlock.Profile,
@@ -941,7 +958,7 @@ func assertUnionHandledCoversCommonFS(
 			continue
 		}
 
-		if _, ok := resultFS[fsRight]; !ok {
+		if _, ok := resultFS[fsRight]; !ok && !grantsRefer(left) && !grantsRefer(right) {
 			t.Errorf("union handled FS missing common right %q", fsRight)
 		}
 	}

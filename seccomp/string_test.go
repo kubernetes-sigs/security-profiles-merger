@@ -337,3 +337,29 @@ func TestSyscallDetailStringWithArgs(t *testing.T) {
 		t.Errorf("SyscallDetail.String() = %q, want %q", got, want)
 	}
 }
+
+// TestFormatProfileQuotesSeparators covers a name holding the separator the
+// names of a rule are joined with: unquoted, one rule for "a,b" and one for
+// "a" and "b" render alike.
+func TestFormatProfileQuotesSeparators(t *testing.T) {
+	t.Parallel()
+
+	one := seccomp.FormatProfile(&specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls:      []specs.LinuxSyscall{{Names: []string{"a,b"}, Action: specs.ActAllow}},
+	})
+	two := seccomp.FormatProfile(&specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls:      []specs.LinuxSyscall{{Names: []string{"a", "b"}, Action: specs.ActAllow}},
+	})
+
+	const want = `Profile{default:SCMP_ACT_ERRNO "a,b"->SCMP_ACT_ALLOW}`
+
+	if one != want {
+		t.Errorf("FormatProfile() = %s, want %s", one, want)
+	}
+
+	if one == two {
+		t.Errorf("one name and two names render alike: %s", one)
+	}
+}

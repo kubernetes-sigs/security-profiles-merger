@@ -72,7 +72,7 @@ fuzz: ## Run all fuzz tests (use FUZZTIME to adjust, default 30s)
 .PHONY: bench
 bench: ## Run benchmarks
 	@for pkg in $(PACKAGES); do \
-		$(GO) test -bench=. -benchmem -count=5 -run='^$$' $$pkg; \
+		$(GO) test -bench=. -benchmem -count=5 -run='^$$' $$pkg || exit 1; \
 	done
 
 # The floor, not the target: the suite sits well above this, and the drift
@@ -100,8 +100,9 @@ verify-coverage: test ## Verify test coverage meets threshold
 # What it cannot reproduce is what needs another machine or a tool this
 # Makefile does not install: the typos scan, the release snapshot build,
 # the macOS and Windows runs, the cross-architecture vet, the fuzz matrix,
-# the benchmarks, the uninstrumented bounds run, and the libseccomp
-# differential tests. test-libseccomp, fuzz and bench run those locally.
+# the benchmarks, the uninstrumented bounds run, the test run on the Go the
+# release is built with, and the libseccomp differential tests.
+# test-libseccomp, fuzz and bench run those locally.
 #
 # verify-mdtoc, verify-tidy and verify-golden rewrite files in place and
 # then check that nothing changed, which is why verify is not part of the
@@ -143,14 +144,17 @@ verify-upstream: ## Check the pinned versions against their upstream releases (n
 # The golden files carry the CLI's output contract, and -update rewrites
 # them from whatever the code does now. Regenerating them here and then
 # asking git whether anything moved is what keeps them from approving
-# themselves. The intent-to-add makes git diff see a golden file -update
-# newly created as well, which it otherwise reports as untracked and this
-# target would not notice.
+# themselves. git diff only sees tracked files, so a golden file -update
+# newly created is caught by listing the untracked ones, which leaves the
+# contributor's index alone.
 .PHONY: verify-golden
 verify-golden: ## Verify the CLI golden files are what the code produces
 	$(GO) test -count=1 -run TestGolden ./cmd/spm/ -update
-	git add --intent-to-add cmd/spm/testdata
 	git diff --exit-code cmd/spm/testdata
+	@untracked=$$(git ls-files --others --exclude-standard -- cmd/spm/testdata); \
+	if [ -n "$${untracked}" ]; then \
+		echo "untracked golden files:"; echo "$${untracked}"; exit 1; \
+	fi
 
 .PHONY: verify-tidy
 verify-tidy: ## Verify go.mod is tidy

@@ -18,6 +18,7 @@ package main
 
 import (
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -28,6 +29,7 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
+	"sigs.k8s.io/security-profiles-merger/internal/strictjson"
 )
 
 func TestReadFromStdinNilReader(t *testing.T) {
@@ -441,5 +443,215 @@ func TestValidateQuietStillReportsErrors(t *testing.T) {
 
 	if !strings.Contains(stderr, "unknown seccomp action") {
 		t.Errorf("stderr = %q, want the validation error", stderr)
+	}
+}
+
+// TestDetectionIgnoresCase covers members spelled in another case than the
+// one the detection used to look for. The decoder reads them, so a document
+// holding them is a profile of that type: missing them let a seccomp profile
+// validate as an empty Landlock one, be merged as AppArmor, or hide the
+// second type of a document that holds two.
+func TestDetectionIgnoresCase(t *testing.T) {
+	t.Parallel()
+
+	seccompUpper := writeTemp(t, `{"DefaultAction":"SCMP_ACT_ERRNO",`+
+		`"Syscalls":[{"names":["read"],"action":"SCMP_ACT_ALLOW"}]}`)
+	seccompBare := writeTemp(t, `{"syscalls":[{"names":["read"],"action":"SCMP_ACT_ALLOW"}]}`)
+	mixed := writeTemp(
+		t,
+		`{"filesystem":{"readOnlyPaths":["/etc"]},"DEFAULTACTION":"SCMP_ACT_KILL"}`,
+	)
+	apparmorFile := writeTemp(t, apparmorJSON(t, "CHOWN"))
+
+	for _, testCase := range []struct {
+		args []string
+		want string
+	}{
+		{
+			[]string{cmdValidate, flagType, typeLandlock, seccompUpper},
+			"holds a seccomp profile, not the landlock --type names",
+		},
+		{
+			[]string{cmdMerge, flagStrategy, strategyUnion, seccompBare, apparmorFile},
+			"inputs mix profile types (seccomp and apparmor)",
+		},
+		{
+			[]string{cmdValidate, mixed},
+			"mixes profile types (seccomp and apparmor)",
+		},
+		{
+			[]string{cmdValidate, flagType, typeSeccomp, apparmorFile},
+			"holds an apparmor profile, not the seccomp --type names",
+		},
+	} {
+		code, _, stderr := runCapture(t, testCase.args, nil)
+		if code != exitUsage {
+			t.Errorf("%v: exit code = %d, want %d: %s", testCase.args, code, exitUsage, stderr)
+		}
+
+		if !strings.Contains(stderr, testCase.want) {
+			t.Errorf("%v: stderr = %q, want %q", testCase.args, stderr, testCase.want)
+		}
+	}
+}
+
+// TestProfileTypesShareNoMemberNames pins what detection by member relies
+// on: a top-level member, compared ignoring case, fills a field of at most
+// one profile type.
+func TestProfileTypesShareNoMemberNames(t *testing.T) {
+	t.Parallel()
+
+	owners := map[string]string{}
+
+	for _, candidate := range detectTypes {
+		for idx := range candidate.target.NumField() {
+			field := candidate.target.Field(idx)
+
+			name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+			if name == "" || name == "-" {
+				t.Fatalf("%s.%s has no JSON name", candidate.target, field.Name)
+			}
+
+			folded := strings.ToLower(name)
+			if owner, taken := owners[folded]; taken {
+				t.Errorf("%s names a field of both %s and %s", name, owner, candidate.profileType)
+			}
+
+			owners[folded] = candidate.profileType
+
+			for _, other := range detectTypes {
+				if other.profileType != candidate.profileType &&
+					strictjson.HasField(other.target, name) {
+					t.Errorf(
+						"%s of %s also fills %s",
+						name,
+						candidate.profileType,
+						other.profileType,
+					)
+				}
+			}
+		}
+	}
+}
+
+// TestNullIsNotAProfile covers null, which decodes into a struct as nothing
+// at all and so used to pass as an empty profile.
+func TestNullIsNotAProfile(t *testing.T) {
+	t.Parallel()
+
+	file := writeTemp(t, " null\n")
+
+	for _, args := range [][]string{
+		{cmdValidate, file},
+		{cmdValidate, flagType, typeSeccomp, file},
+		{cmdMerge, flagType, typeLandlock, flagStrategy, strategyUnion, file},
+	} {
+		code, _, stderr := runCapture(t, args, nil)
+		if code != 1 {
+			t.Errorf("%v: exit code = %d, want 1: %s", args, code, stderr)
+		}
+
+		if !strings.Contains(stderr, errNotAnObject.Error()) {
+			t.Errorf("%v: stderr = %q, want %q", args, stderr, errNotAnObject)
+		}
+	}
+
+	code, _, stderr := runCapture(
+		t,
+		[]string{cmdValidate, flagType, typeAppArmor, writeTemp(t, "{}")},
+		nil,
+	)
+	if code != 0 {
+		t.Errorf("an empty object: exit code = %d, want 0: %s", code, stderr)
+	}
+}
+
+// TestReadInputsCountsStdinArrayElements covers a stdin array beside file
+// arguments: each is within its own bound, but the profiles they bring
+// together are not.
+func TestReadInputsCountsStdinArrayElements(t *testing.T) {
+	t.Parallel()
+
+	file := writeTemp(t, seccompJSON(t, testSyscallRead))
+	array := "[" + strings.Repeat(`{"defaultAction":"SCMP_ACT_ERRNO"},`, maxInputFiles-1) +
+		`{"defaultAction":"SCMP_ACT_ERRNO"}]`
+
+	_, err := readInputs([]string{stdinArg, file}, strings.NewReader(array))
+	if !errors.Is(err, errTooManyInputs) {
+		t.Fatalf("error = %v, want %v", err, errTooManyInputs)
+	}
+
+	if readErrorExit(err) != exitUsage {
+		t.Errorf("exit = %d, want %d", readErrorExit(err), exitUsage)
+	}
+
+	// At the bound, the array and the file still fit.
+	short := "[" + strings.Repeat(`{"defaultAction":"SCMP_ACT_ERRNO"},`, maxInputFiles-2) +
+		`{"defaultAction":"SCMP_ACT_ERRNO"}]`
+
+	inputs, err := readInputs([]string{file, stdinArg}, strings.NewReader(short))
+	if err != nil || len(inputs) != maxInputFiles {
+		t.Fatalf("%d profiles in all = %d inputs, %v", maxInputFiles, len(inputs), err)
+	}
+}
+
+// TestInputNamesAreQuoted covers names the caller typed reaching stderr: a
+// control character in one would forge a line or repaint the terminal.
+func TestInputNamesAreQuoted(t *testing.T) {
+	t.Parallel()
+
+	const forged = "x\x1b[31mRED\nforged"
+
+	for _, args := range [][]string{
+		{cmdValidate, forged},
+		{cmdValidate, writeTemp(t, "{}"), "-" + forged},
+		{forged},
+		{cmdHelp, forged},
+	} {
+		_, _, stderr := runCapture(t, args, nil)
+		if strings.Contains(stderr, "\x1b") || strings.Contains(stderr, "\nforged") {
+			t.Errorf("%q: stderr = %q, want the name quoted", args, stderr)
+		}
+
+		if !strings.Contains(stderr, `x\x1b[31mRED\nforged"`) {
+			t.Errorf("%q: stderr = %q, want the quoted name", args, stderr)
+		}
+	}
+}
+
+// TestSeparatorAfterBooleanFlag covers "--" after a flag that takes no
+// value: what follows is a file name, so a missing one is a missing file
+// rather than a misplaced flag.
+func TestSeparatorAfterBooleanFlag(t *testing.T) {
+	t.Parallel()
+
+	for _, args := range [][]string{
+		{cmdValidate, flagStrict, "--", "-missing.json"},
+		{cmdValidate, "--strict=true", "--", "-missing.json"},
+		{cmdMerge, flagStrategy, strategyUnion, flagNoDetectNote, "--", "-missing.json"},
+	} {
+		code, _, stderr := runCapture(t, args, nil)
+		if code != 1 {
+			t.Errorf("%v: exit code = %d, want 1: %s", args, code, stderr)
+		}
+
+		// The wording of a missing file differs between platforms, so the
+		// check is that the name was read as a file.
+		if !strings.Contains(stderr, "reading -missing.json:") {
+			t.Errorf("%v: stderr = %q, want a missing file", args, stderr)
+		}
+	}
+
+	// A "--" that is the value of a flag is not a separator.
+	flags := newFlagSet(cmdValidate, io.Discard)
+	flags.String("output", "", "")
+	flags.Bool("strict", false, "")
+
+	if argsSeparated(flags, []string{"--output", "--", "-x"}) {
+		t.Error("a flag value \"--\" was taken for the separator")
+	}
+
+	if !argsSeparated(flags, []string{"-strict", "--", "-x"}) {
+		t.Error("a \"--\" after a boolean flag was not taken for the separator")
 	}
 }

@@ -1837,3 +1837,124 @@ func TestMergeDefaultModeAcceptsWhatTheMergeAccepts(t *testing.T) {
 		t.Errorf("stderr = %q, want the input named", stderr)
 	}
 }
+
+// TestMergeOutputReplacesTheFile covers how --output writes a regular file:
+// into a new file beside it that is renamed over it, so that a write that
+// fails half way cannot leave the old file truncated and partial. Nothing
+// but the output is left in the directory.
+func TestMergeOutputReplacesTheFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "out.json")
+
+	err := os.WriteFile(target, []byte(strings.Repeat("old ", 1024)), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	code, stderr := mergeToOutputFile(t, target)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0: %s", code, stderr)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(string(data), "old") || !json.Valid(data) {
+		t.Errorf("output file = %q, want the merged profile alone", data)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(entries) != 1 {
+		t.Errorf("directory holds %d entries, want the output alone", len(entries))
+	}
+}
+
+// TestMergeOutputKeepsContentWhenItCannotReplace covers a write that fails
+// after the old file was checked: the directory refuses the new file, and
+// the old one is left whole.
+func TestMergeOutputKeepsContentWhenItCannotReplace(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions do not refuse a write the same way")
+	}
+
+	if os.Geteuid() == 0 {
+		t.Skip("root is not refused by the mode bits")
+	}
+
+	const keep = "keep me"
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "out.json")
+
+	err := os.WriteFile(target, []byte(keep), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = os.Chmod(dir, 0o500)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	code, stderr := mergeToOutputFile(t, target)
+	if code == 0 {
+		t.Fatalf("exit code = 0, want a failure: %s", stderr)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if string(data) != keep {
+		t.Errorf("output file = %q, want %q", data, keep)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(entries) != 1 {
+		t.Errorf("directory holds %d entries, want the output alone", len(entries))
+	}
+}
+
+// TestMergeOutputQuotesASymlinkName covers the name in the symlink refusal,
+// which the caller typed and a terminal would otherwise interpret.
+func TestMergeOutputQuotesASymlinkName(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks are followed there")
+	}
+
+	dir := t.TempDir()
+	link := filepath.Join(dir, "x"+string(rune(0x1b))+"red")
+
+	err := os.Symlink(filepath.Join(dir, "target"), link)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	code, stderr := mergeToOutputFile(t, link)
+	if code == 0 || !strings.Contains(stderr, errSymlinkOutput.Error()) {
+		t.Fatalf("exit code = %d, stderr = %q, want the symlink refused", code, stderr)
+	}
+
+	if strings.Contains(stderr, "\x1b") {
+		t.Errorf("stderr = %q, want the name quoted", stderr)
+	}
+}

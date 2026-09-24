@@ -47,13 +47,13 @@ func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	)
 	strict := flags.Bool(
 		"strict", false,
-		"use strict validation, which also rejects unknown and repeated fields "+
-			"(not with --artifact)",
+		"use strict validation, which also rejects unknown, repeated and "+
+			"misspelled fields and invalid UTF-8 (not with --artifact)",
 	)
 	artifact := flags.Bool(
 		"artifact", false,
 		"validate as an untrusted OCI artifact the way container runtimes do, "+
-			"rejecting repeated fields",
+			"rejecting repeated and misspelled fields and invalid UTF-8",
 	)
 	format := flags.String("format", formatJSON, "output format: json, human")
 	output := flags.String(
@@ -62,7 +62,7 @@ func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	quiet := flags.Bool(
 		"quiet", false,
 		"write no profile on success and note no auto-detected type; errors and "+
-			"warnings still go to stderr (not with --output)",
+			"warnings still go to stderr (not with --output or --format)",
 	)
 	noDetectNote := flags.Bool(
 		"no-detect-note", false,
@@ -74,7 +74,7 @@ func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	if code := checkFlagOrder(flags.Args(), argsSeparated(args), stderr); code != 0 {
+	if code := checkFlagOrder(flags.Args(), argsSeparated(flags, args), stderr); code != 0 {
 		return code
 	}
 
@@ -225,7 +225,7 @@ func validateProfiles[T any](
 	for idx, profile := range profiles {
 		err := check(profile)
 		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "error: %s: %v\n", merge.SafeText(inputs[idx].name), err)
+			_, _ = fmt.Fprintf(stderr, "error: %s: %v\n", merge.SafeName(inputs[idx].name), err)
 
 			failed = true
 		}

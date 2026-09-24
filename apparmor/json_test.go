@@ -217,3 +217,42 @@ func assertJSONRoundTrip(t *testing.T, profile apparmor.Profile) {
 		t.Errorf("round-trip mismatch:\n  got:  %+v\n  want: %+v", got, profile)
 	}
 }
+
+// TestUnmarshalStrictReplacesTheProfile pins what the UnmarshalStrict
+// documentation promises of the profile passed in: a successful decode
+// replaces it whole, so a member the document omits comes out zero rather
+// than keeping what the profile held, and a failed one leaves it untouched.
+func TestUnmarshalStrictReplacesTheProfile(t *testing.T) {
+	t.Parallel()
+
+	held := func() apparmor.Profile {
+		return apparmor.Profile{
+			Executable: nil, Filesystem: nil, Network: nil,
+			Capabilities: &apparmor.CapabilityRules{
+				AllowedCapabilities: []string{capNetAdmin},
+			},
+		}
+	}
+
+	profile := held()
+
+	err := apparmor.UnmarshalStrict([]byte(`{"filesystem":{"readOnlyPaths":["/etc"]}}`), &profile)
+	if err != nil {
+		t.Fatalf("UnmarshalStrict: %v", err)
+	}
+
+	if profile.Capabilities != nil {
+		t.Errorf("the omitted capabilities kept %v, want nil", profile.Capabilities)
+	}
+
+	profile = held()
+
+	err = apparmor.UnmarshalStrict([]byte(`{"filesystem":{},"filesystem":{}}`), &profile)
+	if err == nil {
+		t.Fatal("UnmarshalStrict accepted a repeated member")
+	}
+
+	if !reflect.DeepEqual(profile, held()) {
+		t.Errorf("a failed decode changed the profile to %+v", profile)
+	}
+}

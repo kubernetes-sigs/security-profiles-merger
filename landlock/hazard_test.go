@@ -62,14 +62,13 @@ func TestIntersectLowersAncestorGrant(t *testing.T) {
 	}
 }
 
-// TestIntersectDoesNotLowerRefer covers the same relocation for refer, which
-// the kernel does not inherit across a mount point: it decides a move or
-// link from the rights each parent collects up to its mount point, so under
-// the left profile alone a rename inside "/data/x" is denied whenever
-// "/data" is a mount, however wide the rule on "/" is. Lowering the grant
-// would allow it, so the intersection drops refer unless both inputs grant
-// it on the path itself.
-func TestIntersectDoesNotLowerRefer(t *testing.T) {
+// TestIntersectLowersRefer covers the same relocation for refer, which the
+// kernel inherits like every other right, across mount points too: it
+// collects the rights of both directories of a move up to their mount point
+// and then continues the walk above it. So a refer grant on "/" covers a
+// rename inside "/data/x" even where "/data" is a mount, and the result
+// grants refer there as it grants the other rights.
+func TestIntersectLowersRefer(t *testing.T) {
 	t.Parallel()
 
 	rights := fsRights{
@@ -78,19 +77,14 @@ func TestIntersectDoesNotLowerRefer(t *testing.T) {
 	left := fsProfile(rights, landlock.PathRule{Path: "/", AccessFS: rights})
 	right := fsProfile(rights, landlock.PathRule{Path: "/data/x", AccessFS: rights})
 
-	assertMergeFormat(t, "Intersect", landlock.Intersect,
-		"Profile{fs:make_reg,refer,remove_file /data/x(make_reg,remove_file)}", left, right)
-	assertMergeFormat(t, "Intersect", landlock.Intersect,
-		"Profile{fs:make_reg,refer,remove_file /data/x(make_reg,remove_file)}", right, left)
+	want := "Profile{fs:make_reg,refer,remove_file /data/x(make_reg,refer,remove_file)}"
+	result := assertMergeFormat(t, "Intersect", landlock.Intersect, want, left, right)
+	assertMergeFormat(t, "Intersect", landlock.Intersect, want, right, left)
 
-	// A grant on the path itself is kept: there is no boundary to cross.
-	both := fsProfile(rights,
-		landlock.PathRule{Path: "/", AccessFS: rights},
-		landlock.PathRule{Path: "/data/x", AccessFS: rights},
-	)
-	assertMergeFormat(t, "Intersect", landlock.Intersect,
-		"Profile{fs:make_reg,refer,remove_file /data/x(make_reg,refer,remove_file)}",
-		both, right)
+	lowered := []string{"/data/x"}
+	if got := landlock.LoweredRulePaths(result, left, right); !slices.Equal(got, lowered) {
+		t.Errorf("LoweredRulePaths = %v, want %v", got, lowered)
+	}
 }
 
 // TestLoweredRulePaths covers what the function answers for the shapes a

@@ -17,6 +17,8 @@ limitations under the License.
 package apparmor_test
 
 import (
+	"strconv"
+	"strings"
 	"testing"
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
@@ -232,5 +234,109 @@ func TestFormatProfileNonNil(t *testing.T) {
 
 	if got := apparmor.FormatProfile(profile); got != want {
 		t.Errorf("FormatProfile() = %q, want %q", got, want)
+	}
+}
+
+// TestProfileStringNil pins that String reports a nil profile the way
+// FormatProfile does rather than panicking.
+func TestProfileStringNil(t *testing.T) {
+	t.Parallel()
+
+	var profile *apparmor.Profile
+
+	const want = "Profile{<nil>}"
+
+	if got := profile.String(); got != want {
+		t.Errorf("String() = %q, want %q", got, want)
+	}
+}
+
+// TestFormatProfileQuotesControlBytes covers the values of a profile an
+// artifact's author chooses: a newline in one would forge a log line and an
+// escape sequence would repaint the terminal it is printed on, so both come
+// out quoted, in every list and in the capabilities.
+func TestFormatProfileQuotesControlBytes(t *testing.T) {
+	t.Parallel()
+
+	const (
+		newline = "/a\nFORGED"
+		escape  = "/b\x1b[31mred"
+		capName = "X\nY\x1b[0m"
+	)
+
+	profile := &apparmor.Profile{
+		Executable: &apparmor.ExecutableRules{
+			AllowedExecutables: []string{newline},
+			AllowedLibraries:   []string{escape},
+		},
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths:  []string{newline},
+			WriteOnlyPaths: []string{escape},
+			ReadWritePaths: []string{newline, escape},
+		},
+		Network:      nil,
+		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{capName}},
+	}
+
+	for name, formatted := range map[string]string{
+		"FormatProfile": apparmor.FormatProfile(profile),
+		"String":        profile.String(),
+	} {
+		if strings.ContainsAny(formatted, "\n\x1b") {
+			t.Errorf("%s = %q holds a raw control byte", name, formatted)
+		}
+
+		for _, value := range []string{newline, escape, capName} {
+			if !strings.Contains(formatted, strconv.Quote(value)) {
+				t.Errorf("%s = %q does not quote %q", name, formatted, value)
+			}
+		}
+	}
+}
+
+// TestFormatProfileQuotesSeparators covers values holding the separators a
+// profile and a diff are built from. An alternation is quoted too: that is
+// noisier, but a path and the two paths that split it at its comma no
+// longer render alike, and a capability cannot pose as a diff of three.
+func TestFormatProfileQuotesSeparators(t *testing.T) {
+	t.Parallel()
+
+	readOnly := func(paths ...string) *apparmor.Profile {
+		return &apparmor.Profile{
+			Executable: nil,
+			Filesystem: &apparmor.FilesystemRules{
+				ReadOnlyPaths: paths, WriteOnlyPaths: nil, ReadWritePaths: nil,
+			},
+			Network:      nil,
+			Capabilities: nil,
+		}
+	}
+	caps := func(names ...string) *apparmor.Profile {
+		return &apparmor.Profile{
+			Executable:   nil,
+			Filesystem:   nil,
+			Network:      nil,
+			Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: names},
+		}
+	}
+
+	one := apparmor.FormatProfile(readOnly("/etc/{a,b}"))
+	two := apparmor.FormatProfile(readOnly("/etc/{a", "b}"))
+
+	if one != `Profile{r:"/etc/{a,b}"}` {
+		t.Errorf("FormatProfile() = %s", one)
+	}
+
+	if one == two {
+		t.Errorf("one path and two paths render alike: %s", one)
+	}
+
+	diff, err := apparmor.Diff(caps(), caps("KILL,-CHOWN,+SYS_ADMIN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := apparmor.FormatDiff(diff), `Diff{caps:+"KILL,-CHOWN,+SYS_ADMIN"}`; got != want {
+		t.Errorf("FormatDiff() = %s, want %s", got, want)
 	}
 }

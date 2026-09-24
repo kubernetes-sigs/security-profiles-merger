@@ -122,6 +122,11 @@ func TestFormatProfileNil(t *testing.T) {
 	if got := landlock.FormatProfile(nil); got != want {
 		t.Errorf("FormatProfile(nil) = %q, want %q", got, want)
 	}
+
+	var profile *landlock.Profile
+	if got := profile.String(); got != want {
+		t.Errorf("(*Profile)(nil).String() = %q, want %q", got, want)
+	}
 }
 
 func TestFormatProfileNonNil(t *testing.T) {
@@ -141,5 +146,26 @@ func TestFormatProfileNonNil(t *testing.T) {
 
 	if got := landlock.FormatProfile(profile); got != want {
 		t.Errorf("FormatProfile() = %q, want %q", got, want)
+	}
+}
+
+// TestFormatProfileQuotesSeparators covers a path holding the characters a
+// rule is built from: unquoted, it could spell a second rule.
+func TestFormatProfileQuotesSeparators(t *testing.T) {
+	t.Parallel()
+
+	got := landlock.FormatProfile(&landlock.Profile{
+		HandledAccessFS:  nil,
+		HandledAccessNet: nil,
+		Scoped:           nil,
+		PathRules: []landlock.PathRule{{
+			Path:     "/a(read_file) /b",
+			AccessFS: []landlock.FSAccessRight{"read_file"},
+		}},
+		NetRules: nil,
+	})
+
+	if want := `Profile{"/a(read_file) /b"(read_file)}`; got != want {
+		t.Errorf("FormatProfile() = %s, want %s", got, want)
 	}
 }

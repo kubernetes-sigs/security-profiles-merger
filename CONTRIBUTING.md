@@ -30,8 +30,8 @@ The codebase is organized in layers:
   common: `SliceDiff`, `InputError`, the sentinel errors they share (such as
   `ErrNilProfile`, `ErrMoreProblems` and the ones `UnmarshalStrict` returns),
   and `Diff`, the `IsEqual() bool` method all three `ProfileDiff` types
-  carry. Each profile package re-exports these under its
-  own name, so a caller need not import it, but naming them once is what makes
+  carry. Each profile package re-exports these under its own name, so a
+  caller need not import it, but naming them once is what makes
   `seccomp.SliceDiff` and `apparmor.StringSliceDiff` the same type rather than
   twins, and what lets pkg.go.dev link them. Keep it this small: the three
   profile types have no common shape, so nothing that needs to know which type
@@ -49,20 +49,21 @@ The codebase is organized in layers:
   primitives as they need them.
 - `internal/strictjson/` finds what `encoding/json` accepts silently and a
   profile from somewhere else must not carry: repeated members, members no
-  field reads, invalid UTF-8 and trailing data. Each package's
+  field reads, members that name a field only ignoring case, invalid UTF-8
+  and trailing data. Each package's
   `UnmarshalStrict` is its `Unmarshal`, and the command uses the scans one by
   one, since its default mode warns where the strict modes reject.
 - `internal/testutil/` holds what the tests of several packages share.
 - `seccomp/`, `apparmor/`, `landlock/` each expose the same public API surface:
   `Intersect`, `Union`, `Validate`, `ValidateStrict`, `ValidateArtifact`,
-  `UnmarshalStrict`, `Diff`, `FormatDiff`, and `FormatProfile`. Each package defines its own types
-  (seccomp uses OCI runtime-spec types, apparmor and landlock define their own)
-  and implements profile-specific normalization, deduplication, and merge logic
-  on top of `internal/merge/`. The seccomp package merges syscalls through a
-  clause model (`rules.go`, `args.go`) that reasons about argument filter
-  regions. It relies on libseccomp's evaluation only for the safe shapes
-  described in the package documentation, reads every other rule set conservatively, and
-  only emits safe shapes.
+  `UnmarshalStrict`, `Diff`, `FormatDiff`, and `FormatProfile`. Each package
+  defines its own types (seccomp uses OCI runtime-spec types, apparmor and
+  landlock define their own) and implements profile-specific normalization,
+  deduplication, and merge logic on top of `internal/merge/`. The seccomp
+  package merges syscalls through a clause model (`rules.go`, `args.go`) that
+  reasons about argument filter regions. It relies on libseccomp's evaluation
+  only for the safe shapes described in the package documentation, reads
+  every other rule set conservatively, and only emits safe shapes.
 - `internal/libseccomp/` is a test aid, built only with the `libseccomp` build
   tag: it compiles a profile with libseccomp itself so that tests can check the
   seccomp evaluation model against the filter a kernel would run.
@@ -71,11 +72,10 @@ The codebase is organized in layers:
   detects the type of an input, and the merge, validate, and diff commands
   dispatch through that registry. `input.go` reads and bounds the inputs,
   `decode.go` decodes them under a per-input policy, and `output.go` writes
-  the result. It uses
-  the standard library `flag` package with manual subcommand dispatch. The
-  merge command takes one validation mode per input, so a single run can
-  check a baseline strictly and a pulled profile the way a runtime checks an
-  artifact.
+  the result. It uses the standard library `flag` package with manual
+  subcommand dispatch. The merge command takes one validation mode per input,
+  so a single run can check a baseline strictly and a pulled profile the way a
+  runtime checks an artifact.
 
 ## Local Development
 
@@ -106,17 +106,21 @@ only by `make test-libseccomp`: `.golangci.yml` sets `run.build-tags` to
 `libseccomp`, so the linter loads the cgo bridge behind that tag. Any version
 does for linting; only `make test-libseccomp` cares which one answers.
 
-`make verify` runs the build, lint, test, coverage, tidy, TOC, golden and
-dependency checks in one command. It is not Go-only, and it depends on
-`verify-coverage`, so it runs the test suite. The CI jobs it does not reproduce
-are the ones that need something the Makefile does not install or a machine it
-does not have: the spell check
+`make verify` runs `verify-coverage` (the test suite with the race detector,
+then the coverage floor), `lint`, `verify-tidy`, `verify-mdtoc`,
+`verify-golden`, `verify-dependencies` and `govulncheck` in one command. It
+does not build the binary; `make build` does. It is not Go-only, since `lint`
+needs the libseccomp headers, and it runs everything with the Go on your
+`PATH`. The CI jobs it does not reproduce are the ones that need something the
+Makefile does not install or a machine it does not have: the spell check
 ([crate-ci/typos](https://github.com/crate-ci/typos)), the release snapshot
 build (goreleaser and syft), the cross-platform test job (macOS and Windows
 runners), the cross-architecture vet job, the uninstrumented `test / bounds`
-job, the fuzz matrix, the benchmarks, and `test-libseccomp`, which needs a
-pinned libseccomp build. `make test-libseccomp`, `make fuzz` and `make bench`
-run those last three locally.
+job, the `test / release go` job (the Go the release binaries are built with,
+where the other test jobs use the `go.mod` floor), the fuzz matrix, the
+benchmarks, and `test-libseccomp`, which needs a pinned libseccomp build.
+`make test-libseccomp`, `make fuzz` and `make bench` run those last three
+locally.
 
 ### Golden files
 

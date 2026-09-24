@@ -4,6 +4,22 @@
 # stanzas let the scheduled dependencies workflow ask each project whether
 # the pin is still the current release.
 dependencies:
+  # The Go the release binaries are built with, which CI also tests and
+  # scans with govulncheck. It is not go.mod's go line: that is the oldest
+  # Go the library supports, which raising would raise for every consumer.
+  # golang/go publishes tags but no GitHub releases, and its tags are not
+  # semver, so the official image's tags are what upstream is read from.
+  - name: go
+    version: 1.27.1
+    upstream:
+      flavour: container
+      registry: golang
+    refPaths:
+      - path: .github/workflows/ci.yml
+        match: "GO_VERSION: \""
+      - path: .github/workflows/release.yml
+        match: "GO_VERSION: \""
+
   - name: golangci-lint
     version: 2.13.2
     upstream:
@@ -13,8 +29,6 @@ dependencies:
       - path: Makefile
         match: ^GOLANGCI_LINT_VERSION
       - path: .github/workflows/ci.yml
-        match: "^\\s+version: v"
-      - path: .github/workflows/release.yml
         match: "^\\s+version: v"
 
   - name: syft
