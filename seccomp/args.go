@@ -66,14 +66,17 @@ func sortedArgs(args []specs.LinuxSeccompArg) []specs.LinuxSeccompArg {
 }
 
 func sortArgs(args []specs.LinuxSeccompArg) {
-	slices.SortFunc(args, func(left, right specs.LinuxSeccompArg) int {
-		return cmp.Or(
-			cmp.Compare(left.Index, right.Index),
-			cmp.Compare(left.Value, right.Value),
-			cmp.Compare(left.ValueTwo, right.ValueTwo),
-			cmp.Compare(left.Op, right.Op),
-		)
-	})
+	slices.SortFunc(args, compareArg)
+}
+
+// compareArg orders two conditions by index, value, valueTwo and operator.
+func compareArg(left, right specs.LinuxSeccompArg) int {
+	return cmp.Or(
+		cmp.Compare(left.Index, right.Index),
+		cmp.Compare(left.Value, right.Value),
+		cmp.Compare(left.ValueTwo, right.ValueTwo),
+		cmp.Compare(left.Op, right.Op),
+	)
 }
 
 // argsKey returns a canonical string for a set of argument filters so that

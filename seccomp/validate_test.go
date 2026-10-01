@@ -166,6 +166,84 @@ func TestValidateEmptySyscallName(t *testing.T) {
 	}
 }
 
+func TestValidateSyscallNameSpelling(t *testing.T) {
+	t.Parallel()
+
+	named := func(name string) *specs.LinuxSeccomp {
+		return &specs.LinuxSeccomp{
+			DefaultAction: specs.ActAllow,
+			Syscalls: []specs.LinuxSyscall{
+				{Names: []string{syscallRead, name}, Action: specs.ActLog},
+			},
+		}
+	}
+
+	// A runtime resolves a name through C strings, so it loads this one as
+	// "mount". Every validator rejects it, and reports it once.
+	withNUL := named("mount\x00")
+
+	for name, check := range map[string]func(*specs.LinuxSeccomp) error{
+		"Validate":         seccomp.Validate,
+		"ValidateArtifact": seccomp.ValidateArtifact,
+		"ValidateStrict":   seccomp.ValidateStrict,
+	} {
+		err := check(withNUL)
+		if !errors.Is(err, seccomp.ErrInvalidSyscallName) {
+			t.Errorf("%s: expected ErrInvalidSyscallName, got: %v", name, err)
+
+			continue
+		}
+
+		if got := strings.Count(err.Error(), seccomp.ErrInvalidSyscallName.Error()); got != 1 {
+			t.Errorf("%s: name reported %d times: %v", name, got, err)
+		}
+	}
+
+	// Any other control character names no syscall a runtime knows, so it
+	// loads nothing, and only an artifact is refused for it.
+	withNewline := named("mount\n")
+
+	err := seccomp.Validate(withNewline)
+	if err != nil {
+		t.Errorf("Validate should accept a control character other than NUL: %v", err)
+	}
+
+	err = seccomp.ValidateArtifact(withNewline)
+	if !errors.Is(err, seccomp.ErrInvalidSyscallName) {
+		t.Errorf("ValidateArtifact: expected ErrInvalidSyscallName, got: %v", err)
+	}
+}
+
+func TestIntersectRefusesNULInSyscallName(t *testing.T) {
+	t.Parallel()
+
+	// The artifact would load "mount" as SCMP_ACT_LOG ahead of the
+	// baseline's rule, while the merge reads the name as another syscall
+	// and keeps both.
+	baseline := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActAllow,
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{"mount"}, Action: specs.ActErrno},
+		},
+	}
+	artifact := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActAllow,
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{"access", "mount\x00"}, Action: specs.ActLog},
+		},
+	}
+
+	_, err := seccomp.Intersect(baseline, artifact)
+	if !errors.Is(err, seccomp.ErrInvalidSyscallName) {
+		t.Fatalf("expected ErrInvalidSyscallName, got: %v", err)
+	}
+
+	var inputErr *seccomp.InputError
+	if !errors.As(err, &inputErr) || inputErr.Index != 1 {
+		t.Errorf("expected the artifact to be named as input 1, got: %v", err)
+	}
+}
+
 func TestValidateAllKnownActions(t *testing.T) {
 	t.Parallel()
 
@@ -460,6 +538,9 @@ func TestValidateStrictAllKnownFlags(t *testing.T) {
 		Flags: []specs.LinuxSeccompFlag{
 			specs.LinuxSeccompFlagLog,
 			specs.LinuxSeccompFlagSpecAllow,
+			// The runtime-spec lists it and runtimes load it, though
+			// specs-go has no constant for it.
+			"SECCOMP_FILTER_FLAG_TSYNC",
 		},
 	}
 
@@ -772,7 +853,7 @@ func TestValidateArtifactRejectsListener(t *testing.T) {
 	}
 }
 
-func TestValidateArtifactRunsShapeChecks(t *testing.T) {
+func TestValidateArtifactRunsWellFormedChecks(t *testing.T) {
 	t.Parallel()
 
 	profile := &specs.LinuxSeccomp{

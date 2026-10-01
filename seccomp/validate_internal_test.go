@@ -72,7 +72,7 @@ func TestForEachProperSubsetEnumeratesSubsets(t *testing.T) {
 
 // TestFormatEntries pins the list rendering of duplicate syscall entry
 // indices, including the single-entry form the duplicate report itself never
-// reaches.
+// reaches and the elision that keeps the list from growing with the profile.
 func TestFormatEntries(t *testing.T) {
 	t.Parallel()
 
@@ -84,6 +84,11 @@ func TestFormatEntries(t *testing.T) {
 		{entries: []int{0}, want: "0"},
 		{entries: []int{0, 1}, want: "0 and 1"},
 		{entries: []int{0, 1, 2}, want: "0, 1 and 2"},
+		{entries: []int{0, 1, 2, 3, 4, 5, 6, 7}, want: "0, 1, 2, 3, 4, 5, 6 and 7"},
+		{
+			entries: []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+			want:    "0, 1, 2, 3, 4, 5, 6, 7 and 2 more",
+		},
 	} {
 		if got := formatEntries(testCase.entries); got != testCase.want {
 			t.Errorf("formatEntries(%v) = %q, want %q", testCase.entries, got, testCase.want)

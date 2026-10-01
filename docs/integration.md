@@ -124,7 +124,7 @@ The same calls exist in `apparmor` and `landlock`, which need the
 |---------|---------------------------|
 | `apparmor` | Render the profile text yourself: `FormatProfile` is for people, not for apparmor_parser. Lower-case each capability name first; see [Capability names](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#hdr-Capability_names) |
 | `landlock` | Call `ValidateForABI` with the node's ABI version. Check each of `LoweredRulePaths` (see [below](#landlock-lowered-rule-paths)). A result that handles and scopes nothing restricts nothing and the kernel refuses to load it: apply no ruleset. After `Intersect` that happens only when no input handles or scopes anything, which `ValidateArtifact` refuses in an artifact |
-| `seccomp` | Run the merge on the node that loads the result: the native architecture is that of the running program. `Intersect` may drop a 32-bit or multiplexing architecture the result only lists (see [What the models leave out](#what-the-models-leave-out)). Use `DiffForArch` to compare profiles for another node |
+| `seccomp` | Run the merge on the node that loads the result: the native architecture is that of the running program. `Intersect` may drop a 32-bit or multiplexing architecture the result only lists (see [What the models leave out](#what-the-models-leave-out)). Use `DiffForArch` to compare profiles for another node. Write an empty `Flags` list of the result as `"flags": []`: `specs.LinuxSeccomp` leaves it out when marshaled, and runc and crun set `SECCOMP_FILTER_FLAG_SPEC_ALLOW` for a profile without the member (see [Flags](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Flags)) |
 
 ## Limits
 

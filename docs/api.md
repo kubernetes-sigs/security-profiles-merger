@@ -189,7 +189,7 @@ formatting.
 | `ErrUnusedErrnoRet` | `ValidateArtifact`, `ValidateStrict` | An errno on any other action, which crun refuses |
 | `ErrNotifyNotAllowed` | `ValidateArtifact`, `ValidateStrict` | `SCMP_ACT_NOTIFY`, which needs a listener only the node provides |
 | `ErrListenerNotAllowed` | `ValidateArtifact`, `ValidateStrict` | `listenerPath`, `listenerMetadata` or `SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV` |
-| `ErrInvalidSyscallName` | `ValidateArtifact`, `ValidateStrict` | A name holding a control character, which libseccomp's C API reads differently |
+| `ErrInvalidSyscallName` | `Validate` and up for a NUL byte; `ValidateArtifact`, `ValidateStrict` for any other control character | A name holding a NUL byte, where libseccomp's C API ends it, or another control character |
 | `ErrValueTooWide` | `ValidateArtifact`, `ValidateStrict` | A value or mask above 32 bits where the filter covers a 32-bit architecture |
 | `ErrConflictingEntries` | `ValidateArtifact`, `ValidateStrict` | Rules of one syscall with different results that a runtime refuses or evaluates in its own order ([Conflicting rules](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Conflicting_rules)) |
 | `ErrTooManyEntries`, `ErrTooManyClauses`, `ErrTooManyNames`, `ErrTooManyProfileClauses` | `ValidateArtifact`, `ValidateStrict` | A profile past one of the [limits](#limits) |
@@ -261,6 +261,9 @@ detail.
 - [Flags](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Flags):
   `SECCOMP_FILTER_FLAG_SPEC_ALLOW` survives intersection only if every input
   sets it, `SECCOMP_FILTER_FLAG_LOG` if any does; union the other way round.
+  A nil list leaves the flags to the runtime, which sets
+  `SECCOMP_FILTER_FLAG_SPEC_ALLOW` then, and an empty list sets none, so the
+  merges and `Diff` keep the two apart.
 - [Listener](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Listener):
   `listenerPath`, `listenerMetadata` and
   `SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV` come from the first input that

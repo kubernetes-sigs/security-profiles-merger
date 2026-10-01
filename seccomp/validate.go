@@ -50,12 +50,12 @@ var (
 	// ErrEmptySyscallName is returned when a syscall entry contains an
 	// empty string in its name list.
 	ErrEmptySyscallName = errors.New("empty syscall name")
-	// ErrInvalidSyscallName is returned by ValidateArtifact and
-	// ValidateStrict when a syscall name holds a NUL byte or another
-	// control character. A runtime resolves a name through libseccomp's C
-	// API, where a NUL ends it: "re\x00ad" is added as "read" there while
-	// this package keeps the two apart, so a scanner and the runtime would
-	// read one profile differently.
+	// ErrInvalidSyscallName is returned when a syscall name holds a NUL
+	// byte, and by ValidateArtifact and ValidateStrict when it holds any
+	// other control character. A runtime resolves a name through
+	// libseccomp's C API, where a NUL ends it: "re\x00ad" is added as "read"
+	// there while this package keeps the two apart, so a merge would settle
+	// "read" without the rule the runtime loads for it.
 	ErrInvalidSyscallName = errors.New("invalid syscall name")
 	// ErrDuplicateSyscallName is returned by ValidateStrict when the same
 	// syscall name appears in more than one syscall entry, or more than once
@@ -196,8 +196,10 @@ const MaxArtifactClausesPerSyscall = 256
 // argument indices in range, and known architectures and flags, and that
 // SCMP_ACT_NOTIFY appears only where runc loads it and only with the
 // listenerPath it needs, which is what a runtime needs to load the profile
-// at all. It is what Intersect and Union run on every input, so callers
-// that want to report all problems up front can call it themselves.
+// at all. It also rejects a syscall name holding a NUL byte
+// (ErrInvalidSyscallName), which a runtime loads as another name than the
+// merges read. It is what Intersect and Union run on every input, so
+// callers that want to report all problems up front can call it themselves.
 //
 // Failures are collected and returned together, up to a bound: past it the
 // error matches ErrMoreProblems instead of listing the rest, so a sentinel
@@ -220,6 +222,7 @@ func Validate(profile *specs.LinuxSeccomp) error {
 
 	errs = append(errs,
 		validateSyscallArgs(profile.Syscalls),
+		validateSyscallNames(profile.Syscalls, hasNUL),
 		validateArchitectures(profile.Architectures),
 		validateFlags(profile.Flags),
 		validateNotifySupport(profile),
@@ -374,7 +377,7 @@ func ValidateArtifact(profile *specs.LinuxSeccomp) error {
 // ValidateArtifact as well.
 func artifactChecks() []profileCheck {
 	return []profileCheck{
-		validateShape,
+		validateWellFormed,
 		validateSyscallNameSpelling,
 		validateNoNotify,
 		validateNoListener,
@@ -440,10 +443,10 @@ func validateWith(
 	return merge.JoinLimited(errs...)
 }
 
-// validateShape runs the checks shared by ValidateStrict and
+// validateWellFormed runs the checks shared by ValidateStrict and
 // ValidateArtifact that do not depend on trust: duplicate architectures and
 // flags, and out-of-range errno values.
-func validateShape(profile *specs.LinuxSeccomp) error {
+func validateWellFormed(profile *specs.LinuxSeccomp) error {
 	return merge.JoinLimited(
 		validateDuplicateArchitectures(profile.Architectures),
 		validateDuplicateFlags(profile.Flags),
@@ -822,17 +825,23 @@ func (c *ruleChecker) checkShapes() {
 	}
 }
 
-// validateSyscallNameSpelling reports a syscall name a runtime would read
-// differently than this package does: one holding a NUL, which ends the
-// name in the C API a runtime resolves it through, or another control
+// validateSyscallNameSpelling reports a syscall name holding a control
 // character, which no syscall name holds and which forges a line wherever
-// the profile is rendered.
+// the profile is rendered. A name holding a NUL is left to Validate, which
+// reports it for every profile.
 func validateSyscallNameSpelling(profile *specs.LinuxSeccomp) error {
+	return validateSyscallNames(profile.Syscalls, func(name string) bool {
+		return hasControlByte(name) && !hasNUL(name)
+	})
+}
+
+// validateSyscallNames reports every syscall name invalid holds for.
+func validateSyscallNames(syscalls []specs.LinuxSyscall, invalid func(string) bool) error {
 	var errs []error
 
-	for idx := range profile.Syscalls {
-		for _, name := range profile.Syscalls[idx].Names {
-			if !hasControlByte(name) {
+	for idx := range syscalls {
+		for _, name := range syscalls[idx].Names {
+			if !invalid(name) {
 				continue
 			}
 
@@ -844,6 +853,13 @@ func validateSyscallNameSpelling(profile *specs.LinuxSeccomp) error {
 	}
 
 	return merge.JoinLimited(errs...)
+}
+
+// hasNUL reports whether a name holds a NUL, which ends the name in the C
+// API a runtime resolves it through, so that the runtime reads another name
+// than this package does.
+func hasNUL(name string) bool {
+	return strings.IndexByte(name, 0) >= 0
 }
 
 // hasControlByte reports whether a name holds a C0 control character or DEL.
@@ -947,7 +963,10 @@ func validateDuplicateSyscallNames(syscalls []specs.LinuxSyscall) error {
 			}
 
 			if _, dup := inEntry[name]; dup {
-				if !slices.Contains(current.repeatedIn, idx) {
+				// Entries are visited in order, so an entry already
+				// recorded is the last one.
+				last := len(current.repeatedIn) - 1
+				if last < 0 || current.repeatedIn[last] != idx {
 					current.repeatedIn = append(current.repeatedIn, idx)
 				}
 
@@ -984,11 +1003,24 @@ func validateDuplicateSyscallNames(syscalls []specs.LinuxSyscall) error {
 	return merge.JoinLimited(errs...)
 }
 
-// formatEntries renders entry indices as "0", "0 and 1", or "0, 1 and 2".
+// maxListedEntries bounds how many entry indices formatEntries lists. One
+// name can sit in as many entries as a profile has, so an error listing all
+// of them would grow with the profile (see merge.MaxJoinedErrors).
+const maxListedEntries = 8
+
+// formatEntries renders entry indices as "0", "0 and 1", or "0, 1 and 2",
+// and past maxListedEntries the first of them followed by how many it left
+// out, as in "0, 1, 2, 3, 4, 5, 6, 7 and 5 more".
 func formatEntries(entries []int) string {
-	parts := make([]string, len(entries))
-	for idx, entry := range entries {
+	listed := min(len(entries), maxListedEntries)
+
+	parts := make([]string, listed)
+	for idx, entry := range entries[:listed] {
 		parts[idx] = strconv.Itoa(entry)
+	}
+
+	if omitted := len(entries) - listed; omitted > 0 {
+		return strings.Join(parts, ", ") + " and " + strconv.Itoa(omitted) + " more"
 	}
 
 	last := len(parts) - 1
@@ -1044,7 +1076,8 @@ func isKnownFlag(flag specs.LinuxSeccompFlag) bool {
 	switch flag {
 	case specs.LinuxSeccompFlagLog,
 		specs.LinuxSeccompFlagSpecAllow,
-		specs.LinuxSeccompFlagWaitKillableRecv:
+		specs.LinuxSeccompFlagWaitKillableRecv,
+		flagTsync:
 		return true
 	default:
 		return false
