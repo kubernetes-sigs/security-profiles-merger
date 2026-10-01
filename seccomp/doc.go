@@ -270,11 +270,17 @@ limitations under the License.
 // fewest conditions, so this takes a profile in which every such rule names
 // a syscall the architecture lacks, as "socketcall" with one unconditional
 // rule and "socket" with a conditional one does on x86_64, in a filter of
-// x86_64 and x32 together or of any other architecture. It does not happen
-// where libseccomp sorts into a binary tree, which runc asks for above 32
-// syscall names and crun never does. An input can have that form, and a
-// merge can produce it from inputs that do not, since it drops rules equal
-// to the default and collapses others to unconditional ones; under a
+// x86_64 and x32 together or of an architecture that does not multiplex
+// through socketcall(2): arm, aarch64, riscv64, loongarch64, parisc,
+// parisc64 and 64-bit and n32 MIPS. A filter of x86_64 or x32 alone loads
+// the number before any syscall is tested, and the multiplexing
+// architectures (x86, 32-bit MIPS, ppc, ppc64, ppc64le, s390, s390x,
+// m68k, sh) drop a rule on a syscall they lack when it is added, so
+// neither is affected. It does not
+// happen where libseccomp sorts into a binary tree, which runc asks for
+// above 32 syscall names and crun never does. An input can have that form,
+// and a merge can produce it from inputs that do not, since it drops rules
+// equal to the default and collapses others to unconditional ones; under a
 // permissive default the result then permits what an input denies. A
 // profile that names one syscall every covered architecture has in an
 // unconditional rule is not affected, which every allowlist is.
