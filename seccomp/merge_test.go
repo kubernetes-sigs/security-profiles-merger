@@ -3507,3 +3507,40 @@ func runtimeErrnoOf(entry specs.LinuxSyscall) uint {
 
 	return *entry.ErrnoRet
 }
+
+// TestIntersectCommutesForEquivalentSpellings merges two profiles whose
+// conditions on one argument are equivalent but spelled differently, "a0 <
+// 1" next to a second condition and "a0 <= 0" alone. The conjoined clause
+// takes the spelling of the first input, so one order once held the same
+// clause twice in two spellings, which is no safe shape, and collapsed the
+// syscall.
+func TestIntersectCommutesForEquivalentSpellings(t *testing.T) {
+	t.Parallel()
+
+	left := profileOf(specs.ActTrap,
+		filtered("clone", specs.ActErrno, arg(0, specs.OpLessThan, 1), masked(1, 1, 0)),
+	)
+	right := profileOf(specs.ActTrap,
+		filtered("clone", specs.ActErrno, arg(0, specs.OpLessEqual, 0)),
+	)
+
+	for name, pair := range map[string][2]*specs.LinuxSeccomp{
+		"left first": {left, right}, "right first": {right, left},
+	} {
+		result, err := seccomp.Intersect(pair[0], pair[1])
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+
+		if len(result.Syscalls) != 1 || result.Syscalls[0].Action != specs.ActErrno ||
+			len(result.Syscalls[0].Args) != 2 {
+			t.Errorf("%s: want one clone entry with both conditions and SCMP_ACT_ERRNO, got %s",
+				name, seccomp.FormatProfile(result))
+		}
+	}
+
+	// The kept spelling follows the first input, so the two orders are
+	// compared by what they do to each call, against the inputs as well.
+	checkMergeSafety(t, intersectSafety(), left, right, true)
+	checkMergeSafety(t, unionSafety(), left, right, true)
+}

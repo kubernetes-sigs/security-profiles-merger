@@ -18,6 +18,7 @@ package seccomp
 
 import (
 	"math/bits"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -338,5 +339,53 @@ func TestIndexSetBeyondItsBits(t *testing.T) {
 
 	if !inWord.intersects(&inMap) || !inMap.intersects(&inWord) {
 		t.Error("sets sharing an index past the word report no intersection")
+	}
+}
+
+// TestPruneDominatedOnEquivalentFilters checks what pruneDominated does
+// with two clauses whose filters cover each other, "a0 <= 0" and "a0 < 1":
+// with one result the later one goes, with different results both stay,
+// since they conflict and the set collapses as a whole.
+func TestPruneDominatedOnEquivalentFilters(t *testing.T) {
+	t.Parallel()
+
+	le0 := func(action specs.LinuxSeccompAction) clause {
+		return clauseOn(action, 0, specs.OpLessEqual, 0)
+	}
+	lt1 := func(action specs.LinuxSeccompAction) clause {
+		return clauseOn(action, 0, specs.OpLessThan, 1)
+	}
+
+	for name, test := range map[string]struct {
+		clauses []clause
+		want    []clause
+	}{
+		"same result keeps the first": {
+			clauses: []clause{le0(specs.ActErrno), lt1(specs.ActErrno)},
+			want:    []clause{le0(specs.ActErrno)},
+		},
+		"same result keeps the first in the other order": {
+			clauses: []clause{lt1(specs.ActErrno), le0(specs.ActErrno)},
+			want:    []clause{lt1(specs.ActErrno)},
+		},
+		"different results keep both": {
+			clauses: []clause{le0(specs.ActErrno), lt1(specs.ActAllow)},
+			want:    []clause{le0(specs.ActErrno), lt1(specs.ActAllow)},
+		},
+		"a strictly wider clause with one result prunes the narrower": {
+			clauses: []clause{
+				le0(specs.ActErrno),
+				{action: specs.ActErrno, errnoRet: nil, args: []specs.LinuxSeccompArg{
+					{Index: 0, Value: 0, ValueTwo: 0, Op: specs.OpLessEqual},
+					{Index: 1, Value: 1, ValueTwo: 0, Op: specs.OpEqualTo},
+				}},
+			},
+			want: []clause{le0(specs.ActErrno)},
+		},
+	} {
+		got := pruneDominated(slices.Clone(test.clauses))
+		if !reflect.DeepEqual(got, test.want) {
+			t.Errorf("%s: pruneDominated(%v) = %v, want %v", name, test.clauses, got, test.want)
+		}
 	}
 }
