@@ -25,26 +25,29 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
-// newFlagSet returns a flag set for a subcommand whose errors go to stderr.
-func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
+// newFlagSet returns a flag set for a subcommand. The flag package prints
+// nothing of its own: parseFlags reports a parse error and prints the usage
+// itself, to stdout or stderr depending on why it is needed.
+func newFlagSet(name string) *flag.FlagSet {
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	// parseFlags prints the usage itself, to stdout or stderr depending on
-	// why it is needed.
+	flags.SetOutput(io.Discard)
 	flags.Usage = func() {}
 
 	return flags
 }
 
 // parseFlags parses a subcommand's arguments. Requested help goes to stdout
-// and exits 0. A parse error, which the flag package has already reported on
-// stderr, is followed by the usage on stderr and exits with the usage code.
-// The first result reports whether the command should stop with the second.
+// and exits 0. A parse error is reported on stderr, followed by the usage,
+// and exits with the usage code. The error quotes the argument it is about,
+// which the caller chose, so it is written the way every other argument is
+// (see merge.SafeName). The first result reports whether the command should
+// stop with the second.
 func parseFlags(
 	flags *flag.FlagSet, usageText string, args []string, stdout, stderr io.Writer,
 ) (bool, int) {
@@ -54,24 +57,70 @@ func parseFlags(
 	}
 
 	if errors.Is(err, flag.ErrHelp) {
-		printUsage(flags, usageText, stdout, stderr)
-
-		return true, 0
+		return true, printHelp(usageWithFlags(flags, usageText), stdout, stderr)
 	}
 
-	printUsage(flags, usageText, stderr, stderr)
+	_, _ = fmt.Fprintln(stderr, merge.SafeName(twoDashes(err.Error())))
+
+	printUsage(flags, usageText, stderr)
 
 	return true, exitUsage
 }
 
-// printUsage writes a subcommand's usage to out and restores the flag set's
-// error output to stderr.
-func printUsage(flags *flag.FlagSet, usageText string, out, stderr io.Writer) {
-	_, _ = fmt.Fprint(out, usageText)
+// twoDashes rewrites the flag an error of the flag package names from the
+// one dash that package prints to the two the usage and the documentation
+// spell a flag with. The name follows one of a few phrases; the last one in
+// the message is taken, since a value the error quotes comes before it.
+func twoDashes(message string) string {
+	for _, phrase := range []string{
+		" for flag -", " for -",
+		"flag provided but not defined: -", "flag needs an argument: -",
+	} {
+		if at := strings.LastIndex(message, phrase); at >= 0 {
+			end := at + len(phrase)
 
-	flags.SetOutput(out)
+			return message[:end] + "-" + message[end:]
+		}
+	}
+
+	return message
+}
+
+// printHelp writes help the caller asked for to stdout. A write failure is
+// reported like every other one, so that a full disk or a closed pipe does
+// not look like a successful run.
+func printHelp(text string, stdout, stderr io.Writer) int {
+	_, err := fmt.Fprint(stdout, text)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "error: writing output: %v\n", err)
+
+		return 1
+	}
+
+	return 0
+}
+
+// printUsage writes a subcommand's usage to out, next to the error that
+// called for it.
+func printUsage(flags *flag.FlagSet, usageText string, out io.Writer) {
+	_, _ = fmt.Fprint(out, usageWithFlags(flags, usageText))
+}
+
+// flagDefaultLine matches the start of a flag in what the flag package
+// prints for PrintDefaults.
+var flagDefaultLine = regexp.MustCompile(`(?m)^ {2}-`)
+
+// usageWithFlags returns a subcommand's usage followed by its flags. The
+// flag package lists a flag with one dash; they are written with two, as
+// the usage texts and the documentation spell them.
+func usageWithFlags(flags *flag.FlagSet, usageText string) string {
+	var defaults strings.Builder
+
+	flags.SetOutput(&defaults)
 	flags.PrintDefaults()
-	flags.SetOutput(stderr)
+	flags.SetOutput(io.Discard)
+
+	return usageText + flagDefaultLine.ReplaceAllString(defaults.String(), "  --")
 }
 
 // flagNamed reports whether the named flag was given on the command line,
@@ -177,7 +226,7 @@ func checkStdin(
 			stderr, "error: no input files given and stdin is a terminal",
 		)
 
-		printUsage(flags, usageText, stderr, stderr)
+		printUsage(flags, usageText, stderr)
 
 		return exitUsage
 	}
@@ -185,23 +234,11 @@ func checkStdin(
 	return 0
 }
 
-// isInteractive reports whether reader is a terminal. Any character device
-// other than the null device is taken for one: reading /dev/null is a valid
-// way to provide empty input.
+// isInteractive reports whether reader is a terminal.
 func isInteractive(reader io.Reader) bool {
 	file, ok := reader.(*os.File)
-	if !ok || file == nil {
-		return false
-	}
 
-	info, err := file.Stat()
-	if err != nil || info.Mode()&fs.ModeCharDevice == 0 {
-		return false
-	}
-
-	null, err := os.Stat(os.DevNull)
-
-	return err != nil || !os.SameFile(info, null)
+	return ok && file != nil && isTerminal(file)
 }
 
 // plural returns noun with an "s" appended unless count is one.

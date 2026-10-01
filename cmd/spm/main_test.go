@@ -18,7 +18,6 @@ package main
 
 import (
 	"errors"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -643,7 +642,7 @@ func TestSeparatorAfterBooleanFlag(t *testing.T) {
 	}
 
 	// A "--" that is the value of a flag is not a separator.
-	flags := newFlagSet(cmdValidate, io.Discard)
+	flags := newFlagSet(cmdValidate)
 	flags.String("output", "", "")
 	flags.Bool("strict", false, "")
 

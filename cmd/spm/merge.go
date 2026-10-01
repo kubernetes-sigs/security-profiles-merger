@@ -88,7 +88,7 @@ func bindMergeFlags(flags *flag.FlagSet) *mergeOptions {
 }
 
 func runMerge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	flags := newFlagSet(cmdMerge, stderr)
+	flags := newFlagSet(cmdMerge)
 	opts := bindMergeFlags(flags)
 
 	if done, code := parseFlags(flags, mergeUsage, args, stdout, stderr); done {
@@ -199,7 +199,7 @@ func validateMergeFlags(
 	strategy := opts.strategy
 	if strategy == "" {
 		_, _ = fmt.Fprintln(stderr, "error: --strategy is required")
-		printUsage(flags, mergeUsage, stderr, stderr)
+		printUsage(flags, mergeUsage, stderr)
 
 		return exitUsage
 	}

@@ -106,6 +106,24 @@ func TestQuoteBoundedTruncatesOnARuneBoundary(t *testing.T) {
 	}
 }
 
+// TestBoundedTextKeepsInvalidUTF8 covers a value that holds no rune start
+// near the limit, which only one that is not valid UTF-8 does. There is no
+// sequence to keep whole in it, so the cut does not back off further and
+// what is shown is the start of the value rather than nothing.
+func TestBoundedTextKeepsInvalidUTF8(t *testing.T) {
+	t.Parallel()
+
+	continuation := strings.Repeat("\x80", 2*merge.MaxMessageBytes)
+
+	if got := merge.QuoteBounded(continuation); len(got) < merge.MaxQuotedBytes {
+		t.Errorf("QuoteBounded shows %d bytes of the value: %s", len(got), got)
+	}
+
+	if got := merge.BoundedText(continuation); len(got) < merge.MaxMessageBytes {
+		t.Errorf("BoundedText shows %d bytes of the text", len(got))
+	}
+}
+
 func TestJoinLimitedBelowTheLimit(t *testing.T) {
 	t.Parallel()
 

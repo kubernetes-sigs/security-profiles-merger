@@ -383,3 +383,135 @@ func TestInputLimitsAtTheirBoundary(t *testing.T) {
 		}
 	})
 }
+
+// TestTypeFlagRejectsInputOfNoKind covers a document holding members none
+// of which the named type knows, such as a profile wrapped in an object of
+// another format. Only the members of the named type are decoded, so it
+// would read as an empty profile: valid, and deny-all once intersected.
+func TestTypeFlagRejectsInputOfNoKind(t *testing.T) {
+	t.Parallel()
+
+	wrapped := writeTemp(t,
+		`{"apiVersion":"v1","kind":"AppArmorProfile","spec":{"filesystem":{}}}`)
+
+	for _, args := range [][]string{
+		{cmdValidate, flagType, typeAppArmor, "--artifact", wrapped},
+		{cmdMerge, flagType, typeAppArmor, flagStrategy, strategyIntersect, wrapped, wrapped},
+		{cmdDiff, flagType, typeAppArmor, wrapped, wrapped},
+		{cmdValidate, flagType, typeLandlock, wrapped},
+	} {
+		code, stdout, stderr := runCapture(t, args, nil)
+		if code != exitUsage || stdout != "" ||
+			!strings.Contains(stderr, "holds no member of") {
+			t.Errorf("%v: exit code = %d, stdout = %q, stderr = %q, want %d and the reason",
+				args, code, stdout, stderr, exitUsage)
+		}
+	}
+
+	// An empty object holds nothing the type could fail to know.
+	code, _, stderr := runCapture(t,
+		[]string{cmdValidate, flagType, typeAppArmor}, strings.NewReader("{}"))
+	if code != 0 {
+		t.Errorf("empty object: exit code = %d, stderr = %q, want 0", code, stderr)
+	}
+}
+
+// TestNonObjectInputReportsAlike covers documents that are not an object.
+// They are no profile of any type, and are reported the same way whether or
+// not the type is named, without the Go type a decoder would name.
+func TestNonObjectInputReportsAlike(t *testing.T) {
+	t.Parallel()
+
+	for _, document := range []string{`"text"`, `null`, `[null]`, `7`} {
+		for _, args := range [][]string{
+			{cmdValidate},
+			{cmdValidate, flagType, typeSeccomp},
+			{cmdValidate, flagType, typeLandlock},
+		} {
+			code, _, stderr := runCapture(t, args, strings.NewReader(document))
+			if code != 1 || !strings.Contains(stderr, errNotAnObject.Error()) ||
+				strings.Contains(stderr, "Go value") {
+				t.Errorf("%s with %v: exit code = %d, stderr = %q, want 1 and %q",
+					document, args, code, stderr, errNotAnObject)
+			}
+		}
+	}
+}
+
+// TestFlagErrorIsEscaped covers a flag error, which quotes an argument the
+// caller chose: it is written the way every other argument is, so that an
+// escape sequence in it does not reach the terminal.
+func TestFlagErrorIsEscaped(t *testing.T) {
+	t.Parallel()
+
+	code, _, stderr := runCapture(t, []string{cmdMerge, "--\x1b[2J"}, nil)
+	if code != exitUsage || strings.Contains(stderr, "\x1b") ||
+		!strings.Contains(stderr, "flag provided but not defined") {
+		t.Errorf("exit code = %d, stderr = %q, want %d and an escaped flag error",
+			code, stderr, exitUsage)
+	}
+}
+
+// TestFlagErrorsSpellFlagsWithTwoDashes covers the errors the flag package
+// writes, which name a flag with one dash where the usage and the
+// documentation spell it with two.
+func TestFlagErrorsSpellFlagsWithTwoDashes(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{cmdMerge, "--typo"}, "flag provided but not defined: --typo"},
+		{[]string{cmdMerge, flagType}, "flag needs an argument: --type"},
+		{
+			[]string{cmdValidate, "--strict=maybe"},
+			`invalid boolean value "maybe" for --strict`,
+		},
+	} {
+		code, _, stderr := runCapture(t, test.args, nil)
+		if code != exitUsage || !strings.Contains(stderr, test.want) {
+			t.Errorf("%v: exit code = %d, stderr = %q, want %d and %q",
+				test.args, code, stderr, exitUsage, test.want)
+		}
+	}
+
+	// A value the error quotes is left as it is, even where it holds one of
+	// the phrases a flag name follows.
+	const (
+		quoted = `invalid value " for -x" for flag -n: parse error`
+		want   = `invalid value " for -x" for flag --n: parse error`
+	)
+
+	if got := twoDashes(quoted); got != want {
+		t.Errorf("twoDashes(%q) = %q, want %q", quoted, got, want)
+	}
+}
+
+// TestHelpSpellsFlagsAndReportsWriteFailures covers the help a caller asks
+// for: flags are listed with two dashes, as the usage and the documentation
+// spell them, and a write failure is not a successful run.
+func TestHelpSpellsFlagsAndReportsWriteFailures(t *testing.T) {
+	t.Parallel()
+
+	for _, args := range [][]string{
+		{cmdHelp, cmdMerge}, {cmdMerge, flagHelp}, {cmdValidate, flagHelp}, {cmdDiff, flagHelp},
+	} {
+		code, stdout, _ := runCapture(t, args, nil)
+		if code != 0 || !strings.Contains(stdout, "\n  --type string") ||
+			strings.Contains(stdout, "\n  -type") {
+			t.Errorf("%v: exit code = %d, stdout = %q, want flags with two dashes",
+				args, code, stdout)
+		}
+	}
+
+	for _, args := range [][]string{
+		{cmdHelp}, {flagHelp}, {cmdHelp, cmdMerge}, {cmdMerge, flagHelp},
+	} {
+		code, stderr := runCaptureTo(t, args, nil, &failWriter{failAfter: 0, written: 0})
+		if code != 1 || !strings.Contains(stderr, errWriteFailed.Error()) {
+			t.Errorf("%v: exit code = %d, stderr = %q, want 1 and the write failure",
+				args, code, stderr)
+		}
+	}
+}

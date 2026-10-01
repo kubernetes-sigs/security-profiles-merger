@@ -477,7 +477,7 @@ func HasField(target reflect.Type, name string) bool {
 		return false
 	}
 
-	_, known, _ := jsonFields(target).lookup(name)
+	_, known, _ := fieldsOf(target).lookup(name)
 
 	return known
 }
@@ -561,12 +561,12 @@ func walkStructFields(value any, typ reflect.Type, prefix string, found *fieldFi
 		return
 	}
 
-	fields := jsonFields(typ)
+	fields := fieldsOf(typ)
 
 	for _, key := range slices.Sorted(maps.Keys(object)) {
 		fieldType, known, exact := fields.lookup(key)
 		if !known {
-			found.unknown.add(joinFieldPath(prefix, key))
+			found.unknown.addLazily(func() string { return joinFieldPath(prefix, key) })
 
 			continue
 		}
@@ -729,6 +729,28 @@ func (set fieldSet) lookup(key string) (reflect.Type, bool, bool) {
 	fieldType, ok := set.folded[foldName(key)]
 
 	return fieldType, ok, false
+}
+
+// fieldSets holds the field set of every struct type asked for, by type. A
+// walk asks once per object of a document and type detection once per
+// member, and a document chooses how many of both it has, while the types
+// are the handful a profile is made of.
+//
+//nolint:gochecknoglobals // a cache of immutable values keyed by type
+var fieldSets sync.Map
+
+// fieldsOf returns jsonFields of a struct type, computed once per type.
+func fieldsOf(typ reflect.Type) fieldSet {
+	if cached, ok := fieldSets.Load(typ); ok {
+		set, _ := cached.(fieldSet)
+
+		return set
+	}
+
+	set := jsonFields(typ)
+	fieldSets.Store(typ, set)
+
+	return set
 }
 
 // jsonFields collects the JSON-visible fields of a struct type, including

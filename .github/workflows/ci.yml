@@ -8,9 +8,15 @@ on:
   # exactly the checks a pull request does.
   workflow_call:
 
+# A newer push to a pull request makes the run before it pointless. A run on
+# main is not: it uploads the coverage and saves the benchmark baseline and
+# the fuzz corpus of its commit, so every merge must finish its own. A group
+# holds one running and one pending run and drops the pending one for a
+# newer, whether or not it cancels the running one, so the runs outside pull
+# requests are grouped by commit and never share one.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -59,6 +65,16 @@ jobs:
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.14.0
+      # cmd/spm has files for hosts that are not Unix, which the run above
+      # never loads: a constant only the Unix file used went unnoticed there.
+      # Only the command is linted this way, since the libseccomp bridge the
+      # config pulls in does not build for Windows.
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        env:
+          GOOS: windows
+        with:
+          version: v2.14.0
+          args: ./cmd/...
 
   test:
     runs-on: ubuntu-latest
@@ -112,6 +128,37 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
       - run: go test -count=1 ./...
+
+  # The seccomp merges settle rules by the native architecture: a 32-bit one
+  # compares half of each value, and one that multiplexes socket and IPC
+  # calls reads those rules a second way. The jobs above only ever run as
+  # amd64, so the suite also runs where that needs no emulation: as 386 on
+  # the same runners, which is both 32-bit and multiplexing, and on an arm64
+  # runner. s390x and ppc64le would need qemu, under which the wall-clock
+  # bounds of the suite do not hold, so those are only vetted below.
+  test-arch:
+    name: test / linux-${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: "386"
+            runner: ubuntu-latest
+          - goarch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - env:
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: go test -count=1 ./...
 
   # The runners are all 64-bit, so a word-size mistake compiles here and
   # breaks for whoever vendors the library into a 32-bit build. Nothing is
@@ -198,15 +245,17 @@ jobs:
         run: make test-libseccomp
 
   # The library handles Linux profile paths on every host and binaries are
-  # released for these platforms, so the packages are tested there too.
+  # released for these platforms, so the packages are tested there too, on
+  # the floor and on the Go the binaries are built with.
   test-cross:
-    name: test / ${{ matrix.os }}
+    name: test / ${{ matrix.os }} / ${{ matrix.go }} go
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
+        go: [floor, release]
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -214,7 +263,8 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ matrix.go == 'release' && env.GO_VERSION || '' }}
+          go-version-file: ${{ matrix.go == 'floor' && 'go.mod' || '' }}
       - run: go test -count=1 ./...
 
   fuzz-prepare:
@@ -282,7 +332,11 @@ jobs:
       # The corpus the fuzzing engine grows lives in the Go build cache, not
       # in testdata/fuzz, which only holds committed regression inputs.
       - run: echo "GOFUZZCACHE=$(go env GOCACHE)/fuzz" >> "$GITHUB_ENV"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # A pull request starts from the corpus main grew and saves none of
+      # its own: a cache saved from a pull request can only be restored by
+      # that pull request, so saving one per target and commit there fills
+      # the cache quota with entries nothing reads.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.GOFUZZCACHE }}
           key: fuzz-${{ matrix.fuzz.name }}-${{ github.sha }}
@@ -290,16 +344,26 @@ jobs:
       # go test exits 0 when the pattern matches no target, so a target
       # renamed, deleted or hidden behind a build tag would fuzz nothing for
       # thirty seconds and pass. The matrix completeness check counts the
-      # declarations; this checks that the run did something.
+      # declarations; this checks that the run did something. The matrix
+      # values reach the script through the environment rather than being
+      # written into it.
       - shell: bash
+        env:
+          FUZZ_TARGET: ${{ matrix.fuzz.target }}
+          FUZZ_PACKAGE: ${{ matrix.fuzz.package }}
         run: |
           set -o pipefail
-          go test -fuzz="^${{ matrix.fuzz.target }}\$" -fuzztime=30s \
-            ${{ matrix.fuzz.package }} 2>&1 | tee fuzz.log
+          go test -fuzz="^${FUZZ_TARGET}\$" -fuzztime=30s \
+            "$FUZZ_PACKAGE" 2>&1 | tee fuzz.log
           if grep -q "no fuzz tests to fuzz" fuzz.log; then
-            echo "::error::${{ matrix.fuzz.target }} matched no fuzz target"
+            echo "::error::${FUZZ_TARGET} matched no fuzz target"
             exit 1
           fi
+      - if: github.event_name != 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.GOFUZZCACHE }}
+          key: fuzz-${{ matrix.fuzz.name }}-${{ github.sha }}
 
   benchmark:
     runs-on: ubuntu-latest
@@ -328,14 +392,18 @@ jobs:
       # into tee hides a failing or panicking benchmark behind tee's own
       # exit code, and the job stays green on partial output.
       - shell: bash
+        env:
+          BENCH_PACKAGE: ${{ matrix.package }}
         run: |
           set -o pipefail
-          go test -bench=. -benchmem -count=5 -run=^$ ${{ matrix.package }} | tee benchmark.txt
+          go test -bench=. -benchmem -count=5 -run=^$ "$BENCH_PACKAGE" | tee benchmark.txt
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: benchmark-${{ matrix.name }}
           path: benchmark.txt
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # As for the fuzz corpus, a pull request reads the baseline main saved
+      # and saves none of its own, which nothing else could restore.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ./cache
           key: benchmark-${{ matrix.name }}-${{ github.sha }}
@@ -364,6 +432,11 @@ jobs:
           alert-threshold: "200%"
           summary-always: true
           fail-on-alert: false
+      - if: github.event_name != 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ./cache
+          key: benchmark-${{ matrix.name }}-${{ github.sha }}
 
   govulncheck:
     runs-on: ubuntu-latest
