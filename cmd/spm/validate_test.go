@@ -708,3 +708,47 @@ func TestValidateStrictWithArtifactRejected(t *testing.T) {
 		t.Errorf("stderr = %q, want the flag conflict reported", stderr)
 	}
 }
+
+// TestValidateLandlockNetRuleNeedsPort covers a network rule without a
+// port, which decodes as a rule on port 0. The modes that take the document
+// for one they did not write refuse it, and the default mode warns, as it
+// does for every other thing the decoder reads without a word.
+func TestValidateLandlockNetRuleNeedsPort(t *testing.T) {
+	t.Parallel()
+
+	missing := writeTemp(t,
+		`{"handledAccessNet":["bind_tcp"],"netRules":[{"accessNet":["bind_tcp"]}]}`)
+
+	const member = `"netRules[0].port"`
+
+	for _, mode := range []string{"--artifact", "--strict"} {
+		code, _, stderr := runCapture(t,
+			[]string{cmdValidate, flagType, typeLandlock, mode, missing}, nil)
+		if code != 1 || !strings.Contains(stderr, "error: ") || !strings.Contains(stderr, member) {
+			t.Errorf("%s: exit code = %d, stderr = %q, want 1 and an error naming %s",
+				mode, code, stderr, member)
+		}
+	}
+
+	code, _, stderr := runCapture(t, []string{cmdValidate, flagType, typeLandlock, missing}, nil)
+	if code != 0 || !strings.Contains(stderr, "warning: ") || !strings.Contains(stderr, member) {
+		t.Errorf("default mode: exit code = %d, stderr = %q, want 0 and a warning naming %s",
+			code, stderr, member)
+	}
+}
+
+// TestValidateLandlockRepeatedPort covers a port repeated with a null, which
+// decodes as the port named first: the document is warned about for the
+// repetition, and not for a port it did name.
+func TestValidateLandlockRepeatedPort(t *testing.T) {
+	t.Parallel()
+
+	repeated := writeTemp(t,
+		`{"handledAccessNet":["bind_tcp"],"netRules":[{"port":80,"port":null}]}`)
+
+	code, _, stderr := runCapture(t, []string{cmdValidate, flagType, typeLandlock, repeated}, nil)
+	if code != 0 || !strings.Contains(stderr, landlock.ErrDuplicateKey.Error()) ||
+		strings.Contains(stderr, landlock.ErrMissingField.Error()) {
+		t.Errorf("exit code = %d, stderr = %q, want 0 and the duplicate alone", code, stderr)
+	}
+}

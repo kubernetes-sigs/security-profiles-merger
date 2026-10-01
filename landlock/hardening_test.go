@@ -238,7 +238,12 @@ func TestUnionKeepsReferGrant(t *testing.T) {
 	left := fsProfile(read, landlock.PathRule{Path: "/a", AccessFS: read})
 	right := fsProfile(readRefer, landlock.PathRule{Path: "/", AccessFS: readRefer})
 
-	want := "Profile{fs:read_file,refer /(read_file,refer) /a(read_file)}"
+	// The second input allows moves between any two directories, and the
+	// rule on /a repeats a right its root rule grants. Inside a mount other
+	// than the root mount the kernel would read that as a right gained by
+	// moving into /a and deny it, so the union stops handling read_file,
+	// which the root rule grants on every path already.
+	want := "Profile{fs:refer /(refer)}"
 	assertMergeFormat(t, "Union", landlock.Union, want, left, right)
 	assertMergeFormat(t, "Union", landlock.Union, want, right, left)
 
@@ -554,7 +559,9 @@ func TestMergeOutputIsMinimal(t *testing.T) {
 
 	// A rule granting refer is minimized as any other: the kernel decides a
 	// move from the rights each directory inherits, past its mount point up
-	// to the real root, so a repeated right decides nothing.
+	// to the real root. A right the root rule grants and /etc repeats is
+	// the documented exception: inside a mount other than the root mount it
+	// makes the input deny moves into /etc that the result allows.
 	readRefer := fsRights{landlock.FSAccessReadFile, landlock.FSAccessRefer}
 	referRules := fsProfile(readRefer,
 		landlock.PathRule{Path: "/", AccessFS: readRefer},
@@ -569,6 +576,47 @@ func TestMergeOutputIsMinimal(t *testing.T) {
 	)
 	assertMergeFormat(t, "Intersect", landlock.Intersect,
 		"Profile{fs:read_file,refer /(read_file) /etc(refer)}", nestedRefer)
+}
+
+// TestUnionSettlesMovesWithoutTheRootRule covers a union whose rule on "/"
+// grants a right another rule grants again. Inside a mount other than the
+// root mount the kernel leaves the root rule out of its comparison of the
+// two directories of a move, so the repeated grant reads as a right a file
+// gains by moving to /data/b, and the three rules together deny a move
+// within /data that the first input allows. Linux 7.2 answers EXDEV for
+// them. The union keeps every rule and stops handling the right instead,
+// which the root rule grants on every path already.
+func TestUnionSettlesMovesWithoutTheRootRule(t *testing.T) {
+	t.Parallel()
+
+	handled := fsRights{
+		landlock.FSAccessReadFile, landlock.FSAccessWriteFile, landlock.FSAccessRefer,
+	}
+	readRefer := fsRights{landlock.FSAccessReadFile, landlock.FSAccessRefer}
+	write := fsRights{landlock.FSAccessWriteFile}
+
+	recording := fsProfile(handled, landlock.PathRule{Path: "/data", AccessFS: readRefer})
+	other := fsProfile(handled,
+		landlock.PathRule{Path: "/", AccessFS: write},
+		landlock.PathRule{Path: "/data/b", AccessFS: write},
+	)
+
+	want := "Profile{fs:read_file,refer /data(read_file,refer)}"
+	assertMergeFormat(t, "Union", landlock.Union, want, recording, other)
+	assertMergeFormat(t, "Union", landlock.Union, want, other, recording)
+
+	// A profile on its own allows no move the union of it could deny, so
+	// it comes back as it is.
+	assertMergeFormat(t, "Union", landlock.Union,
+		"Profile{fs:read_file,refer,write_file /(write_file) /data/b(write_file)}", other)
+
+	// Without a grant of refer no move is allowed, and nothing is settled.
+	read := fsRights{landlock.FSAccessReadFile}
+	assertMergeFormat(t, "Union", landlock.Union,
+		"Profile{fs:read_file /(read_file) /data(read_file)}",
+		fsProfile(read, landlock.PathRule{Path: "/", AccessFS: read}),
+		fsProfile(read, landlock.PathRule{Path: "/data", AccessFS: read}),
+	)
 }
 
 // TestUnionKeepsNestedRules covers rules whose path may be a symlink: on

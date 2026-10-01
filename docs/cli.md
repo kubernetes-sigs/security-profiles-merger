@@ -150,6 +150,7 @@ library, and handle what `encoding/json` accepts silently as follows. The
 | Member repeated within one object | warn | reject | reject |
 | Member spelled only in another case | warn | reject | reject |
 | Byte that is not valid UTF-8 | warn | reject | reject |
+| Landlock network rule without a `port` | warn | reject | reject |
 | Member the profile type has no field for | warn | warn | reject |
 | Data after the profile, or a document that is not an object | reject | reject | reject |
 
@@ -166,8 +167,9 @@ comparing names exactly drops it. An unknown field, such as a misspelled
 key, silently drops the rule it was meant to carry. `encoding/json` replaces
 bytes that are not valid UTF-8 with U+FFFD, so two profiles whose syscall
 names differ only in those bytes would decode to the same name and merge into
-one rule. `spm diff` has no strictness flag, so it warns about all of these
-and still prints its verdict.
+one rule. A Landlock network rule without a `port` decodes as a rule on port
+0, the port a socket binds to for an ephemeral one. `spm diff` has no
+strictness flag, so it warns about all of these and still prints its verdict.
 
 Every error and warning names the input it came from: a file by its path as
 written, stdin by `stdin`, and one element of a JSON array on stdin by

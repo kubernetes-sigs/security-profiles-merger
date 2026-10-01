@@ -908,6 +908,108 @@ func TestValidateForABI(t *testing.T) {
 	}
 }
 
+// TestDowngradeToABI covers the copy a node on an older kernel loads: it
+// drops exactly the rights the version does not know, from the handled
+// sets, the scoped set and the rules, and drops the rules that leaves
+// empty.
+func TestDowngradeToABI(t *testing.T) {
+	t.Parallel()
+
+	profile := &landlock.Profile{
+		HandledAccessFS: []landlock.FSAccessRight{
+			landlock.FSAccessReadFile, landlock.FSAccessRefer,
+			landlock.FSAccessTruncate, landlock.FSAccessIOCTLDev,
+		},
+		HandledAccessNet: []landlock.NetAccessRight{
+			landlock.NetAccessBindTCP, landlock.NetAccessBindUDP,
+		},
+		Scoped: []landlock.ScopeRight{landlock.ScopeSignal},
+		PathRules: []landlock.PathRule{
+			{
+				Path: "/etc",
+				AccessFS: []landlock.FSAccessRight{
+					landlock.FSAccessReadFile, landlock.FSAccessTruncate,
+				},
+			},
+			{Path: "/srv", AccessFS: []landlock.FSAccessRight{landlock.FSAccessRefer}},
+			{Path: "/dev", AccessFS: []landlock.FSAccessRight{landlock.FSAccessIOCTLDev}},
+		},
+		NetRules: []landlock.NetRule{
+			{Port: 80, AccessNet: []landlock.NetAccessRight{landlock.NetAccessBindTCP}},
+			{Port: 53, AccessNet: []landlock.NetAccessRight{landlock.NetAccessBindUDP}},
+		},
+	}
+	before := landlock.FormatProfile(profile)
+
+	for _, testCase := range []struct {
+		abi  landlock.ABIVersion
+		want string
+	}{
+		{landlock.ABIV1, "Profile{fs:read_file /etc(read_file)}"},
+		{landlock.ABIV2, "Profile{fs:read_file,refer /etc(read_file) /srv(refer)}"},
+		{
+			landlock.ABIV4,
+			"Profile{fs:read_file,refer,truncate net:bind_tcp " +
+				"/etc(read_file,truncate) /srv(refer) :80(bind_tcp)}",
+		},
+		{landlock.LatestABIVersion, before},
+		{landlock.LatestABIVersion + 1, before},
+	} {
+		downgraded, err := landlock.DowngradeToABI(profile, testCase.abi)
+		if err != nil {
+			t.Fatalf("v%d: unexpected error: %v", testCase.abi, err)
+		}
+
+		if got := landlock.FormatProfile(downgraded); got != testCase.want {
+			t.Errorf("v%d: got %s, want %s", testCase.abi, got, testCase.want)
+		}
+
+		err = landlock.ValidateForABI(downgraded, testCase.abi)
+		if err != nil {
+			t.Errorf("v%d: the copy does not validate for its version: %v", testCase.abi, err)
+		}
+	}
+
+	if got := landlock.FormatProfile(profile); got != before {
+		t.Errorf("DowngradeToABI changed its argument: %s", got)
+	}
+
+	_, err := landlock.DowngradeToABI(nil, landlock.ABIV1)
+	if !errors.Is(err, landlock.ErrNilProfile) {
+		t.Errorf("nil profile: got %v, want ErrNilProfile", err)
+	}
+
+	_, err = landlock.DowngradeToABI(profile, 0)
+	if !errors.Is(err, landlock.ErrUnknownABIVersion) {
+		t.Errorf("version 0: got %v, want ErrUnknownABIVersion", err)
+	}
+}
+
+// TestDowngradeToABIKeepsWhatValidateReports covers what the copy leaves
+// alone: a right this package does not know and a rule that granted nothing
+// to begin with are the validators' to report, not the downgrade's to hide.
+func TestDowngradeToABIKeepsWhatValidateReports(t *testing.T) {
+	t.Parallel()
+
+	profile := &landlock.Profile{
+		HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessReadFile, "bogus"},
+		HandledAccessNet: nil,
+		Scoped:           nil,
+		PathRules:        []landlock.PathRule{{Path: "/etc", AccessFS: nil}},
+		NetRules:         nil,
+	}
+
+	downgraded, err := landlock.DowngradeToABI(profile, landlock.ABIV1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	err = landlock.ValidateArtifact(downgraded)
+	if !errors.Is(err, landlock.ErrUnknownRight) || !errors.Is(err, landlock.ErrEmptyRule) {
+		t.Errorf("ValidateArtifact = %v, want ErrUnknownRight and ErrEmptyRule", err)
+	}
+}
+
 // TestValidateForABIAgreesWithRequired ties the two together: a profile
 // validates against exactly the versions at or above what it requires.
 func TestValidateForABIAgreesWithRequired(t *testing.T) {

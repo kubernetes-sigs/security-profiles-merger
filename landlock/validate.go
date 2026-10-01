@@ -577,6 +577,83 @@ func ValidateForABI(profile *Profile, abi ABIVersion) error {
 	return merge.JoinLimited(errs...)
 }
 
+// DowngradeToABI returns a copy of the profile without the access rights the
+// given Landlock ABI version does not support, so that a kernel reporting
+// that version does not reject it for them. It is for a node that prefers
+// enforcing what its kernel can enforce over enforcing nothing when a
+// profile fails ValidateForABI.
+//
+// The copy is not the same policy:
+//
+//   - A right dropped from a handled set or from the scoped set is no
+//     longer restricted, since that kernel cannot restrict it: the copy
+//     permits what the profile denied.
+//   - FSAccessRefer is the exception. A kernel at ABIV1 knows no refer right
+//     and denies every move or link into another directory under a ruleset
+//     handling a filesystem right, which no rule can lift. Where the copy
+//     still handles one, it denies the moves the profile granted, and where
+//     refer was the only filesystem right handled, it restricts none.
+//
+// Rules lose the dropped rights, and a rule left without any is dropped. A
+// copy that handles and scopes nothing restricts nothing: the kernel refuses
+// to load it, and ValidateArtifact reports it with ErrEmptyRuleset. Rights
+// this package does not know are kept for Validate to report.
+//
+// A version newer than LatestABIVersion drops nothing, as ValidateForABI
+// rejects nothing for it, and one below ABIV1 is reported with
+// ErrUnknownABIVersion. A nil profile is reported with ErrNilProfile. The
+// profile is not validated otherwise and not modified.
+func DowngradeToABI(profile *Profile, abi ABIVersion) (*Profile, error) {
+	if profile == nil {
+		return nil, ErrNilProfile
+	}
+
+	if abi < ABIV1 {
+		return nil, fmt.Errorf("%w: v%d (the first is v%d)", ErrUnknownABIVersion, abi, ABIV1)
+	}
+
+	downgraded := &Profile{
+		HandledAccessFS:  supportedRights(profile.HandledAccessFS, abi, fsAccessABI),
+		HandledAccessNet: supportedRights(profile.HandledAccessNet, abi, netAccessABI),
+		Scoped:           supportedRights(profile.Scoped, abi, scopeABI),
+		PathRules:        nil,
+		NetRules:         nil,
+	}
+
+	for _, rule := range profile.PathRules {
+		kept := supportedRights(rule.AccessFS, abi, fsAccessABI)
+		if len(kept) > 0 || len(rule.AccessFS) == 0 {
+			downgraded.PathRules = append(downgraded.PathRules, newPathRule(rule.Path, kept))
+		}
+	}
+
+	for _, rule := range profile.NetRules {
+		kept := supportedRights(rule.AccessNet, abi, netAccessABI)
+		if len(kept) > 0 || len(rule.AccessNet) == 0 {
+			downgraded.NetRules = append(downgraded.NetRules, newNetRule(rule.Port, kept))
+		}
+	}
+
+	return downgraded, nil
+}
+
+// supportedRights returns a copy of the rights without the ones that need a
+// newer ABI version than the given one, or nil when none remain. Rights
+// outside the table are kept, as abiErrors leaves them to Validate.
+func supportedRights[T ~string](rights []T, abi ABIVersion, table map[T]ABIVersion) []T {
+	var kept []T
+
+	for _, right := range rights {
+		if needed, known := table[right]; known && needed > abi {
+			continue
+		}
+
+		kept = append(kept, right)
+	}
+
+	return kept
+}
+
 // abiErrors reports every right of the list that needs a newer ABI version
 // than the given one. Rights outside the table are left to Validate.
 func abiErrors[T ~string](

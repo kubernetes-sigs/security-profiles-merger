@@ -136,6 +136,36 @@ limitations under the License.
 // input at the end, so this does not depend on how a fold of more than two
 // inputs is grouped.
 //
+// The rule on "/" is an exception to how the kernel compares the two
+// directories. It compares them before it applies the rule of the
+// directory its walk is at, and ends the walk at the real root without
+// comparing again. For a move inside a mount other than the root mount, the
+// rights the root rule grants are therefore left out of the comparison,
+// while they count for a move inside the root mount and for granting refer
+// itself. A ruleset granting a right on "/" and again on a directory denies
+// moving a file into that directory from outside it in such a mount,
+// although the file gains nothing, and allows it in the root mount.
+//
+// A merge does not know the mounts of the node. A union therefore looks
+// both ways for the rights that would deny a move an input allows, and
+// stops handling the ones it finds only without the root rule as it does
+// the others. Such a right is one the union's root rule grants. Not
+// handling it changes nothing on a path that leads through the root, and
+// permits the right on a path that does not, such as a file reached through
+// another mount namespace or a directory descriptor passed in, where no
+// input may grant it: the union then permits more than any input there, as
+// it does for every right it stops handling. Refer cannot be left
+// unhandled, so one case stays: where the union's root rule grants refer
+// and another rule grants it again, the kernel denies moving a directory
+// into the hierarchy of that rule from outside it, inside a mount other
+// than the root mount, which an input may allow.
+//
+// An intersection follows its inputs for moves inside the root mount only:
+// where an input repeats a right of its root rule on a directory, the
+// result can allow a move into that directory, inside another mount, which
+// the input denies there. The input grants the right on both directories of
+// such a move, so the file gains none by it.
+//
 // # Rule paths
 //
 // A right is granted for a path or port only if every input of an
@@ -212,6 +242,12 @@ limitations under the License.
 // to keep it denied. Kernels with ABI version 1 know no refer right and
 // always deny moving or linking a file into another directory, which
 // matches the default denial.
+//
+// [DowngradeToABI] returns a profile without the rights a version does not
+// support, for a node that enforces what its kernel can rather than
+// nothing. The result is another policy: the kernel no longer restricts a
+// right dropped from a handled set, and a kernel at [ABIV1] denies the moves
+// and links a refer grant allowed.
 //
 // A node may report an ABI version newer than this package knows rights
 // for. Versions are cumulative, so ValidateForABI treats such a version as

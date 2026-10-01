@@ -81,6 +81,8 @@ func (mode validateMode) decodePolicy() decodePolicy {
 		// alike, which is a hazard for a user-authored profile and a sign of
 		// a crafted one in an artifact.
 		rejectInvalidUTF8: mode == modeStrict || mode == modeArtifact,
+		// A member left out decodes as a value the document never named.
+		rejectMissing: mode == modeStrict || mode == modeArtifact,
 	}
 }
 

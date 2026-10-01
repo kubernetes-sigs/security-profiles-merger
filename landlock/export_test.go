@@ -24,7 +24,7 @@ import (
 
 // isAncestorOrSelf reports whether ancestor is path itself or one of its
 // parent directories. Paths are expected to be cleaned. This states the
-// hierarchy relation pathAncestors enumerates; the merge uses the
+// hierarchy relation ancestors enumerates; the merge uses the
 // enumeration, and a test keeps the two in agreement.
 func isAncestorOrSelf(ancestor, path string) bool {
 	if ancestor == path {

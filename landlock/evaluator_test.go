@@ -44,6 +44,15 @@ import (
 // a right every input handles, so on a single path an intersection may be
 // stricter than its inputs (for refer only) and a union more permissive
 // (for rights it no longer handles only).
+//
+// The kernel decides a move in one of two ways, depending on whether it
+// happens inside the root mount (see evalMove). Union is checked under
+// both, apart from refer itself as a right a directory gains by moving,
+// which a union cannot settle. Intersect is checked for moves inside the
+// root mount only: inside another mount an input can deny a move for a
+// right its rule on "/" and another of its rules both grant, which gains
+// the file nothing, and the intersection is documented not to follow it
+// there.
 
 // evalCovers reports whether a rule path covers a file, which it does when
 // the file is the path itself or sits beneath it.
@@ -102,7 +111,25 @@ func evalHandles(profile *landlock.Profile, right landlock.FSAccessRight) bool {
 // every handled right dst grants must be granted at the file's parent or by
 // a rule on the file itself, so the file gains no right by moving. For a
 // file that is not a directory only the rights applying to files count.
-func evalMove(profile *landlock.Profile, file, dst string, dir bool) bool {
+//
+// rootMount says whether the move happens inside the root mount. The kernel
+// compares the two directories before it applies the rule of the directory
+// its walk is at, and ends the walk at the real root without comparing
+// again. Inside the root mount the walk starts with the rule on "/" already
+// collected, so that rule counts. Inside any other mount it never does, and
+// a move the comparison then refuses is allowed only if the rules grant both
+// directories every handled right. Checked against Linux 7.2 with rules on
+// "/" and on directories of a tmpfs.
+func evalMove(profile *landlock.Profile, file, dst string, dir, rootMount bool) bool {
+	return evalMoveGaining(profile, file, dst, dir, rootMount, nil)
+}
+
+// evalMoveGaining is evalMove for a kernel that lets the file gain the given
+// rights by moving, which says whether a move is denied for those alone.
+func evalMoveGaining(
+	profile *landlock.Profile, file, dst string, dir, rootMount bool,
+	gainable []landlock.FSAccessRight,
+) bool {
 	src := path.Dir(file)
 
 	if !evalPermits(profile, src, landlock.FSAccessRefer) ||
@@ -110,18 +137,56 @@ func evalMove(profile *landlock.Profile, file, dst string, dir bool) bool {
 		return false
 	}
 
+	gains := evalGains(profile, file, dst, dir, rootMount, gainable)
+	if !gains || rootMount {
+		return !gains
+	}
+
+	return !slices.ContainsFunc(profile.HandledAccessFS, func(right landlock.FSAccessRight) bool {
+		return !evalPermits(profile, src, right) || !evalPermits(profile, dst, right)
+	})
+}
+
+// evalGains reports whether the file gains a handled right by moving into
+// dst, as the kernel compares the two directories, leaving out the rights
+// it may gain.
+func evalGains(
+	profile *landlock.Profile, file, dst string, dir, rootMount bool,
+	gainable []landlock.FSAccessRight,
+) bool {
+	src := path.Dir(file)
+
 	for _, right := range profile.HandledAccessFS {
-		if !dir && !slices.Contains(evalFileRights, right) {
+		if !dir && !slices.Contains(evalFileRights, right) || slices.Contains(gainable, right) {
 			continue
 		}
 
-		if evalPermits(profile, dst, right) && !evalPermits(profile, src, right) &&
+		if evalGrants(profile, dst, right, rootMount) &&
+			!evalGrants(profile, src, right, rootMount) &&
 			!evalOwnRule(profile, file, right) {
-			return false
+			return true
 		}
 	}
 
-	return true
+	return false
+}
+
+// evalGrants reports whether a rule grants the handled right at the file,
+// leaving out the rule on "/" unless withRoot is set.
+func evalGrants(
+	profile *landlock.Profile, file string, right landlock.FSAccessRight, withRoot bool,
+) bool {
+	for _, rule := range profile.PathRules {
+		if !withRoot && rule.Path == "/" {
+			continue
+		}
+
+		if slices.Contains(rule.AccessFS, right) && evalCovers(rule.Path, file) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // evalOwnRule reports whether a rule on exactly the file grants the handled
@@ -340,12 +405,12 @@ func assertIntersectMoves(t *testing.T, inputs []*landlock.Profile, result *land
 	t.Helper()
 
 	evalMoves(func(file, dst string, dir bool) {
-		if !evalMove(result, file, dst, dir) {
+		if !evalMove(result, file, dst, dir, true) {
 			return
 		}
 
 		for _, input := range inputs {
-			if !evalMove(input, file, dst, dir) {
+			if !evalMove(input, file, dst, dir, true) {
 				t.Fatalf("Intersect allows moving %q (dir %v) into %q, which %s denies\nresult=%s",
 					file, dir, dst, landlock.FormatProfile(input), landlock.FormatProfile(result))
 			}
@@ -354,22 +419,41 @@ func assertIntersectMoves(t *testing.T, inputs []*landlock.Profile, result *land
 }
 
 // assertUnionMoves checks that the union allows every move or link among
-// the probes that an input allows.
+// the probes that an input allows, inside the root mount and inside any
+// other.
+//
+// One denial is left out, which a union cannot avoid: inside a mount other
+// than the root mount, a directory moving beneath a rule that grants refer,
+// from a directory that has refer from the rule on "/" alone, gains refer
+// in the kernel's comparison. Refer cannot be left unhandled as any other
+// right can, so the union is asked whether it denies the move for anything
+// but that.
 func assertUnionMoves(t *testing.T, inputs []*landlock.Profile, result *landlock.Profile) {
 	t.Helper()
 
-	evalMoves(func(file, dst string, dir bool) {
-		if evalMove(result, file, dst, dir) {
-			return
+	for _, rootMount := range []bool{true, false} {
+		var gainable []landlock.FSAccessRight
+		if !rootMount {
+			gainable = []landlock.FSAccessRight{landlock.FSAccessRefer}
 		}
 
-		for _, input := range inputs {
-			if evalMove(input, file, dst, dir) {
-				t.Fatalf("Union denies moving %q (dir %v) into %q, which %s allows\nresult=%s",
-					file, dir, dst, landlock.FormatProfile(input), landlock.FormatProfile(result))
+		evalMoves(func(file, dst string, dir bool) {
+			if evalMoveGaining(result, file, dst, dir, rootMount, gainable) {
+				return
 			}
-		}
-	})
+
+			for _, input := range inputs {
+				if evalMove(input, file, dst, dir, rootMount) {
+					t.Fatalf(
+						"Union denies moving %q (dir %v, root mount %v) into %q, "+
+							"which %s allows\nresult=%s",
+						file, dir, rootMount, dst,
+						landlock.FormatProfile(input), landlock.FormatProfile(result),
+					)
+				}
+			}
+		})
+	}
 }
 
 // TestMergeManyPermitsAt checks folds of two and more inputs at the probe

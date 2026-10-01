@@ -440,3 +440,83 @@ func TestHasField(t *testing.T) {
 		t.Error("HasField of a string type = true, want false")
 	}
 }
+
+// requiredTarget has a field whose zero value is a value of its own, as the
+// port of a network rule is, directly and through an embedded struct.
+type requiredTarget struct {
+	Rules    []requiredRule   `json:"rules"`
+	Embedded []requiredOuter  `json:"embedded"`
+	Pointers []*requiredRule  `json:"pointers"`
+	One      *requiredRule    `json:"one"`
+	Plain    []unrequiredRule `json:"plain"`
+}
+
+type requiredRule struct {
+	Port uint16 `json:"port" strict:"required"`
+	Name string `json:"name"`
+}
+
+type requiredOuter struct {
+	requiredRule
+
+	Extra string `json:"extra"`
+}
+
+type unrequiredRule struct {
+	Port uint16 `json:"port"`
+}
+
+// TestMissingFieldsOf covers a required member: it is reported with the
+// path of the object that names no value for it, and not where the document
+// names one, however it spells the name or whatever value it gives it.
+func TestMissingFieldsOf(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		raw  string
+		want []string
+	}{
+		{`{}`, nil},
+		{`{"rules":[]}`, nil},
+		{`{"rules":[{"port":0},{"port":80,"name":"a"}]}`, nil},
+		{`{"rules":[{"PORT":0}]}`, nil},
+		{`{"plain":[{}]}`, nil},
+		{`{"rules":[{"port":80},{"name":"a"}]}`, []string{"rules[1].port"}},
+		{`{"rules":[{"port":null},{}]}`, []string{"rules[0].port", "rules[1].port"}},
+		// A null in place of the object leaves the member out as well.
+		{`{"rules":[null]}`, []string{"rules[0].port"}},
+		// A nil pointer is no object that could miss a member.
+		{`{"pointers":[null],"one":null}`, nil},
+		{`{"pointers":[{}],"one":{}}`, []string{"pointers[0].port", "one.port"}},
+		// The decoder keeps the first value when the member is repeated
+		// with a null, so the document did name one.
+		{`{"rules":[{"port":80,"port":null}]}`, nil},
+		{`{"rules":[{"port":null,"port":80}]}`, nil},
+		// A member of an embedded struct sits in the object embedding it.
+		{`{"embedded":[{"port":1},{"extra":"x"}]}`, []string{"embedded[1].port"}},
+	} {
+		var decoded requiredTarget
+
+		err := json.Unmarshal([]byte(test.raw), &decoded)
+		if err != nil {
+			t.Fatalf("%s: %v", test.raw, err)
+		}
+
+		got, omitted := MissingFieldsOf([]byte(test.raw), &decoded)
+		if !slices.Equal(got, test.want) || omitted != 0 {
+			t.Errorf("%s: MissingFieldsOf = %v (%d omitted), want %v",
+				test.raw, got, omitted, test.want)
+		}
+	}
+
+	// A type without a required field is never walked for one.
+	var profile specs.LinuxSeccomp
+
+	if got, omitted := MissingFieldsOf([]byte(`{}`), &profile); got != nil || omitted != 0 {
+		t.Errorf("a type without required fields: MissingFieldsOf = %v (%d omitted)", got, omitted)
+	}
+
+	if !requiresFields(reflect.TypeFor[requiredOuter]()) {
+		t.Error("a required field of an embedded struct is not seen")
+	}
+}
