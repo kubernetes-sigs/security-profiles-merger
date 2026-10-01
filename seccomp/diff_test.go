@@ -269,6 +269,37 @@ func TestDiffErrnoRetUnsetEqualsEPERM(t *testing.T) {
 	}
 }
 
+func TestDiffNarrowsErrnoRetAsRuntimesDo(t *testing.T) {
+	t.Parallel()
+
+	// runc and crun load the lower 16 bits of errnoRet, so 65537 is the
+	// EPERM an unset errnoRet stands for.
+	wrapped := uint(65537)
+
+	left := &specs.LinuxSeccomp{
+		DefaultAction:   specs.ActErrno,
+		DefaultErrnoRet: &wrapped,
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{syscallRead}, Action: specs.ActTrace, ErrnoRet: &wrapped},
+		},
+	}
+	right := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{syscallRead}, Action: specs.ActTrace},
+		},
+	}
+
+	diff, err := seccomp.Diff(left, right)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !diff.Equal {
+		t.Errorf("expected equal profiles, got %s", seccomp.FormatDiff(diff))
+	}
+}
+
 func TestDiffFlags(t *testing.T) {
 	t.Parallel()
 
@@ -292,6 +323,38 @@ func TestDiffFlags(t *testing.T) {
 
 	if len(diff.Flags.Removed) != 1 {
 		t.Errorf("removed flags = %v, want 1", diff.Flags.Removed)
+	}
+}
+
+// TestDiffFlagsReadsAbsentListAsRuntimesDo pins how Diff reads a profile
+// without a flag list: runc since 1.2 and crun set
+// SECCOMP_FILTER_FLAG_SPEC_ALLOW for it, which a list that is set but empty
+// turns off.
+func TestDiffFlagsReadsAbsentListAsRuntimesDo(t *testing.T) {
+	t.Parallel()
+
+	withFlags := func(flags []specs.LinuxSeccompFlag) *specs.LinuxSeccomp {
+		return &specs.LinuxSeccomp{DefaultAction: specs.ActErrno, Flags: flags}
+	}
+
+	spec := []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagSpecAllow}
+
+	diff, err := seccomp.Diff(withFlags(nil), withFlags(spec))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !diff.Equal {
+		t.Errorf("absent list and SPEC_ALLOW should be equal, got %s", seccomp.FormatDiff(diff))
+	}
+
+	diff, err = seccomp.Diff(withFlags(nil), withFlags([]specs.LinuxSeccompFlag{}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if diff.Flags == nil || !slices.Equal(diff.Flags.Removed, spec) || len(diff.Flags.Added) != 0 {
+		t.Errorf("empty list should remove SPEC_ALLOW, got %s", seccomp.FormatDiff(diff))
 	}
 }
 

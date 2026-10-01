@@ -22,8 +22,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strconv"
-	"strings"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
@@ -149,6 +147,8 @@ func foldProfiles(
 		return nil, err
 	}
 
+	result.Flags = flagsForListener(result.Flags, result.ListenerPath)
+
 	result.Syscalls = regroupSyscalls(result.Syscalls)
 
 	slices.Sort(result.Architectures)
@@ -174,7 +174,7 @@ func normalizeProfile(profile *specs.LinuxSeccomp, rules ruleMerger) *specs.Linu
 		DefaultAction:    def.action,
 		DefaultErrnoRet:  outputErrno(def.action, def.errnoRet),
 		Architectures:    merge.DeduplicateSlice(profile.Architectures),
-		Flags:            merge.DeduplicateSlice(profile.Flags),
+		Flags:            normalizeFlags(profile.Flags),
 		ListenerPath:     profile.ListenerPath,
 		ListenerMetadata: profile.ListenerMetadata,
 		Syscalls:         settledSyscalls(&rules, profile.Syscalls, def),
@@ -396,19 +396,7 @@ func regroupSyscalls(syscalls []specs.LinuxSyscall) []specs.LinuxSyscall {
 }
 
 func groupKey(entry *specs.LinuxSyscall) string {
-	var builder strings.Builder
-
-	builder.WriteString(string(entry.Action))
-	builder.WriteByte('|')
-
-	if entry.ErrnoRet != nil {
-		builder.WriteString(strconv.FormatUint(uint64(*entry.ErrnoRet), 10))
-	}
-
-	builder.WriteByte('|')
-	builder.WriteString(argsKey(entry.Args))
-
-	return builder.String()
+	return resultKey(entry.Action, entry.ErrnoRet, argsKey(entry.Args))
 }
 
 // UnionSyscalls merges two syscall lists via union, following the rules of
@@ -427,8 +415,8 @@ func groupKey(entry *specs.LinuxSyscall) string {
 // documentation.
 //
 // This function does not validate its inputs. Callers should ensure that
-// actions are known and that every entry has at least one name, or call
-// Validate on the enclosing profile first.
+// actions are known, that every entry has at least one name and that no
+// name holds a NUL byte, or call Validate on the enclosing profile first.
 func UnionSyscalls(left, right []specs.LinuxSyscall) []specs.LinuxSyscall {
 	return regroupSyscalls(unionRules().mergeBareSyscalls(left, right))
 }
@@ -449,8 +437,8 @@ func UnionSyscalls(left, right []specs.LinuxSyscall) []specs.LinuxSyscall {
 // the package documentation.
 //
 // This function does not validate its inputs. Callers should ensure that
-// actions are known and that every entry has at least one name, or call
-// Validate on the enclosing profile first.
+// actions are known, that every entry has at least one name and that no
+// name holds a NUL byte, or call Validate on the enclosing profile first.
 func IntersectSyscalls(left, right []specs.LinuxSyscall) []specs.LinuxSyscall {
 	return regroupSyscalls(intersectRules().mergeBareSyscalls(left, right))
 }

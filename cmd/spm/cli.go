@@ -214,13 +214,14 @@ func plural(count int, noun string) string {
 }
 
 // encodeJSON writes value as indented JSON. HTML characters are written as
-// they are: the output is a profile, not markup.
+// they are: the output is a profile, not markup. A seccomp profile is
+// written in its seccompOutput form.
 func encodeJSON(writer io.Writer, value any) error {
 	enc := json.NewEncoder(writer)
 	enc.SetIndent("", "  ")
 	enc.SetEscapeHTML(false)
 
-	err := enc.Encode(value)
+	err := enc.Encode(jsonValue(value))
 	if err != nil {
 		return fmt.Errorf("encoding output: %w", err)
 	}

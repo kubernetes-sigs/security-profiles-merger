@@ -204,11 +204,11 @@ limitations under the License.
 //
 // [Validate] does not range-check errnoRet; [ValidateStrict] and
 // [ValidateArtifact] reject values above 4095 on actions that return them.
-// runc narrows errnoRet to an int16 and skips an entry whose action and
-// errno equal the default, so a value such as 65537 against a default errno
-// of 1 survives the merge as an entry runc would have skipped. That entry is
-// redundant rather than wrong: it applies the same action and the same
-// truncated errno the default applies.
+// runc and crun load only the lower 16 bits of errnoRet, and the merges and
+// [Diff] read a value the same way: 65537 is EPERM, so an entry carrying it
+// against a default errno of 1 is one a runtime skips for equaling the
+// default, and it hides no other rule of its syscall. Results spell an
+// errno as it is loaded.
 //
 // # Architectures
 //
@@ -216,14 +216,16 @@ limitations under the License.
 // the native architecture, and the listed architectures are added to it. An
 // empty list means "native only" and a non-empty list "native plus these".
 // A list need not name the native architecture, and a profile listing only
-// foreign architectures is valid. [Intersect] takes the plain set
-// intersection of the lists, which may be empty, less the architectures it
-// drops as described below. [Union] combines them. The set the union covers
-// is exact, but the behavior on an architecture only one input lists is not
-// the rule-by-rule union: there the other input's filter applies
-// libseccomp's action for an unlisted architecture, SCMP_ACT_KILL, while the
-// result applies the merged rules. That is the permissive direction, so the
-// union guarantee holds.
+// foreign architectures is valid. [Validate] accepts every architecture the
+// runtime-spec names. runc knows no parisc, m68k or sh and refuses a profile
+// listing one, while crun resolves the name through libseccomp. [Intersect]
+// takes the plain set intersection of the lists, which may be empty, less
+// the architectures it drops as described below. [Union] combines them. The
+// set the union covers is exact, but the behavior on an architecture only
+// one input lists is not the rule-by-rule union: there the other input's
+// filter applies libseccomp's action for an unlisted architecture,
+// SCMP_ACT_KILL, while the result applies the merged rules. That is the
+// permissive direction, so the union guarantee holds.
 //
 // The evaluation model covers the program libseccomp compiles for a 64-bit
 // architecture on which every syscall is called directly. Two effects of
@@ -305,10 +307,23 @@ limitations under the License.
 // baseline. SECCOMP_FILTER_FLAG_SPEC_ALLOW disables a mitigation:
 // intersection keeps it only if every input sets it, union if any does.
 // SECCOMP_FILTER_FLAG_LOG adds audit logging: intersection keeps it if any
-// input sets it, union only if every input does.
-// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV only matters with a listener and
-// comes from the input the listener comes from (see the Listener section).
-// [Validate] rejects unknown flags. An empty list means "no flags".
+// input sets it, union only if every input does. SECCOMP_FILTER_FLAG_TSYNC,
+// which the runtime-spec lists and runc ignores, loosens nothing and is
+// merged the same way, except that a result with a listener never carries
+// it: the kernel refuses it next to the flag that creates the listener,
+// which crun passes along with it. SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV
+// only matters with a listener and comes from the input the listener comes
+// from (see the Listener section). [Validate] rejects unknown flags.
+//
+// A nil list is not an empty one. It leaves the flags to the runtime, and
+// runc since 1.2 and crun then set SECCOMP_FILTER_FLAG_SPEC_ALLOW, while a
+// list that is set but empty sets no flag. The merges and [Diff] therefore
+// read a nil list as one naming the flag. A result is nil again where the
+// flag survives through an input that left it to the runtime and no other
+// flag does; a list cannot leave one flag to the runtime and set another,
+// so next to other flags the result names it. specs.LinuxSeccomp leaves an
+// empty list out when it is marshaled, so a caller writing a result as JSON
+// has to write "flags": [] itself to keep the flag off.
 //
 // # Listener
 //
@@ -445,9 +460,9 @@ limitations under the License.
 // [UnionSyscalls] keeps everything, and collapses a syscall that is not in a
 // safe shape to its least restrictive action, which decides calls the lists
 // leave to the default but never less permissively than the default would.
-// Neither validates its inputs: callers ensure that actions are known and
-// that every entry has at least one name, or call [Validate] on the
-// enclosing profile first.
+// Neither validates its inputs: callers ensure that actions are known, that
+// every entry has at least one name and that no name holds a NUL byte, or
+// call [Validate] on the enclosing profile first.
 //
 // # Conflicting rules
 //

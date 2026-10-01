@@ -105,7 +105,8 @@ func (r rule) sameRule(other rule) bool {
 const eperm uint = 1
 
 // loadedErrno returns the errno runc encodes into an action: the explicit
-// value or EPERM for ERRNO and TRACE, and none for every other action.
+// value, narrowed to the 16 bits the action carries, or EPERM for ERRNO and
+// TRACE, and none for every other action.
 func loadedErrno(action specs.LinuxSeccompAction, ret *uint) uint {
 	if action != specs.ActErrno && action != specs.ActTrace {
 		return 0
@@ -115,7 +116,7 @@ func loadedErrno(action specs.LinuxSeccompAction, ret *uint) uint {
 		return eperm
 	}
 
-	return *ret
+	return *ret & 0xffff
 }
 
 // loadedCond returns a condition as libseccomp compares it: only masked

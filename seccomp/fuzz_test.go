@@ -18,6 +18,7 @@ package seccomp_test
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -318,6 +319,28 @@ func addFuzzSeeds(f *testing.F) {
 		"read", "write", false, false, uint64(0), uint64(0),
 		uint32(0), uint8(0), uint16(2), uint16(42), uint16(0),
 	)
+
+	// The listener flag on one side only, next to a side without a flag
+	// list: the flag follows the first profile, and the flag a runtime
+	// sets for the missing list must not follow it.
+	f.Add(
+		uint8(4), uint8(8), uint8(8),
+		"0", "0", true, false, uint64(65564), uint64(0),
+		uint32(0x1D), uint8(0), uint16(0), uint16(0), uint16(76),
+		uint8(0), uint8(5), uint8(8),
+		"0", "0", false, false, uint64(0), uint64(0),
+		uint32(0), uint8(0x05), uint16(0), uint16(0), uint16(0),
+	)
+
+	// A syscall name holding a NUL byte, which Validate rejects
+	f.Add(
+		uint8(4), uint8(8), uint8(8),
+		"\x00", "write", false, false, uint64(0), uint64(0),
+		uint32(0), uint8(0), uint16(0), uint16(0), uint16(0),
+		uint8(4), uint8(8), uint8(8),
+		"read", "re\x00ad", false, false, uint64(0), uint64(0),
+		uint32(0), uint8(0), uint16(0), uint16(0), uint16(0),
+	)
 }
 
 type fuzzMergeConfig struct {
@@ -346,13 +369,13 @@ func fuzzMerge(
 	t.Helper()
 
 	left := fuzzProfile(
-		defL, act1L, act2L, name1L, name2L,
+		defL, act1L, act2L, mergeableName(name1L), mergeableName(name2L),
 		args1L, args2L, argVal1L, argVal2L,
 		archMaskL, flagMaskL,
 		defErrnoL, errno1L, errno2L,
 	)
 	right := fuzzProfile(
-		defR, act1R, act2R, name1R, name2R,
+		defR, act1R, act2R, mergeableName(name1R), mergeableName(name2R),
 		args1R, args2R, argVal1R, argVal2R,
 		archMaskR, flagMaskR,
 		defErrnoR, errno1R, errno2R,
@@ -407,6 +430,14 @@ func fuzzMerge(
 	}
 }
 
+// mergeableName drops the NUL bytes of a drawn syscall name. A runtime reads
+// such a name as another one, so Validate rejects it and a drawn one would
+// fail every merge rather than exercise it. A name left empty is replaced
+// by fuzzProfile.
+func mergeableName(name string) string {
+	return strings.ReplaceAll(name, "\x00", "")
+}
+
 func sameRestrictiveness(
 	actionA, actionB specs.LinuxSeccompAction,
 ) bool {
@@ -441,9 +472,12 @@ func equalModuloErrnoRet(
 
 	// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV belongs to the listener and is
 	// taken from the first profile, like ListenerPath, so it is not
-	// commutative by design and is left out of the comparison.
-	firstFlags := slices.DeleteFunc(slices.Clone(first.Flags), isListenerFlag)
-	secondFlags := slices.DeleteFunc(slices.Clone(second.Flags), isListenerFlag)
+	// commutative by design and is left out of the comparison. The flags
+	// are compared as a runtime sets them: a nil list may come back naming
+	// the flag the runtime sets for it, where the result holds the listener
+	// flag in one order only.
+	firstFlags := slices.DeleteFunc(loadedFlags(first.Flags), isListenerFlag)
+	secondFlags := slices.DeleteFunc(loadedFlags(second.Flags), isListenerFlag)
 
 	slices.Sort(firstFlags)
 	slices.Sort(secondFlags)
@@ -471,6 +505,16 @@ func equalModuloErrnoRet(
 	}
 
 	return true
+}
+
+// loadedFlags returns a copy of the flags a runtime sets for a list: the
+// list itself, or SECCOMP_FILTER_FLAG_SPEC_ALLOW for a nil one.
+func loadedFlags(flags []specs.LinuxSeccompFlag) []specs.LinuxSeccompFlag {
+	if flags == nil {
+		return []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagSpecAllow}
+	}
+
+	return slices.Clone(flags)
 }
 
 func isListenerFlag(flag specs.LinuxSeccompFlag) bool {

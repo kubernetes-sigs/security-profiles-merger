@@ -450,6 +450,103 @@ func TestMergeBoundsMultiNameExpansion(t *testing.T) {
 	}
 }
 
+// TestMergeBoundsRepeatedMultiplexedName covers the same product on the
+// multiplexer path, which reads the socket and SysV IPC syscalls a second
+// time when the result covers an architecture that multiplexes them. An
+// entry repeating one of those names loads the same rules for it each time,
+// so the path reads each distinct name of an entry once.
+//
+//nolint:paralleltest // a wall-clock bound, so it runs before the parallel tests
+func TestMergeBoundsRepeatedMultiplexedName(t *testing.T) {
+	const (
+		names          = 200000
+		conditions     = 256
+		generousBudget = 2 * time.Second
+	)
+
+	entry := specs.LinuxSyscall{
+		Names:    slices.Repeat([]string{syscallSocket}, names),
+		Action:   specs.ActAllow,
+		ErrnoRet: nil,
+		Args:     make([]specs.LinuxSeccompArg, 0, conditions),
+	}
+
+	for idx := range conditions {
+		entry.Args = append(entry.Args, specs.LinuxSeccompArg{
+			Index: 1, Value: uint64(idx), Op: specs.OpEqualTo, ValueTwo: 0,
+		})
+	}
+
+	profile := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Architectures: []specs.Arch{specs.ArchX86},
+		Syscalls:      []specs.LinuxSyscall{entry},
+	}
+
+	for _, direction := range []safetyDirection{intersectSafety(), unionSafety()} {
+		start := time.Now()
+
+		result, err := direction.merge(profile, profile)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", direction.name, err)
+		}
+
+		if elapsed := time.Since(start); testutil.UninstrumentedRun() &&
+			elapsed > generousBudget {
+			t.Errorf("%s took %s, want well under %s", direction.name, elapsed, generousBudget)
+		}
+
+		err = seccomp.Validate(result)
+		if err != nil {
+			t.Errorf("%s yields an invalid profile: %v", direction.name, err)
+		}
+	}
+}
+
+// TestValidateStrictBoundsDuplicateReport covers the duplicate report of
+// ValidateStrict, which names the entries a syscall sits in: its cost stays
+// linear in the names of the profile however often an entry repeats one, and
+// its size does not grow with the entries that share a name.
+//
+//nolint:paralleltest // a wall-clock bound, so it runs before the parallel tests
+func TestValidateStrictBoundsDuplicateReport(t *testing.T) {
+	const (
+		entries        = 20000
+		repeats        = 200
+		generousBudget = 2 * time.Second
+		generousSize   = 8 * 1024
+	)
+
+	profile := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls:      make([]specs.LinuxSyscall, 0, entries),
+	}
+
+	names := slices.Repeat([]string{syscallRead}, repeats)
+
+	for range entries {
+		profile.Syscalls = append(profile.Syscalls, specs.LinuxSyscall{
+			Names:  names,
+			Action: specs.ActAllow,
+		})
+	}
+
+	start := time.Now()
+
+	err := seccomp.ValidateStrict(profile)
+	if !errors.Is(err, seccomp.ErrDuplicateSyscallName) {
+		t.Fatalf("expected ErrDuplicateSyscallName, got: %v", err)
+	}
+
+	if elapsed := time.Since(start); testutil.UninstrumentedRun() && elapsed > generousBudget {
+		t.Errorf("ValidateStrict took %s, want well under %s", elapsed, generousBudget)
+	}
+
+	if size := len(err.Error()); size > generousSize {
+		t.Errorf("error is %d bytes, want at most %d", size, generousSize)
+	}
+}
+
 // TestValidateArtifactRejectsMultiNameExpansion is the other half: a runtime
 // never merges such a profile in the first place, since the rules it loads
 // are past what an artifact may ask for.

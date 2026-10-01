@@ -183,6 +183,23 @@ func TestFormatProfileWithFlags(t *testing.T) {
 	}
 }
 
+func TestFormatProfileWithEmptyFlags(t *testing.T) {
+	t.Parallel()
+
+	// A list that is set but empty turns off what a runtime sets for a
+	// profile without one, so the two are not rendered alike.
+	profile := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Flags:         []specs.LinuxSeccompFlag{},
+	}
+
+	const want = "Profile{default:SCMP_ACT_ERRNO flags:none}"
+
+	if got := seccomp.FormatProfile(profile); got != want {
+		t.Errorf("FormatProfile() = %q, want %q", got, want)
+	}
+}
+
 func TestFormatProfileWithListener(t *testing.T) {
 	t.Parallel()
 

@@ -906,6 +906,56 @@ func TestMergeTreatsUnsetErrnoRetAsEPERM(t *testing.T) {
 	}
 }
 
+func TestMergeNarrowsErrnoRetAsRuntimesDo(t *testing.T) {
+	t.Parallel()
+
+	merges := []func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error){
+		seccomp.Intersect, seccomp.Union,
+	}
+
+	// runc and crun load the lower 16 bits of errnoRet, so 65537 is EPERM.
+	// The unconditional entry then equals the default, the runtime skips
+	// it, and it must not hide the conditional rule next to it.
+	wraps := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls: []specs.LinuxSyscall{
+			{
+				Names:  []string{syscallRead},
+				Action: specs.ActAllow,
+				Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 1, Op: specs.OpEqualTo}},
+			},
+			{Names: []string{syscallRead}, Action: specs.ActErrno, ErrnoRet: uintPtr(65537)},
+		},
+	}
+
+	// A value that narrows to another errno is spelled as it is loaded.
+	narrows := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActAllow,
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{syscallRead}, Action: specs.ActErrno, ErrnoRet: uintPtr(65538)},
+		},
+	}
+
+	for _, mergeFn := range merges {
+		for _, test := range []struct {
+			profile *specs.LinuxSeccomp
+			want    string
+		}{
+			{wraps, "Profile{default:SCMP_ACT_ERRNO read([0]SCMP_CMP_EQ:1)->SCMP_ACT_ALLOW}"},
+			{narrows, "Profile{default:SCMP_ACT_ALLOW read->SCMP_ACT_ERRNO(errno:2)}"},
+		} {
+			result, err := mergeFn(test.profile)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if got := seccomp.FormatProfile(result); got != test.want {
+				t.Errorf("got %s, want %s", got, test.want)
+			}
+		}
+	}
+}
+
 func TestUnionSyscallErrnoRetTiebreak(t *testing.T) {
 	t.Parallel()
 

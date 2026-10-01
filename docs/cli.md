@@ -72,6 +72,11 @@ from the first input that sets a `listenerPath`. So `spm merge a.json b.json`
 and `spm merge b.json a.json` are not the same command, and a runtime lists
 its inputs from most to least trusted.
 
+A seccomp profile without a `flags` member leaves the flags to the runtime,
+and runc and crun then set `SECCOMP_FILTER_FLAG_SPEC_ALLOW`, while
+`"flags": []` sets none. The merge keeps the two apart, and its output
+carries `"flags": []` where the flag has to stay off.
+
 `--validate` names the checks to run on the inputs before merging: `default`
 (what the merge itself applies), `strict`, or `artifact`, as described under
 [Validate profiles](#validate-profiles). Give one mode for all inputs, or one
