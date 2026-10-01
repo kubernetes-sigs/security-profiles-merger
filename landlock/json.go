@@ -21,16 +21,18 @@ import (
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
-// ErrDuplicateKey, ErrUnknownField, ErrMisspelledField, ErrInvalidUTF8 and
-// ErrUnexpectedData are returned by UnmarshalStrict for a document
-// encoding/json would decode without a word: one repeating a member, holding
-// a member no field reads, holding a member that names a field only ignoring
-// case, holding a byte the decoder replaces, or followed by more data. See
-// the spm package for each.
+// ErrDuplicateKey, ErrUnknownField, ErrMisspelledField, ErrMissingField,
+// ErrInvalidUTF8 and ErrUnexpectedData are returned by UnmarshalStrict for a
+// document encoding/json would decode without a word: one repeating a
+// member, holding a member no field reads, holding a member that names a
+// field only ignoring case, leaving out the port of a network rule, holding
+// a byte the decoder replaces, or followed by more data. See the spm package
+// for each.
 var (
 	ErrDuplicateKey    = spm.ErrDuplicateKey
 	ErrUnknownField    = spm.ErrUnknownField
 	ErrMisspelledField = spm.ErrMisspelledField
+	ErrMissingField    = spm.ErrMissingField
 	ErrInvalidUTF8     = spm.ErrInvalidUTF8
 	ErrUnexpectedData  = spm.ErrUnexpectedData
 )
@@ -39,8 +41,11 @@ var (
 // accepts silently: members the Profile, PathRule and NetRule types have no
 // field for, members that name a field only ignoring case, members repeated
 // within one object, bytes that are not valid UTF-8, and data behind the
-// profile. A document that is not a JSON object, such as null, is rejected
-// too.
+// profile. A network rule without a port, or with a null one, is rejected as
+// well: json.Unmarshal reads it as a rule on port 0, which is the port a
+// socket binds to for an ephemeral one, so an artifact that lost the member
+// would grant that. A document that is not a JSON object, such as null, is
+// rejected too.
 //
 // Each loses something a reader of an artifact must not lose. A
 // member a newer version of this format uses to handle a further access

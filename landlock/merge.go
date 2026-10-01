@@ -19,6 +19,7 @@ package landlock
 import (
 	"cmp"
 	"fmt"
+	"iter"
 	"maps"
 	"slices"
 	"strings"
@@ -57,8 +58,11 @@ type InputError = spm.InputError
 // ancestors in the result already grant. As in the kernel, a profile
 // handling any filesystem right denies FSAccessRefer unless a rule grants
 // it, and the result drops refer where it would allow a move an input
-// denies, so it may deny moves and links that every input allows. See the
-// Handled access, Refer and Rule paths sections of the package
+// denies, so it may deny moves and links that every input allows. One kind
+// of move is not covered: inside a mount other than the root mount, an
+// input can deny a move for a right its rule on "/" and another of its
+// rules both grant, which gains the file nothing, and the result may allow
+// it. See the Handled access, Refer and Rule paths sections of the package
 // documentation.
 //
 // Hierarchy resolution is textual, so a rule of the result can carry an
@@ -93,8 +97,10 @@ func Intersect(profiles ...*Profile) (*Profile, error) {
 // share no other handled filesystem right. Where a right one input grants
 // at a destination would deny a move another input allows, the result stops
 // handling that right, which permits it everywhere and more than any input
-// does. See the Handled access, Refer and ABI versions sections of the
-// package documentation.
+// does. That is judged with and without the rights of a rule on "/", which
+// the kernel leaves out of the comparison for moves outside the root mount.
+// See the Handled access, Refer and ABI versions sections of the package
+// documentation.
 //
 // Inputs are validated as for Intersect. A result that handles and scopes
 // nothing, for example the union of a profile handling only filesystem
@@ -160,6 +166,9 @@ func finishIntersect(result *Profile, inputs []*Profile) {
 func finishUnion(result *Profile, inputs []*Profile) {
 	unhandleMoveConflicts(result, inputs)
 }
+
+// rootPath is the path of the rule on the root directory.
+const rootPath = "/"
 
 // pruneUnhandledRights drops rule rights outside the handled sets and rules
 // left without rights. Unhandled rights are implicitly allowed, so this does
@@ -422,10 +431,21 @@ func directAccess[Key comparable, Right comparable](
 // link up to the mount point first, but then continues the walk above it,
 // applying the same rules to both directories, until every right is
 // settled or the real root is reached.
+//
+// One rule is an exception to that, which this function does not model. The
+// kernel compares the rights of the two directories before it applies the
+// rule of the directory it is at, and stops at the real root without
+// comparing again. So for a move inside a mount other than the root mount,
+// the rights the rule on "/" grants are left out of the comparison, while
+// they count in full for a move inside the root mount and for granting refer
+// itself. Which of the two applies depends on the mounts of the node, which
+// a merge does not know. A union settles its moves for both (see
+// unhandleMoveConflicts); the Refer section of the package documentation
+// says what that leaves open for an intersection.
 func effectiveFSAccess(
 	path string, rules map[string][]FSAccessRight,
 ) []FSAccessRight {
-	return ancestorAccess(pathAncestors(path), rules)
+	return ancestorAccess(ancestors(path), rules)
 }
 
 // dropUnsafeRefer removes FSAccessRefer from the result rules wherever the
@@ -516,7 +536,7 @@ func stripRefer(rules []PathRule, paths map[string]struct{}, inputs []*Profile) 
 	strip := make(map[string]struct{})
 
 	for path := range paths {
-		for _, ancestor := range pathAncestors(path) {
+		for ancestor := range ancestors(path) {
 			strip[ancestor] = struct{}{}
 		}
 	}
@@ -584,15 +604,34 @@ func referRulePaths(inputs []*Profile) map[string]struct{} {
 //
 // A conflict needs an input granting refer, and the union keeps that grant
 // and so lists refer, which therefore stays handled and denied elsewhere.
+//
+// The kernel compares the two directories in one of two ways, with the
+// rights the rule on "/" grants or without them (see effectiveFSAccess),
+// and a merge does not know which applies on the node. So where the union
+// has a rule on "/", the conflicts are looked for both ways. A right found
+// only the second way is one the union's root rule grants, which a rule of
+// another input grants again at the destination. Not handling it permits it
+// everywhere, as for any other right the union stops handling. On a path
+// that leads through the root, the root rule permits it already. On one
+// that does not, such as a file reached through another mount namespace or
+// through a directory descriptor passed in, no input may grant it, and
+// there the union then permits what no input does.
+//
+// Refer itself cannot be left unhandled, so one conflict stays: where the
+// union's root rule grants refer and another rule grants it again, the
+// kernel denies moving a directory into the hierarchy of that rule from
+// outside it, inside a mount other than the root mount, which the input
+// granting refer on "/" allows.
 func unhandleMoveConflicts(result *Profile, inputs []*Profile) {
 	bits := newRightBits(result.HandledAccessFS)
 	resultRules := ruleMap(result.PathRules, pathRuleKey, pathRuleAccess)
 	paths := inputRulePaths(inputs)
+	_, rootRule := resultRules[rootPath]
 
 	var conflicting uint32
 
 	for _, input := range inputs {
-		conflicting |= moveConflicts(bits, input, resultRules, paths)
+		conflicting |= moveConflicts(bits, input, resultRules, paths, rootRule)
 	}
 
 	conflicting &= bits.mask(result.HandledAccessFS) &^ bits[FSAccessRefer]
@@ -612,18 +651,35 @@ func unhandleMoveConflicts(result *Profile, inputs []*Profile) {
 // input on its children grant, which a child keeps when it moves.
 type moveSide struct{ input, result, children uint32 }
 
-// moveConflicts returns the rights through which the union could deny a
-// move or link the input allows.
-func moveConflicts(
-	bits rightBits, input *Profile, resultRules map[string][]FSAccessRight, paths []string,
-) uint32 {
-	sources, destinations := moveSides(bits, input, resultRules, paths)
-	files := bits.mask(fileAccessFS())
+// moveSets holds the distinct answers of the directories an input grants
+// refer on, as sources and as destinations of a move.
+type moveSets struct{ sources, destinations map[moveSide]struct{} }
 
+func newMoveSets() moveSets {
+	return moveSets{
+		sources:      make(map[moveSide]struct{}),
+		destinations: make(map[moveSide]struct{}),
+	}
+}
+
+// add records a directory as a source and, unless it is only the parent of
+// a rule path, as a destination, which does not depend on its children.
+func (s moveSets) add(side moveSide, destination bool) {
+	s.sources[side] = struct{}{}
+
+	if destination {
+		side.children = 0
+		s.destinations[side] = struct{}{}
+	}
+}
+
+// conflicts returns the rights through which the union could deny a move
+// between a source and a destination that the input allows.
+func (s moveSets) conflicts(files uint32) uint32 {
 	var conflicting uint32
 
-	for src := range sources {
-		for dst := range destinations {
+	for src := range s.sources {
+		for dst := range s.destinations {
 			// The input denies every move from src to dst, whatever it moves.
 			if (dst.input&^src.input&^src.children)&files != 0 {
 				continue
@@ -636,49 +692,73 @@ func moveConflicts(
 	return conflicting
 }
 
-// moveSides returns the distinct answers of the directories the input
-// grants refer on, as sources and as destinations of a move. Rights change
-// only at rule paths, so a destination answers as the deepest rule path
-// above it does. A source also depends on the rules on its children, so the
-// parents of rule paths are asked as well.
+// moveConflicts returns the rights through which the union could deny a
+// move or link the input allows: comparing the directories with the rights
+// of the rules on "/" and, when belowRoot is set, without them as well.
+func moveConflicts(
+	bits rightBits, input *Profile, resultRules map[string][]FSAccessRight, paths []string,
+	belowRoot bool,
+) uint32 {
+	withRoot, withoutRoot := moveSides(bits, input, resultRules, paths)
+	files := bits.mask(fileAccessFS())
+
+	conflicting := withRoot.conflicts(files)
+	if belowRoot {
+		conflicting |= withoutRoot.conflicts(files)
+	}
+
+	return conflicting
+}
+
+// moveSides returns the answers of the directories the input grants refer
+// on, once compared with the rights the rules on "/" grant and once without
+// them. Rights change only at rule paths, so a destination answers as the
+// deepest rule path above it does. A source also depends on the rules on
+// its children, so the parents of rule paths are asked as well.
+//
+// Whether a directory grants refer is read with the rules on "/" in both
+// cases, since the kernel counts them for the grant either way.
 func moveSides(
 	bits rightBits, input *Profile, resultRules map[string][]FSAccessRight, paths []string,
-) (map[moveSide]struct{}, map[moveSide]struct{}) {
+) (moveSets, moveSets) {
 	inputRules := ruleMap(input.PathRules, pathRuleKey, pathRuleAccess)
 	children := make(map[string]uint32)
 
 	for _, path := range paths {
-		if ancestors := pathAncestors(path); len(ancestors) > 1 {
-			children[ancestors[1]] |= bits.mask(inputRules[path])
+		if parent, ok := parentPath(path); ok {
+			children[parent] |= bits.mask(inputRules[path])
 		}
 	}
 
-	sideOf := func(path string) moveSide {
-		return moveSide{
-			input:    bits.mask(effectiveFSAccess(path, inputRules)),
-			result:   bits.mask(effectiveFSAccess(path, resultRules)),
+	withRoot, withoutRoot := newMoveSets(), newMoveSets()
+
+	add := func(path string, destination bool) {
+		inputBelow, inputRoot := bits.maskAt(path, inputRules)
+		if (inputBelow|inputRoot)&bits[FSAccessRefer] == 0 {
+			return
+		}
+
+		resultBelow, resultRoot := bits.maskAt(path, resultRules)
+
+		withRoot.add(moveSide{
+			input:    inputBelow | inputRoot,
+			result:   resultBelow | resultRoot,
 			children: children[path],
-		}
+		}, destination)
+		withoutRoot.add(moveSide{
+			input: inputBelow, result: resultBelow, children: children[path],
+		}, destination)
 	}
-
-	sources := make(map[moveSide]struct{})
-	destinations := make(map[moveSide]struct{})
 
 	for _, path := range paths {
-		if side := sideOf(path); side.input&bits[FSAccessRefer] != 0 {
-			sources[side] = struct{}{}
-			side.children = 0
-			destinations[side] = struct{}{}
-		}
+		add(path, true)
 	}
 
 	for parent := range children {
-		if side := sideOf(parent); side.input&bits[FSAccessRefer] != 0 {
-			sources[side] = struct{}{}
-		}
+		add(parent, false)
 	}
 
-	return sources, destinations
+	return withRoot, withoutRoot
 }
 
 // rightBits numbers filesystem rights, so that sets of them become masks.
@@ -708,6 +788,23 @@ func (b rightBits) mask(rights []FSAccessRight) uint32 {
 	}
 
 	return mask
+}
+
+// maskAt returns the rights the rules grant for a path, as effectiveFSAccess
+// reads them, split into the ones rules beneath the root grant and the ones
+// the rule on "/" grants.
+func (b rightBits) maskAt(path string, rules map[string][]FSAccessRight) (uint32, uint32) {
+	var below, root uint32
+
+	for ancestor := range ancestors(path) {
+		if ancestor == rootPath {
+			root |= b.mask(rules[ancestor])
+		} else {
+			below |= b.mask(rules[ancestor])
+		}
+	}
+
+	return below, root
 }
 
 // fileAccessFS returns the rights that apply to a file that is not a
@@ -743,11 +840,11 @@ func inputRulePaths(inputs []*Profile) []string {
 // the caller runs it once per rule of either side and scanning would make a
 // profile with many rules quadratic to merge.
 func ancestorAccess(
-	ancestors []string, rules map[string][]FSAccessRight,
+	ancestors iter.Seq[string], rules map[string][]FSAccessRight,
 ) []FSAccessRight {
 	var result []FSAccessRight
 
-	for _, ancestor := range ancestors {
+	for ancestor := range ancestors {
 		if access, ok := rules[ancestor]; ok {
 			result = merge.UnionSlice(result, access)
 		}
@@ -756,33 +853,62 @@ func ancestorAccess(
 	return result
 }
 
-// pathAncestors returns the path itself followed by each of its parent
+// ancestors yields the path itself followed by each of its parent
 // directories, ending at "/" for an absolute path. Paths are expected to be
 // cleaned, so they carry no trailing slash except for the root itself.
 // Resolution is purely textual: the merge assumes no symlink or bind mount
 // crosses a rule boundary.
-func pathAncestors(path string) []string {
-	// Validate rejects an empty rule path before a merge sees it, so this
-	// only keeps the loop below from indexing an empty string.
-	if path == "" {
-		return nil
-	}
+//
+// The ancestors are yielded rather than listed, since a merge asks for them
+// once per rule and more: a list holds a string header per path component,
+// and a profile of a thousand rules two thousand components deep allocated
+// some hundred megabytes on them.
+func ancestors(path string) iter.Seq[string] {
+	return func(yield func(string) bool) {
+		// Validate rejects an empty rule path before a merge sees it, so
+		// this only keeps the loop below from indexing an empty string.
+		if path == "" || !yield(path) {
+			return
+		}
 
-	result := make([]string, 0, strings.Count(path, "/")+1)
-	result = append(result, path)
+		for idx := len(path) - 1; idx > 0; idx-- {
+			if path[idx] == '/' && !yield(path[:idx]) {
+				return
+			}
+		}
 
-	for idx := len(path) - 1; idx > 0; idx-- {
-		if path[idx] == '/' {
-			result = append(result, path[:idx])
+		// A relative path has no root ancestor, and "/" is already the
+		// path.
+		if len(path) > 1 && path[0] == '/' {
+			yield(rootPath)
 		}
 	}
+}
 
-	// A relative path has no root ancestor, and "/" is already the path.
-	if len(path) > 1 && path[0] == '/' {
-		result = append(result, "/")
+// parentPath returns the parent directory of a cleaned path, if it has one:
+// the root has none, and neither has a relative path of one component.
+func parentPath(path string) (string, bool) {
+	idx := strings.LastIndexByte(path, '/')
+
+	switch {
+	case idx < 0 || path == rootPath:
+		return "", false
+	case idx == 0:
+		return rootPath, true
+	default:
+		return path[:idx], true
+	}
+}
+
+// strictAncestors yields the parent directories of the path, nearest first,
+// which are the parent and its own ancestors.
+func strictAncestors(path string) iter.Seq[string] {
+	parent, ok := parentPath(path)
+	if !ok {
+		return func(func(string) bool) {}
 	}
 
-	return result
+	return ancestors(parent)
 }
 
 // minimizePathRules drops from each rule the rights that rules on its
@@ -793,6 +919,9 @@ func pathAncestors(path string) []string {
 // intersection may minimize but union must not. The kernel decides a move
 // or link from the same inherited rights, walking past mount points up to
 // the real root, so a rule granting FSAccessRefer is minimized as any other.
+// Minimizing also drops every right the root rule grants from the rules
+// beneath it, so the result's own moves do not depend on whether the kernel
+// counts the root rule in its comparison (see effectiveFSAccess).
 func minimizePathRules(rules []PathRule) []PathRule {
 	// A single rule has no ancestor among the rules to inherit from.
 	const minRules = 2
@@ -805,7 +934,7 @@ func minimizePathRules(rules []PathRule) []PathRule {
 	result := make([]PathRule, 0, len(rules))
 
 	for _, rule := range rules {
-		inherited := toSet(ancestorAccess(pathAncestors(rule.Path)[1:], byPath))
+		inherited := toSet(ancestorAccess(strictAncestors(rule.Path), byPath))
 
 		kept := make([]FSAccessRight, 0, len(rule.AccessFS))
 
@@ -825,9 +954,11 @@ func minimizePathRules(rules []PathRule) []PathRule {
 
 // LoweredRulePaths reports the rule paths of a merge result that carry
 // access an input granted only on an ancestor path. A path is reported when
-// some input has no rule on it, yet a rule of that input on one of its
-// ancestors grants a right the result grants there: the merge lowered that
-// input's grant onto the deeper path, which another input named.
+// the result grants a right there that some input grants through a rule on
+// one of its ancestors and not through a rule on the path itself, whether
+// that input has no rule on the path or one granting other rights: the
+// merge lowered that input's grant onto the deeper path, which another
+// input named.
 //
 // The paths are cleaned as the merge cleans them, reported once each and
 // sorted. A nil result, an input this package would reject, or a path no
@@ -896,14 +1027,8 @@ func loweredAt(
 ) bool {
 	direct := toSet(inputRules[path])
 
-	// The first entry is the path itself, so anything beyond it is a
-	// strict ancestor and a path without one can carry nothing lowered.
-	ancestors := pathAncestors(path)
-	if len(ancestors) == 0 {
-		return false
-	}
-
-	inherited := toSet(ancestorAccess(ancestors[1:], inputRules))
+	// A path without a strict ancestor can carry nothing lowered.
+	inherited := toSet(ancestorAccess(strictAncestors(path), inputRules))
 
 	for _, right := range access {
 		if _, ok := direct[right]; ok {

@@ -21,12 +21,12 @@ import (
 	"testing"
 )
 
-// TestPathAncestorsMatchesRelation checks the enumeration the merge uses
+// TestAncestorsMatchRelation checks the enumeration the merge uses
 // against the hierarchy relation it stands for: for every pair of cleaned
 // paths, the enumeration lists an ancestor exactly when the relation holds.
 // The merge enumerates rather than testing every rule, because testing would
 // make a profile with many rules quadratic to merge.
-func TestPathAncestorsMatchesRelation(t *testing.T) {
+func TestAncestorsMatchRelation(t *testing.T) {
 	t.Parallel()
 
 	paths := []string{
@@ -37,17 +37,23 @@ func TestPathAncestorsMatchesRelation(t *testing.T) {
 
 	for _, raw := range paths {
 		cleaned := cleanPath(raw)
-		ancestors := pathAncestors(cleaned)
+		yielded := slices.Collect(ancestors(cleaned))
+
+		// The parents are the same enumeration without the path itself.
+		if parents := slices.Collect(strictAncestors(cleaned)); len(yielded) > 0 &&
+			!slices.Equal(parents, yielded[1:]) {
+			t.Errorf("strictAncestors(%q) = %v, want %v", cleaned, parents, yielded[1:])
+		}
 
 		for _, other := range paths {
 			candidate := cleanPath(other)
 
-			listed := slices.Contains(ancestors, candidate)
+			listed := slices.Contains(yielded, candidate)
 			want := isAncestorOrSelf(candidate, cleaned)
 
 			if listed != want {
 				t.Errorf(
-					"pathAncestors(%q) lists %q = %v, isAncestorOrSelf(%q, %q) = %v",
+					"ancestors(%q) yields %q = %v, isAncestorOrSelf(%q, %q) = %v",
 					cleaned, candidate, listed, candidate, cleaned, want,
 				)
 			}

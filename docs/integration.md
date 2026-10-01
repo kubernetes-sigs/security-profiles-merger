@@ -211,6 +211,15 @@ what it is given at face value.
   an input denies, so it may deny moves every input allows, and `Union` stops
   handling a right that would deny a move an input allows, which permits that
   right everywhere.
+- **Landlock: the rule on `/` and mounts.** Inside a mount other than the
+  root mount, the kernel leaves the rights the rule on `/` grants out of
+  that comparison, so a ruleset granting a right on `/` and again on a
+  directory denies moves into that directory there, although the file gains
+  nothing. `Union` stops handling a right that would deny a move an input
+  allows in either case; what stays is a directory moved beneath a rule that
+  repeats `refer` of the root rule. `Intersect` follows its inputs for moves
+  inside the root mount only and may allow such a move elsewhere. See
+  [Refer](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#hdr-Refer).
 - **Landlock: symlinks and bind mounts.** Hierarchy resolution is textual,
   while the kernel binds a rule to the file its path resolves to. See below.
 
@@ -244,7 +253,10 @@ every layer does.
 Also call `ValidateForABI` with the node's ABI version. An intersection
 unions the handled access rights, so the result can require up to the
 highest ABI any input needs, and a runtime that treats "the ruleset failed
-to load" as "run without Landlock" would fail open.
+to load" as "run without Landlock" would fail open. A runtime that prefers
+enforcing what an older kernel can enforce calls `DowngradeToABI`, which
+drops the rights that version does not know; the result no longer restricts
+them, so this is a decision to make per node, not a default.
 
 ## seccomp: the listener
 

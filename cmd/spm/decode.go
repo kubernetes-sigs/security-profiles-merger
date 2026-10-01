@@ -40,6 +40,9 @@ type decodePolicy struct {
 	rejectMisspelled bool
 	// rejectInvalidUTF8 rejects bytes that are not valid UTF-8.
 	rejectInvalidUTF8 bool
+	// rejectMissing rejects a required member left out or set to null,
+	// which decodes as the zero value.
+	rejectMissing bool
 }
 
 // lenientDecode returns the policy that warns about every ambiguity and
@@ -50,6 +53,7 @@ func lenientDecode(inputs int) []decodePolicy {
 		rejectDuplicates:  false,
 		rejectMisspelled:  false,
 		rejectInvalidUTF8: false,
+		rejectMissing:     false,
 	}}, inputs)
 }
 
@@ -59,8 +63,10 @@ func lenientDecode(inputs int) []decodePolicy {
 // within one object is read differently by different parsers, and so is one
 // whose name matches a field only ignoring case; and a byte that is not
 // valid UTF-8 is replaced with U+FFFD, which makes profiles that differ in
-// their bytes decode to the same rules. Each is an error when that
-// input's policy rejects it and a warning on stderr otherwise.
+// their bytes decode to the same rules; and a required member left out
+// decodes as a value of its own, such as port 0 for a Landlock network rule.
+// Each is an error when that input's policy rejects it and a warning on
+// stderr otherwise.
 func unmarshalAll[T any](
 	inputs []profileInput, policies []decodePolicy, stderr io.Writer,
 ) ([]*T, error) {
@@ -81,28 +87,7 @@ func unmarshalAll[T any](
 			return nil, fmt.Errorf("parsing %s: %w", merge.SafeName(input.name), errNotAnObject)
 		}
 
-		duplicates, moreDuplicates := strictjson.DuplicateKeys(input.data)
-		unknown, moreUnknown := strictjson.UnknownFieldsOf[T](input.data)
-		misspelled, moreMisspelled := strictjson.MisspelledFieldsOf[T](input.data)
-
-		checks := []struct {
-			err    error
-			reject bool
-		}{
-			{
-				strictjson.PathsError(spm.ErrDuplicateKey, duplicates, moreDuplicates),
-				policy.rejectDuplicates,
-			},
-			{
-				strictjson.PathsError(spm.ErrUnknownField, unknown, moreUnknown),
-				policy.rejectUnknown,
-			},
-			{
-				strictjson.PathsError(spm.ErrMisspelledField, misspelled, moreMisspelled),
-				policy.rejectMisspelled,
-			},
-			{strictjson.InvalidUTF8(input.data), policy.rejectInvalidUTF8},
-		}
+		checks := documentChecks(input.data, profile, policy)
 
 		for _, check := range checks {
 			if check.err == nil {
@@ -120,6 +105,42 @@ func unmarshalAll[T any](
 	}
 
 	return profiles, nil
+}
+
+// documentCheck is one finding about a document that decoded, and whether
+// the policy it was decoded under rejects it.
+type documentCheck struct {
+	err    error
+	reject bool
+}
+
+// documentChecks looks for what the decoder read without a word in a
+// document that decoded into profile.
+func documentChecks[T any](data []byte, profile *T, policy decodePolicy) []documentCheck {
+	duplicates, moreDuplicates := strictjson.DuplicateKeys(data)
+	unknown, moreUnknown := strictjson.UnknownFieldsOf[T](data)
+	misspelled, moreMisspelled := strictjson.MisspelledFieldsOf[T](data)
+	missing, moreMissing := strictjson.MissingFieldsOf(data, profile)
+
+	return []documentCheck{
+		{
+			strictjson.PathsError(spm.ErrDuplicateKey, duplicates, moreDuplicates),
+			policy.rejectDuplicates,
+		},
+		{
+			strictjson.PathsError(spm.ErrUnknownField, unknown, moreUnknown),
+			policy.rejectUnknown,
+		},
+		{
+			strictjson.PathsError(spm.ErrMisspelledField, misspelled, moreMisspelled),
+			policy.rejectMisspelled,
+		},
+		{
+			strictjson.PathsError(spm.ErrMissingField, missing, moreMissing),
+			policy.rejectMissing,
+		},
+		{strictjson.InvalidUTF8(data), policy.rejectInvalidUTF8},
+	}
 }
 
 // decodeError reports a decoder failure against the input it came from. The

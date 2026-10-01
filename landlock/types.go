@@ -150,8 +150,12 @@ type PathRule struct {
 
 // NetRule defines the access rights allowed for a specific port.
 type NetRule struct {
-	// Port is the network port this rule applies to.
-	Port uint16 `json:"port"`
+	// Port is the network port this rule applies to. Port 0 is one a rule
+	// can name: a socket bound to it gets an ephemeral port. json.Unmarshal
+	// reads a rule without the member as a rule on that port, which is what
+	// a producer writing it with omitempty relies on, while UnmarshalStrict
+	// requires the member (ErrMissingField).
+	Port uint16 `json:"port" strict:"required"`
 
 	// AccessNet is the set of network access rights allowed for this port.
 	AccessNet []NetAccessRight `json:"accessNet,omitempty"`

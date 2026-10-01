@@ -94,6 +94,11 @@ func TestSentinelsAreShared(t *testing.T) {
 			shared: spm.ErrMisspelledField,
 		},
 		{
+			name:   "ErrMissingField",
+			errs:   []error{landlock.ErrMissingField},
+			shared: spm.ErrMissingField,
+		},
+		{
 			name: "ErrInvalidUTF8",
 			errs: []error{
 				seccomp.ErrInvalidUTF8, apparmor.ErrInvalidUTF8, landlock.ErrInvalidUTF8,

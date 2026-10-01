@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"sigs.k8s.io/security-profiles-merger/landlock"
@@ -195,6 +196,22 @@ func TestUnmarshalStrict(t *testing.T) {
 			data:    `{"netRules":[{"port":80,"accessNetExtra":["bind_tcp"]}]}`,
 			wantErr: true,
 		},
+		"a net rule without a port": {
+			data:    `{"handledAccessNet":["bind_tcp"],"netRules":[{"accessNet":["bind_tcp"]}]}`,
+			wantErr: true,
+		},
+		"a net rule with a null port": {
+			data:    `{"netRules":[{"port":null,"accessNet":["bind_tcp"]}]}`,
+			wantErr: true,
+		},
+		"a null net rule": {
+			data:    `{"handledAccessNet":["bind_tcp"],"netRules":[null]}`,
+			wantErr: true,
+		},
+		"a net rule on port 0": {
+			data:    `{"handledAccessNet":["bind_tcp"],"netRules":[{"port":0,"accessNet":["bind_tcp"]}]}`,
+			wantErr: false,
+		},
 		"a wrongly typed member": {data: `{"handledAccessFs":"read_file"}`, wantErr: true},
 		"a truncated document":   {data: `{"handledAccessFs":[`, wantErr: true},
 		"no document":            {data: ``, wantErr: true},
@@ -241,5 +258,35 @@ func TestUnmarshalStrictDecodesTheSameProfile(t *testing.T) {
 
 	if !reflect.DeepEqual(strict, plain) {
 		t.Errorf("UnmarshalStrict = %+v, want %+v", strict, plain)
+	}
+}
+
+// TestUnmarshalStrictRequiresPort covers a network rule without its port.
+// Port 0 is one a rule can name, which a socket binds to for an ephemeral
+// port, so a rule decoded without a port would grant that, and no validator
+// could tell it from one that names port 0. The strict decode refuses it and
+// names the rule. json.Unmarshal reads it as before, which a producer that
+// writes the port with omitempty depends on.
+func TestUnmarshalStrictRequiresPort(t *testing.T) {
+	t.Parallel()
+
+	const missing = `{"handledAccessNet":["bind_tcp"],"netRules":[` +
+		`{"port":80,"accessNet":["bind_tcp"]},{"accessNet":["bind_tcp"]}]}`
+
+	var profile landlock.Profile
+
+	err := landlock.UnmarshalStrict([]byte(missing), &profile)
+	if !errors.Is(err, landlock.ErrMissingField) ||
+		!strings.Contains(err.Error(), `"netRules[1].port"`) {
+		t.Errorf("UnmarshalStrict = %v, want ErrMissingField naming netRules[1].port", err)
+	}
+
+	if profile.NetRules != nil {
+		t.Errorf("a refused document was decoded: %+v", profile)
+	}
+
+	err = json.Unmarshal([]byte(missing), &profile)
+	if err != nil || len(profile.NetRules) != 2 || profile.NetRules[1].Port != 0 {
+		t.Errorf("json.Unmarshal = %v, %+v, want the second rule on port 0", err, profile.NetRules)
 	}
 }

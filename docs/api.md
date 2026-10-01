@@ -107,6 +107,7 @@ from any of the three packages.
 | `ErrRelativePath` | `apparmor`, `landlock`: `ValidateArtifact` and `ValidateStrict` | A path does not start with `/` |
 | `ErrPathTooLong` | `apparmor`, `landlock`: every validator and merge | A path is longer than `MaxPathLen`. It is checked before the path is scanned; only the empty-path check and the artifact limits of `ValidateArtifact` and `ValidateStrict` run before it |
 | `ErrDuplicateKey`, `ErrUnknownField`, `ErrMisspelledField`, `ErrInvalidUTF8`, `ErrUnexpectedData` | `UnmarshalStrict` of every package | See [Strict decoding](#strict-decoding) |
+| `ErrMissingField` | `landlock.UnmarshalStrict` | See [Strict decoding](#strict-decoding) |
 
 ### Strict decoding
 
@@ -120,6 +121,7 @@ artifact and the runtime that loads it:
 | `ErrDuplicateKey` | A member repeated within one object, compared ignoring case as `encoding/json` matches members to fields | `encoding/json` keeps the last occurrence, other parsers the first |
 | `ErrUnknownField` | A member the profile type has no field for | `encoding/json` drops it, so a misspelled member loses its rule and a member of a newer format is lost in the permissive direction |
 | `ErrMisspelledField` | A member that names a field only ignoring case, such as `"Syscalls"` or `"ſyscalls"` (U+017F) for `syscalls` | `encoding/json` fills the field from it, a reader comparing names exactly drops it |
+| `ErrMissingField` | No `port` in a Landlock network rule, or a null one | `encoding/json` decodes port 0, the port a socket binds to for an ephemeral one, so the rule would grant that. `json.Unmarshal` keeps reading it that way, which a producer writing the port with `omitempty` relies on |
 | `ErrInvalidUTF8` | A byte that is not valid UTF-8, or a `\u` escape spelling half a surrogate pair | `encoding/json` replaces both with U+FFFD, so names that differ only there decode alike and merge into one rule |
 | `ErrUnexpectedData` | Anything but whitespace after the profile | A second value would be dropped |
 
@@ -439,6 +441,7 @@ import "sigs.k8s.io/security-profiles-merger/landlock"
 | `ValidateStrict` | `ValidateArtifact` plus duplicate rules and rights, which no other validator reports |
 | `ValidateForABI` | `Validate` plus the rights a given ABI version does not know. A version newer than `LatestABIVersion` is read as `LatestABIVersion`. Not a validation level: combine it with `ValidateArtifact` or `ValidateStrict` |
 | `RequiredABIVersion` | The lowest ABI version supporting every right a profile uses. It returns no error, so a nil profile yields `ABIV1` |
+| `DowngradeToABI` | A copy of a profile without the rights a given ABI version does not support. Another policy than the profile: a right dropped from a handled set is no longer restricted, and at `ABIV1` the moves a `refer` grant allowed are denied |
 | `LoweredRulePaths` | The rule paths of a result that carry access an input granted only on an ancestor path |
 | `UnmarshalStrict` | Decode a profile, refusing what `encoding/json` accepts silently; see [strict decoding](#strict-decoding) |
 | `Diff` | Structured diff of the cleaned rules as written, not of the access they grant |
@@ -475,7 +478,8 @@ wrapped in an `InputError`.
 | `ErrDuplicateRule` | `ValidateStrict` | More than one rule for a path (after cleaning) or port |
 | `ErrDuplicateRight` | `ValidateStrict` | A right is repeated in a handled set, scoped set or rule |
 | `ErrUnsupportedABIRight` | `ValidateForABI` | A right the given ABI version does not know (`EINVAL`) |
-| `ErrUnknownABIVersion` | `ValidateForABI` | A version below `ABIV1`, which names no kernel |
+| `ErrUnknownABIVersion` | `ValidateForABI`, `DowngradeToABI` | A version below `ABIV1`, which names no kernel |
+| `ErrMissingField` | `UnmarshalStrict` | A network rule without a `port`, or with a null one; see [Strict decoding](#strict-decoding) |
 
 ### Limits
 
