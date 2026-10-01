@@ -218,8 +218,12 @@ what it is given at face value.
   there, and every call then gets the default action. That takes a profile
   whose rules with the fewest conditions all name syscalls the architecture
   lacks, such as one unconditional rule on `socketcall` next to a
-  conditional one on `socket`, loaded for x86_64 and x32 together or for any
-  other architecture, by crun or by runc with up to 32 syscall names. The
+  conditional one on `socket`, loaded for x86_64 and x32 together or for an
+  architecture without `socketcall` multiplexing (arm, aarch64, riscv64,
+  loongarch64, parisc, parisc64, 64-bit and n32 MIPS), by crun or by runc
+  with up to 32 syscall names; x86 and the other multiplexing architectures
+  drop a rule on a syscall they lack when it is added and are not affected,
+  nor is a filter of x86_64 or x32 alone. The
   merges do not model it and can produce such a profile from inputs that are
   not one; under a permissive default it then permits what an input denies.
   An allowlist is not affected, since it names syscalls every architecture

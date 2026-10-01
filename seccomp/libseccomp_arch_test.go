@@ -476,8 +476,11 @@ func TestModelMatchesLibseccompOnOtherArchitectures(t *testing.T) {
 // rule without conditions. Here that is socketcall, which x86_64 does not
 // have, so the conditional rule on socket is lost on x86_64, and a call the
 // profile denies is allowed. It takes a filter of x86_64 and x32 together,
-// or of any other architecture, and libseccomp sorting by priority, as crun
-// has it do and runc for a profile naming up to 32 syscalls.
+// or of an architecture without socketcall(2) multiplexing such as aarch64,
+// and libseccomp sorting by priority, as crun has it do and runc for a
+// profile naming up to 32 syscalls. The multiplexing architectures drop a
+// rule on a syscall they lack when it is added, and x86_64 alone loads the
+// number before any syscall is tested.
 //
 // The test fails when a libseccomp that is checked here stops doing this,
 // so that the warning can go.
@@ -499,32 +502,58 @@ func TestLibseccompLosesRulesBehindAnAbsentSyscall(t *testing.T) {
 	)
 	profile.Architectures = []specs.Arch{specs.ArchX86_64, specs.ArchX86, specs.ArchX32}
 
+	checkRulesLostOn(t, profile, specs.ArchX86_64, "socket", []uint64{40})
+
+	// Without x32 the filter of x86_64 stands alone, and the number is
+	// loaded before any syscall is tested.
+	profile.Architectures = []specs.Arch{specs.ArchX86_64, specs.ArchX86}
+
 	prog, err := compilers.compile(profile)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
 
 	socket := syscallNumbers(t, []string{"socket"})["socket"]
-	got, _, read := runProgramTraced(t, prog, libseccomp.NativeAuditArch(), socket, []uint64{40})
 
-	if got != specs.ActAllow || read {
-		t.Errorf("libseccomp %s applies the rule on socket (%s, number read: %v): "+
-			"the defect is gone, and so can the warning in the package documentation",
-			libseccomp.Version(), got, read)
+	got, _ := runProgramArch(t, prog, libseccomp.NativeAuditArch(), socket, []uint64{40})
+	if got != specs.ActErrno {
+		t.Errorf("without x32: socket(40) yields %s, want %s", got, specs.ActErrno)
 	}
 
-	// Without x32 the filter of x86_64 stands alone, and the number is
-	// loaded before any syscall is tested.
-	profile.Architectures = []specs.Arch{specs.ArchX86_64, specs.ArchX86}
+	// aarch64 has no socketcall either and stores the rule on it, so its
+	// block loses the socket rule the same way.
+	profile.Architectures = []specs.Arch{specs.ArchAARCH64}
+	checkRulesLostOn(t, profile, specs.ArchAARCH64, "socket", []uint64{40})
+}
 
-	prog, err = compilers.compile(profile)
+// checkRulesLostOn compiles the profile and checks that the program answers
+// the call on the architecture with the default without reading the syscall
+// number, as the defect has it do.
+func checkRulesLostOn(
+	t *testing.T, profile *specs.LinuxSeccomp, arch specs.Arch, name string, args []uint64,
+) {
+	t.Helper()
+
+	prog, err := compilers.compile(profile)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
 
-	got, _ = runProgramArch(t, prog, libseccomp.NativeAuditArch(), socket, []uint64{40})
-	if got != specs.ActErrno {
-		t.Errorf("without x32: socket(40) yields %s, want %s", got, specs.ActErrno)
+	audit, err := libseccomp.AuditArch(arch)
+	if err != nil {
+		t.Fatalf("resolve %s: %v", arch, err)
+	}
+
+	number, err := libseccomp.SyscallNumberArch(name, arch)
+	if err != nil {
+		t.Fatalf("resolve %s on %s: %v", name, arch, err)
+	}
+
+	got, _, read := runProgramTraced(t, prog, audit, number, args)
+	if got != profile.DefaultAction || read {
+		t.Errorf("libseccomp %s applies the rule on %s on %s (%s, number read: %v): "+
+			"the defect is gone there, and so can the warning in the package documentation",
+			libseccomp.Version(), name, arch, got, read)
 	}
 }
 
