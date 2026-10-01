@@ -153,10 +153,13 @@ import "sigs.k8s.io/security-profiles-merger/seccomp"
 | `IntersectSyscalls`, `UnionSyscalls` | The same on bare syscall slices, assuming the caller loads them with one default more restrictive than every action in them |
 | `Diff` | Structured diff by the rules a runtime loads, with the running program's architecture implied |
 | `DiffForArch` | `Diff` for a named native architecture, or none |
+| `IntersectForArch`, `UnionForArch` | `Intersect` and `Union` as a node of a named native architecture merges, for a merge that does not run on the node loading its result |
 | `DiffSyscalls` | `Diff` on bare syscall slices |
 | `Validate` | What a runtime needs to load the profile at all; what the merges run on every input |
 | `ValidateArtifact` | `Validate` plus what an artifact needs to load on every runtime and merge precisely: the [limits](#limits), no notify or listener settings, no conflicting rules |
+| `ValidateArtifactForArch` | `ValidateArtifact` for a named native architecture, which decides whether a value above 32 bits is reported |
 | `ValidateStrict` | `ValidateArtifact` plus duplicate syscall names and `valueTwo` on operators that ignore it |
+| `ValidateStrictForArch` | `ValidateStrict` for a named native architecture, so that it accepts only what `ValidateArtifactForArch` accepts there |
 | `UnmarshalStrict` | Decode a profile, refusing what `encoding/json` accepts silently (see [Strict decoding](#strict-decoding)) |
 | `MoreRestrictive`, `LessRestrictive` | Rank two actions in the [action order](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Action_order) |
 | `NativeArchitecture` | The seccomp architecture of the running program, from `runtime.GOARCH` |
@@ -183,7 +186,7 @@ formatting.
 | `ErrEmptySyscallName` | `Validate` and up | A name is the empty string |
 | `ErrUnknownOperator` | `Validate` and up | An argument operator this package does not know |
 | `ErrArgIndexOutOfRange` | `Validate` and up | An argument index above 5 |
-| `ErrUnknownArch`, `ErrUnknownFlag` | `Validate` and up | An architecture or flag this package does not know |
+| `ErrUnknownArch`, `ErrUnknownFlag` | `Validate` and up; `ErrUnknownArch` also the `ForArch` functions | An architecture or flag this package does not know |
 | `ErrNotifyUnsupported` | `Validate` and up | `SCMP_ACT_NOTIFY` as the default action or on `write`, which runc refuses |
 | `ErrNotifyWithoutListener` | `Validate` and up; `Intersect`, `Union` on their result | `SCMP_ACT_NOTIFY` without a `listenerPath`, which runc refuses |
 | `ErrDuplicateArch`, `ErrDuplicateFlag` | `ValidateArtifact`, `ValidateStrict` | An architecture or flag listed twice |
@@ -243,8 +246,10 @@ detail.
 - [Intersection](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Intersection)
   and [Union](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Union):
   `Intersect` never permits a call any input denies, `Union` never denies one
-  any input permits. Both are conservative rather than exact where filters
-  interact.
+  any input permits, as libseccomp evaluates them; the one exception is a
+  libseccomp defect the merges do not model (see
+  [Architectures](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Architectures)).
+  Both are conservative rather than exact where filters interact.
 - Validators on results: merge results pass `Validate`, but often list one
   syscall in several entries (`arg0 == 1` and `arg0 != 1`), which
   `ValidateStrict` rejects with `ErrDuplicateSyscallName`. Check results

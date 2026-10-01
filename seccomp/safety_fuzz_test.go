@@ -241,7 +241,7 @@ func intersectSafety() safetyDirection {
 	return safetyDirection{
 		name: "intersect",
 		merge: func(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
-			return seccomp.IntersectOn(specs.ArchX86_64, profiles...)
+			return seccomp.IntersectForArch(specs.ArchX86_64, profiles...)
 		},
 		bare:  seccomp.IntersectSyscalls,
 		safe:  permitsAtMost,
@@ -253,7 +253,7 @@ func unionSafety() safetyDirection {
 	return safetyDirection{
 		name: "union",
 		merge: func(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
-			return seccomp.UnionOn(specs.ArchX86_64, profiles...)
+			return seccomp.UnionForArch(specs.ArchX86_64, profiles...)
 		},
 		bare:  seccomp.UnionSyscalls,
 		safe:  permitsAtLeast,

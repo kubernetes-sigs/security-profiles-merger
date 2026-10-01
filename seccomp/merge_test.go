@@ -956,6 +956,162 @@ func TestMergeNarrowsErrnoRetAsRuntimesDo(t *testing.T) {
 	}
 }
 
+// TestIntersectKeepsWhatTheBaselineImplies covers an artifact rule whose
+// condition says more than the baseline's on the same argument. Every call
+// the artifact allows is one the baseline allows, so the rule survives,
+// where comparing the conditions by their spelling alone found no rule both
+// sides share and denied the syscall altogether. The baselines are the
+// socket and clone rules of the Docker and containerd default profile.
+func TestIntersectKeepsWhatTheBaselineImplies(t *testing.T) {
+	t.Parallel()
+
+	allow := func(name string, args ...specs.LinuxSeccompArg) specs.LinuxSyscall {
+		return specs.LinuxSyscall{Names: []string{name}, Action: specs.ActAllow, Args: args}
+	}
+	profile := func(entries ...specs.LinuxSyscall) *specs.LinuxSeccomp {
+		return &specs.LinuxSeccomp{DefaultAction: specs.ActErrno, Syscalls: entries}
+	}
+	arg := func(op specs.LinuxSeccompOperator, value uint64) specs.LinuxSeccompArg {
+		return specs.LinuxSeccompArg{Index: 0, Value: value, ValueTwo: 0, Op: op}
+	}
+
+	for _, test := range []struct {
+		name               string
+		baseline, artifact *specs.LinuxSeccomp
+		want               string
+	}{
+		{
+			"an address family the baseline does not exclude",
+			profile(allow(syscallSocket, arg(specs.OpNotEqual, 40))),
+			profile(allow(syscallSocket, arg(specs.OpEqualTo, 2))),
+			"socket([0]SCMP_CMP_EQ:2)->SCMP_ACT_ALLOW",
+		},
+		{
+			"several of them",
+			profile(allow(syscallSocket, arg(specs.OpNotEqual, 40))),
+			profile(
+				allow(syscallSocket, arg(specs.OpEqualTo, 1)),
+				allow(syscallSocket, arg(specs.OpEqualTo, 2)),
+				allow(syscallSocket, arg(specs.OpEqualTo, 10)),
+			),
+			"socket([0]SCMP_CMP_EQ:10)->SCMP_ACT_ALLOW socket([0]SCMP_CMP_EQ:1)->SCMP_ACT_ALLOW " +
+				"socket([0]SCMP_CMP_EQ:2)->SCMP_ACT_ALLOW",
+		},
+		{
+			"the family the baseline excludes",
+			profile(allow(syscallSocket, arg(specs.OpNotEqual, 40))),
+			profile(allow(syscallSocket, arg(specs.OpEqualTo, 40))),
+			"",
+		},
+		{
+			"a narrower range",
+			profile(allow(syscallRead, arg(specs.OpLessEqual, 10))),
+			profile(allow(syscallRead, arg(specs.OpLessThan, 5))),
+			"read([0]SCMP_CMP_LT:5)->SCMP_ACT_ALLOW",
+		},
+		{
+			"flags inside a mask",
+			profile(allow(syscallClone, specs.LinuxSeccompArg{
+				Index: 0, Value: 0x7E020000, ValueTwo: 0, Op: specs.OpMaskedEqual,
+			})),
+			profile(allow(syscallClone, arg(specs.OpEqualTo, 17))),
+			"clone([0]SCMP_CMP_EQ:17)->SCMP_ACT_ALLOW",
+		},
+	} {
+		want := strings.TrimSpace("Profile{default:SCMP_ACT_ERRNO " + test.want)
+		want += "}"
+
+		for _, inputs := range [][]*specs.LinuxSeccomp{
+			{test.baseline, test.artifact}, {test.artifact, test.baseline},
+		} {
+			result, err := seccomp.Intersect(inputs...)
+			if err != nil {
+				t.Fatalf("%s: unexpected error: %v", test.name, err)
+			}
+
+			if got := seccomp.FormatProfile(result); got != want {
+				t.Errorf("%s: got %s, want %s", test.name, got, want)
+			}
+		}
+	}
+}
+
+// TestIntersectReadsOrderedBaselineRulesConservatively covers the socket
+// rules of the CRI-O and Podman default profile: AF_VSOCK and the audit
+// netlink protocol are denied, everything else is allowed, in four clauses
+// of which two overlap with different results and two carry two conditions.
+// libseccomp decides them by an order of its own, which the package does
+// not model, so ValidateArtifact names the syscall and an intersection
+// reads the rules as the most restrictive of them: every socket call is
+// left to the default, where the baseline on its own allows most. This is
+// what the integration guide tells a runtime to look for in its baseline.
+func TestIntersectReadsOrderedBaselineRulesConservatively(t *testing.T) {
+	t.Parallel()
+
+	const (
+		afNetlink    = 16
+		afVsock      = 40
+		netlinkAudit = 9
+		einval       = 22
+	)
+
+	arg := func(index uint, op specs.LinuxSeccompOperator, value uint64) specs.LinuxSeccompArg {
+		return specs.LinuxSeccompArg{Index: index, Value: value, ValueTwo: 0, Op: op}
+	}
+
+	baseline := &specs.LinuxSeccomp{
+		DefaultAction:   specs.ActErrno,
+		DefaultErrnoRet: uintPtr(38),
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{syscallRead, syscallWrite}, Action: specs.ActAllow},
+			{
+				Names: []string{syscallSocket}, Action: specs.ActErrno, ErrnoRet: uintPtr(1),
+				Args: []specs.LinuxSeccompArg{arg(0, specs.OpEqualTo, afVsock)},
+			},
+			{
+				Names: []string{syscallSocket}, Action: specs.ActErrno, ErrnoRet: uintPtr(einval),
+				Args: []specs.LinuxSeccompArg{
+					arg(0, specs.OpEqualTo, afNetlink), arg(2, specs.OpEqualTo, netlinkAudit),
+				},
+			},
+			{
+				Names: []string{syscallSocket}, Action: specs.ActAllow,
+				Args: []specs.LinuxSeccompArg{
+					arg(0, specs.OpEqualTo, afNetlink), arg(2, specs.OpNotEqual, netlinkAudit),
+				},
+			},
+			{
+				Names: []string{syscallSocket}, Action: specs.ActAllow,
+				Args: []specs.LinuxSeccompArg{arg(0, specs.OpNotEqual, afNetlink)},
+			},
+		},
+	}
+
+	err := seccomp.ValidateArtifact(baseline)
+	if !errors.Is(err, seccomp.ErrConflictingEntries) ||
+		!strings.Contains(err.Error(), syscallSocket) {
+		t.Errorf("ValidateArtifact = %v, want ErrConflictingEntries naming socket", err)
+	}
+
+	artifact := &specs.LinuxSeccomp{
+		DefaultAction:   specs.ActErrno,
+		DefaultErrnoRet: uintPtr(38),
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{syscallRead, syscallSocket}, Action: specs.ActAllow},
+		},
+	}
+
+	result, err := seccomp.Intersect(baseline, artifact)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	const want = "Profile{default:SCMP_ACT_ERRNO defaultErrno:38 read->SCMP_ACT_ALLOW}"
+	if got := seccomp.FormatProfile(result); got != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}
+
 func TestUnionSyscallErrnoRetTiebreak(t *testing.T) {
 	t.Parallel()
 

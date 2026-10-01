@@ -88,7 +88,14 @@ The same calls exist in `apparmor` and `landlock`, which need the
    defaults runtimes ship fail the stricter levels: the Moby, containerd and
    CRI-O seccomp defaults list one syscall in several entries, which
    `ValidateStrict` reports, and CRI-O's also holds a `setns` entry that its
-   own allowlist overrides, which `ValidateArtifact` reports. Both levels also
+   own allowlist overrides, which `ValidateArtifact` reports. Do run
+   `ValidateArtifact` on a seccomp baseline once and read what it says about
+   conflicting entries: a syscall it names there is one whose rules
+   libseccomp decides by an order of its own, which `Intersect` reads as the
+   most restrictive of them. CRI-O's `socket` rules are such a set, so an
+   intersection with that baseline denies every `socket` call until the
+   rules are restated in a
+   [safe shape](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Evaluation_model). Both levels also
    reject a notification listener (see
    [seccomp: the listener](#seccomp-the-listener)). `ValidateStrict` remains
    useful as a lint for a baseline an administrator writes by hand.
@@ -202,7 +209,21 @@ what it is given at face value.
   native architecture is that of the running program, so what
   `ValidateArtifact` accepts and what the merges return depend on where they
   run: call them on the node that loads the result, and use `DiffForArch`
-  when comparing profiles for another node. See
+  when comparing profiles for another node. Where the merge cannot run on
+  that node, `IntersectForArch`, `UnionForArch`, `ValidateArtifactForArch`
+  and `ValidateStrictForArch` take its architecture instead. See
+  [Architectures](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Architectures).
+- **seccomp: a libseccomp defect.** libseccomp 2.5.5 and 2.6.1 lose every
+  rule of an architecture when the syscall they test first does not exist
+  there, and every call then gets the default action. That takes a profile
+  whose rules with the fewest conditions all name syscalls the architecture
+  lacks, such as one unconditional rule on `socketcall` next to a
+  conditional one on `socket`, loaded for x86_64 and x32 together or for any
+  other architecture, by crun or by runc with up to 32 syscall names. The
+  merges do not model it and can produce such a profile from inputs that are
+  not one; under a permissive default it then permits what an input denies.
+  An allowlist is not affected, since it names syscalls every architecture
+  has in unconditional rules. See
   [Architectures](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Architectures).
 - **Landlock: refer.** The kernel allows a move or link into another
   directory only when both grant `refer` and the file gains no handled right
@@ -321,7 +342,9 @@ held up.
   merge errs in that direction: a seccomp rule libseccomp evaluates in an
   order of its own is read at its most restrictive and never emitted, and a
   Landlock move one ruleset cannot express is denied by `Intersect` and
-  permitted by `Union`.
+  permitted by `Union`. The one exception is the libseccomp defect under
+  [What the models leave out](#what-the-models-leave-out), which the merges
+  do not model.
 - **No mutation.** A function never modifies its arguments, except
   `UnmarshalStrict`, which replaces the profile it is given when decoding
   succeeds. See [Concurrency and memory](#concurrency-and-memory) for the one

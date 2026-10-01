@@ -33,12 +33,13 @@ import (
 // The tests in this file check merge results on architectures other than
 // the native one, where libseccomp compiles something else than the model
 // reads: x86, which compares only the lower 32 bits of every value and
-// reaches the socket syscalls through socketcall(2) as well, and ppc64le,
-// which is 64-bit but multiplexes the same way. Both are little-endian, as
-// the BPF interpreter of these tests assumes of seccomp_data. The filters
-// list them, as runc adds them, and every call is made on every
-// architecture, so a filter that does not cover one answers with
-// libseccomp's action for an unlisted architecture.
+// reaches the socket syscalls through socketcall(2) as well, ppc64le, which
+// is 64-bit but multiplexes the same way, and x32, arm and aarch64, which
+// lack syscalls the others have. All are little-endian, as the BPF
+// interpreter of these tests assumes of seccomp_data. The filters list
+// them, as runc adds them, and every call is made on every architecture, so
+// a filter that does not cover one answers with libseccomp's action for an
+// unlisted architecture.
 
 // archCall is one probed call on one architecture and the actions the
 // inputs apply to it, or nil where libseccomp does not load the input.
@@ -53,9 +54,18 @@ type archCall struct {
 
 // archNames are the syscalls the architecture checks draw from: a
 // multiplexed syscall, another one with a different sub-call, the
-// multiplexer, and one that is neither.
+// multiplexer, one that is neither, and one that x86 does not have, as
+// x86_64, x32 and aarch64 do not have the multiplexer.
 func archNames() []string {
-	return []string{"socket", "connect", "socketcall", "personality"}
+	return []string{"socket", "connect", "socketcall", "personality", "accept"}
+}
+
+// archProbes are the architectures the checks make calls on besides the
+// native one.
+func archProbes() []specs.Arch {
+	return []specs.Arch{
+		specs.ArchX86, specs.ArchPPC64LE, specs.ArchX32, specs.ArchARM, specs.ArchAARCH64,
+	}
 }
 
 // archValues are the argument values the architecture checks draw from:
@@ -78,7 +88,7 @@ func archCalls(t *testing.T) []archCall {
 
 	var calls []archCall
 
-	for _, arch := range []specs.Arch{native, specs.ArchX86, specs.ArchPPC64LE} {
+	for _, arch := range slices.Compact(slices.Sorted(slices.Values(append(archProbes(), native)))) {
 		audit, err := libseccomp.AuditArch(arch)
 		if err != nil {
 			t.Fatalf("resolve %s: %v", arch, err)
@@ -126,6 +136,10 @@ func randomArchProfile(rng *rand.Rand, def specs.LinuxSeccompAction) *specs.Linu
 		{specs.ArchX86},
 		{specs.ArchPPC64LE},
 		{specs.ArchX86, specs.ArchPPC64LE},
+		{specs.ArchX86_64, specs.ArchX86, specs.ArchX32},
+		{specs.ArchX32},
+		{specs.ArchARM, specs.ArchAARCH64},
+		{specs.ArchAARCH64},
 	}
 
 	profile := profileOf(def)
@@ -173,23 +187,24 @@ func randomErrno(rng *rand.Rand, action specs.LinuxSeccompAction) *uint {
 
 // archMergeCase merges a pair as profileMergeCase does, and for each foreign
 // architecture both inputs list, also as a node whose native architecture
-// it is would merge them: that node cannot drop the architecture from the
-// result, so it settles by collapsing instead. The filters list the
-// architecture, so they cover it here as they would there.
+// it is would merge them: a 32-bit or multiplexing node cannot drop its own
+// architecture from the result, so it settles by collapsing instead, and
+// the others settle the rest by it. The filters list the architecture, so
+// they cover it here as they would there.
 func archMergeCase(t *testing.T, left, right *specs.LinuxSeccomp) mergeCase {
 	t.Helper()
 
 	merged := profileMergeCase(t, left, right)
 
-	for _, native := range []specs.Arch{specs.ArchX86, specs.ArchPPC64LE} {
+	for _, native := range archProbes() {
 		if !slices.Contains(left.Architectures, native) ||
 			!slices.Contains(right.Architectures, native) {
 			continue
 		}
 
 		for _, direction := range []libseccompDirection{
-			nativeDirection(intersectDirection(), native, seccomp.IntersectOn),
-			nativeDirection(unionDirection(), native, seccomp.UnionOn),
+			nativeDirection(intersectDirection(), native, seccomp.IntersectForArch),
+			nativeDirection(unionDirection(), native, seccomp.UnionForArch),
 		} {
 			result, err := direction.merge(left, right)
 			if err != nil {
@@ -242,16 +257,7 @@ func checkArchMergeCase(t *testing.T, merged mergeCase, template []archCall) {
 			continue
 		}
 
-		for idx := range calls {
-			action, _ := runProgramArch(
-				t,
-				prog,
-				calls[idx].audit,
-				calls[idx].number,
-				calls[idx].args,
-			)
-			calls[idx].inputs[inputIdx] = &action
-		}
+		recordInputActions(t, calls, inputIdx, input, prog)
 	}
 
 	for _, result := range merged.results {
@@ -266,6 +272,99 @@ func checkArchMergeCase(t *testing.T, merged mergeCase, template []archCall) {
 
 		checkArchResultCalls(t, calls, merged, result, prog)
 	}
+}
+
+// recordInputActions runs every call against the program of an input and
+// records the action it yields, except where libseccomp lost the input's
+// rules (see lostRules): such an answer says nothing about what the input
+// permits.
+func recordInputActions(
+	t *testing.T, calls []archCall, inputIdx int, input *specs.LinuxSeccomp,
+	prog []libseccomp.Instruction,
+) {
+	t.Helper()
+
+	lost := rulesLostOn(t, input)
+
+	for idx := range calls {
+		action, _, read := runProgramTraced(
+			t, prog, calls[idx].audit, calls[idx].number, calls[idx].args,
+		)
+
+		if !lost(calls[idx].arch, read) {
+			calls[idx].inputs[inputIdx] = &action
+		}
+	}
+}
+
+// rulesLostOn returns a function reporting whether a program compiled from
+// the profile answered a call of an architecture without applying the
+// profile's rules there, which is libseccomp's doing and not the profile's
+// (see TestLibseccompLosesRulesBehindAnAbsentSyscall): the program never
+// read the syscall number, although the filter covers the architecture and
+// libseccomp places a rule of the profile in its block. A program without
+// a rule to place there has no number to read, and its answer is the
+// profile's own, so a result that lost every rule is still checked.
+func rulesLostOn(t *testing.T, profile *specs.LinuxSeccomp) func(specs.Arch, bool) bool {
+	t.Helper()
+
+	placed := make(map[specs.Arch]bool)
+
+	return func(arch specs.Arch, read bool) bool {
+		if read || !coversArch(profile, arch) {
+			return false
+		}
+
+		has, known := placed[arch]
+		if !known {
+			has = placesRule(t, profile, arch)
+			placed[arch] = has
+		}
+
+		return has
+	}
+}
+
+// placesRule reports whether libseccomp places a rule of the profile in the
+// block of the architecture: an entry whose action differs from the default,
+// which libseccomp refuses otherwise, names a syscall the architecture has,
+// directly or through socketcall(2).
+func placesRule(t *testing.T, profile *specs.LinuxSeccomp, arch specs.Arch) bool {
+	t.Helper()
+
+	for _, entry := range profile.Syscalls {
+		if entry.Action == profile.DefaultAction &&
+			loadedErrno(entry.Action, entry.ErrnoRet) ==
+				loadedErrno(profile.DefaultAction, profile.DefaultErrnoRet) {
+			continue
+		}
+
+		for _, name := range entry.Names {
+			number, err := libseccomp.SyscallNumberArch(name, arch)
+			if err != nil {
+				t.Fatalf("resolve %s on %s: %v", name, arch, err)
+			}
+
+			if number >= 0 || multiplexes(arch) && slices.Contains(socketNames(), name) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// multiplexes reports whether the architecture reaches the socket syscalls
+// through socketcall(2), where libseccomp adds a rule on a socket syscall
+// as one on the multiplexer. Of the probed architectures, x86 and ppc64le
+// do.
+func multiplexes(arch specs.Arch) bool {
+	return arch == specs.ArchX86 || arch == specs.ArchPPC64LE
+}
+
+// socketNames are the names of archNames that socketcall(2) multiplexes.
+func socketNames() []string {
+	return []string{"socket", "connect", "accept"}
 }
 
 // checkArchResultCalls checks a compiled merge result against the actions
@@ -285,8 +384,14 @@ func checkArchResultCalls(
 ) {
 	t.Helper()
 
+	lost := rulesLostOn(t, result.profile)
+
 	for _, call := range calls {
-		got, _ := runProgramArch(t, prog, call.audit, call.number, call.args)
+		got, _, read := runProgramTraced(t, prog, call.audit, call.number, call.args)
+		if lost(call.arch, read) {
+			// As for an input: libseccomp lost the rules of the result.
+			continue
+		}
 
 		for _, inputIdx := range result.inputs {
 			want := call.inputs[inputIdx]
@@ -357,6 +462,70 @@ func TestModelMatchesLibseccompOnOtherArchitectures(t *testing.T) {
 	parallelFor(len(cases), func(idx int) {
 		checkArchMergeCase(t, cases[idx], calls)
 	})
+}
+
+// TestLibseccompLosesRulesBehindAnAbsentSyscall pins a defect of libseccomp
+// that the model does not follow and the package documentation warns about,
+// present in 2.5.5 and 2.6.1 alike. libseccomp emits the instruction that loads the syscall number in
+// the block of the syscall it tests first, and leaves that block out when
+// the syscall does not exist on the architecture. Every other rule of the
+// architecture then compares against a value that is no syscall number, and
+// every call gets the default action.
+//
+// The syscall tested first is the one with the highest priority, which is a
+// rule without conditions. Here that is socketcall, which x86_64 does not
+// have, so the conditional rule on socket is lost on x86_64, and a call the
+// profile denies is allowed. It takes a filter of x86_64 and x32 together,
+// or of any other architecture, and libseccomp sorting by priority, as crun
+// has it do and runc for a profile naming up to 32 syscalls.
+//
+// The test fails when a libseccomp that is checked here stops doing this,
+// so that the warning can go.
+func TestLibseccompLosesRulesBehindAnAbsentSyscall(t *testing.T) {
+	t.Parallel()
+
+	native, _ := seccomp.NativeArchitecture()
+	if native != specs.ArchX86_64 {
+		t.Skip("the profile below is written for x86_64")
+	}
+
+	if libseccomp.Optimize() != 0 {
+		t.Skip("the defect needs libseccomp to sort the syscalls by priority")
+	}
+
+	profile := profileOf(specs.ActAllow,
+		filtered("socket", specs.ActErrno, arg(0, specs.OpEqualTo, 40)),
+		filtered("socketcall", specs.ActErrno),
+	)
+	profile.Architectures = []specs.Arch{specs.ArchX86_64, specs.ArchX86, specs.ArchX32}
+
+	prog, err := compilers.compile(profile)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	socket := syscallNumbers(t, []string{"socket"})["socket"]
+	got, _, read := runProgramTraced(t, prog, libseccomp.NativeAuditArch(), socket, []uint64{40})
+
+	if got != specs.ActAllow || read {
+		t.Errorf("libseccomp %s applies the rule on socket (%s, number read: %v): "+
+			"the defect is gone, and so can the warning in the package documentation",
+			libseccomp.Version(), got, read)
+	}
+
+	// Without x32 the filter of x86_64 stands alone, and the number is
+	// loaded before any syscall is tested.
+	profile.Architectures = []specs.Arch{specs.ArchX86_64, specs.ArchX86}
+
+	prog, err = compilers.compile(profile)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	got, _ = runProgramArch(t, prog, libseccomp.NativeAuditArch(), socket, []uint64{40})
+	if got != specs.ActErrno {
+		t.Errorf("without x32: socket(40) yields %s, want %s", got, specs.ActErrno)
+	}
 }
 
 // TestModelMatchesLibseccompForArchitectureFindings merges the pairs that

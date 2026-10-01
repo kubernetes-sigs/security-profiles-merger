@@ -55,10 +55,13 @@ test: ## Run tests with race detection and coverage report (set RACE= to skip th
 	$(GO) tool cover -html=$(BUILD_DIR)/coverage.out -o $(BUILD_DIR)/coverage.html
 
 # TestLibseccompVersion names the library that answered. Set
-# LIBSECCOMP_VERSION to require a particular one, as CI does.
+# LIBSECCOMP_VERSION to require a particular one, as CI does, and
+# SPM_LIBSECCOMP_OPTIMIZE=2 to compile every filter as a binary tree, as
+# runc does above 32 syscall names. TESTFLAGS go to go test, as
+# TESTFLAGS='-run Libseccomp' for the tests that need the library alone.
 .PHONY: test-libseccomp
 test-libseccomp: ## Check the seccomp evaluation model against libseccomp itself (needs cgo and the libseccomp headers)
-	CGO_ENABLED=1 $(GO) test -v -count=1 -tags libseccomp ./seccomp/
+	CGO_ENABLED=1 $(GO) test -v -count=1 -tags libseccomp $(TESTFLAGS) ./seccomp/
 
 .PHONY: fuzz
 fuzz: ## Run all fuzz tests (use FUZZTIME to adjust, default 30s)

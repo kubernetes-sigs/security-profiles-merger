@@ -117,6 +117,55 @@ func Union(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 	return foldProfiles(profiles, unionRules())
 }
 
+// IntersectForArch merges as Intersect does on a node whose native
+// architecture is the given one, and is otherwise identical to it.
+//
+// Intersect settles the result for the architecture of the running program,
+// which a runtime always adds to the filter: the 32-bit and multiplexing
+// architectures are read differently where one of them is native (see the
+// Architectures section of the package documentation). Use this where the
+// merge does not run on the node that loads its result, as in a control
+// plane merging for a node of another architecture. Pass the empty Arch to
+// imply none, as DiffForArch takes it and as Intersect runs on a platform
+// without a native architecture: the result is then settled by the listed
+// architectures alone. An architecture this package does not know is
+// reported with ErrUnknownArch.
+func IntersectForArch(
+	native specs.Arch, profiles ...*specs.LinuxSeccomp,
+) (*specs.LinuxSeccomp, error) {
+	err := checkNative(native)
+	if err != nil {
+		return nil, err
+	}
+
+	return foldProfiles(profiles, intersectRulesFor(native))
+}
+
+// UnionForArch merges as Union does on a node whose native architecture is
+// the given one, and is otherwise identical to it. See IntersectForArch.
+func UnionForArch(
+	native specs.Arch, profiles ...*specs.LinuxSeccomp,
+) (*specs.LinuxSeccomp, error) {
+	err := checkNative(native)
+	if err != nil {
+		return nil, err
+	}
+
+	return foldProfiles(profiles, unionRulesFor(native))
+}
+
+// checkNative reports a native architecture this package does not know. The
+// empty Arch implies none and passes.
+func checkNative(native specs.Arch) error {
+	if native != "" && !isKnownArch(native) {
+		return fmt.Errorf(
+			"native architecture: %w %s", ErrUnknownArch, merge.QuoteBounded(string(native)),
+		)
+	}
+
+	return nil
+}
+
 func foldProfiles(
 	profiles []*specs.LinuxSeccomp, rules ruleMerger,
 ) (*specs.LinuxSeccomp, error) {

@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -60,7 +61,26 @@ var (
 	errWorkerExited = errors.New("compile worker exited")
 )
 
+// optimizeEnv names the libseccomp optimization level the whole run compiles
+// with. Unset, libseccomp sorts the syscalls of a filter by priority, as
+// crun and runc for a small profile have it do. Set to 2, it sorts them
+// into a binary tree, which is how runc compiles a profile naming more than
+// 32 syscalls. The workers inherit it with the environment.
+const optimizeEnv = "SPM_LIBSECCOMP_OPTIMIZE"
+
 func TestMain(m *testing.M) {
+	if value := os.Getenv(optimizeEnv); value != "" {
+		level, err := strconv.ParseUint(value, 10, 32)
+		if err != nil || (level != 0 && level != libseccomp.BinaryTree) {
+			// A value that is not read would quietly repeat the default run.
+			fmt.Fprintf(os.Stderr, "%s=%q: want 0 or %d\n",
+				optimizeEnv, value, libseccomp.BinaryTree)
+			os.Exit(2)
+		}
+
+		libseccomp.SetOptimize(uint32(level))
+	}
+
 	if os.Getenv(compileWorkerEnv) != "" {
 		os.Exit(serveCompiles(os.Stdin, os.Stdout))
 	}

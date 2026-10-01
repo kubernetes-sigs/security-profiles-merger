@@ -323,11 +323,29 @@ func validateNotifySupport(profile *specs.LinuxSeccomp) error {
 // since they often list one syscall in several entries; check them with
 // Validate.
 func ValidateStrict(profile *specs.LinuxSeccomp) error {
-	return validateWith(
-		profile,
-		append(artifactChecks(), validateDuplicateNames, validateUnusedValueTwo),
-		validateSyscallRules,
-	)
+	return validateWith(profile, strictChecks(runningArchitecture()), validateSyscallRules)
+}
+
+// ValidateStrictForArch checks a profile as ValidateStrict does on a node
+// whose native architecture is the given one, and is otherwise identical to
+// it. It accepts only what ValidateArtifactForArch accepts for the same
+// architecture, which keeps the lattice of the three validators where the
+// check does not run on the node that loads the profile. The native
+// architecture is taken as ValidateArtifactForArch takes it.
+func ValidateStrictForArch(native specs.Arch, profile *specs.LinuxSeccomp) error {
+	err := checkNative(native)
+	if err != nil {
+		return err
+	}
+
+	return validateWith(profile, strictChecks(native), validateSyscallRules)
+}
+
+// strictChecks returns the checks ValidateStrict runs besides Validate, for
+// a node with the given native architecture: those of ValidateArtifact and
+// its own.
+func strictChecks(native specs.Arch) []profileCheck {
+	return append(artifactChecks(native), validateDuplicateNames, validateUnusedValueTwo)
 }
 
 // ValidateArtifact checks an artifact, a profile from an untrusted source
@@ -369,13 +387,31 @@ func ValidateStrict(profile *specs.LinuxSeccomp) error {
 // artifact itself. See the Conflicting rules, Cost bounds and Architectures
 // sections of the package documentation.
 func ValidateArtifact(profile *specs.LinuxSeccomp) error {
-	return validateWith(profile, artifactChecks(), validateSyscallRules)
+	return validateWith(profile, artifactChecks(runningArchitecture()), validateSyscallRules)
 }
 
-// artifactChecks returns the checks ValidateArtifact runs besides Validate.
-// ValidateStrict runs them too, so that a profile it accepts is accepted by
-// ValidateArtifact as well.
-func artifactChecks() []profileCheck {
+// ValidateArtifactForArch checks an artifact as ValidateArtifact does on a
+// node whose native architecture is the given one, and is otherwise
+// identical to it. The native architecture decides whether the filter
+// covers a 32-bit architecture, and so whether a value above 32 bits is
+// reported (ErrValueTooWide). Use it with IntersectForArch where the check
+// does not run on the node that loads the result. The empty Arch implies
+// none, as IntersectForArch takes it, so that only the listed architectures
+// decide. An architecture this package does not know is reported with
+// ErrUnknownArch.
+func ValidateArtifactForArch(native specs.Arch, profile *specs.LinuxSeccomp) error {
+	err := checkNative(native)
+	if err != nil {
+		return err
+	}
+
+	return validateWith(profile, artifactChecks(native), validateSyscallRules)
+}
+
+// artifactChecks returns the checks ValidateArtifact runs besides Validate,
+// for a node with the given native architecture. ValidateStrict runs them
+// too, so that a profile it accepts is accepted by ValidateArtifact as well.
+func artifactChecks(native specs.Arch) []profileCheck {
 	return []profileCheck{
 		validateWellFormed,
 		validateSyscallNameSpelling,
@@ -384,16 +420,16 @@ func artifactChecks() []profileCheck {
 		validateEntryCount,
 		validateProfileClauses,
 		validateUnusedErrnoRet,
-		validateValueWidth,
+		func(profile *specs.LinuxSeccomp) error { return validateValueWidth(profile, native) },
 	}
 }
 
 // validateValueWidth reports conditions against a value above 32 bits when
 // the filter covers a 32-bit architecture (see ErrValueTooWide). Values are
 // read as libseccomp reads them, so a valueTwo it ignores or masks away does
-// not count.
-func validateValueWidth(profile *specs.LinuxSeccomp) error {
-	if !coversAny(profile.Architectures, narrowArchitectures, runningArchitecture()) {
+// not count. native is the architecture the runtime adds to the filter.
+func validateValueWidth(profile *specs.LinuxSeccomp, native specs.Arch) error {
+	if !coversAny(profile.Architectures, narrowArchitectures, native) {
 		return nil
 	}
 
