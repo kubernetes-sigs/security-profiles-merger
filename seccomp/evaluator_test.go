@@ -39,6 +39,10 @@ import (
 //   - otherwise, if the conditional rules form one of the exact shapes
 //     (exactShape), a call gets the result of a rule it matches, or the
 //     default;
+//   - otherwise, if every rule tests one argument for equality and all
+//     apply one action (equalitiesWithOneAction), a call gets that action
+//     if a rule matches it and the default otherwise, with whichever errno
+//     one of the matching rules carries;
 //   - otherwise libseccomp's order of evaluation decides, and all the
 //     evaluator knows is that the call gets the default or the action of one
 //     of the rules.
@@ -268,6 +272,47 @@ func complementary(rules []rule) bool {
 	return false
 }
 
+// equalitiesWithOneAction reports whether every rule tests one argument for
+// equality and all apply one action, differing in their errno at most. Such
+// rules are different results to libseccomp where the errno differs, so the
+// shape is not exact, but libseccomp still applies the action to every call
+// a rule matches and the default to every other: checked against libseccomp
+// for every pair of equalities on two indices and sampled triples
+// (TestModelMatchesLibseccompForErrnoEqualities). The merges rely on it when
+// they give such clauses one errno (see the Errno values section of the
+// package documentation).
+func equalitiesWithOneAction(rules []rule) bool {
+	type equality struct {
+		index uint
+		value uint64
+	}
+
+	seen := make(map[equality]bool, len(rules))
+
+	for _, current := range rules {
+		if len(current.conds) != 1 || current.conds[0].Op != specs.OpEqualTo ||
+			!sameRestrictiveness(current.action, rules[0].action) {
+			return false
+		}
+
+		// The same equality with two results is a conflict libseccomp
+		// refuses. Two values that agree on their lower 32 bits alone
+		// are distinct where 64 bits are compared, and where they are
+		// not, the rules conflict there and the filter does not load;
+		// either way no call gets another action.
+		cond := current.conds[0]
+		key := equality{index: cond.Index, value: cond.Value}
+
+		if seen[key] {
+			return false
+		}
+
+		seen[key] = true
+	}
+
+	return true
+}
+
 func uniformWithoutWideRanges(rules []rule) bool {
 	uses := make(map[uint]int)
 	wide := make(map[uint]bool)
@@ -298,7 +343,10 @@ func uniformWithoutWideRanges(rules []rule) bool {
 
 // verdict is what the evaluator knows about the action a profile applies to
 // a call. strictest and loosest bound it; they are equal when exact is set,
-// and errno is then the errno the action returns.
+// and errno is then the errno the action returns. They are also equal for
+// a call of a syscall whose rules are equalities with one action
+// (equalitiesWithOneAction), where exact stays unset because the errno is
+// not known.
 type verdict struct {
 	strictest specs.LinuxSeccompAction
 	loosest   specs.LinuxSeccompAction
@@ -348,7 +396,10 @@ type syscallJudge struct {
 	unconditional *rule
 	rules         []rule
 	exact         bool
-	def           rule
+	// actionExact is set when the action of every call is known although
+	// the errno is not (equalitiesWithOneAction); exact implies it.
+	actionExact bool
+	def         rule
 }
 
 func newSyscallJudge(profile *specs.LinuxSeccomp, name string) syscallJudge {
@@ -357,6 +408,7 @@ func newSyscallJudge(profile *specs.LinuxSeccomp, name string) syscallJudge {
 		unconditional: nil,
 		rules:         nil,
 		exact:         true,
+		actionExact:   true,
 		def: rule{
 			action: profile.DefaultAction,
 			errno:  loadedErrno(profile.DefaultAction, profile.DefaultErrnoRet),
@@ -374,6 +426,7 @@ func newSyscallJudge(profile *specs.LinuxSeccomp, name string) syscallJudge {
 
 	judge.rules = uniqueRules(rules)
 	judge.exact = exactShape(judge.rules)
+	judge.actionExact = judge.exact || equalitiesWithOneAction(judge.rules)
 
 	return judge
 }
@@ -394,6 +447,10 @@ func (j *syscallJudge) judge(call []uint64) verdict {
 		return exactVerdict(j.def.action, j.def.errno)
 	}
 
+	if j.actionExact {
+		return j.actionVerdict(call)
+	}
+
 	result := verdict{
 		strictest: j.def.action,
 		loosest:   j.def.action,
@@ -409,6 +466,29 @@ func (j *syscallJudge) judge(call []uint64) verdict {
 	}
 
 	return result
+}
+
+// actionVerdict returns the verdict for a call of a syscall whose rules are
+// equalities with one action: that action with an unknown errno if a rule
+// matches, and the default otherwise.
+func (j *syscallJudge) actionVerdict(call []uint64) verdict {
+	action, errno := j.def.action, j.def.errno
+
+	for _, current := range j.rules {
+		if current.matches(call) {
+			action, errno = current.action, 0
+
+			break
+		}
+	}
+
+	return verdict{
+		strictest: action,
+		loosest:   action,
+		errno:     errno,
+		exact:     false,
+		possible:  []specs.LinuxSeccompAction{action},
+	}
 }
 
 type judgeKey struct {

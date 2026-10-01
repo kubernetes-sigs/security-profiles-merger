@@ -885,6 +885,146 @@ func TestModelMatchesLibseccompForShapes(t *testing.T) {
 	checkShapes(t, profiles)
 }
 
+// TestModelMatchesLibseccompForErrnoEqualities enumerates pairs of equality
+// rules that share SCMP_ACT_ERRNO but not the errno, and samples triples,
+// and checks that libseccomp applies the action to every call a rule matches
+// and the default to every other one, which is what the evaluator claims of
+// such a shape (equalitiesWithOneAction) and what the merges rely on when
+// they give such clauses one errno.
+func TestModelMatchesLibseccompForErrnoEqualities(t *testing.T) {
+	t.Parallel()
+	requireNativeArch(t)
+
+	profiles := errnoEqualityProfiles()
+	number := syscallNumbers(t, []string{"read"})["read"]
+	values := shapeValues()
+
+	parallelFor(len(profiles), func(idx int) {
+		profile := profiles[idx]
+
+		prog, err := compilers.compile(profile)
+		if err != nil {
+			// The same equality with two errnos is a conflict, which
+			// ValidateArtifact rejects.
+			if !errors.Is(err, errRuleConflict) ||
+				!errors.Is(seccomp.ValidateArtifact(profile), seccomp.ErrConflictingEntries) {
+				t.Errorf("%s does not compile: %v", seccomp.FormatProfile(profile), err)
+			}
+
+			return
+		}
+
+		judge := newSyscallJudge(profile, "read")
+		if !judge.actionExact {
+			t.Errorf("evaluator does not know the action in %s", seccomp.FormatProfile(profile))
+
+			return
+		}
+
+		for _, first := range values {
+			for _, second := range values {
+				call := []uint64{first, second}
+				got, gotErrno := runProgram(t, prog, number, call)
+
+				if want := judge.judge(call).strictest; !sameRestrictiveness(got, want) {
+					t.Errorf("read%v: libseccomp says %s, evaluator says %s in %s\n%s",
+						call, got, want, seccomp.FormatProfile(profile), pfc(t, profile))
+
+					return
+				}
+
+				if !errnoOfMatchingRule(profile, call, gotErrno) {
+					t.Errorf("read%v: libseccomp returns errno %s, "+
+						"which no matching rule carries in %s",
+						call, formatErrno(gotErrno), seccomp.FormatProfile(profile))
+
+					return
+				}
+			}
+		}
+	})
+}
+
+// errnoOfMatchingRule reports whether the errno a program returned for the
+// call is the one of a rule the call matches, or none where no rule does.
+func errnoOfMatchingRule(profile *specs.LinuxSeccomp, call []uint64, got *uint) bool {
+	matched := false
+
+	for _, entry := range profile.Syscalls {
+		if !entryMatches(entry, call) {
+			continue
+		}
+
+		matched = true
+
+		if got != nil && *got == loadedErrno(entry.Action, entry.ErrnoRet) {
+			return true
+		}
+	}
+
+	return !matched && got == nil
+}
+
+// errnoEqualityProfiles returns every pair of equality conditions of
+// shapeConditions with SCMP_ACT_ERRNO and two errno values, and sampled
+// triples with three, half of them with SCMP_ACT_TRACE, which carries a
+// message number the same way.
+func errnoEqualityProfiles() []*specs.LinuxSeccomp {
+	var conds []specs.LinuxSeccompArg
+
+	for _, cond := range shapeConditions() {
+		if cond.Op == specs.OpEqualTo {
+			conds = append(conds, cond)
+		}
+	}
+
+	errnos := []uint{1, 48, 38}
+	rng := rand.New(rand.NewPCG(7, 8))
+
+	const triples = 5000
+
+	profiles := make([]*specs.LinuxSeccomp, 0, 2*len(conds)*len(conds)+triples)
+
+	for _, action := range []specs.LinuxSeccompAction{specs.ActErrno, specs.ActTrace} {
+		for _, first := range conds {
+			for _, second := range conds {
+				profiles = append(profiles, profileOf(specs.ActTrap,
+					returning("read", action, 1, first),
+					returning("read", action, 48, second),
+				))
+			}
+		}
+	}
+
+	for idx := range triples {
+		action := specs.ActErrno
+		if idx%2 == 1 {
+			action = specs.ActTrace
+		}
+
+		entries := make([]specs.LinuxSyscall, 0, 3)
+		for range 3 {
+			entries = append(entries, returning("read", action,
+				errnos[rng.IntN(len(errnos))], conds[rng.IntN(len(conds))]))
+		}
+
+		profiles = append(profiles, profileOf(specs.ActTrap, entries...))
+	}
+
+	return profiles
+}
+
+// returning is filtered with the errno or message number the action
+// returns.
+func returning(
+	name string, action specs.LinuxSeccompAction, errno uint, args ...specs.LinuxSeccompArg,
+) specs.LinuxSyscall {
+	entry := filtered(name, action, args...)
+	entry.ErrnoRet = uintPtr(errno)
+
+	return entry
+}
+
 func checkShapes(t *testing.T, profiles []*specs.LinuxSeccomp) {
 	t.Helper()
 

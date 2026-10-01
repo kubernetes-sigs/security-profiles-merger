@@ -219,6 +219,15 @@ func addSafetySeeds(f *testing.F) {
 		1, 4, 1, 13, 0, 4, 1, 42, 1, 3, 0, 3,
 		4, 1, 99, 0, 4, 1, 7, 0,
 	})
+	// Equivalent conditions spelled differently (a0 < 1 and a0 <= 0), one
+	// of them next to a second condition: the intersection once depended
+	// on the input order.
+	f.Add([]byte("000000021020111021111000002010100010100000201010001010" +
+		"00000000101010000210101010A"))
+	// Equalities on one argument that agree on their lower 32 bits, with
+	// one action and two errno values, for each merge.
+	f.Add([]byte("100120101010B12101000\x0010B000000"))
+	f.Add([]byte("1007101000110B711010011000B"))
 }
 
 // safetyDirection describes one merge direction for checkMergeSafety.
@@ -440,6 +449,24 @@ func FuzzUnionSyscallsSafety(f *testing.F) {
 		left, right, _ := safetyInputs(t, data)
 		checkBareMergeSafety(t, unionSafety(), left, right)
 	})
+}
+
+// TestMergeSafetyOfErrnoEqualities pins an input the fuzzer found: two
+// equality clauses on different arguments that share SCMP_ACT_ERRNO but not
+// the errno, one of them behind a masked comparison with an empty mask. The
+// merges give both one errno rather than collapsing the syscall (see the
+// Errno values section of the package documentation), which the evaluator
+// has to read as libseccomp does: the action is exact, the errno is not.
+func TestMergeSafetyOfErrnoEqualities(t *testing.T) {
+	t.Parallel()
+
+	profile := profileOf(specs.ActTrap,
+		filtered("writev", specs.ActErrno, arg(0, specs.OpEqualTo, 0)),
+		errnoFiltered("writev", 48, masked(0, 0, 0), arg(1, specs.OpEqualTo, 0)),
+	)
+
+	checkMergeSafety(t, intersectSafety(), profile, profile, false)
+	checkMergeSafety(t, unionSafety(), profile, profile, false)
 }
 
 func FuzzIntersectSafety(f *testing.F) {

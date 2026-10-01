@@ -218,13 +218,14 @@ limitations under the License.
 // Clauses of one syscall that apply one action, each test one argument for
 // equality with a different filter, and report different errno values are
 // given the errno of the first of them. They are different results to
-// libseccomp, so without that the syscall would collapse to one
-// unconditional rule: a baseline filtering one argument and an artifact
-// filtering another, one of them spelling the EPERM the other leaves
-// implicit, would deny every call of a syscall both allow. A clause set that
-// is already a safe shape keeps its errno values as written, and
-// [ValidateArtifact] reports such clauses in one profile as conflicting
-// rather than unifying them.
+// libseccomp, which still applies the action to every call one of them
+// matches, in one of their errno values; without that the syscall would
+// collapse to one unconditional rule: a baseline filtering one argument
+// and an artifact filtering another, one of them spelling the EPERM the
+// other leaves implicit, would deny every call of a syscall both allow. A
+// clause set that is already a safe shape keeps its errno values as
+// written, and [ValidateArtifact] reports such clauses in one profile as
+// conflicting rather than unifying them.
 //
 // [Validate] does not range-check errnoRet; [ValidateStrict] and
 // [ValidateArtifact] reject values above 4095 on actions that return them.
