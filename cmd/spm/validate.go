@@ -40,7 +40,7 @@ Options:
 `
 
 func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	flags := newFlagSet(cmdValidate, stderr)
+	flags := newFlagSet(cmdValidate)
 
 	profileType := flags.String(
 		"type", "", "profile type: seccomp, apparmor, landlock (auto-detected if omitted)",

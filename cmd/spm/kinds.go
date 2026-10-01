@@ -257,21 +257,30 @@ func kindByName(name string) (profileKind, bool) {
 }
 
 // resolveKind returns the profile kind named by --type, or the one detected
-// from the inputs when the flag is empty. Input that is not a JSON object
-// cannot be detected; it is reported the way decoding it with --type would
-// report it, exiting with parseExit. A detected type is noted on stderr
-// unless noDetectNote is set, so that a command in a pipeline can stay
-// silent about what it inferred.
+// from the inputs when the flag is empty. Input that is not a JSON object is
+// no profile of any type and cannot be detected; it is reported the same
+// way with and without --type, exiting with parseExit. A detected type is
+// noted on stderr unless noDetectNote is set, so that a command in a
+// pipeline can stay silent about what it inferred.
 //
 // A named type is checked against the inputs as well, rather than taken on
 // faith: only the members of that type are decoded, so an input of another
-// kind decodes into an empty profile, which an intersection reads as
-// permitting nothing and a diff reads as equal to anything. Both would
-// otherwise succeed, with an unknown-field warning as the only sign.
+// kind, or of none, decodes into an empty profile, which an intersection
+// reads as permitting nothing and a diff reads as equal to anything. Both
+// would otherwise succeed, with an unknown-field warning as the only sign.
 func resolveKind(
 	profileType string, inputs []profileInput, parseExit int, noDetectNote bool,
 	stderr io.Writer,
 ) (profileKind, int) {
+	err := checkParsable(inputs)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+
+		var none profileKind
+
+		return none, parseExit
+	}
+
 	if profileType != "" {
 		code := checkTypeMatchesInputs(profileType, inputs, stderr)
 		if code != 0 {
@@ -282,15 +291,6 @@ func resolveKind(
 	}
 
 	if profileType == "" {
-		err := checkParsable(inputs)
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
-
-			var none profileKind
-
-			return none, parseExit
-		}
-
 		detected, conflict := detectProfileType(inputs)
 
 		if conflict != nil {
@@ -326,24 +326,35 @@ func resolveKind(
 	return kind, 0
 }
 
-// checkTypeMatchesInputs reports an input whose members say it is a profile
-// of a kind other than the one --type names. An input holding the members of
-// two kinds is accepted here: naming the type is what resolves that case,
-// which is what reportTypeConflict asks the caller to do.
+// checkTypeMatchesInputs reports an input whose members say it is not a
+// profile of the kind --type names: one of another kind, or one holding
+// members none of which that kind knows, such as a profile wrapped in an
+// object of another format. An input holding the members of two kinds is
+// accepted here: naming the type is what resolves that case, which is what
+// reportTypeConflict asks the caller to do. So is an empty object, which
+// holds nothing the type could fail to know.
 func checkTypeMatchesInputs(
 	profileType string, inputs []profileInput, stderr io.Writer,
 ) int {
 	for _, input := range inputs {
-		detected := detectOneProfileType(input.data)
-		if len(detected) == 0 || slices.Contains(detected, profileType) {
-			continue
-		}
+		detected, members := detectMembers(input.data)
 
-		_, _ = fmt.Fprintf(
-			stderr,
-			"error: %s holds %s %s profile, not the %s --type names\n",
-			merge.SafeName(input.name), article(detected[0]), detected[0], profileType,
-		)
+		switch {
+		case slices.Contains(detected, profileType) || members == 0:
+			continue
+		case len(detected) > 0:
+			_, _ = fmt.Fprintf(
+				stderr,
+				"error: %s holds %s %s profile, not the %s --type names\n",
+				merge.SafeName(input.name), article(detected[0]), detected[0], profileType,
+			)
+		default:
+			_, _ = fmt.Fprintf(
+				stderr,
+				"error: %s holds no member of %s %s profile\n",
+				merge.SafeName(input.name), article(profileType), profileType,
+			)
+		}
 
 		return exitUsage
 	}
@@ -498,11 +509,19 @@ var detectTypes = []struct {
 // document holding it is a seccomp profile whatever else it is. The types
 // share no member names, so a member reveals at most one of them.
 func detectOneProfileType(raw []byte) []string {
+	found, _ := detectMembers(raw)
+
+	return found
+}
+
+// detectMembers is detectOneProfileType, and also returns how many
+// top-level members the document holds.
+func detectMembers(raw []byte) ([]string, int) {
 	var fields map[string]json.RawMessage
 
 	err := json.Unmarshal(raw, &fields)
 	if err != nil {
-		return nil
+		return nil, 0
 	}
 
 	var found []string
@@ -517,7 +536,7 @@ func detectOneProfileType(raw []byte) []string {
 		}
 	}
 
-	return found
+	return found, len(fields)
 }
 
 // article returns the indefinite article for a profile type name.

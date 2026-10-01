@@ -23,9 +23,14 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 func TestDuplicateKeys(t *testing.T) {
@@ -134,6 +139,77 @@ func addJSONFuzzSeeds(f *testing.F) {
 	}
 }
 
+// TestDuplicateKeysBoundsPathWork covers a document nesting deeply under
+// long names, whose paths are megabytes each: naming the repeated members
+// must not copy a path per level, and the report shows the same start of
+// each path as it would of the whole.
+//
+//nolint:paralleltest // a wall-clock bound, so it runs before the parallel tests
+func TestDuplicateKeysBoundsPathWork(t *testing.T) {
+	const (
+		levels         = 5000
+		nameBytes      = 1000
+		generousBudget = 5 * time.Second
+	)
+
+	var document strings.Builder
+
+	name := strings.Repeat("k", nameBytes)
+
+	for range levels {
+		document.WriteString(`{"` + name + `":`)
+	}
+
+	document.WriteString("{")
+
+	for idx := range 2 * MaxReportedPaths {
+		member := `"d` + strconv.Itoa(idx) + `":1`
+		document.WriteString(member + "," + member + ",")
+	}
+
+	document.WriteString(`"last":1}` + strings.Repeat("}", levels))
+
+	start := time.Now()
+
+	paths, omitted := DuplicateKeys([]byte(document.String()))
+
+	if elapsed := time.Since(start); testutil.UninstrumentedRun() && elapsed > generousBudget {
+		t.Errorf("DuplicateKeys took %s, want well under %s", elapsed, generousBudget)
+	}
+
+	if len(paths) != MaxReportedPaths || omitted != MaxReportedPaths {
+		t.Fatalf("got %d paths and %d omitted, want %d of each",
+			len(paths), omitted, MaxReportedPaths)
+	}
+
+	err := PathsError(spm.ErrDuplicateKey, paths, omitted)
+	if want := strconv.Quote(strings.Repeat("k", merge.MaxQuotedBytes)) + "..."; !strings.Contains(
+		err.Error(), want,
+	) {
+		t.Errorf("error does not show the start of the path: %v", err)
+	}
+}
+
+// TestDuplicateKeysCutsPathsWhereAReportDoes covers what the bound on a
+// path costs: two members repeated beneath a name already longer than a
+// report shows are named by that name alone, and so alike, which is how a
+// report would have shown their full paths too. A shorter path stays whole.
+func TestDuplicateKeysCutsPathsWhereAReportDoes(t *testing.T) {
+	t.Parallel()
+
+	long := strings.Repeat("n", maxPathBytes+1)
+
+	paths, _ := DuplicateKeys([]byte(`{"` + long + `":{"a":1,"a":2,"b":1,"b":2}}`))
+	if !slices.Equal(paths, []string{long, long}) {
+		t.Errorf("DuplicateKeys = %v, want the long name twice", paths)
+	}
+
+	paths, _ = DuplicateKeys([]byte(`{"short":{"a":1,"a":2,"b":1,"b":2}}`))
+	if !slices.Equal(paths, []string{"short.a", "short.b"}) {
+		t.Errorf("DuplicateKeys = %v, want both members by their path", paths)
+	}
+}
+
 // FuzzDuplicateKeys checks the repeated-member scan: it must terminate on
 // any input, report each path once and reproducibly, name only members the
 // document holds, and report nothing for a document that cannot hold a
@@ -173,14 +249,16 @@ func FuzzDuplicateKeys(f *testing.F) {
 }
 
 // checkPathsAreDistinctAndPresent asserts that a scan names each path once
-// and names only members the document spells.
+// and names only members the document spells. A path is built only as far
+// as a report shows it (see maxPathBytes), so two members beneath one path
+// already past that are named alike, as a report would show them anyway.
 func checkPathsAreDistinctAndPresent(t *testing.T, raw string, paths []string) {
 	t.Helper()
 
 	seen := make(map[string]struct{}, len(paths))
 
 	for _, path := range paths {
-		if _, dup := seen[path]; dup {
+		if _, dup := seen[path]; dup && len(path) <= maxPathBytes {
 			t.Errorf("DuplicateKeys reported %q more than once: %v", path, paths)
 		}
 

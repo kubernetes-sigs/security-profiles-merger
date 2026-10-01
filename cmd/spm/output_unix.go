@@ -33,6 +33,11 @@ const oNoFollow = syscall.O_NOFOLLOW
 // refuseSymlinks is true where a symlink at the --output path is refused.
 const refuseSymlinks = true
 
+// ownerReadWrite is the mode an output file is left with: a merged profile
+// is the security policy of a workload, so it is not readable by everyone on
+// the node by default.
+const ownerReadWrite = 0o600
+
 // chmodOutput sets the mode of a new output file exactly, since the mode it
 // was created with is narrowed by the umask.
 func chmodOutput(file *os.File) error {
@@ -42,6 +47,12 @@ func chmodOutput(file *os.File) error {
 	}
 
 	return nil
+}
+
+// isMountPoint reports whether a rename failed because its target is a
+// mount point, which rename(2) reports as EBUSY.
+func isMountPoint(err error) bool {
+	return errors.Is(err, syscall.EBUSY)
 }
 
 // isSymlinkRefusal reports whether an open failed because O_NOFOLLOW

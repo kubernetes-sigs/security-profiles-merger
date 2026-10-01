@@ -74,7 +74,7 @@ type profileInput struct {
 	data []byte
 }
 
-// readErrorExit returns the exit code for a readInputs failure. The three
+// readErrorExit returns the exit code for a readInputs failure. The
 // sentinels below report an invocation mistake rather than a bad profile,
 // so they exit like every other usage error.
 func readErrorExit(err error) int {
@@ -246,7 +246,15 @@ func readFromStdin(reader io.Reader) ([]profileInput, error) {
 // document itself before the limit could refuse it.
 func readStdinArray(data []byte) ([]profileInput, error) {
 	count, isArray, err := countArrayElements(data)
-	if err == nil && isArray && count > maxInputFiles {
+
+	// Anything that does not open an array is a single document. That
+	// includes null, which decodes into a slice as no elements at all and
+	// would otherwise read as no input rather than as the document it is.
+	if !isArray {
+		return nil, nil
+	}
+
+	if err == nil && count > maxInputFiles {
 		return nil, errTooManyStdin
 	}
 

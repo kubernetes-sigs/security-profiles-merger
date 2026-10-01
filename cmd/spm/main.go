@@ -119,9 +119,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case cmdHelp:
 		return runHelp(args[1:], stdin, stdout, stderr)
 	case flagHelp, "-h":
-		_, _ = fmt.Fprint(stdout, usage)
-
-		return 0
+		return printHelp(usage, stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "unknown command: %s\n\n%s", merge.SafeName(args[0]), usage)
 
@@ -133,9 +131,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // one.
 func runHelp(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprint(stdout, usage)
-
-		return 0
+		return printHelp(usage, stdout, stderr)
 	}
 
 	switch args[0] {
@@ -151,7 +147,7 @@ func runHelp(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // runVersion prints the version. It takes no arguments besides the help
 // flags, which print its usage like those of the other commands.
 func runVersion(args []string, stdout, stderr io.Writer) int {
-	flags := newFlagSet(cmdVersion, stderr)
+	flags := newFlagSet(cmdVersion)
 
 	if done, code := parseFlags(flags, versionUsage, args, stdout, stderr); done {
 		return code
@@ -160,7 +156,7 @@ func runVersion(args []string, stdout, stderr io.Writer) int {
 	if flags.NArg() > 0 {
 		_, _ = fmt.Fprintf(stderr, "error: unexpected argument %q\n", flags.Arg(0))
 
-		printUsage(flags, versionUsage, stderr, stderr)
+		printUsage(flags, versionUsage, stderr)
 
 		return exitUsage
 	}

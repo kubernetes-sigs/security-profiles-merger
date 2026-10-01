@@ -60,7 +60,11 @@ func flushOutput(path string, content []byte, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	err := writeOutputFile(filepath.Clean(path), content)
+	err := checkOutputPath(path)
+	if err == nil {
+		err = writeOutputFile(filepath.Clean(path), content)
+	}
+
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "error: writing output file: %v\n", err)
 
@@ -70,14 +74,30 @@ func flushOutput(path string, content []byte, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// ownerReadWrite is the mode an output file is left with: a merged profile
-// is the security policy of a workload, so it is not readable by everyone on
-// the node by default.
-const ownerReadWrite = 0o600
-
 // errSymlinkOutput reports an --output path that is a symbolic link, which
 // is refused rather than followed.
 var errSymlinkOutput = errors.New("refusing to write through a symbolic link")
+
+// errDirectoryOutput reports an --output path that names a directory.
+var errDirectoryOutput = errors.New("is a directory")
+
+// checkOutputPath refuses an --output path whose last element is empty, "."
+// or "..", as in "dir/", "dir/." and "dir/..". Such a path names a
+// directory, and cleaning it would drop that element and create a file
+// named "dir" where no directory of that name exists.
+func checkOutputPath(path string) error {
+	start := len(path)
+	for start > 0 && !os.IsPathSeparator(path[start-1]) {
+		start--
+	}
+
+	switch path[start:] {
+	case "", ".", "..":
+		return errDirectoryOutput
+	default:
+		return nil
+	}
+}
 
 // writeOutputFile writes content to path. A symlink at path is refused
 // rather than followed where the platform can tell (see refuseSymlinks), so
@@ -89,6 +109,11 @@ var errSymlinkOutput = errors.New("refusing to write through a symbolic link")
 // disk say, then leaves the previous file whole instead of truncated, and a
 // reader never sees half a profile. The new file has the mode above,
 // whatever the umask and whatever mode the file it replaces had.
+//
+// A regular file that is a mount point is the exception, since it cannot be
+// replaced: a file bind-mounted into a container (docker run -v
+// ./out.json:/out.json, or a Kubernetes subPath mount) is written in place
+// and keeps its mode, which belongs to whoever mounted it.
 //
 // Anything else is written in place and left as it is. --output may name a
 // device or a FIFO, and "> /dev/null to check the exit code" is an ordinary
@@ -115,15 +140,29 @@ func writeOutputFile(path string, content []byte) error {
 
 		return writeOutputFile(target, content)
 	case info.Mode().IsRegular():
-		err = checkWritable(path)
-		if err != nil {
-			return err
-		}
-
-		return replaceOutputFile(path, content)
+		return writeRegularFile(path, content)
 	default:
-		return writeInPlace(path, content)
+		return writeInPlace(path, content, 0)
 	}
+}
+
+// writeRegularFile writes content to an existing regular file, which is
+// replaced unless it is a mount point.
+func writeRegularFile(path string, content []byte) error {
+	err := checkWritable(path)
+	if err != nil {
+		return err
+	}
+
+	// A file mounted over this path cannot be replaced, and its directory
+	// often takes no new file either: the root of a container with a
+	// read-only root file system, or of one running as another user than
+	// root.
+	if isMountedFile(path) {
+		return writeInPlace(path, content, os.O_TRUNC)
+	}
+
+	return replaceOutputFile(path, content)
 }
 
 // checkWritable opens an existing output file for writing and closes it
@@ -149,10 +188,16 @@ func checkWritable(path string) error {
 // symlinkError reports an --output path that is a symbolic link.
 func symlinkError(path string) error {
 	return fmt.Errorf(
-		"%w: %s is a symbolic link; write to its target, or to stdout with -",
+		"%w: %s is a symbolic link; write to its target, to stdout with -, "+
+			"or redirect stdout",
 		errSymlinkOutput, merge.SafeName(path),
 	)
 }
+
+// tempPattern names the new file an output file is replaced through. It
+// does not carry the name of the output file: a name close to the longest
+// the file system takes would leave no room for the rest of the pattern.
+const tempPattern = ".spm-output-*.tmp"
 
 // replaceOutputFile writes content to a new file in the directory of path
 // and renames it over path. The new file is created exclusively, so it is
@@ -160,7 +205,20 @@ func symlinkError(path string) error {
 // anything fails. Rename replaces a symlink that appeared at path since it
 // was checked rather than following it.
 func replaceOutputFile(path string, content []byte) error {
-	temp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp*")
+	return replaceOutputFileWith(path, content, os.Rename)
+}
+
+// replaceOutputFileWith is replaceOutputFile with the rename to use.
+//
+// A file that is a mount point cannot be renamed over. writeOutputFile
+// writes one in place where the platform can tell it is one (see
+// isMountedFile); where it cannot, the rename says so, and the file is
+// written in place then, once the new file has shown that the content can
+// be written at all.
+func replaceOutputFileWith(
+	path string, content []byte, rename func(oldPath, newPath string) error,
+) error {
+	temp, err := os.CreateTemp(filepath.Dir(path), tempPattern)
 	if err != nil {
 		return bareFileError(err)
 	}
@@ -168,28 +226,26 @@ func replaceOutputFile(path string, content []byte) error {
 	tempPath := temp.Name()
 
 	err = writeTempFile(temp, content)
-	if err == nil {
-		err = os.Rename(tempPath, path)
-		if err != nil {
-			err = fmt.Errorf("rename: %w", bareLinkError(err))
-		}
-	}
-
 	if err != nil {
 		_ = os.Remove(tempPath)
 
 		return err
 	}
 
-	return nil
-}
+	err = rename(tempPath, path)
+	if err == nil {
+		return nil
+	}
 
-// bareLinkError strips the paths an *os.LinkError carries, as bareFileError
-// does for one path: the caller names the output itself.
-func bareLinkError(err error) error {
+	_ = os.Remove(tempPath)
+
+	if isMountPoint(err) {
+		return writeInPlace(path, content, os.O_TRUNC)
+	}
+
 	var linkErr *os.LinkError
 	if errors.As(err, &linkErr) {
-		return linkErr.Err
+		return fmt.Errorf("rename: %w", linkErr.Err)
 	}
 
 	return err
@@ -228,15 +284,16 @@ func writeTempFile(temp *os.File, content []byte) error {
 	return nil
 }
 
-// writeInPlace writes content to a file that is not regular, such as a
-// device or a FIFO, without changing its mode. It is opened without
+// writeInPlace writes content to a file that cannot be replaced, such as a
+// device, a FIFO or a mount point, without changing its mode. It is opened
+// with the given flags, which truncate a regular file, and without
 // following a symlink, so that one put at path since it was checked is
 // refused too.
-func writeInPlace(path string, content []byte) error {
+func writeInPlace(path string, content []byte, flags int) error {
 	// The path is the --output value, which is the caller's own choice;
 	// what needs guarding is that it is not followed through a symlink.
 	file, err := os.OpenFile( //nolint:gosec // the caller named this path
-		path, os.O_WRONLY|oNoFollow, 0,
+		path, os.O_WRONLY|oNoFollow|flags, 0,
 	)
 	if err != nil {
 		if isSymlinkRefusal(err) {

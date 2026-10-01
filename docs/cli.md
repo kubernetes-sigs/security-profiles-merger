@@ -40,7 +40,9 @@ Usage errors, which exit `2`:
   so does each file beside it);
 - stdin named twice (`spm merge - -`);
 - a profile type that cannot be detected, that the inputs disagree on, or
-  that `--type` names against what an input holds.
+  that `--type` names against what an input holds: members of another type,
+  or members none of which the named type knows, such as a profile wrapped
+  in an object of another format.
 
 The split is between "you invoked it wrong", which no profile can cause, and
 "the profile is wrong", which is the answer the command was asked for. An
@@ -117,13 +119,24 @@ for an input:
   keep the old one's owner or hard links.
 - A device or FIFO is written in place and keeps its mode, so
   `--output /dev/null` leaves that node alone.
+- A file that is a mount point cannot be replaced, which is what a file
+  bind-mounted into a container is (`docker run -v ./out.json:/out.json`, or
+  a Kubernetes `subPath` mount). It is written in place and keeps its mode
+  as well, so a write that fails half way leaves it truncated. On Linux the
+  mount is recognized up front, so this also works where the directory takes
+  no new file, as with a read-only root file system; elsewhere it takes a
+  writable directory to find out.
+- A path whose last element is empty, `.` or `..`, such as `dir/` or
+  `dir/.`, names a directory and is refused, whether or not the directory
+  exists.
 - On Unix, a regular file is left with mode `0600` regardless of the umask,
   since a merged profile can name node-local paths.
 - On Unix, a symbolic link as the final path component is refused rather
-  than followed, so `--output /dev/stdout` is refused as well: use
-  `--output -` or shell redirection for that. A symlinked *directory* in the
-  path is followed; the guard is about the file `--output` names, not about
-  the route to it.
+  than followed, so `--output /dev/stdout` is refused as well, and so are
+  `/dev/fd/N` and a process substitution such as `>(cmd)`, which the shell
+  passes as one: use `--output -`, shell redirection or a pipe for those. A
+  symlinked *directory* in the path is followed; the guard is about the file
+  `--output` names, not about the route to it.
 - Elsewhere the file keeps the permissions the platform gives it and a
   symbolic link is followed to the file it names.
 

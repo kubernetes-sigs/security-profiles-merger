@@ -35,6 +35,12 @@ func chmodOutput(_ *os.File) error {
 	return nil
 }
 
+// isMountPoint is always false where a rename failure does not say that
+// its target is a mount point.
+func isMountPoint(_ error) bool {
+	return false
+}
+
 // isSymlinkRefusal is always false where oNoFollow is zero, so no open
 // failure can be blamed on a symlink.
 func isSymlinkRefusal(_ error) bool {

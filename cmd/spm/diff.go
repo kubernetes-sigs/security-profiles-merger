@@ -144,7 +144,7 @@ func bindDiffFlags(flags *flag.FlagSet) *diffOptions {
 }
 
 func runDiff(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	flags := newFlagSet(cmdDiff, stderr)
+	flags := newFlagSet(cmdDiff)
 	opts := bindDiffFlags(flags)
 
 	if done, code := parseFlags(flags, diffUsage, args, stdout, stderr); done {

@@ -138,6 +138,10 @@ make tidy                # run go mod tidy
 make clean               # remove build artifacts
 ```
 
+Build the binary with `make build`, or give `go build` an output path: a bare
+`go build ./cmd/spm` at the repository root fails, because the binary would
+take the name of the `spm` package directory.
+
 Notes on the targets:
 
 - `make test` runs with the race detector, which needs cgo; `RACE=` skips it.
@@ -203,8 +207,9 @@ merge should keep all three passing:
 - The per-package unit tests cover the documented behavior of each function,
   and the golden tests in `cmd/spm/golden_test.go` cover the CLI output.
 - Each package has fuzz targets for `ValidateArtifact`, the entry point a
-  runtime points at a profile it did not author, and `cmd/spm` has targets
-  for the JSON walkers that see those bytes before any profile package does.
+  runtime points at a profile it did not author. `internal/strictjson` has
+  targets for the JSON walkers that see those bytes before any profile
+  package does, and `cmd/spm` has one for the type detection.
 - Each package has fuzz targets that assert the safety properties against an
   independent evaluator: `Intersect` never permits an operation any input
   denies, and `Union` never denies one any input permits. The evaluators live
