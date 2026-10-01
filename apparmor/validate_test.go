@@ -260,6 +260,11 @@ func TestValidateDuplicatePathInCategory(t *testing.T) {
 			"expected ErrDuplicatePathInCategory, got: %v", err,
 		)
 	}
+
+	// One category listing a path twice is not a path in two categories.
+	if errors.Is(err, apparmor.ErrDuplicatePath) {
+		t.Errorf("unexpected ErrDuplicatePath: %v", err)
+	}
 }
 
 func TestValidateDuplicatePathInWriteOnlyCategory(t *testing.T) {
@@ -286,6 +291,11 @@ func TestValidateDuplicatePathInWriteOnlyCategory(t *testing.T) {
 			"expected ErrDuplicatePathInCategory, got: %v", err,
 		)
 	}
+
+	// One category listing a path twice is not a path in two categories.
+	if errors.Is(err, apparmor.ErrDuplicatePath) {
+		t.Errorf("unexpected ErrDuplicatePath: %v", err)
+	}
 }
 
 func TestValidateDuplicatePathInReadWriteCategory(t *testing.T) {
@@ -311,6 +321,11 @@ func TestValidateDuplicatePathInReadWriteCategory(t *testing.T) {
 		t.Errorf(
 			"expected ErrDuplicatePathInCategory, got: %v", err,
 		)
+	}
+
+	// One category listing a path twice is not a path in two categories.
+	if errors.Is(err, apparmor.ErrDuplicatePath) {
+		t.Errorf("unexpected ErrDuplicatePath: %v", err)
 	}
 }
 

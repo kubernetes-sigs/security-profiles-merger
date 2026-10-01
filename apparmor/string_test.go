@@ -145,6 +145,22 @@ func TestCapabilityRulesString(t *testing.T) {
 	}
 }
 
+func TestCapabilityRulesStringQuotesNone(t *testing.T) {
+	t.Parallel()
+
+	// An empty list reads "none", so a capability spelled that way must
+	// not read the same.
+	rules := apparmor.CapabilityRules{
+		AllowedCapabilities: []string{"none", "NET_ADMIN"},
+	}
+
+	const want = `caps:"none",NET_ADMIN`
+
+	if got := rules.String(); got != want {
+		t.Errorf("String() = %q, want %q", got, want)
+	}
+}
+
 func TestCapabilityRulesStringEmpty(t *testing.T) {
 	t.Parallel()
 

@@ -316,9 +316,10 @@ func TestStarComponentRule(t *testing.T) {
 		{"/etc/{a/*,b}x", "/etc/a/x", true},
 		{"/etc/{a/*,b}", "/etc/a/", true},
 		{"/etc/{a,b/*}", "/etc/b/", true},
-		{"**", "", true},
-		{"**", "/etc/passwd", true},
-		{"*", "", true},
+		// A relative pattern loads no rule, whatever its expression covers.
+		{"**", "", false},
+		{"**", "/etc/passwd", false},
+		{"*", "", false},
 		{"/**", "/", false},
 		{"/**", "//x", false},
 		{"/**", "/x//", true},

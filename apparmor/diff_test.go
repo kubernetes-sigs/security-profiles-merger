@@ -1067,6 +1067,42 @@ func TestFormatDiffQuotesUnsafeBytes(t *testing.T) {
 	}
 }
 
+// TestDiffComparesClassSpellings covers two spellings of one character
+// class, which are one rule to Validate and to the merge, which keeps one of
+// them, and so have to be one rule to Diff.
+func TestDiffComparesClassSpellings(t *testing.T) {
+	t.Parallel()
+
+	readOnly := func(list ...string) *apparmor.Profile {
+		return &apparmor.Profile{
+			Executable: nil,
+			Filesystem: &apparmor.FilesystemRules{
+				ReadOnlyPaths: list, WriteOnlyPaths: nil, ReadWritePaths: nil,
+			},
+			Network:      nil,
+			Capabilities: nil,
+		}
+	}
+
+	classes := readOnly("/x[bc]", "/x[cb]")
+
+	merged, err := apparmor.Intersect(classes)
+	if err != nil {
+		t.Fatalf("Intersect: %v", err)
+	}
+
+	for _, other := range []*apparmor.Profile{merged, readOnly("/x[b-c]")} {
+		diff, err := apparmor.Diff(classes, other)
+		if err != nil {
+			t.Fatalf("Diff: %v", err)
+		}
+
+		if !diff.Equal {
+			t.Errorf("Diff of class spellings = %s, want equal", apparmor.FormatDiff(diff))
+		}
+	}
+}
+
 // TestDiffComparesRulesNotSpellings covers a profile against its own merge
 // result. The merge keeps one spelling per rule, so a diff that compared the
 // text would report the spelling it dropped as removed and the one it kept
