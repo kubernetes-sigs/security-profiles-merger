@@ -212,22 +212,179 @@ func TestConjoinArgs(t *testing.T) {
 	}
 }
 
-func TestArgsSubset(t *testing.T) {
+func TestArgsCover(t *testing.T) {
 	t.Parallel()
 
 	index1 := specs.LinuxSeccompArg{Index: 1, Value: 2, ValueTwo: 0, Op: specs.OpEqualTo}
-	sub := filter(specs.OpEqualTo, 1)
-	super := []specs.LinuxSeccompArg{index1, cond(specs.OpEqualTo, 1)}
+	wide := filter(specs.OpEqualTo, 1)
+	narrow := []specs.LinuxSeccompArg{index1, cond(specs.OpEqualTo, 1)}
 
-	if !argsSubset(sub, super) {
-		t.Error("expected sub to be a subset of super")
+	if !argsCover(wide, narrow) {
+		t.Error("expected the filter with fewer conditions to cover the other")
 	}
 
-	if argsSubset(super, sub) {
-		t.Error("expected super not to be a subset of sub")
+	if argsCover(narrow, wide) {
+		t.Error("expected the filter with more conditions not to cover the other")
 	}
 
-	if !argsSubset(nil, sub) {
-		t.Error("empty filter is a subset of everything")
+	if !argsCover(nil, wide) {
+		t.Error("empty filter covers everything")
+	}
+
+	if !argsCover(filter(specs.OpNotEqual, 40), filter(specs.OpEqualTo, 2)) {
+		t.Error("expected a0 != 40 to cover a0 == 2")
+	}
+
+	if argsCover(filter(specs.OpNotEqual, 40), []specs.LinuxSeccompArg{index1}) {
+		t.Error("expected a condition on a0 not to cover a filter on a1 alone")
+	}
+}
+
+// smallConditions returns every condition over a small value domain: each
+// operator against each value, and each masked comparison of the domain's
+// bits. The domain is small enough to check a claim about two conditions
+// against every value there is.
+func smallConditions() []specs.LinuxSeccompArg {
+	const (
+		domain    = 8
+		operators = 6
+	)
+
+	conds := make([]specs.LinuxSeccompArg, 0, domain*(operators+domain))
+
+	for value := range uint64(domain) {
+		for _, op := range []specs.LinuxSeccompOperator{
+			specs.OpNotEqual, specs.OpLessThan, specs.OpLessEqual,
+			specs.OpEqualTo, specs.OpGreaterEqual, specs.OpGreaterThan,
+		} {
+			conds = append(conds, cond(op, value))
+		}
+
+		for mask := range uint64(domain) {
+			conds = append(conds, canonicalArg(specs.LinuxSeccompArg{
+				Index: 0, Value: mask, ValueTwo: value, Op: specs.OpMaskedEqual,
+			}))
+		}
+	}
+
+	return conds
+}
+
+// checkImplicationsSound checks every implication condImplies claims among
+// the conditions against every value of a small domain, and returns how
+// many it claims between two different conditions.
+func checkImplicationsSound(t *testing.T, conds []specs.LinuxSeccompArg) int {
+	t.Helper()
+
+	const probes = 64
+
+	found := 0
+
+	for _, strong := range conds {
+		for _, weak := range conds {
+			if !condImplies(strong, weak) {
+				continue
+			}
+
+			if strong != weak {
+				found++
+			}
+
+			for value := range uint64(probes) {
+				if condHolds(strong, value) && !condHolds(weak, value) {
+					t.Fatalf("%+v is said to imply %+v, but %d matches only the first",
+						strong, weak, value)
+				}
+			}
+		}
+	}
+
+	return found
+}
+
+// TestCondImpliesIsSound checks the claim condImplies makes against every
+// value: where it says one condition implies another, no value matches the
+// first without matching the second. It also pins that the implications a
+// merge relies on are found, since a function that always said no, or only
+// of a condition and itself, would be sound too.
+func TestCondImpliesIsSound(t *testing.T) {
+	t.Parallel()
+
+	conds := smallConditions()
+	foundBetweenDifferent := checkImplicationsSound(t, conds)
+
+	// Every equality implies every inequality against another value, so
+	// the different conditions alone imply more than there are conditions.
+	if foundBetweenDifferent < len(conds) {
+		t.Errorf("only %d implications found between the %d different conditions",
+			foundBetweenDifferent, len(conds))
+	}
+
+	for _, test := range []struct {
+		name         string
+		strong, weak specs.LinuxSeccompArg
+		want         bool
+	}{
+		{"equality implies an inequality", cond(specs.OpEqualTo, 2), cond(specs.OpNotEqual, 40), true},
+		{"equality against its own value", cond(specs.OpEqualTo, 40), cond(specs.OpNotEqual, 40), false},
+		{"a narrower range", cond(specs.OpLessThan, 5), cond(specs.OpLessEqual, 10), true},
+		{"a wider range", cond(specs.OpLessEqual, 10), cond(specs.OpLessThan, 5), false},
+		{"a range clear of a value", cond(specs.OpLessThan, 5), cond(specs.OpNotEqual, 40), true},
+		{"an inequality implies nothing else", cond(specs.OpNotEqual, 40), cond(specs.OpNotEqual, 41), false},
+		{
+			"equality implies a mask it satisfies",
+			cond(specs.OpEqualTo, 17),
+			specs.LinuxSeccompArg{Index: 0, Value: 0x7E020000, ValueTwo: 0, Op: specs.OpMaskedEqual},
+			true,
+		},
+		{
+			// On a 32-bit architecture the first matches 40.
+			"a wide value implies nothing",
+			cond(specs.OpEqualTo, 0x100000028), cond(specs.OpNotEqual, 40), false,
+		},
+	} {
+		if got := condImplies(test.strong, test.weak); got != test.want {
+			t.Errorf("%s: condImplies = %v, want %v", test.name, got, test.want)
+		}
+	}
+}
+
+// TestConjoinArgsKeepsTheStrongerCondition covers two filters that put
+// different conditions on one argument. Their conjunction is expressible
+// when one condition implies the other, as the stronger of the two.
+func TestConjoinArgsKeepsTheStrongerCondition(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name        string
+		left, right []specs.LinuxSeccompArg
+		want        []specs.LinuxSeccompArg
+	}{
+		{
+			"an equality inside an inequality",
+			filter(specs.OpNotEqual, 40), filter(specs.OpEqualTo, 2), filter(specs.OpEqualTo, 2),
+		},
+		{
+			"the narrower of two ranges",
+			filter(specs.OpLessEqual, 10), filter(specs.OpLessThan, 5), filter(specs.OpLessThan, 5),
+		},
+		{"conditions that say different things", filter(specs.OpNotEqual, 40), filter(specs.OpNotEqual, 41), nil},
+	} {
+		for _, order := range [][2][]specs.LinuxSeccompArg{
+			{test.left, test.right}, {test.right, test.left},
+		} {
+			got, ok := conjoinArgs(order[0], order[1])
+			if ok != (test.want != nil) || !slices.Equal(got, test.want) {
+				t.Errorf("%s: conjoinArgs = %v, %v, want %v", test.name, got, ok, test.want)
+			}
+		}
+	}
+
+	if !argsCover(filter(specs.OpNotEqual, 40), filter(specs.OpEqualTo, 2)) {
+		t.Error("an inequality should cover an equality with another value")
+	}
+
+	if argsCover(filter(specs.OpEqualTo, 2), filter(specs.OpNotEqual, 40)) {
+		t.Error("an equality should not cover an inequality")
 	}
 }

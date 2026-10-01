@@ -132,9 +132,16 @@ type bpfMachine struct {
 	acc  uint32
 	idx  uint32
 	mem  [bpfMemSlots]uint32
+	// readNumber records that the program loaded the syscall number, which
+	// sits at the start of seccomp_data.
+	readNumber bool
 }
 
 func (m *bpfMachine) load(offset uint32) uint32 {
+	if offset == offsetNR {
+		m.readNumber = true
+	}
+
 	if int(offset)+4 > len(m.data) {
 		return 0
 	}
@@ -321,6 +328,20 @@ func runProgramArch(
 ) (specs.LinuxSeccompAction, *uint) {
 	t.Helper()
 
+	action, errno, _ := runProgramTraced(t, prog, auditArch, number, args)
+
+	return action, errno
+}
+
+// runProgramTraced is runProgramArch, and also reports whether the program
+// read the syscall number on its way to the answer. One that did not cannot
+// have applied a rule, whatever the profile holds for the call (see
+// TestLibseccompLosesRulesBehindAnAbsentSyscall).
+func runProgramTraced(
+	t *testing.T, prog []libseccomp.Instruction, auditArch uint32, number int32, args []uint64,
+) (specs.LinuxSeccompAction, *uint, bool) {
+	t.Helper()
+
 	data := seccompData{
 		nr:   number,
 		arch: auditArch,
@@ -329,14 +350,17 @@ func runProgramArch(
 	copy(data.args[:], args)
 
 	machine := &bpfMachine{
-		prog: prog,
-		data: data.encode(),
-		acc:  0,
-		idx:  0,
-		mem:  [bpfMemSlots]uint32{},
+		prog:       prog,
+		data:       data.encode(),
+		acc:        0,
+		idx:        0,
+		mem:        [bpfMemSlots]uint32{},
+		readNumber: false,
 	}
 
-	return decodeAction(machine.run(t))
+	action, errno := decodeAction(machine.run(t))
+
+	return action, errno, machine.readNumber
 }
 
 // syscallNumbers resolves syscall names the way libseccomp does.
@@ -590,7 +614,7 @@ func TestLibseccompVersion(t *testing.T) {
 		t.Fatal("libseccomp did not report a version")
 	}
 
-	t.Logf("libseccomp %s answered", got)
+	t.Logf("libseccomp %s answered, compiling at optimization level %d", got, libseccomp.Optimize())
 
 	want := os.Getenv("LIBSECCOMP_VERSION")
 	if want == "" {

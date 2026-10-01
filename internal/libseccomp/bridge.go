@@ -59,6 +59,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 	"unsafe"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -361,19 +362,40 @@ func ExportPFC(profile *specs.LinuxSeccomp, scratch string) (string, error) {
 	return string(raw), err
 }
 
-// withFilter builds a filter from the profile the way runc does and hands it
-// to use before releasing it.
-func withFilter(profile *specs.LinuxSeccomp, use func(ctx C.scmp_filter_ctx) error) error {
-	ctx := C.seccomp_init(actionValue(profile.DefaultAction, profile.DefaultErrnoRet))
-	if ctx == nil {
-		return ErrFilterInit
-	}
+// BinaryTree is the optimization level at which libseccomp sorts the
+// syscalls of a filter into a binary tree instead of testing them one after
+// the other by priority. runc asks for it when a profile names more than 32
+// syscalls, so it is how every profile of a realistic size is compiled
+// there, while crun never asks for it.
+const BinaryTree = 2
 
-	defer C.seccomp_release(ctx)
+// optimize is the SCMP_FLTATR_CTL_OPTIMIZE level every filter is built
+// with, or zero for libseccomp's default.
+//
+//nolint:gochecknoglobals // a setting of the test process, see SetOptimize
+var optimize atomic.Uint32
+
+// SetOptimize sets the optimization level the filters of this process are
+// compiled with from here on. It is a setting of the whole process, so that
+// one run of the tests checks the model against one way of compiling.
+func SetOptimize(level uint32) { optimize.Store(level) }
+
+// Optimize returns the level set with SetOptimize.
+func Optimize() uint32 { return optimize.Load() }
+
+// prepareFilter sets the optimization level of a new filter and adds the
+// architectures a profile lists.
+func prepareFilter(ctx C.scmp_filter_ctx, archs []specs.Arch) error {
+	if level := Optimize(); level != 0 {
+		code := C.seccomp_attr_set(ctx, C.SCMP_FLTATR_CTL_OPTIMIZE, C.uint32_t(level))
+		if code != 0 {
+			return fmt.Errorf("%w: setting the optimization level: %d", ErrRuleRejected, int(code))
+		}
+	}
 
 	// runc adds every listed architecture to the filter, which already
 	// covers the native one.
-	for _, arch := range profile.Architectures {
+	for _, arch := range archs {
 		token, err := archToken(arch)
 		if err != nil {
 			return err
@@ -385,11 +407,32 @@ func withFilter(profile *specs.LinuxSeccomp, use func(ctx C.scmp_filter_ctx) err
 		}
 	}
 
+	return nil
+}
+
+// withFilter builds a filter from the profile the way runc does and hands it
+// to use before releasing it.
+func withFilter(profile *specs.LinuxSeccomp, use func(ctx C.scmp_filter_ctx) error) error {
+	ctx := C.seccomp_init(actionValue(profile.DefaultAction, profile.DefaultErrnoRet))
+	if ctx == nil {
+		return ErrFilterInit
+	}
+
+	defer C.seccomp_release(ctx)
+
+	err := prepareFilter(ctx, profile.Architectures)
+	if err != nil {
+		return err
+	}
+
 	for _, entry := range profile.Syscalls {
 		for _, name := range entry.Names {
+			// runc skips a name libseccomp does not know rather than
+			// failing on it, so that a profile naming a syscall of a newer
+			// kernel still loads.
 			number, err := SyscallNumber(name)
 			if err != nil {
-				return err
+				continue
 			}
 
 			err = addEntry(ctx, entry, C.int(number))

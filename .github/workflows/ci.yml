@@ -243,6 +243,16 @@ jobs:
         env:
           LIBSECCOMP_VERSION: ${{ matrix.version }}
         run: make test-libseccomp
+      # libseccomp sorts the syscalls of a filter by priority unless asked
+      # for a binary tree, which is what runc asks for above 32 syscall
+      # names, and so for every profile of a realistic size. The model has
+      # to hold for the programs of both. Only the tests that compile with
+      # the library depend on the level, so only they run again.
+      - name: Run the model against libseccomp ${{ matrix.version }}, binary tree
+        env:
+          LIBSECCOMP_VERSION: ${{ matrix.version }}
+          SPM_LIBSECCOMP_OPTIMIZE: "2"
+        run: make test-libseccomp TESTFLAGS='-run Libseccomp'
 
   # The library handles Linux profile paths on every host and binaries are
   # released for these platforms, so the packages are tested there too, on
