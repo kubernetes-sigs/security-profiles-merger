@@ -1700,30 +1700,117 @@ func TestUnionPopExactRemovesGlobPattern(t *testing.T) {
 	}
 }
 
-func TestNormalizeGlobPathEmptyPrefix(t *testing.T) {
+// TestRelativeGlobMatchesNothing covers a pattern that does not start with
+// "/". apparmor_parser reads no file rule from it, so it grants nothing,
+// whatever names its expression covers: an intersection drops it and keeps
+// no literal on its account, and a union keeps it as written without
+// dropping the literals its expression covers.
+func TestRelativeGlobMatchesNothing(t *testing.T) {
 	t.Parallel()
 
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{"**/*.log"},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
+	readOnly := func(paths ...string) *apparmor.Profile {
+		return &apparmor.Profile{
+			Executable: nil,
+			Filesystem: &apparmor.FilesystemRules{
+				ReadOnlyPaths:  paths,
+				WriteOnlyPaths: nil,
+				ReadWritePaths: nil,
+			},
+			Network:      nil,
+			Capabilities: nil,
+		}
+	}
+
+	for _, testCase := range []struct {
+		name   string
+		merge  func(...*apparmor.Profile) (*apparmor.Profile, error)
+		inputs []*apparmor.Profile
+		want   []string
+	}{
+		{
+			name:   "intersect of one profile drops it",
+			merge:  apparmor.Intersect,
+			inputs: []*apparmor.Profile{readOnly("**/*.log")},
+			want:   nil,
 		},
-		Network:      nil,
-		Capabilities: nil,
+		{
+			name:   "intersect keeps no literal it covers",
+			merge:  apparmor.Intersect,
+			inputs: []*apparmor.Profile{readOnly("**"), readOnly("/etc/passwd", "/etc/*")},
+			want:   nil,
+		},
+		{
+			name:   "union keeps the literal it covers",
+			merge:  apparmor.Union,
+			inputs: []*apparmor.Profile{readOnly("/etc/passwd"), readOnly("**")},
+			want:   []string{"**", "/etc/passwd"},
+		},
+	} {
+		result, err := testCase.merge(testCase.inputs...)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", testCase.name, err)
+		}
+
+		if !slices.Equal(result.Filesystem.ReadOnlyPaths, testCase.want) {
+			t.Errorf(
+				"%s: ReadOnlyPaths = %v, want %v",
+				testCase.name, result.Filesystem.ReadOnlyPaths, testCase.want,
+			)
+		}
+	}
+}
+
+// TestRelativeGlobKeepsItsIdentity covers two spellings of one relative
+// pattern. It matches nothing, but it still spells one rule, so Validate,
+// the merge and Diff identify it by its expression as they do an absolute
+// pattern, and agree with each other.
+func TestRelativeGlobKeepsItsIdentity(t *testing.T) {
+	t.Parallel()
+
+	readOnly := func(paths ...string) *apparmor.Profile {
+		return &apparmor.Profile{
+			Executable: nil,
+			Filesystem: &apparmor.FilesystemRules{
+				ReadOnlyPaths:  paths,
+				WriteOnlyPaths: nil,
+				ReadWritePaths: nil,
+			},
+			Network:      nil,
+			Capabilities: nil,
+		}
 	}
 
-	result, err := apparmor.Intersect(profile)
+	err := apparmor.Validate(readOnly("x[bc]", "x[cb]"))
+	if !errors.Is(err, apparmor.ErrDuplicatePathInCategory) {
+		t.Errorf("Validate: expected ErrDuplicatePathInCategory, got: %v", err)
+	}
+
+	united, err := apparmor.Union(readOnly("x[bc]"), readOnly("x[cb]"))
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("Union: %v", err)
 	}
 
-	if !slices.Equal(result.Filesystem.ReadOnlyPaths, []string{"**/*.log"}) {
-		t.Errorf(
-			"ReadOnlyPaths = %v, want [**/*.log]",
-			result.Filesystem.ReadOnlyPaths,
-		)
+	if got := united.Filesystem.ReadOnlyPaths; len(got) != 1 {
+		t.Errorf("Union keeps %v, want one spelling", got)
+	}
+
+	diff, err := apparmor.Diff(readOnly("x[bc]"), readOnly("x[cb]"))
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+
+	if !diff.Equal {
+		t.Errorf("Diff of two spellings = %s, want equal", apparmor.FormatDiff(diff))
+	}
+
+	// A relative pattern is no rule an absolute one spells.
+	diff, err = apparmor.Diff(readOnly("x[bc]"), readOnly("/x[bc]"))
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+
+	if diff.Equal {
+		t.Error("Diff of a relative and an absolute pattern is equal")
 	}
 }
 

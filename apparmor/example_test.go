@@ -104,7 +104,7 @@ func ExampleValidateStrict() {
 	fmt.Println(err)
 
 	// Output:
-	// AllowedExecutables: "/etc/config": duplicate executable path
+	// AllowedExecutables[1]: "/etc/config": duplicate executable path
 }
 
 func ExampleFormatProfile() {

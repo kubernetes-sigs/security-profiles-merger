@@ -286,6 +286,12 @@ few properties of the result matter:
 - **AppArmor merges permissions per path.** A path read-only in one
   recording and write-only in another comes out read-write, and so does a
   read-only path one recording lists under a write-only glob of the other.
+- **AppArmor keeps patterns that do not load.** `Union` validates its inputs
+  with `Validate`, which accepts a pattern apparmor_parser rejects, and
+  keeps such a pattern as written. Check the result with `ValidateArtifact`
+  before rendering it for the parser, and run the parser under a timeout
+  that kills its process group: apparmor_parser 5.0.2 does not return from a
+  class holding an escaped comma (`/a/[\,]`), and its workers outlive it.
 
 ```sh
 spm merge --type seccomp --strategy union \

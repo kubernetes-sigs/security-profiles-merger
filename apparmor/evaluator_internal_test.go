@@ -336,8 +336,13 @@ func (parser *evalParser) class() (evalNode, bool) {
 
 // matchGlob reports whether an AppArmor path pattern matches a file name.
 // It panics on syntax it does not support, so an unsupported pattern cannot
-// silently weaken the fuzzers.
+// silently weaken the fuzzers. A pattern that does not start with "/"
+// matches nothing: apparmor_parser reads no file rule from it.
 func matchGlob(pattern, name string) bool {
+	if !strings.HasPrefix(pattern, "/") {
+		return false
+	}
+
 	parsed, cached := evalParsed.Load(pattern)
 	if !cached {
 		nodes, valid := evalParse(pattern)
@@ -727,9 +732,11 @@ func TestMatchGlobAgreesWithRegex(t *testing.T) {
 			continue
 		}
 
+		// A relative pattern loads no rule, so it is not usable, and both
+		// implementations match nothing with it below.
 		matcher := matcherFor(pattern)
-		if !matcher.usable() {
-			t.Errorf("pattern %q is not usable", pattern)
+		if matcher.usable() != strings.HasPrefix(pattern, "/") {
+			t.Errorf("pattern %q: usable = %v", pattern, matcher.usable())
 
 			continue
 		}
@@ -856,7 +863,7 @@ func TestIntersectGroupingStaysSafe(t *testing.T) {
 
 	for idx, triple := range evalGroupingTriples {
 		inputs := groupingInputs(triple)
-		results := groupingResults(t, idx, inputs)
+		results := groupingResults(t, idx, inputs, Intersect)
 
 		for _, result := range results {
 			for _, other := range results {
@@ -894,8 +901,38 @@ func groupingInputs(triple [3][2]uint64) [3]*Profile {
 	return inputs
 }
 
-// groupingResults intersects three profiles in every order and grouping.
-func groupingResults(t *testing.T, idx int, inputs [3]*Profile) map[string]*Profile {
+// TestUnionGroupingIsExact is the counterpart for Union, which has no order
+// to depend on: however three profiles are folded and grouped, the result
+// permits an operation exactly when one of them does.
+func TestUnionGroupingIsExact(t *testing.T) {
+	t.Parallel()
+
+	for idx, triple := range evalGroupingTriples {
+		inputs := groupingInputs(triple)
+
+		for name, result := range groupingResults(t, idx, inputs, Union) {
+			for _, access := range []operation{opRead, opWrite, opExec} {
+				for _, probe := range evalProbes {
+					want := slices.ContainsFunc(inputs[:], func(input *Profile) bool {
+						return permits(input, access, probe)
+					})
+
+					if got := permits(result, access, probe); got != want {
+						t.Fatalf(
+							"triple %d grouped %s permits %s on %q: %v, inputs: %v\nresult=%s",
+							idx, name, access, probe, got, want, FormatProfile(result),
+						)
+					}
+				}
+			}
+		}
+	}
+}
+
+// groupingResults merges three profiles in every order and grouping.
+func groupingResults(
+	t *testing.T, idx int, inputs [3]*Profile, mergeFn func(...*Profile) (*Profile, error),
+) map[string]*Profile {
 	t.Helper()
 
 	results := make(map[string]*Profile)
@@ -905,7 +942,7 @@ func groupingResults(t *testing.T, idx int, inputs [3]*Profile) map[string]*Prof
 		"(c,b,a)": {inputs[2], inputs[1], inputs[0]},
 		"(b,a,c)": {inputs[1], inputs[0], inputs[2]},
 	} {
-		result, err := Intersect(order...)
+		result, err := mergeFn(order...)
 		if err != nil {
 			t.Fatalf("triple %d %s: %v", idx, name, err)
 		}
@@ -918,12 +955,12 @@ func groupingResults(t *testing.T, idx int, inputs [3]*Profile) map[string]*Prof
 		"a,(b,c)": {{inputs[1], inputs[2]}, {inputs[0]}},
 		"c,(a,b)": {{inputs[0], inputs[1]}, {inputs[2]}},
 	} {
-		inner, err := Intersect(pair[0]...)
+		inner, err := mergeFn(pair[0]...)
 		if err != nil {
 			t.Fatalf("triple %d %s inner: %v", idx, name, err)
 		}
 
-		result, err := Intersect(append(pair[1], inner)...)
+		result, err := mergeFn(append(pair[1], inner)...)
 		if err != nil {
 			t.Fatalf("triple %d %s: %v", idx, name, err)
 		}
