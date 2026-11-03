@@ -333,15 +333,14 @@ func (s *clauseSummary) pick(intersect bool) clause {
 // collectRules falls back to past maxLoadedClauses. Every name of an entry
 // loads the same clauses, so each entry is folded once and its fold applied
 // per name, which keeps the pass linear in the size of the input instead of
-// in the clauses it would expand to.
-// only names the syscalls to summarize; the rest are left to the caller,
-// which reads them exactly.
+// in the clauses it would expand to. Only the syscalls in summarized are
+// read; the rest are left to the caller, which reads them exactly.
 func summarizeRules(
-	syscalls []specs.LinuxSyscall, def *clause, only map[string]bool,
+	syscalls []specs.LinuxSyscall, def *clause, summarized map[string]bool,
 ) map[string]*syscallRules {
 	rules := make(map[string]*syscallRules)
 
-	if len(only) == 0 {
+	if len(summarized) == 0 {
 		return rules
 	}
 
@@ -363,7 +362,7 @@ func summarizeRules(
 		}
 
 		for _, name := range entry.Names {
-			if !only[name] {
+			if !summarized[name] {
 				continue
 			}
 

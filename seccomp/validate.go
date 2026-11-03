@@ -665,18 +665,6 @@ func truncatedClause(current clause) clause {
 	return current
 }
 
-func hasWideValue(profile *specs.LinuxSeccomp) bool {
-	for idx := range profile.Syscalls {
-		for _, arg := range profile.Syscalls[idx].Args {
-			if arg.Value > lower32 || arg.ValueTwo > lower32 {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
 // syscallRuleState is what validateSyscallRules tracks for one syscall.
 type syscallRuleState struct {
 	// trackers find conflicts among the rules as written and as libseccomp
@@ -703,7 +691,7 @@ func validateSyscallRules(profile *specs.LinuxSeccomp) error {
 	counts, total := clauseCounts(profile.Syscalls, def)
 	checker := &ruleChecker{
 		counts:   counts,
-		truncate: hasWideValue(profile),
+		truncate: loadsWideValue(profile),
 		states:   make(map[string]*syscallRuleState),
 		reported: make(map[string]struct{}),
 		errs:     nil,
