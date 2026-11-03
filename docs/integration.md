@@ -39,9 +39,22 @@ treat their inputs alike, so it is the caller who keeps the two apart.
 ## The runtime flow
 
 ```go
-// 0. At config load, check that the baseline loads at all.
+// 0. At config load, check that the baseline loads, then that the merge
+//    reads every rule of it: its intersection with itself is equal to it
+//    exactly then.
 if err := seccomp.Validate(baseline); err != nil {
     return nodeMisconfigured(err)
+}
+settled, err := seccomp.Intersect(baseline)
+if err != nil {
+    return nodeMisconfigured(err)
+}
+diff, err := seccomp.Diff(baseline, settled)
+if err != nil {
+    return nodeMisconfigured(err)
+}
+if !diff.Equal {
+    return nodeMisconfigured(fmt.Errorf("baseline has rules the merge cannot apply: %s", seccomp.FormatDiff(diff)))
 }
 
 // 1. At pull time, decode strictly. encoding/json accepts what two readers
@@ -75,28 +88,74 @@ if err != nil {
 // 4. Load the merge result. Never the artifact.
 load(effective)
 
-// 5. Log what the merge took away from the artifact.
+// 5. Log what the merge took away from the artifact, and the architectures
+//    the artifact took away from the baseline (see step 3).
 if diff, err := seccomp.Diff(&artifact, effective); err == nil && !diff.Equal {
     log.Printf("artifact constrained by baseline: %s", seccomp.FormatDiff(diff))
+}
+if diff, err := seccomp.Diff(baseline, effective); err == nil && diff.Architectures != nil {
+    log.Printf("architectures narrowed by artifact: %s", seccomp.FormatDiff(diff))
 }
 ```
 
 The same calls exist in `apparmor` and `landlock`, which need the
 [extra steps](#extra-steps-after-intersect) below before step 4.
 
-0. **Check the baseline once, at config load, with `Validate`.** The
-   defaults runtimes ship fail the stricter levels: the Moby, containerd and
-   CRI-O seccomp defaults list one syscall in several entries, which
-   `ValidateStrict` reports, and CRI-O's also holds a `setns` entry that its
-   own allowlist overrides, which `ValidateArtifact` reports. Do run
-   `ValidateArtifact` on a seccomp baseline once and read what it says about
-   conflicting entries: a syscall it names there is one whose rules
-   libseccomp decides by an order of its own, which `Intersect` reads as the
-   most restrictive of them. CRI-O's `socket` rules are such a set, so an
-   intersection with that baseline denies every `socket` call until the
-   rules are restated in a
-   [safe shape](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Evaluation_model). Both levels also
-   reject a notification listener (see
+0. **Check the baseline once, at config load: `Validate`, then
+   `Diff(baseline, Intersect(baseline))`.** `Validate` is what the merge
+   needs to load the profile at all. The diff is the check that matters: an
+   intersection of the baseline with itself is equal to it exactly when the
+   merge reads every rule of it, so a diff that is not equal names what
+   every merge with that baseline will take away, whatever the artifact
+   says. It is a different check from `ValidateArtifact`, which reports
+   rules of one syscall with different results: the diff also shows rules
+   outside a [safe shape](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Evaluation_model)
+   whose results agree, a value above 32 bits where the profile covers a
+   32-bit architecture, and rules of `socket` or another multiplexed
+   syscall with different results that form no safe shape once their
+   first-argument condition is gone, where the profile covers an
+   architecture that routes the syscall through `socketcall` or `ipc` (see
+   [What the models leave out](#what-the-models-leave-out)). Run the
+   diff on the node, or `DiffForArch` and `IntersectForArch` for the
+   architecture of the node, and treat an unequal diff as a misconfigured
+   node rather than as something to fix at merge time.
+
+   The defaults runtimes ship need restating before they pass. Moby,
+   containerd and CRI-O list one syscall in several entries, which
+   `ValidateStrict` reports and the merge reads exactly; the two sets below,
+   both in the CRI-O default, are the ones the merge cannot read:
+
+   - `clone`: one `ALLOW` clause with a masked comparison on the flags (no
+     namespace flag set) next to `ERRNO` clauses for each namespace flag.
+     The single `ALLOW` clause alone is a safe shape; a clone with a
+     namespace flag then gets the profile default's errno (ENOSYS in that
+     profile) instead of EPERM.
+   - `socket`: `ERRNO` (EPERM) for AF_VSOCK, `ERRNO` (EINVAL) for
+     AF_NETLINK with NETLINK_AUDIT, `ALLOW` for AF_NETLINK otherwise, and
+     `ALLOW a0 != AF_NETLINK`, which overlaps the AF_VSOCK rule with a
+     different result, so the set is no safe shape. One clause,
+     `ALLOW a0 != AF_VSOCK`, is the restatement: AF_VSOCK then gets the
+     default's errno instead of EPERM, and the NETLINK_AUDIT rule is gone.
+     That rule was for compatibility: EINVAL lets libaudit treat audit as
+     absent instead of failing later with EPERM.
+     [containers/common#421](https://github.com/containers/common/pull/421)
+     found that an unconditional `ALLOW` had hidden it for years, so
+     dropping it changes little. The complement pair `ERRNO a0 == AF_VSOCK` plus
+     `ALLOW a0 != AF_VSOCK` is a safe shape on x86_64 and aarch64 but not
+     where `socket` goes through `socketcall`: libseccomp copies both
+     rules to the multiplexer with the same filter and different results
+     and refuses the second, so `Intersect` drops x86 from the list of an
+     x86_64 node and denies `socket` on ppc64le and s390x. Containerd's
+     default states its `socket` rules as one range and single-value
+     equalities on the first argument, all `ALLOW`, which pass as they are.
+
+   `ValidateArtifact` reports one more entry of the CRI-O default, `setns`:
+   an unconditional `ALLOW` followed by an unconditional `ERRNO`. libseccomp
+   keeps the first unconditional rule of a syscall and so does the merge, so
+   the diff is equal and restating it, by keeping only the first entry, is
+   optional.
+
+   Both validation levels also reject a notification listener (see
    [seccomp: the listener](#seccomp-the-listener)). `ValidateStrict` remains
    useful as a lint for a baseline an administrator writes by hand.
 1. **Decode with `UnmarshalStrict`.** It refuses repeated, unknown and
@@ -115,6 +174,15 @@ The same calls exist in `apparmor` and `landlock`, which need the
    input must be non-nil, so the pod spec's profile is only passed when the
    pod sets one. A failure is an `spm.InputError` whose `Index` names the
    input: 0 is the baseline, any other index rejects the workload.
+
+   The merge intersects the architecture lists, so an artifact that lists
+   none narrows the result to the native architecture: on an amd64 node that
+   drops x86 and x32 from a baseline listing them, and a 32-bit process in
+   the container is killed on its first syscall. The artifact's diff of
+   step 5 does not show it, since the artifact and the result list the same
+   architectures; the `Architectures` field of `Diff(baseline, effective)`
+   does, so log it (see the code block), and tell artifact authors to list
+   the architectures their profile is for.
 4. **Load the result of the merge, never the artifact.** An accepted artifact
    may still hold rules a runtime evaluates in an order of its own; the merge
    reads those conservatively and never emits them.
