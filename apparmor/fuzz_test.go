@@ -31,9 +31,9 @@ func capsFromMask(mask uint64) []string {
 
 	var result []string
 
-	for idx, cap := range caps {
+	for idx, name := range caps {
 		if mask&(1<<idx) != 0 {
-			result = append(result, cap)
+			result = append(result, name)
 		}
 	}
 
@@ -322,12 +322,12 @@ func assertCapsSubset(
 	leftCaps := stringSet(left.Capabilities.AllowedCapabilities)
 	rightCaps := stringSet(right.Capabilities.AllowedCapabilities)
 
-	for _, cap := range result.Capabilities.AllowedCapabilities {
-		_, inLeft := leftCaps[cap]
-		_, inRight := rightCaps[cap]
+	for _, name := range result.Capabilities.AllowedCapabilities {
+		_, inLeft := leftCaps[name]
+		_, inRight := rightCaps[name]
 
 		if !inLeft || !inRight {
-			t.Errorf("intersect result has cap %q not in both inputs", cap)
+			t.Errorf("intersect result has cap %q not in both inputs", name)
 		}
 	}
 }
@@ -340,9 +340,9 @@ func assertCapsSuperset(
 	resultCaps := stringSet(result.Capabilities.AllowedCapabilities)
 
 	for _, profiles := range []*apparmor.Profile{left, right} {
-		for _, cap := range profiles.Capabilities.AllowedCapabilities {
-			if _, ok := resultCaps[cap]; !ok {
-				t.Errorf("union result missing cap %q from input", cap)
+		for _, name := range profiles.Capabilities.AllowedCapabilities {
+			if _, ok := resultCaps[name]; !ok {
+				t.Errorf("union result missing cap %q from input", name)
 			}
 		}
 	}

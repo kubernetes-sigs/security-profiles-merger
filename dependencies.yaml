@@ -10,7 +10,7 @@ dependencies:
   # golang/go publishes tags but no GitHub releases, and its tags are not
   # semver, so the official image's tags are what upstream is read from.
   - name: go
-    version: 1.27.1
+    version: 1.27.3
     upstream:
       flavour: container
       registry: golang
@@ -21,7 +21,7 @@ dependencies:
         match: "GO_VERSION: \""
 
   - name: golangci-lint
-    version: 2.14.0
+    version: 2.15.0
     upstream:
       flavour: github
       url: golangci/golangci-lint
@@ -32,7 +32,7 @@ dependencies:
         match: "^\\s+version: v"
 
   - name: syft
-    version: 1.52.0
+    version: 1.56.0
     upstream:
       flavour: github
       url: anchore/syft
@@ -43,7 +43,7 @@ dependencies:
         match: "syft-version: v"
 
   - name: goreleaser
-    version: 2.18.2
+    version: 2.19.0
     upstream:
       flavour: github
       url: goreleaser/goreleaser
@@ -54,7 +54,7 @@ dependencies:
         match: "GORELEASER_VERSION: v"
 
   - name: cosign
-    version: 3.1.3
+    version: 3.1.4
     upstream:
       flavour: github
       url: sigstore/cosign
