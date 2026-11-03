@@ -622,7 +622,7 @@ func TestUnionWithOneEmptyArgs(t *testing.T) {
 func TestIntersectOneHasArgs(t *testing.T) {
 	t.Parallel()
 
-	left := &specs.LinuxSeccomp{
+	withArgs := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
 		Syscalls: []specs.LinuxSyscall{{
 			Names:  []string{syscallClone},
@@ -630,37 +630,45 @@ func TestIntersectOneHasArgs(t *testing.T) {
 			Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 0x10000, Op: specs.OpMaskedEqual}},
 		}},
 	}
-
-	right := &specs.LinuxSeccomp{
+	unconditional := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
 		Syscalls: []specs.LinuxSyscall{
 			{Names: []string{syscallClone}, Action: specs.ActAllow},
 		},
 	}
 
-	result, err := seccomp.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	for name, inputs := range map[string][]*specs.LinuxSeccomp{
+		"args on the left":  {withArgs, unconditional},
+		"args on the right": {unconditional, withArgs},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	for _, syscall := range result.Syscalls {
-		if slices.Contains(syscall.Names, syscallClone) {
-			if syscall.Action != specs.ActAllow {
-				t.Errorf("clone action = %q, want %q", syscall.Action, specs.ActAllow)
+			result, err := seccomp.Intersect(inputs...)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
 
-			if len(syscall.Args) != 1 {
-				t.Errorf(
-					"clone args count = %d, want 1 (intersect keeps args from the side that has them)",
-					len(syscall.Args),
-				)
+			for _, syscall := range result.Syscalls {
+				if slices.Contains(syscall.Names, syscallClone) {
+					if syscall.Action != specs.ActAllow {
+						t.Errorf("clone action = %q, want %q", syscall.Action, specs.ActAllow)
+					}
+
+					if len(syscall.Args) != 1 {
+						t.Errorf(
+							"clone args count = %d, want 1 (intersect keeps args from the side that has them)",
+							len(syscall.Args),
+						)
+					}
+
+					return
+				}
 			}
 
-			return
-		}
+			t.Error("clone not found in result")
+		})
 	}
-
-	t.Error("clone not found in result")
 }
 
 func TestIntersectFlags(t *testing.T) {
@@ -1589,50 +1597,6 @@ func TestIntersectSyscallErrnoRetTieBreaking(t *testing.T) {
 	}
 
 	t.Error("read not found in result")
-}
-
-func TestIntersectOneHasArgsReverse(t *testing.T) {
-	t.Parallel()
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallClone}, Action: specs.ActAllow},
-		},
-	}
-
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{{
-			Names:  []string{syscallClone},
-			Action: specs.ActAllow,
-			Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 0x10000, Op: specs.OpMaskedEqual}},
-		}},
-	}
-
-	result, err := seccomp.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	for _, syscall := range result.Syscalls {
-		if slices.Contains(syscall.Names, syscallClone) {
-			if syscall.Action != specs.ActAllow {
-				t.Errorf("clone action = %q, want %q", syscall.Action, specs.ActAllow)
-			}
-
-			if len(syscall.Args) != 1 {
-				t.Errorf(
-					"clone args count = %d, want 1 (intersect keeps args from the side that has them)",
-					len(syscall.Args),
-				)
-			}
-
-			return
-		}
-	}
-
-	t.Error("clone not found in result")
 }
 
 func TestMergeErrnoRetLeftNilWhenActionsEqual(t *testing.T) {
