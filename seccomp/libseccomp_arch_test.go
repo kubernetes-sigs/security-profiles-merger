@@ -32,11 +32,11 @@ import (
 
 // The tests in this file check merge results on architectures other than
 // the native one, where libseccomp compiles something else than the model
-// reads: x86, which compares only the lower 32 bits of every value and
-// reaches the socket syscalls through socketcall(2) as well, ppc64le, which
-// is 64-bit but multiplexes the same way, and x32, arm and aarch64, which
-// lack syscalls the others have. All are little-endian, as the BPF
-// interpreter of these tests assumes of seccomp_data. The filters list
+// reads: x86, mipsel and sh, which compare only the lower 32 bits of every
+// value and reach the socket syscalls through socketcall(2) as well,
+// ppc64le, which is 64-bit but multiplexes the same way, and x32, arm and
+// aarch64, which lack syscalls the others have. All are little-endian, as
+// the BPF interpreter of these tests assumes of seccomp_data. The filters list
 // them, as runc adds them, and every call is made on every architecture, so
 // a filter that does not cover one answers with libseccomp's action for an
 // unlisted architecture.
@@ -61,11 +61,19 @@ func archNames() []string {
 }
 
 // archProbes are the architectures the checks make calls on besides the
-// native one.
+// native one, less those the linked libseccomp does not know: sh needs
+// libseccomp 2.6.
 func archProbes() []specs.Arch {
-	return []specs.Arch{
+	probes := []specs.Arch{
 		specs.ArchX86, specs.ArchPPC64LE, specs.ArchX32, specs.ArchARM, specs.ArchAARCH64,
+		specs.ArchMIPSEL, specs.ArchSH,
 	}
+
+	return slices.DeleteFunc(probes, func(arch specs.Arch) bool {
+		_, err := libseccomp.AuditArch(arch)
+
+		return err != nil
+	})
 }
 
 // archValues are the argument values the architecture checks draw from:
@@ -356,10 +364,12 @@ func placesRule(t *testing.T, profile *specs.LinuxSeccomp, arch specs.Arch) bool
 
 // multiplexes reports whether the architecture reaches the socket syscalls
 // through socketcall(2), where libseccomp adds a rule on a socket syscall
-// as one on the multiplexer. Of the probed architectures, x86 and ppc64le
-// do.
+// as one on the multiplexer. Of the probed architectures, x86, ppc64le,
+// mipsel and sh do.
 func multiplexes(arch specs.Arch) bool {
-	return arch == specs.ArchX86 || arch == specs.ArchPPC64LE
+	return slices.Contains(
+		[]specs.Arch{specs.ArchX86, specs.ArchPPC64LE, specs.ArchMIPSEL, specs.ArchSH}, arch,
+	)
 }
 
 // socketNames are the names of archNames that socketcall(2) multiplexes.

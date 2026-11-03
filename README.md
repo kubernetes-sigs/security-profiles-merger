@@ -107,6 +107,22 @@ flow, including the baseline check at config load, the pod spec's own
 profile as a middle input, and how to tell a bad baseline from a bad artifact.
 
 ```go
+// Once, at config load: a baseline the merge cannot read exactly loses
+// those rules in every merge, so it is a misconfiguration, not an artifact
+// problem. The runtime defaults need restating first (see the flow).
+settled, err := seccomp.Intersect(baseline)
+if err != nil {
+    return err
+}
+diff, err := seccomp.Diff(baseline, settled)
+if err != nil {
+    return err
+}
+if !diff.Equal {
+    return fmt.Errorf("baseline has rules the merge cannot apply: %s", seccomp.FormatDiff(diff))
+}
+
+// Per artifact.
 artifact := new(specs.LinuxSeccomp)
 if err := seccomp.UnmarshalStrict(artifactBytes, artifact); err != nil {
     return err // a permanent rejection
@@ -123,7 +139,8 @@ if err != nil {
 `effective` permits only what every input permits, judged by what runc and
 crun load through libseccomp. Architectures need no preparation: as in runc
 and crun, every profile covers the native architecture plus the ones it
-lists, and the merge intersects the lists. `Intersect` drops a 32-bit or
+lists, and the merge intersects the lists, so an artifact that lists none
+narrows the result to the native architecture. `Intersect` drops a 32-bit or
 multiplexing architecture the result only lists, and the native architecture
 is that of the running program, so run the merge on the node that loads the
 result.

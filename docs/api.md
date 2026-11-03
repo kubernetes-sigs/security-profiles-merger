@@ -42,7 +42,7 @@ also passes `Validate`.
 
 | Level | For whom | Called by |
 |-------|----------|-----------|
-| `Validate` | Any merge input, and the baseline at config load: what a runtime needs to load the profile at all. The runtime defaults fail the other two levels, and both reject a seccomp notification listener | The runtime at config load; every `Intersect` and `Union`, on each input; `spm validate`; `spm merge --validate default` |
+| `Validate` | Any merge input: what a runtime needs to load the profile at all. The runtime defaults fail the other two levels, and both reject a seccomp notification listener. A baseline needs `Diff(baseline, Intersect(baseline))` as well, see [the runtime flow](integration.md#the-runtime-flow) | The runtime at config load; every `Intersect` and `Union`, on each input; `spm validate`; `spm merge --validate default` |
 | `ValidateArtifact` | The artifact: `Validate` plus the limits and what an untrusted author must not control | The runtime at pull time, after `UnmarshalStrict`; `spm validate --artifact`; `spm merge --validate artifact` |
 | `ValidateStrict` | A profile a person writes by hand, as a lint: `ValidateArtifact` plus what is likely a mistake, such as a duplicate | Tooling and review of hand-written profiles; `spm validate --strict`; `spm merge --validate strict` |
 
@@ -156,7 +156,7 @@ import "sigs.k8s.io/security-profiles-merger/seccomp"
 | `IntersectForArch`, `UnionForArch` | `Intersect` and `Union` as a node of a named native architecture merges, for a merge that does not run on the node loading its result |
 | `DiffSyscalls` | `Diff` on bare syscall slices |
 | `Validate` | What a runtime needs to load the profile at all; what the merges run on every input |
-| `ValidateArtifact` | `Validate` plus what an artifact needs to load on every runtime and merge precisely: the [limits](#limits), no notify or listener settings, no conflicting rules |
+| `ValidateArtifact` | `Validate` plus what an artifact needs to load on every runtime: the [limits](#limits), no notify or listener settings, no rules of one syscall with different results outside a safe shape. It does not promise an exact merge: same-result rules outside a safe shape and rules a multiplexing architecture refuses pass it and are still settled (see [Conflicting rules](#conflicting-rules)) |
 | `ValidateArtifactForArch` | `ValidateArtifact` for a named native architecture, which decides whether a value above 32 bits is reported |
 | `ValidateStrict` | `ValidateArtifact` plus duplicate syscall names and `valueTwo` on operators that ignore it |
 | `ValidateStrictForArch` | `ValidateStrict` for a named native architecture, so that it accepts only what `ValidateArtifactForArch` accepts there |

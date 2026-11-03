@@ -259,8 +259,12 @@ limitations under the License.
 // to be the one of the running program (see [NativeArchitecture]). Both
 // were checked against libseccomp 2.6.1 for every architecture it knows,
 // and the libseccomp tests of this package check merge results on x86,
-// x32, arm, aarch64 and ppc64le against it, with libseccomp sorting the
-// syscalls by priority and into a binary tree.
+// x32, arm, aarch64, ppc64le, mipsel and, with libseccomp 2.6, sh against
+// it, with libseccomp sorting the syscalls by priority and into a binary
+// tree. The remaining multiplexing architectures (big-endian 32-bit MIPS,
+// ppc, ppc64, s390, s390x, m68k, sheb) are big-endian, which libseccomp
+// does not combine with a little-endian architecture in one filter, and
+// are inferred from the probed ones.
 //
 // One thing libseccomp does there is not followed, because it is a defect
 // rather than a reading: libseccomp 2.5.5 and 2.6.1 load the syscall number
@@ -319,29 +323,37 @@ limitations under the License.
 // a1 != 1 still decide socketcall(SYS_SETSOCKOPT) by its second argument.
 // Two copies with the same filter and different results, errno included,
 // are refused with EEXIST, and an unconditional rule on the multiplexer
-// decides all of its calls. Where neither profile has multiplexer rules and
-// no rule of the syscall tests the first argument, the path decides each
-// call as the syscall does, and the merges keep it as they keep the
-// syscall. Otherwise they read that path of every input as the results a
-// call can get there: the multiplexer's unconditional rule if it has one;
-// with conditional multiplexer rules, the results of those, of every
-// syscall the multiplexer carries and of the default; and otherwise the
-// results of the syscall's rules, and the default unless one of them
-// matches the whole sub-call. A result that would permit more ([Intersect])
-// or less ([Union]) on that path than an input, or hold rules libseccomp
-// may refuse there (different results for one of these syscalls where a
-// rule matches the whole sub-call or the rules form no safe shape without
-// the first argument, or conditional rules on the multiplexer), is settled.
-// [Intersect] drops the multiplexing architectures from the list where the
-// native architecture does not multiplex. Otherwise, and always for
-// [Union], the multiplexer and each affected syscall collapse to one
-// unconditional rule in the merge direction, combining their actions with
-// what the inputs apply on that path, which also removes the filters from
-// the direct syscall. An unconditional multiplexer rule that differs from
-// the default only in its errno, and would hide multiplexed rules, is
-// dropped instead of settling where those rules then decide every sub-call
-// safely. [ValidateArtifact] does not model which of these rule sets
-// libseccomp refuses.
+// decides all of its calls.
+//
+// The merges read that path in one of three ways:
+//
+//   - Kept as the syscall: neither profile has multiplexer rules and no
+//     rule of the syscall tests the first argument, so the path decides
+//     each call as the syscall does.
+//   - Read as a set of results: otherwise, each input's path is read as
+//     the results a call can get there. With an unconditional multiplexer
+//     rule, that rule; with conditional multiplexer rules, the results of
+//     those, of every syscall the multiplexer carries and of the default;
+//     and otherwise the results of the syscall's rules, and the default
+//     unless one of them matches the whole sub-call.
+//   - Settled: a result that would permit more ([Intersect]) or less
+//     ([Union]) on that path than an input, or that holds rules libseccomp
+//     may refuse there (different results for one of these syscalls where
+//     a rule matches the whole sub-call or the rules form no safe shape
+//     without the first argument, or conditional rules on the
+//     multiplexer). [Intersect] drops the multiplexing architectures from
+//     the list where the native architecture does not multiplex.
+//     Otherwise, and always for [Union], the multiplexer and each affected
+//     syscall collapse to one unconditional rule in the merge direction,
+//     combining their actions with what the inputs apply on that path,
+//     which also removes the filters from the direct syscall. An
+//     unconditional multiplexer rule that differs from the default only in
+//     its errno, and would hide multiplexed rules, is dropped instead of
+//     settling where those rules then decide every sub-call safely.
+//
+// [ValidateArtifact] does not model which of these rule sets libseccomp
+// refuses; [Diff] of a profile against [Intersect] of it alone shows what
+// every merge settles in it, whatever the other inputs.
 //
 // Dropping an architecture from the list does not remove it from a filter
 // where it is native, so [Intersect] is meant to run on the node that loads
