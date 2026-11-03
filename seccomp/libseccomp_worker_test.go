@@ -179,10 +179,29 @@ func startCompileWorker() (*compileWorker, error) {
 	}, nil
 }
 
-func (w *compileWorker) stop() {
+// stop ends the worker and returns its exit status.
+func (w *compileWorker) stop() error {
 	_ = w.stdin.Close()
 	_ = w.cmd.Process.Kill()
-	_ = w.cmd.Wait()
+
+	err := w.cmd.Wait()
+	if err != nil {
+		return fmt.Errorf("exit: %w", err)
+	}
+
+	return nil
+}
+
+// withExit adds how the worker exited to the error its pipes reported.
+func withExit(err, exitErr error) error {
+	switch {
+	case exitErr == nil:
+		return err
+	case err == nil:
+		return exitErr
+	default:
+		return fmt.Errorf("%w (%w)", err, exitErr)
+	}
 }
 
 // compilerPool hands out workers, one per concurrent compile.
@@ -237,7 +256,7 @@ func (p *compilerPool) close() {
 	defer p.mu.Unlock()
 
 	for _, worker := range p.idle {
-		worker.stop()
+		_ = worker.stop()
 	}
 
 	p.idle = nil
@@ -272,31 +291,44 @@ func (p *compilerPool) compile(profile *specs.LinuxSeccomp) ([]libseccomp.Instru
 	case err = <-done:
 	case <-timer.C:
 		// Killing the worker ends the pending read, so the goroutine
-		// finishes before the pipes are closed.
+		// finishes before the pipes are closed. A nil error means the
+		// compile finished as the timer fired: its response stands, only
+		// the worker is lost.
 		_ = worker.cmd.Process.Kill()
 
-		<-done
-		worker.stop()
+		err = <-done
+		exitErr := worker.stop()
+
 		p.release(nil)
 
-		return nil, errCompileHang
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", errCompileHang, withExit(err, exitErr))
+		}
+
+		return response.result()
 	}
 
 	if err != nil {
-		worker.stop()
+		exitErr := worker.stop()
+
 		p.release(nil)
 
-		return nil, fmt.Errorf("%w: %w", errWorkerExited, err)
+		return nil, fmt.Errorf("%w: %w", errWorkerExited, withExit(err, exitErr))
 	}
 
 	p.release(worker)
 
+	return response.result()
+}
+
+// result reads the response of a compile.
+func (r compileResponse) result() ([]libseccomp.Instruction, error) {
 	switch {
-	case response.Conflict:
-		return nil, fmt.Errorf("%w: %s", errRuleConflict, response.Err)
-	case response.Err != "":
-		return nil, fmt.Errorf("%w: %s", errCompileFailed, response.Err)
+	case r.Conflict:
+		return nil, fmt.Errorf("%w: %s", errRuleConflict, r.Err)
+	case r.Err != "":
+		return nil, fmt.Errorf("%w: %s", errCompileFailed, r.Err)
 	default:
-		return response.Prog, nil
+		return r.Prog, nil
 	}
 }
