@@ -351,9 +351,12 @@ limitations under the License.
 //     its errno, and would hide multiplexed rules, is dropped instead of
 //     settling where those rules then decide every sub-call safely.
 //
-// [ValidateArtifact] does not model which of these rule sets libseccomp
-// refuses; [Diff] of a profile against [Intersect] of it alone shows what
-// every merge settles in it, whatever the other inputs.
+// Where the profile covers an architecture that multiplexes,
+// [ValidateArtifact] reports ([ErrConflictingEntries]) the rules of a
+// multiplexed syscall whose copies libseccomp may refuse, and conditional
+// rules of the multiplexer next to rules of a syscall it carries; [Diff] of
+// a profile against [Intersect] of it alone shows what every merge settles
+// in it, whatever the other inputs.
 //
 // Dropping an architecture from the list does not remove it from a filter
 // where it is native, so [Intersect] is meant to run on the node that loads

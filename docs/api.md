@@ -156,7 +156,7 @@ import "sigs.k8s.io/security-profiles-merger/seccomp"
 | `IntersectForArch`, `UnionForArch` | `Intersect` and `Union` as a node of a named native architecture merges, for a merge that does not run on the node loading its result |
 | `DiffSyscalls` | `Diff` on bare syscall slices |
 | `Validate` | What a runtime needs to load the profile at all; what the merges run on every input |
-| `ValidateArtifact` | `Validate` plus what an artifact needs to load on every runtime: the [limits](#limits), no notify or listener settings, no rules of one syscall with different results outside a safe shape. It does not promise an exact merge: same-result rules outside a safe shape and rules a multiplexing architecture refuses pass it and are still settled (see [Conflicting rules](#conflicting-rules)) |
+| `ValidateArtifact` | `Validate` plus what an artifact needs to load on every runtime: the [limits](#limits), no notify or listener settings, no rules of one syscall with different results outside a safe shape, on the syscall or on a multiplexer that carries it. It does not promise an exact merge: same-result rules outside a safe shape pass it and are still settled (see [Conflicting rules](#conflicting-rules)) |
 | `ValidateArtifactForArch` | `ValidateArtifact` for a named native architecture, which decides whether a value above 32 bits is reported |
 | `ValidateStrict` | `ValidateArtifact` plus duplicate syscall names and `valueTwo` on operators that ignore it |
 | `ValidateStrictForArch` | `ValidateStrict` for a named native architecture, so that it accepts only what `ValidateArtifactForArch` accepts there |

@@ -111,10 +111,9 @@ The same calls exist in `apparmor` and `landlock`, which need the
    rules of one syscall with different results: the diff also shows rules
    outside a [safe shape](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Evaluation_model)
    whose results agree, a value above 32 bits where the profile covers a
-   32-bit architecture, and rules of `socket` or another multiplexed
-   syscall with different results that form no safe shape once their
-   first-argument condition is gone, where the profile covers an
-   architecture that routes the syscall through `socketcall` or `ipc` (see
+   32-bit architecture, and conditional rules on `socketcall` or `ipc`
+   themselves, which the merge collapses where the profile covers an
+   architecture that multiplexes (see
    [What the models leave out](#what-the-models-leave-out)). Run the
    diff on the node, or `DiffForArch` and `IntersectForArch` for the
    architecture of the node, and treat an unequal diff as a misconfigured
@@ -144,8 +143,10 @@ The same calls exist in `apparmor` and `landlock`, which need the
      `ALLOW a0 != AF_VSOCK` is a safe shape on x86_64 and aarch64 but not
      where `socket` goes through `socketcall`: libseccomp copies both
      rules to the multiplexer with the same filter and different results
-     and refuses the second, so `Intersect` drops x86 from the list of an
-     x86_64 node and denies `socket` on ppc64le and s390x. Containerd's
+     and refuses the second, so `ValidateArtifact` reports the pair where
+     the profile covers such an architecture, and `Intersect` drops x86
+     from the list of an x86_64 node and denies `socket` on ppc64le and
+     s390x. Containerd's
      default states its `socket` rules as one range and single-value
      equalities on the first argument, all `ALLOW`, which pass as they are.
 
