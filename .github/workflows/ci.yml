@@ -199,6 +199,8 @@ jobs:
     name: test-libseccomp / ${{ matrix.version }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      LIBSECCOMP_PREFIX: ${{ github.workspace }}/.libseccomp
     strategy:
       fail-fast: false
       matrix:
@@ -229,19 +231,21 @@ jobs:
           echo "$LIBSECCOMP_SHA256  libseccomp.tar.gz" | sha256sum --check --strict
           tar xf libseccomp.tar.gz
           cd "libseccomp-$LIBSECCOMP_VERSION"
-          # Install over the distribution's own copy rather than into
-          # /usr/lib, which the loader searches after the multiarch
-          # directory, so that the build and the run agree.
-          ./configure --prefix=/usr --libdir=/usr/lib/$(gcc -print-multiarch)
+          # A prefix of its own, not the system directory: ldconfig points
+          # the soname link at the newest file there, so a build older than
+          # the runner image's copy would never be the one loaded. The run
+          # steps name this prefix for the build (pkg-config) and the loader.
+          ./configure --prefix="$LIBSECCOMP_PREFIX"
           make -j"$(nproc)"
-          sudo make install
-          sudo ldconfig
+          make install
       # pkg-config only describes the build. TestLibseccompVersion reads the
       # library the process loaded and fails when it is not this one, so a
       # model checked here is checked against the version named here.
       - name: Run the model against libseccomp ${{ matrix.version }}
         env:
           LIBSECCOMP_VERSION: ${{ matrix.version }}
+          PKG_CONFIG_PATH: ${{ env.LIBSECCOMP_PREFIX }}/lib/pkgconfig
+          LD_LIBRARY_PATH: ${{ env.LIBSECCOMP_PREFIX }}/lib
         run: make test-libseccomp
       # libseccomp sorts the syscalls of a filter by priority unless asked
       # for a binary tree, which is what runc asks for above 32 syscall
@@ -252,6 +256,8 @@ jobs:
         env:
           LIBSECCOMP_VERSION: ${{ matrix.version }}
           SPM_LIBSECCOMP_OPTIMIZE: "2"
+          PKG_CONFIG_PATH: ${{ env.LIBSECCOMP_PREFIX }}/lib/pkgconfig
+          LD_LIBRARY_PATH: ${{ env.LIBSECCOMP_PREFIX }}/lib
         run: make test-libseccomp TESTFLAGS='-run Libseccomp'
 
   # The library handles Linux profile paths on every host and binaries are
