@@ -19,6 +19,7 @@ package seccomp_test
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1582,5 +1583,60 @@ func TestValidateBoundsErrorSize(t *testing.T) {
 		if size := len(err.Error()); size > generousSize {
 			t.Errorf("%s error is %d bytes, want at most %d", validate.name, size, generousSize)
 		}
+	}
+}
+
+// TestValidateArtifactPassesWhatIntersectSettles pins the documented gap:
+// clauses with one result but several conditions each pass ValidateArtifact,
+// and Intersect still reads them as one unconditional rule and denies the
+// syscall. Diff of the profile against Intersect of it alone shows that.
+func TestValidateArtifactPassesWhatIntersectSettles(t *testing.T) {
+	t.Parallel()
+
+	profile := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls: []specs.LinuxSyscall{
+			{
+				Names:  []string{"read"},
+				Action: specs.ActAllow,
+				Args: []specs.LinuxSeccompArg{
+					{Index: 0, Value: 1, Op: specs.OpEqualTo},
+					{Index: 1, Value: 2, Op: specs.OpEqualTo},
+				},
+			},
+			{
+				Names:  []string{"read"},
+				Action: specs.ActAllow,
+				Args: []specs.LinuxSeccompArg{
+					{Index: 0, Value: 3, Op: specs.OpEqualTo},
+					{Index: 1, Value: 4, Op: specs.OpEqualTo},
+				},
+			},
+		},
+	}
+
+	err := seccomp.ValidateArtifact(profile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	settled, err := seccomp.Intersect(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	diff, err := seccomp.Diff(profile, settled)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if diff.Equal {
+		t.Fatal("expected the intersection to settle the read rules")
+	}
+
+	if slices.ContainsFunc(settled.Syscalls, func(entry specs.LinuxSyscall) bool {
+		return slices.Contains(entry.Names, "read")
+	}) {
+		t.Errorf("expected read to fall to the default, got %s", seccomp.FormatProfile(settled))
 	}
 }
