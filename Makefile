@@ -132,15 +132,21 @@ verify-dependencies: ## Verify external dependencies
 		validate --local-only --base-path . --config dependencies.yaml
 
 # Only the remote command can reach upstream; the plain one refuses. It
-# reports an outdated pin on stdout and still exits 0, so reading what it
-# printed is what turns the report into an answer. Not part of verify: it
-# needs the network and a token, and a release someone else cut is not a
-# reason to fail a pull request.
+# reports an outdated pin on stdout and still exits 0. Neither target is
+# part of verify: they need the network and a token, and a release someone
+# else cut is not a reason to fail a pull request.
+ZEITGEIST_REMOTE = $(GO) run sigs.k8s.io/zeitgeist/remote/zeitgeist@$(ZEITGEIST_VERSION) \
+	validate --local-only=false --base-path . --config dependencies.yaml
+
+.PHONY: report-upstream
+report-upstream: ## Print the pinned versions that are behind their upstream releases (needs GITHUB_TOKEN)
+	$(ZEITGEIST_REMOTE)
+
+# Reading what the report printed is what turns it into an answer.
 .PHONY: verify-upstream
-verify-upstream: ## Check the pinned versions against their upstream releases (needs GITHUB_TOKEN)
+verify-upstream: ## Fail if a pinned version is behind its upstream release (needs GITHUB_TOKEN)
 	@set -e; \
-	out=$$($(GO) run sigs.k8s.io/zeitgeist/remote/zeitgeist@$(ZEITGEIST_VERSION) \
-		validate --local-only=false --base-path . --config dependencies.yaml); \
+	out=$$($(ZEITGEIST_REMOTE)); \
 	echo "$${out}"; \
 	if echo "$${out}" | grep -q 'Update available'; then exit 1; fi
 

@@ -1,11 +1,12 @@
+# Dependabot updates go.mod and the pinned action SHAs. The tool versions in
+# dependencies.yaml live in a Makefile variable or a workflow env, where it
+# cannot see them, so this workflow asks each upstream once a week whether
+# the pin is still the current release. An outdated pin is news rather than
+# an error of this repository: the report goes to one tracking issue, with a
+# comment whenever it changes, the issue is closed once the pins are
+# current, and only a check that cannot run fails.
 name: dependency-updates
 
-# Dependabot watches pinned action SHAs and go.mod. The tool versions in the
-# Makefile and in the workflow envs, the Go the release is built with, and
-# the libseccomp releases the seccomp model is checked against, are plain
-# strings it cannot see. zeitgeist asks
-# every upstream about them instead, on a schedule rather than per pull
-# request: a release someone else cut is news, not a reason to fail a change.
 on:
   schedule:
     - cron: "17 6 * * 1"
@@ -14,10 +15,25 @@ on:
 permissions:
   contents: read
 
+# Runs take turns, so that a manual run does not race the scheduled one.
+concurrency:
+  group: dependency-updates
+  cancel-in-progress: false
+
+env:
+  ISSUE_TITLE: "Tool pins behind their upstream releases"
+  ISSUE_LABEL: dependency-updates
+
 jobs:
+  # The check runs code it downloads (zeitgeist), so it gets a token that
+  # can only read; the issue is handled by a job of its own.
   upstream:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      report: ${{ steps.check.outputs.report }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -26,6 +42,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Check the pinned versions against their upstreams
+        id: check
         env:
           # zeitgeist reads GITHUB_TOKEN, and the unauthenticated API budget
           # does not stretch to a release listing per dependency.
@@ -34,4 +51,62 @@ jobs:
           # go run fetch the toolchain its module asks for, as the
           # dependencies job does in ci.yml.
           GOTOOLCHAIN: auto
-        run: make verify-upstream
+        # report-upstream prints the outdated pins and fails only when the
+        # check itself does; tee keeps the output visible while it runs.
+        run: |
+          set -euo pipefail
+          make report-upstream 2>&1 | tee report.txt
+          {
+            echo 'report<<EOF'
+            grep '^Update available' report.txt || true
+            echo 'EOF'
+          } >> "${GITHUB_OUTPUT}"
+
+  issue:
+    needs: upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      REPORT: ${{ needs.upstream.outputs.report }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      # The newest issue with the label is the tracking issue, open or
+      # closed, found through the issues API rather than the search index,
+      # which lags behind right after it was created. A closed one is
+      # reopened only for a changed report, so that closing it by hand holds
+      # a known report back without hiding a new one.
+      - name: Update the tracking issue
+        run: |
+          set -euo pipefail
+          gh label create "${ISSUE_LABEL}" --force --color ededed \
+            --description "The weekly check of the pinned tool versions reports here"
+          issue=$(gh issue list --state all --label "${ISSUE_LABEL}" --limit 1 --json number,state,body)
+          number=$(echo "${issue}" | jq -r '.[0].number // empty')
+          state=$(echo "${issue}" | jq -r '.[0].state // empty')
+          previous=$(echo "${issue}" | jq -r '.[0].body // empty' | tr -d '\r' | sed -n '/^```$/,/^```$/p' | grep '^Update available' || true)
+          if [ -z "${REPORT}" ]; then
+            if [ -n "${number}" ] && [ "${state}" = "OPEN" ]; then
+              gh issue close "${number}" --comment "The pinned tool versions are current again."
+            fi
+            exit 0
+          fi
+          body=$(printf 'The weekly check found newer releases of pinned tools:\n\n```\n%s\n```\n\nUpdate the versions in `dependencies.yaml` and in the files its `refPaths` name (`make verify-dependencies` checks that they agree). libseccomp has no refPaths: add the release and the sha256 of its tarball to the `test-libseccomp` matrix in `ci.yml` as well. This issue is updated by every run and closed once the pins are current.\n\nLast run: %s\n' "${REPORT}" "${RUN_URL}")
+          if [ -z "${number}" ]; then
+            gh issue create --title "${ISSUE_TITLE}" --label "${ISSUE_LABEL}" --body "${body}"
+            exit 0
+          fi
+          if [ "${previous}" = "${REPORT}" ]; then
+            if [ "${state}" = "OPEN" ]; then
+              gh issue edit "${number}" --body "${body}"
+            fi
+            exit 0
+          fi
+          if [ "${state}" != "OPEN" ]; then
+            gh issue reopen "${number}"
+          fi
+          gh issue edit "${number}" --body "${body}"
+          gh issue comment "${number}" --body "$(printf 'The report changed:\n\n```\n%s\n```\n' "${REPORT}")"
