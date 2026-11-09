@@ -32,7 +32,7 @@ dependencies:
         match: "^\\s+version: v"
 
   - name: syft
-    version: 1.56.0
+    version: 1.57.0
     upstream:
       flavour: github
       url: anchore/syft
@@ -43,7 +43,7 @@ dependencies:
         match: "syft-version: v"
 
   - name: goreleaser
-    version: 2.19.0
+    version: 2.20.0
     upstream:
       flavour: github
       url: goreleaser/goreleaser
