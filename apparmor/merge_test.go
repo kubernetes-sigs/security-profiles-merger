@@ -2074,3 +2074,92 @@ func TestMergeErrorsNameTheCallersEntry(t *testing.T) {
 		})
 	}
 }
+
+// TestMergeWithoutProfiles pins the error for an empty argument list: the
+// sentinel, wrapped as the seccomp and landlock merges wrap it.
+func TestMergeWithoutProfiles(t *testing.T) {
+	t.Parallel()
+
+	for name, mergeFn := range map[string]mergeFunc{
+		"Intersect": apparmor.Intersect,
+		"Union":     apparmor.Union,
+	} {
+		result, err := mergeFn()
+		if result != nil || !errors.Is(err, apparmor.ErrNoProfiles) ||
+			err.Error() != "merge: "+apparmor.ErrNoProfiles.Error() {
+			t.Errorf("%s() = %v, %v, want ErrNoProfiles", name, result, err)
+		}
+	}
+}
+
+// TestMergeOfOneProfileSharesNothing covers the merge of a single profile,
+// which returns the normalized copy the merge made rather than cloning it a
+// second time: the result must still share no slice with the input.
+func TestMergeOfOneProfileSharesNothing(t *testing.T) {
+	t.Parallel()
+
+	for name, mergeFn := range map[string]mergeFunc{
+		"Intersect": apparmor.Intersect,
+		"Union":     apparmor.Union,
+	} {
+		input := readOnly("/etc/b", "/etc/a")
+		input.Capabilities = &apparmor.CapabilityRules{AllowedCapabilities: []string{"CHOWN"}}
+
+		result, err := mergeFn(input)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+
+		result.Filesystem.ReadOnlyPaths[0] = "/changed"
+		result.Capabilities.AllowedCapabilities[0] = "KILL"
+
+		if input.Filesystem.ReadOnlyPaths[0] != "/etc/b" ||
+			input.Capabilities.AllowedCapabilities[0] != "CHOWN" {
+			t.Errorf("%s: changing the result changed the input to %+v", name, input)
+		}
+	}
+}
+
+// TestProfileClone covers the exported deep copy.
+func TestProfileClone(t *testing.T) {
+	t.Parallel()
+
+	var none *apparmor.Profile
+	if none.Clone() != nil {
+		t.Error("Clone of a nil profile is not nil")
+	}
+
+	allow := true
+	original := &apparmor.Profile{
+		Executable: &apparmor.ExecutableRules{
+			AllowedExecutables: []string{"/bin/sh"}, AllowedLibraries: []string{"/lib/x"},
+		},
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths: []string{"/etc"}, WriteOnlyPaths: []string{"/w"},
+			ReadWritePaths: []string{"/rw"},
+		},
+		Network: &apparmor.NetworkRules{
+			AllowRaw:  &allow,
+			Protocols: &apparmor.AllowedProtocols{AllowTCP: &allow, AllowUDP: nil},
+		},
+		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{"CHOWN"}},
+	}
+
+	clone := original.Clone()
+	if !reflect.DeepEqual(clone, original) {
+		t.Fatalf("Clone = %+v, want %+v", clone, original)
+	}
+
+	clone.Executable.AllowedExecutables[0] = "/changed"
+	clone.Filesystem.ReadWritePaths[0] = "/changed"
+	*clone.Network.AllowRaw = false
+	*clone.Network.Protocols.AllowTCP = false
+	clone.Capabilities.AllowedCapabilities[0] = "KILL"
+
+	if original.Executable.AllowedExecutables[0] != "/bin/sh" ||
+		original.Filesystem.ReadWritePaths[0] != "/rw" || !*original.Network.AllowRaw ||
+		!*original.Network.Protocols.AllowTCP ||
+		original.Capabilities.AllowedCapabilities[0] != "CHOWN" {
+		t.Errorf("changing the clone changed the original to %+v", original)
+	}
+}

@@ -113,6 +113,14 @@ func TestSentinelsAreShared(t *testing.T) {
 			},
 			shared: spm.ErrUnexpectedData,
 		},
+		{
+			name: "ErrNotAnObject",
+			errs: []error{
+				seccomp.ErrNotAnObject, apparmor.ErrNotAnObject,
+				landlock.ErrNotAnObject,
+			},
+			shared: spm.ErrNotAnObject,
+		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
@@ -171,9 +179,9 @@ func TestSliceDiffIsTheSameType(t *testing.T) {
 	shared := spm.SliceDiff[string]{Added: []string{"a"}, Removed: []string{"b"}}
 
 	getters := map[string]func(spm.SliceDiff[string]) []string{
-		"apparmor": func(diff apparmor.StringSliceDiff) []string { return diff.Added },
+		"apparmor": func(diff apparmor.SliceDiff[string]) []string { return diff.Added },
 		"seccomp":  func(diff seccomp.SliceDiff[string]) []string { return diff.Added },
-		"landlock": func(diff landlock.RightsDiff[string]) []string { return diff.Added },
+		"landlock": func(diff landlock.SliceDiff[string]) []string { return diff.Added },
 	}
 
 	for name, get := range getters {
@@ -332,5 +340,42 @@ func TestInputErrorNamesTheFailingProfile(t *testing.T) {
 	_, err = landlock.Intersect(new(landlock.Profile), new(landlock.Profile), emptyRule)
 	if !errors.As(err, &inputErr) || inputErr.Index != 2 {
 		t.Errorf("landlock.Intersect = %v, want an InputError for profile 2", err)
+	}
+}
+
+// TestUnmarshalStrictRefusesWhatIsNotAnObject checks the sentinel through
+// each package's UnmarshalStrict, which is where a caller meets it.
+func TestUnmarshalStrictRefusesWhatIsNotAnObject(t *testing.T) {
+	t.Parallel()
+
+	for _, doc := range []string{"null", " null ", "[]", `"profile"`, "1", "true", "[] x", "1 2", `"a" "b"`} {
+		var (
+			seccompProfile  specs.LinuxSeccomp
+			apparmorProfile apparmor.Profile
+			landlockProfile landlock.Profile
+		)
+
+		for name, err := range map[string]error{
+			"seccomp":  seccomp.UnmarshalStrict([]byte(doc), &seccompProfile),
+			"apparmor": apparmor.UnmarshalStrict([]byte(doc), &apparmorProfile),
+			"landlock": landlock.UnmarshalStrict([]byte(doc), &landlockProfile),
+		} {
+			if !errors.Is(err, spm.ErrNotAnObject) {
+				t.Errorf("%s.UnmarshalStrict(%q) = %v, want ErrNotAnObject", name, doc, err)
+			}
+		}
+	}
+}
+
+// TestUnmarshalStrictReportsDataBehindNull checks that null, which decodes
+// without error, is refused for what follows it, as an object would be.
+func TestUnmarshalStrictReportsDataBehindNull(t *testing.T) {
+	t.Parallel()
+
+	var profile landlock.Profile
+
+	err := landlock.UnmarshalStrict([]byte("null x"), &profile)
+	if !errors.Is(err, spm.ErrUnexpectedData) {
+		t.Errorf("UnmarshalStrict(%q) = %v, want ErrUnexpectedData", "null x", err)
 	}
 }

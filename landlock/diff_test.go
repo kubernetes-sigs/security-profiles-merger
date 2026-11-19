@@ -50,6 +50,39 @@ func TestDiffNil(t *testing.T) {
 	if !errors.Is(err, landlock.ErrNilProfile) {
 		t.Fatalf("Diff(nil, nil) = %v, want ErrNilProfile", err)
 	}
+
+	// The error names the nil argument, as a merge names a bad input.
+	for want, args := range map[int][2]*landlock.Profile{
+		0: {nil, profile},
+		1: {profile, nil},
+	} {
+		_, err := landlock.Diff(args[0], args[1])
+
+		var inputErr *landlock.InputError
+		if !errors.As(err, &inputErr) || inputErr.Index != want {
+			t.Errorf("Diff with argument %d nil = %v, want an InputError with Index %d",
+				want, err, want)
+		}
+	}
+}
+
+// TestProfileDiffString covers the Stringer, which formats as FormatDiff.
+func TestProfileDiffString(t *testing.T) {
+	t.Parallel()
+
+	read := fsRights{landlock.FSAccessReadFile}
+
+	diff, err := landlock.Diff(
+		fsProfile(read), fsProfile(read, landlock.PathRule{Path: "/srv", AccessFS: read}),
+	)
+	if err != nil {
+		t.Fatalf("Diff = %v", err)
+	}
+
+	want := landlock.FormatDiff(diff)
+	if got := diff.String(); got != want {
+		t.Errorf("String = %q, want %q", got, want)
+	}
 }
 
 func TestDiffEqual(t *testing.T) {

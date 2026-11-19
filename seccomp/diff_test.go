@@ -18,6 +18,7 @@ package seccomp_test
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -45,6 +46,56 @@ func TestDiffNil(t *testing.T) {
 	_, err = seccomp.Diff(nil, nil)
 	if !errors.Is(err, seccomp.ErrNilProfile) {
 		t.Fatalf("expected ErrNilProfile for two nil profiles, got: %v", err)
+	}
+}
+
+// TestDiffNamesTheNilSide checks that Diff reports a nil profile the way the
+// merges do, as an InputError naming its position, so that a caller tells a
+// missing baseline from a missing artifact without reading the message.
+func TestDiffNamesTheNilSide(t *testing.T) {
+	t.Parallel()
+
+	profile := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
+
+	for _, testCase := range []struct {
+		left, right *specs.LinuxSeccomp
+		want        int
+	}{
+		{left: nil, right: profile, want: 0},
+		{left: profile, right: nil, want: 1},
+		{left: nil, right: nil, want: 0},
+	} {
+		diff, err := seccomp.DiffForArch("", testCase.left, testCase.right)
+
+		var inputErr *seccomp.InputError
+		if !errors.As(err, &inputErr) || inputErr.Index != testCase.want {
+			t.Errorf("DiffForArch = %v, %v, want an InputError for profile %d",
+				diff, err, testCase.want)
+		}
+	}
+}
+
+// TestProfileDiffString checks that fmt renders a diff as FormatDiff does.
+func TestProfileDiffString(t *testing.T) {
+	t.Parallel()
+
+	left := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
+	right := &specs.LinuxSeccomp{DefaultAction: specs.ActAllow}
+
+	diff, err := seccomp.Diff(left, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Printed as fmt sees a value of unknown type, both as a pointer and as
+	// a value.
+	byPointer, byValue := any(diff), any(*diff)
+
+	want := seccomp.FormatDiff(diff)
+	for _, got := range []string{diff.String(), fmt.Sprint(byPointer), fmt.Sprint(byValue)} {
+		if got != want {
+			t.Errorf("rendered %q, want %q", got, want)
+		}
 	}
 }
 

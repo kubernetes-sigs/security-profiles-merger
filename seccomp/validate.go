@@ -287,20 +287,13 @@ func Validate(profile *specs.LinuxSeccomp) error {
 func validateNotifySupport(profile *specs.LinuxSeccomp) error {
 	var errs merge.Collector
 
-	if profile.DefaultAction == specs.ActNotify {
+	notifies := false
+
+	scanNotify(profile, func() {
 		errs.Report(func() error {
 			return fmt.Errorf("default action: %w", ErrNotifyUnsupported)
 		})
-	}
-
-	notifies := false
-
-	for idx := range profile.Syscalls {
-		entry := &profile.Syscalls[idx]
-		if entry.Action != specs.ActNotify {
-			continue
-		}
-
+	}, func(idx int, entry *specs.LinuxSyscall) {
 		notifies = true
 
 		if slices.Contains(entry.Names, notifyWriteSyscall) {
@@ -311,7 +304,7 @@ func validateNotifySupport(profile *specs.LinuxSeccomp) error {
 				)
 			})
 		}
-	}
+	})
 
 	// Reported once for the profile: the listener is a profile-wide setting,
 	// so naming every entry that notifies would repeat one problem.
@@ -746,9 +739,8 @@ func syscallRuleCheck(native specs.Arch) profileCheck {
 func validateSyscallRules(profile *specs.LinuxSeccomp, native specs.Arch) error {
 	def := defaultClause(profile)
 
-	counts, total := clauseCounts(profile.Syscalls, def)
 	checker := &ruleChecker{
-		counts:   counts,
+		counts:   clauseCounts(profile.Syscalls, def),
 		truncate: loadsWideValue(profile),
 		states:   make(map[string]*syscallRuleState),
 		reported: make(map[string]struct{}),
@@ -760,7 +752,7 @@ func validateSyscallRules(profile *specs.LinuxSeccomp, native specs.Arch) error 
 	// Past the profile-wide bound, expanding the entries is the very work
 	// that bound exists to prevent. validateWith runs this only after
 	// validateProfileSize has passed, which checks that bound first.
-	if total <= MaxArtifactClauses {
+	if sumCounts(checker.counts) <= MaxArtifactClauses {
 		forEachClause(profile.Syscalls, def, checker.skip, checker.record)
 		checker.checkShapes()
 
@@ -1012,21 +1004,36 @@ func hasControlByte(name string) bool {
 func validateNoNotify(profile *specs.LinuxSeccomp) error {
 	var errs merge.Collector
 
-	if profile.DefaultAction == specs.ActNotify {
+	scanNotify(profile, func() {
 		errs.Report(func() error {
 			return fmt.Errorf("default action: %w", ErrNotifyNotAllowed)
 		})
+	}, func(idx int, _ *specs.LinuxSyscall) {
+		errs.Report(func() error {
+			return fmt.Errorf("syscall entry %d action: %w", idx, ErrNotifyNotAllowed)
+		})
+	})
+
+	return errs.Err()
+}
+
+// scanNotify finds where a profile applies SCMP_ACT_NOTIFY, for the checks
+// that refuse it where runc does and in an artifact: it calls onDefault when
+// the default action is SCMP_ACT_NOTIFY, and onEntry with every entry that
+// applies it, in order.
+func scanNotify(
+	profile *specs.LinuxSeccomp,
+	onDefault func(), onEntry func(idx int, entry *specs.LinuxSyscall),
+) {
+	if profile.DefaultAction == specs.ActNotify {
+		onDefault()
 	}
 
 	for idx := range profile.Syscalls {
 		if profile.Syscalls[idx].Action == specs.ActNotify {
-			errs.Report(func() error {
-				return fmt.Errorf("syscall entry %d action: %w", idx, ErrNotifyNotAllowed)
-			})
+			onEntry(idx, &profile.Syscalls[idx])
 		}
 	}
-
-	return errs.Err()
 }
 
 func validateEntryCount(profile *specs.LinuxSeccomp) error {

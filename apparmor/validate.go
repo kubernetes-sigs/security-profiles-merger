@@ -305,7 +305,7 @@ func Validate(profile *Profile) error {
 	}
 
 	check := newValidator(newMatcherCache())
-	check.structure(profile, true)
+	check.structure(profile, true, false)
 
 	return check.report.Err()
 }
@@ -314,20 +314,20 @@ func Validate(profile *Profile) error {
 // those of Validate except the duplicates within one list, which the merge
 // folds. It reads the profile as the caller wrote it, so that a failure
 // names the caller's index and spelling rather than those of the
-// deduplicated copy the merge goes on to work with.
-func validateMergeInput(profile *Profile, matchers *matcherCache) error {
+// deduplicated copy the merge goes on to work with. It returns the
+// normalized copy of the profile its checks compared, which the merge goes
+// on with, so that every path is normalized once.
+func validateMergeInput(profile *Profile, matchers *matcherCache) (*Profile, error) {
 	if profile == nil {
-		return ErrNilProfile
+		return nil, ErrNilProfile
 	}
 
 	check := newValidator(matchers)
-	if check.structure(profile, false) {
-		return check.report.Err()
-	}
+	normalized := check.structure(profile, false, true)
 
 	err := check.report.Err()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Analyze every path of the input now, before the next input is read,
@@ -336,13 +336,13 @@ func validateMergeInput(profile *Profile, matchers *matcherCache) error {
 	// the artifacts after it hold. structure has analyzed the filesystem
 	// rules already, and the merge reads the paths normalized, so that is
 	// how they are analyzed here.
-	visitPathLists(profile, func(_ string, paths []string) {
-		for _, path := range normalizePaths(paths) {
+	for _, paths := range pathLists(normalized) {
+		for _, path := range *paths {
 			matchers.matcher(path)
 		}
-	})
+	}
 
-	return nil
+	return normalized, nil
 }
 
 // validator holds the state of one validation call: the failures found so
@@ -360,39 +360,57 @@ func newValidator(matchers *matcherCache) *validator {
 	return &validator{report: merge.Collector{}, matchers: matchers, strict: false}
 }
 
-// structure runs the checks of Validate on a non-nil profile and reports
-// whether it stopped at an oversized path. ValidateStrict and
-// ValidateArtifact read that flag rather than measuring every path again:
-// their pattern checks have nothing to work on once a path is oversized.
+// structure runs the checks of Validate on a non-nil profile. With
+// copyProfile it returns the normalized copy of the profile (see
+// normalizeProfile) its checks compared, which ValidateStrict,
+// ValidateArtifact and the merge read rather than normalizing every path
+// again, or nil when it stopped at an oversized path, which it normalizes
+// no further. Without it, as for Validate, it normalizes only the
+// filesystem rules it compares and returns nil. The pattern checks of ValidateStrict
+// and ValidateArtifact have nothing to work on once a path is oversized.
 // listDuplicates selects the checks for a path or capability listed twice
 // within one list, which a merge leaves out.
-func (check *validator) structure(profile *Profile, listDuplicates bool) bool {
+func (check *validator) structure(
+	profile *Profile, listDuplicates, copyProfile bool,
+) *Profile {
 	// Oversized paths are reported on their own: every other check scans
 	// the paths.
 	var lengths merge.Collector
 
-	visitPathLists(profile, func(context string, paths []string) {
-		rejectPaths(&lengths, context, paths, func(path string) bool {
+	for context, paths := range pathLists(profile) {
+		rejectPaths(&lengths, context, *paths, func(path string) bool {
 			return len(path) > maxGlobPatternLen
 		}, ErrPathTooLong, false)
-	})
+	}
 
 	err := lengths.Err()
 	if err != nil {
 		check.report.Add(err)
 
-		return true
+		return nil
 	}
 
-	visitPathLists(profile, func(context string, paths []string) {
-		check.reject(context, paths, func(path string) bool {
+	// The duplicate checks compare the filesystem rules normalized. Only a
+	// caller that goes on to read the other lists normalized has the whole
+	// profile copied; Validate normalizes no more than it compares.
+	var normalized *Profile
+
+	normalizedFs := normalizeFilesystem(profile.Filesystem)
+
+	if copyProfile {
+		normalized = normalizeProfile(profile)
+		normalizedFs = normalized.Filesystem
+	}
+
+	for context, paths := range pathLists(profile) {
+		check.reject(context, *paths, func(path string) bool {
 			return path == ""
 		}, ErrEmptyPath, false)
-		check.reject(context, paths, referencesVariable, ErrUnsupportedVariable, true)
-	})
+		check.reject(context, *paths, referencesVariable, ErrUnsupportedVariable, true)
+	}
 
 	if profile.Filesystem != nil {
-		check.filesystemDuplicates(profile.Filesystem, listDuplicates)
+		check.filesystemDuplicates(profile.Filesystem, normalizedFs, listDuplicates)
 	}
 
 	if profile.Capabilities != nil {
@@ -405,7 +423,33 @@ func (check *validator) structure(profile *Profile, listDuplicates bool) bool {
 		}
 	}
 
-	return false
+	return normalized
+}
+
+// normalizedExecutables returns the executable and library paths of the
+// profile normalized, read from the normalized copy when there is one and
+// normalized from the profile's own lists otherwise.
+func normalizedExecutables(profile, normalized *Profile) ([]string, []string) {
+	if normalized != nil && normalized.Executable != nil {
+		return normalized.Executable.AllowedExecutables, normalized.Executable.AllowedLibraries
+	}
+
+	return normalizePaths(profile.Executable.AllowedExecutables),
+		normalizePaths(profile.Executable.AllowedLibraries)
+}
+
+// normalizeFilesystem returns the filesystem rules with their paths
+// normalized, or nil for nil rules.
+func normalizeFilesystem(rules *FilesystemRules) *FilesystemRules {
+	if rules == nil {
+		return nil
+	}
+
+	return &FilesystemRules{
+		ReadOnlyPaths:  normalizePaths(rules.ReadOnlyPaths),
+		WriteOnlyPaths: normalizePaths(rules.WriteOnlyPaths),
+		ReadWritePaths: normalizePaths(rules.ReadWritePaths),
+	}
 }
 
 // ValidateStrict validates a profile a person wrote. It rejects everything
@@ -428,7 +472,7 @@ func ValidateStrict(profile *Profile) error {
 	check := newValidator(newMatcherCache())
 	check.strict = true
 
-	err := check.artifact(profile)
+	normalized, err := check.artifact(profile)
 	if err != nil {
 		return err
 	}
@@ -438,15 +482,17 @@ func ValidateStrict(profile *Profile) error {
 	}
 
 	if profile.Executable != nil {
+		// Past an oversized path structure normalized nothing, and the
+		// duplicates are reported all the same, from the two lists alone.
+		executables, libraries := normalizedExecutables(profile, normalized)
+
 		check.listDuplicates(
 			"AllowedExecutables", profile.Executable.AllowedExecutables,
-			normalizePaths(profile.Executable.AllowedExecutables),
-			ErrDuplicateExecutablePath,
+			executables, ErrDuplicateExecutablePath,
 		)
 		check.listDuplicates(
 			"AllowedLibraries", profile.Executable.AllowedLibraries,
-			normalizePaths(profile.Executable.AllowedLibraries),
-			ErrDuplicateExecutablePath,
+			libraries, ErrDuplicateExecutablePath,
 		)
 	}
 
@@ -481,7 +527,7 @@ func ValidateStrict(profile *Profile) error {
 func ValidateArtifact(profile *Profile) error {
 	check := newValidator(newMatcherCache())
 
-	err := check.artifact(profile)
+	_, err := check.artifact(profile)
 	if err != nil {
 		return err
 	}
@@ -494,29 +540,30 @@ func ValidateArtifact(profile *Profile) error {
 // profile it accepts is one ValidateArtifact accepts by construction rather
 // than by two functions being kept alike.
 //
-// The result is a failure that ends validation on its own: a nil profile,
-// or one past a size limit, which is refused rather than scanned.
-func (check *validator) artifact(profile *Profile) error {
+// It returns the normalized copy structure returns, and a failure that ends
+// validation on its own: a nil profile, or one past a size limit, which is
+// refused rather than scanned.
+func (check *validator) artifact(profile *Profile) (*Profile, error) {
 	if profile == nil {
-		return ErrNilProfile
+		return nil, ErrNilProfile
 	}
 
 	err := validatePathCount(profile)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	oversized := check.structure(profile, true)
+	normalized := check.structure(profile, true, true)
 
 	if profile.Capabilities != nil {
 		check.capabilitySpelling(profile.Capabilities.AllowedCapabilities)
 	}
 
-	if !oversized {
-		check.loadablePaths(profile)
+	if normalized != nil {
+		check.loadablePaths(profile, normalized)
 	}
 
-	return nil
+	return normalized, nil
 }
 
 // validatePathCount reports a profile holding more paths than
@@ -531,15 +578,15 @@ func validatePathCount(profile *Profile) error {
 	count := 0
 	patternBytes := 0
 
-	visitPathLists(profile, func(_ string, paths []string) {
-		count += len(paths)
+	for _, paths := range pathLists(profile) {
+		count += len(*paths)
 
-		for _, path := range paths {
+		for _, path := range *paths {
 			if strings.ContainsAny(path, patternSyntax) {
 				patternBytes += len(path)
 			}
 		}
-	})
+	}
 
 	if count > MaxArtifactPaths {
 		return fmt.Errorf("%d paths, at most %d: %w",
@@ -563,16 +610,41 @@ func validatePathCount(profile *Profile) error {
 
 // loadablePaths reports the paths apparmor_parser would refuse and the glob
 // patterns the matcher drops, which ValidateStrict and ValidateArtifact both
-// check. Callers run it only when no path is oversized, which structure has
-// already reported.
-func (check *validator) loadablePaths(profile *Profile) {
-	visitPathLists(profile, func(context string, paths []string) {
+// check, given the normalized copy structure returned. Callers run it only
+// when no path is oversized, which structure has already reported.
+func (check *validator) loadablePaths(profile, normalizedProfile *Profile) {
+	// The copy has the sections of the profile, so pathLists yields the
+	// same lists of both in the same order, and they are paired by walking
+	// both. A list the copy lacks is normalized here instead.
+	type namedList struct {
+		context string
+		paths   []string
+	}
+
+	var normalizedLists []namedList
+
+	for context, list := range pathLists(normalizedProfile) {
+		normalizedLists = append(normalizedLists, namedList{context: context, paths: *list})
+	}
+
+	idx := 0
+
+	for context, list := range pathLists(profile) {
 		// Normalizing never changes whether a path is absolute, which
 		// characters it holds, or which escapes it spells beyond dropping
 		// escaped slashes from a run of slashes, so those checks
 		// read the raw paths and report them as written. The pattern checks
 		// apply to the normalized form, which is what the merge matches.
-		normalized := normalizePaths(paths)
+		paths := *list
+
+		var normalized []string
+
+		if idx < len(normalizedLists) && normalizedLists[idx].context == context {
+			normalized = normalizedLists[idx].paths
+			idx++
+		} else {
+			normalized = normalizePaths(paths)
+		}
 
 		check.reject(context, paths, func(path string) bool {
 			return path != "" && path[0] != '/'
@@ -583,21 +655,15 @@ func (check *validator) loadablePaths(profile *Profile) {
 		check.reject(context, normalized, func(path string) bool {
 			return dotComponentIn(path, check.matchers.matcher(path))
 		}, ErrDotComponent, true)
-	})
+	}
 }
 
-// hasDotComponent reports whether a path has a "." or ".." component, with
-// escape sequences resolved. For a glob, the components of the literal text
-// before the first glob token count, and so do the later components that
-// are exactly "." or ".." and lie outside every alternation and class: a
-// dot component inside an alternation, as in "/{a,b/./c}", only rules out
-// that alternative.
-func hasDotComponent(path string) bool {
-	return dotComponentIn(path, matcherFor(path))
-}
-
-// dotComponentIn reports what hasDotComponent reports, given the analysis
-// of the path.
+// dotComponentIn reports whether a path, given its analysis, has a "." or
+// ".." component, with escape sequences resolved. For a glob, the
+// components of the literal text before the first glob token count, and so
+// do the later components that are exactly "." or ".." and lie outside every
+// alternation and class: a dot component inside an alternation, as in
+// "/{a,b/./c}", only rules out that alternative.
 func dotComponentIn(path string, matcher *globMatcher) bool {
 	switch matcher.kind {
 	case kindInvalid:
@@ -967,21 +1033,6 @@ func capabilityWord(name string) bool {
 	return true
 }
 
-// visitPathLists calls visit for every list of paths in the profile, named
-// after its field.
-func visitPathLists(profile *Profile, visit func(context string, paths []string)) {
-	if profile.Executable != nil {
-		visit("AllowedExecutables", profile.Executable.AllowedExecutables)
-		visit("AllowedLibraries", profile.Executable.AllowedLibraries)
-	}
-
-	if profile.Filesystem != nil {
-		visit("ReadOnlyPaths", profile.Filesystem.ReadOnlyPaths)
-		visit("WriteOnlyPaths", profile.Filesystem.WriteOnlyPaths)
-		visit("ReadWritePaths", profile.Filesystem.ReadWritePaths)
-	}
-}
-
 // globStatus reports patterns apparmor_parser rejects or loads with another
 // meaning than they spell, and glob patterns that exceed the matcher's
 // limits, which never match. It runs on normalized patterns, the form the
@@ -1006,16 +1057,18 @@ func (check *validator) globStatus(context string, paths []string) {
 // and, with listDuplicates, the paths one category lists twice. Paths are
 // compared by the rule they spell, not by their text, so that two spellings
 // of one path are the pair of rules they are to apparmor_parser (see
-// keyForPath). They are compared normalized, as the merge compares them,
+// pathKey). They are compared normalized, as the merge compares them,
 // and reported as the caller wrote them, at the caller's index.
-func (check *validator) filesystemDuplicates(rules *FilesystemRules, listDuplicates bool) {
+func (check *validator) filesystemDuplicates(
+	rules, normalized *FilesystemRules, listDuplicates bool,
+) {
 	categories := []struct {
 		name            string
 		raw, normalized []string
 	}{
-		{"ReadOnlyPaths", rules.ReadOnlyPaths, normalizePaths(rules.ReadOnlyPaths)},
-		{"WriteOnlyPaths", rules.WriteOnlyPaths, normalizePaths(rules.WriteOnlyPaths)},
-		{"ReadWritePaths", rules.ReadWritePaths, normalizePaths(rules.ReadWritePaths)},
+		{"ReadOnlyPaths", rules.ReadOnlyPaths, normalized.ReadOnlyPaths},
+		{"WriteOnlyPaths", rules.WriteOnlyPaths, normalized.WriteOnlyPaths},
+		{"ReadWritePaths", rules.ReadWritePaths, normalized.ReadWritePaths},
 	}
 
 	seen := make(map[pathKey]string)
@@ -1101,7 +1154,7 @@ func (check *validator) capabilityNames(caps []string) {
 }
 
 // listDuplicates reports the paths of one list that spell a rule an earlier
-// path of the list already spells (see keyForPath). normalized holds the
+// path of the list already spells (see pathKey). normalized holds the
 // paths of raw normalized, which is what is compared, while raw is what is
 // reported.
 func (check *validator) listDuplicates(context string, raw, normalized []string, sentinel error) {

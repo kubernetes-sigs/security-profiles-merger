@@ -684,7 +684,7 @@ func assertDiffSymmetry(
 
 func assertStringDiffSwapped(
 	t *testing.T, label string,
-	fwd, rev *apparmor.StringSliceDiff,
+	fwd, rev *apparmor.SliceDiff[string],
 ) {
 	t.Helper()
 

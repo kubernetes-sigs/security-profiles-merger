@@ -19,6 +19,7 @@ package strictjson_test
 import (
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -26,6 +27,7 @@ import (
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/internal/strictjson"
 	"sigs.k8s.io/security-profiles-merger/landlock"
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 	"sigs.k8s.io/security-profiles-merger/spm"
@@ -204,6 +206,14 @@ func TestUnmarshalStrictRefusesNull(t *testing.T) {
 		}
 	}
 
+	// null decodes, and is refused with the sentinel.
+	for _, document := range []string{"null", " \n null \t"} {
+		err := decodeSeccomp([]byte(document))
+		if !errors.Is(err, spm.ErrNotAnObject) {
+			t.Errorf("%q = %v, want %v", document, err, spm.ErrNotAnObject)
+		}
+	}
+
 	err := decodeSeccomp([]byte(" {} "))
 	if err != nil {
 		t.Errorf("an empty object = %v, want nil", err)
@@ -235,4 +245,46 @@ func TestUnmarshalStrictBoundsDecoderErrors(t *testing.T) {
 func decodeSeccomp(data []byte) error {
 	//nolint:wrapcheck // the tests match the error itself
 	return seccomp.UnmarshalStrict(data, new(specs.LinuxSeccomp))
+}
+
+// TestFindingsComeInOrderAndOnDemand covers the findings the command and
+// Unmarshal share: one per kind, in the order Unmarshal checks them, and
+// only as far as the caller asks.
+func TestFindingsComeInOrderAndOnDemand(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`{"defaultAction":"A","DEFAULTACTION":"B","bogus":1,` +
+		`"syscalls":[{"Names":["` + "\xff" + `"]}]}`)
+
+	var decoded specs.LinuxSeccomp
+
+	hint, err := strictjson.Decode(raw, &decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var kinds []error
+
+	for finding := range strictjson.Findings(raw, &decoded, hint) {
+		if !errors.Is(finding.Err, finding.Kind) {
+			t.Errorf("finding %v does not wrap its kind %v", finding.Err, finding.Kind)
+		}
+
+		kinds = append(kinds, finding.Kind)
+	}
+
+	want := []error{
+		spm.ErrDuplicateKey, spm.ErrUnknownField, spm.ErrMisspelledField, spm.ErrInvalidUTF8,
+	}
+	if !slices.Equal(kinds, want) {
+		t.Errorf("kinds = %v, want %v", kinds, want)
+	}
+
+	for finding := range strictjson.Findings(raw, &decoded, hint) {
+		if !errors.Is(finding.Kind, spm.ErrDuplicateKey) {
+			t.Errorf("first finding = %v, want the repeated member", finding.Kind)
+		}
+
+		break
+	}
 }

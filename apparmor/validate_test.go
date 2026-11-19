@@ -18,6 +18,7 @@ package apparmor_test
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -1016,4 +1017,41 @@ func oversizeGlob() string {
 	}
 
 	return "/etc/{" + strings.Join(alternatives, ",") + "}"
+}
+
+// TestValidateDoesNotNormalizeExecutables pins what Validate normalizes:
+// only the filesystem rules, which its duplicate checks compare. The
+// executable and library paths are checked as written, so their number
+// does not change how often Validate allocates, even when every one of them
+// would need normalizing.
+//
+//nolint:paralleltest // testing.AllocsPerRun refuses to run in a parallel test
+func TestValidateDoesNotNormalizeExecutables(t *testing.T) {
+	allocations := func(count int) float64 {
+		paths := make([]string, 0, count)
+		for idx := range count {
+			paths = append(paths, fmt.Sprintf("/usr//bin/tool%d", idx))
+		}
+
+		profile := &apparmor.Profile{
+			Executable: &apparmor.ExecutableRules{
+				AllowedExecutables: paths, AllowedLibraries: paths,
+			},
+			Filesystem:   nil,
+			Network:      nil,
+			Capabilities: nil,
+		}
+
+		return testing.AllocsPerRun(10, func() {
+			err := apparmor.Validate(profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	few, many := allocations(10), allocations(1000)
+	if many > few {
+		t.Errorf("Validate allocated %v times for 1000 executables, %v for 10", many, few)
+	}
 }

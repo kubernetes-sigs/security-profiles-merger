@@ -18,6 +18,7 @@ package apparmor
 
 import (
 	"fmt"
+	"iter"
 	"slices"
 	"strings"
 
@@ -115,21 +116,28 @@ type strategy interface {
 func foldProfiles(
 	profiles []*Profile, matchers *matcherCache, mergeOp strategy,
 ) (*Profile, error) {
-	// The caller's profiles are validated as written, before any of them
-	// is normalized, so that a failure names the caller's index and
-	// spelling, and no normalization work is spent on an oversized path.
+	if len(profiles) == 0 {
+		return nil, fmt.Errorf("merge: %w", ErrNoProfiles)
+	}
+
+	// The caller's profiles are validated as written, so that a failure
+	// names the caller's index and spelling, and an oversized path is
+	// refused before anything is normalized. Validation returns the
+	// normalized copy it compared, which the merge goes on with.
+	normalized := make([]*Profile, len(profiles))
+
 	for idx, profile := range profiles {
-		err := validateMergeInput(profile, matchers)
+		norm, err := validateMergeInput(profile, matchers)
 		if err != nil {
 			return nil, &spm.InputError{Index: idx, Err: err}
 		}
+
+		normalized[idx] = norm
 	}
 
-	normalized := make([]*Profile, len(profiles))
-	for idx, profile := range profiles {
-		normalized[idx] = normalizeProfile(profile)
-		deduplicateProfile(normalized[idx])
-		canonicalizeAliases(normalized[idx], matchers)
+	for _, profile := range normalized {
+		deduplicateProfile(profile)
+		canonicalizeAliases(profile, matchers)
 	}
 
 	// Each profile now holds one spelling per rule, but two profiles may
@@ -142,7 +150,9 @@ func foldProfiles(
 		mergeOp.prepare(profile)
 	}
 
-	result, err := merge.Fold(normalized, cloneProfile, func(a, b *Profile) (*Profile, error) {
+	// The normalized profiles are copies this call owns, so a single
+	// profile needs no further clone.
+	result, err := merge.Fold(normalized, ownedProfile, func(a, b *Profile) (*Profile, error) {
 		return mergeTwo(a, b, mergeOp), nil
 	})
 	if err != nil {
@@ -153,6 +163,10 @@ func foldProfiles(
 
 	return result, nil
 }
+
+// ownedProfile is the clone function merge.Fold calls for a single profile:
+// the profiles Fold receives here are copies the call already owns.
+func ownedProfile(profile *Profile) *Profile { return profile }
 
 // canonicalizeAliases folds the paths of one list that spell the same rule
 // into one entry, keeping the simplest spelling. Two such spellings differ
@@ -168,9 +182,9 @@ func foldProfiles(
 // unifyAliasSpellings has given every input the same spelling for a rule and
 // the merge introduces no new one.
 func canonicalizeAliases(profile *Profile, matchers *matcherCache) {
-	mapPathLists(profile, func(paths []string) []string {
-		return foldAliasList(paths, matchers)
-	})
+	for _, paths := range pathLists(profile) {
+		*paths = foldAliasList(*paths, matchers)
+	}
 }
 
 // unifyAliasSpellings gives every profile the same spelling for a rule any
@@ -198,8 +212,8 @@ func unifyAliasSpellings(profiles []*Profile, matchers *matcherCache) {
 	simplest := make(map[pathKey]string)
 
 	for _, profile := range profiles {
-		eachPathList(profile, func(paths []string) {
-			for _, path := range paths {
+		for _, paths := range pathLists(profile) {
+			for _, path := range *paths {
 				key := matchers.key(path)
 
 				kept, ok := simplest[key]
@@ -207,40 +221,38 @@ func unifyAliasSpellings(profiles []*Profile, matchers *matcherCache) {
 					simplest[key] = path
 				}
 			}
-		})
+		}
 	}
 
 	for _, profile := range profiles {
-		eachPathList(profile, func(paths []string) {
-			for idx, path := range paths {
-				paths[idx] = simplest[matchers.key(path)]
+		for _, paths := range pathLists(profile) {
+			for idx, path := range *paths {
+				(*paths)[idx] = simplest[matchers.key(path)]
 			}
-		})
+		}
 	}
 }
 
-// eachPathList calls visit with every list of paths a profile holds. The
-// slices are visited in place, so a visitor may rewrite their elements.
-func eachPathList(profile *Profile, visit func(paths []string)) {
-	mapPathLists(profile, func(paths []string) []string {
-		visit(paths)
+// pathLists yields every list of paths a profile holds, named after its
+// field, as a pointer through which the caller may read the list, rewrite
+// its elements or replace it. A section the profile omits holds no list.
+func pathLists(profile *Profile) iter.Seq2[string, *[]string] {
+	return func(yield func(string, *[]string) bool) {
+		if profile.Executable != nil {
+			if !yield("AllowedExecutables", &profile.Executable.AllowedExecutables) ||
+				!yield("AllowedLibraries", &profile.Executable.AllowedLibraries) {
+				return
+			}
+		}
 
-		return paths
-	})
-}
+		if profile.Filesystem != nil {
+			if !yield("ReadOnlyPaths", &profile.Filesystem.ReadOnlyPaths) ||
+				!yield("WriteOnlyPaths", &profile.Filesystem.WriteOnlyPaths) {
+				return
+			}
 
-// mapPathLists replaces every list of paths a profile holds with what apply
-// returns for it. A section the profile omits holds no list.
-func mapPathLists(profile *Profile, apply func(paths []string) []string) {
-	if profile.Executable != nil {
-		profile.Executable.AllowedExecutables = apply(profile.Executable.AllowedExecutables)
-		profile.Executable.AllowedLibraries = apply(profile.Executable.AllowedLibraries)
-	}
-
-	if profile.Filesystem != nil {
-		profile.Filesystem.ReadOnlyPaths = apply(profile.Filesystem.ReadOnlyPaths)
-		profile.Filesystem.WriteOnlyPaths = apply(profile.Filesystem.WriteOnlyPaths)
-		profile.Filesystem.ReadWritePaths = apply(profile.Filesystem.ReadWritePaths)
+			yield("ReadWritePaths", &profile.Filesystem.ReadWritePaths)
+		}
 	}
 }
 
@@ -311,7 +323,9 @@ func simplestSpelling(left, right string) int {
 }
 
 func sortProfile(profile *Profile) {
-	eachPathList(profile, slices.Sort[[]string])
+	for _, paths := range pathLists(profile) {
+		slices.Sort(*paths)
+	}
 
 	if profile.Capabilities != nil {
 		slices.Sort(profile.Capabilities.AllowedCapabilities)
@@ -434,9 +448,10 @@ type intersectStrategy struct {
 // it.
 func (op intersectStrategy) prepare(profile *Profile) {
 	populateEmpty(profile)
-	mapPathLists(profile, func(paths []string) []string {
-		return dropUnusableGlobs(paths, op.matchers)
-	})
+
+	for _, paths := range pathLists(profile) {
+		*paths = dropUnusableGlobs(*paths, op.matchers)
+	}
 }
 
 // populateEmpty replaces every nil section of the profile with an explicit
@@ -837,6 +852,16 @@ func collapseFsPerms(perms map[string]fsPermission) *FilesystemRules {
 	}
 }
 
+// Clone returns a deep copy of the profile, which shares no slice or pointer
+// with it, or nil for a nil profile.
+func (p *Profile) Clone() *Profile {
+	if p == nil {
+		return nil
+	}
+
+	return cloneProfile(p)
+}
+
 func cloneProfile(profile *Profile) *Profile {
 	clone := &Profile{
 		Executable:   nil,
@@ -908,7 +933,9 @@ func cloneCapabilities(caps *CapabilityRules) *CapabilityRules {
 func normalizeProfile(profile *Profile) *Profile {
 	result := cloneProfile(profile)
 
-	mapPathLists(result, normalizePaths)
+	for _, paths := range pathLists(result) {
+		*paths = normalizePaths(*paths)
+	}
 
 	if result.Capabilities != nil {
 		result.Capabilities.AllowedCapabilities = normalizeCapabilities(
@@ -933,7 +960,9 @@ func normalizeCapabilities(caps []string) []string {
 }
 
 func deduplicateProfile(profile *Profile) {
-	mapPathLists(profile, merge.DeduplicateSlice[string])
+	for _, paths := range pathLists(profile) {
+		*paths = merge.DeduplicateSlice(*paths)
+	}
 
 	if profile.Capabilities != nil {
 		profile.Capabilities.AllowedCapabilities = merge.DeduplicateSlice(

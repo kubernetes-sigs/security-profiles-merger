@@ -63,13 +63,11 @@ Options:
 
 // mergeOptions holds the parsed flags of the merge command.
 type mergeOptions struct {
-	profileType  string
-	strategy     string
-	format       string
-	output       string
-	validate     string
-	arch         string
-	noDetectNote bool
+	commonOptions
+
+	strategy string
+	validate string
+	arch     string
 }
 
 // bindMergeFlags declares the merge flags on the set and returns the struct
@@ -77,26 +75,16 @@ type mergeOptions struct {
 func bindMergeFlags(flags *flag.FlagSet) *mergeOptions {
 	opts := new(mergeOptions)
 
-	flags.StringVar(
-		&opts.profileType, "type", "",
-		"profile type: seccomp, apparmor, landlock (auto-detected if omitted)",
-	)
+	opts.bind(flags, "the merged profile", "stdout")
 	flags.StringVar(
 		&opts.strategy, "strategy", "", "merge strategy: intersect, union (required)",
 	)
-	flags.StringVar(&opts.format, "format", formatJSON, "output format: json, human")
-	flags.StringVar(&opts.output, "output", "", "write output to file (default: stdout)")
 	flags.StringVar(
 		&opts.validate, "validate", modeNameDefault,
 		"checks to run on the inputs before merging: default, strict, artifact; "+
 			"or one mode per input, comma separated",
 	)
 	bindArchFlag(flags, &opts.arch, "of the node that loads the result")
-	flags.BoolVar(
-		&opts.noDetectNote, "no-detect-note", false,
-		"do not note an auto-detected profile type on stderr; the merged "+
-			"profile, errors and warnings still go to their usual streams",
-	)
 
 	return opts
 }
@@ -235,11 +223,7 @@ func validateMergeFlags(
 		return exitUsage
 	}
 
-	if code := validateFormat(opts.format, stderr); code != 0 {
-		return code
-	}
-
-	return validateProfileType(opts.profileType, stderr)
+	return opts.check(stderr)
 }
 
 // mergeRequest carries everything one merge run needs, so that the per-input
@@ -278,7 +262,9 @@ func mergeProfiles[T any](request mergeRequest[T], stdout, stderr io.Writer) int
 		return 1
 	}
 
-	if failed := checkInputs(profiles, request.checks, request.inputs, stderr); failed {
+	checkAt := func(idx int) func(*T) error { return request.checks[idx] }
+
+	if failed := checkInputs(profiles, checkAt, request.inputs, stderr); failed {
 		return 1
 	}
 
@@ -306,20 +292,23 @@ func nameMergeFailure(err error, inputs []profileInput) error {
 	return fmt.Errorf("%s: %w", merge.SafeName(inputs[inputErr.Index].name), inputErr.Err)
 }
 
-// checkInputs runs each input's own validation and reports whether any
-// failed. Every input is checked, so one run names every problem. A nil
-// check means the merge functions already run what this input asked for.
+// checkInputs runs each input's own validation, the one checkAt returns for
+// its index, and reports whether any failed. Every input is checked, so one
+// run names every problem. A nil check means the merge functions already
+// run what this input asked for.
 func checkInputs[T any](
-	profiles []*T, checks []func(*T) error, inputs []profileInput, stderr io.Writer,
+	profiles []*T, checkAt func(idx int) func(*T) error, inputs []profileInput,
+	stderr io.Writer,
 ) bool {
 	failed := false
 
 	for idx, profile := range profiles {
-		if checks[idx] == nil {
+		check := checkAt(idx)
+		if check == nil {
 			continue
 		}
 
-		err := checks[idx](profile)
+		err := check(profile)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "error: %s: %v\n", merge.SafeName(inputs[idx].name), err)
 

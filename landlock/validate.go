@@ -180,36 +180,63 @@ func netRuleRef(idx int) fieldRef  { return fieldRef{field: "NetRules", idx: idx
 // the rest and matches ErrMoreProblems, so a sentinel a profile violates
 // can be absent from the error that reports it.
 func Validate(profile *Profile) error {
-	_, err := validateProfile(profile, false)
+	_, err := validateProfile(profile, tierMerge)
 
 	return err
 }
 
-// validateProfile runs the checks of Validate, skipping the duplicate checks
-// unless checkDuplicates is set. It returns the cleaned path of every path
-// rule, index aligned with PathRules, so callers need not clean again; the
-// entry of a rejected path is empty.
-func validateProfile(profile *Profile, checkDuplicates bool) ([]string, error) {
+// validationTier is how much a validator checks. Each tier checks
+// everything the one before it does, so what one rejects every later one
+// rejects.
+type validationTier int
+
+const (
+	// tierMerge is what Validate checks: what the merge needs.
+	tierMerge validationTier = iota
+	// tierArtifact is what ValidateArtifact checks: MaxArtifactRules, first
+	// and on its own, and what a kernel could not load.
+	tierArtifact
+	// tierStrict is what ValidateStrict checks: duplicate rules and rights
+	// too.
+	tierStrict
+)
+
+// validateProfile runs the checks of the tier. It returns the cleaned path
+// of every path rule, index aligned with PathRules, so callers need not
+// clean again; the entry of a rejected path is empty, and no paths are
+// returned for a profile refused for its rule count.
+func validateProfile(profile *Profile, tier validationTier) ([]string, error) {
 	if profile == nil {
 		return nil, ErrNilProfile
 	}
 
+	if tier >= tierArtifact {
+		err := validateRuleCount(profile)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	var report merge.Collector
 
-	cleaned := collectProfile(&report, profile, checkDuplicates)
+	cleaned := collectProfile(&report, profile, tier)
+
+	if tier >= tierArtifact {
+		validateLoadable(&report, profile)
+	}
 
 	return cleaned, report.Err()
 }
 
-// collectProfile reports the failures validateProfile returns for a profile
-// that is not nil, and returns the cleaned paths.
+// collectProfile reports the failures of Validate for a profile that is not
+// nil, and the duplicates from tierStrict on, and returns the cleaned paths.
 //
 // Every check below reports a failure through the collector rather than
 // building it first: a report shows at most 32 failures, and a profile
 // holds as many as it holds rights and rules, so building the ones past
 // the limit only to count them costs memory in the size of the profile for
 // a report of fixed size.
-func collectProfile(report *merge.Collector, profile *Profile, checkDuplicates bool) []string {
+func collectProfile(report *merge.Collector, profile *Profile, tier validationTier) []string {
 	validateRights(report, handledFSRef(), profile.HandledAccessFS, isKnownFSRight)
 	validateRights(report, handledNetRef(), profile.HandledAccessNet, isKnownNetRight)
 	validateRights(report, scopedRef(), profile.Scoped, isKnownScopeRight)
@@ -232,7 +259,7 @@ func collectProfile(report *merge.Collector, profile *Profile, checkDuplicates b
 		validateRights(report, netRuleRef(idx), rule.AccessNet, isKnownNetRight)
 	}
 
-	if checkDuplicates {
+	if tier >= tierStrict {
 		validateDuplicates(report, profile, cleaned)
 	}
 
@@ -254,8 +281,21 @@ func validateDuplicates(report *merge.Collector, profile *Profile, cleaned []str
 		validateDuplicateRights(report, netRuleRef(idx), rule.AccessNet)
 	}
 
-	validateDuplicatePaths(report, profile.PathRules, cleaned)
-	validateDuplicatePorts(report, profile.NetRules)
+	// Rejected paths, whose cleaned entry is empty, are skipped, and paths
+	// are compared cleaned, so that "/etc" and "//etc" are reported as
+	// duplicates just as the merge functions would combine them.
+	validateDuplicateRules(report, len(profile.PathRules),
+		func(idx int) (string, bool) { return cleaned[idx], cleaned[idx] != "" },
+		func(idx int) error {
+			return fmt.Errorf("%s: path %s: %w",
+				pathRuleRef(idx), merge.QuoteBounded(profile.PathRules[idx].Path), ErrDuplicateRule)
+		})
+	validateDuplicateRules(report, len(profile.NetRules),
+		func(idx int) (uint16, bool) { return profile.NetRules[idx].Port, true },
+		func(idx int) error {
+			return fmt.Errorf("%s: port %d: %w",
+				netRuleRef(idx), profile.NetRules[idx].Port, ErrDuplicateRule)
+		})
 }
 
 func validateRights[T ~string](
@@ -437,31 +477,6 @@ func isKnownNetRight(right NetAccessRight) bool {
 	return ok
 }
 
-// validateDuplicatePaths detects rules for the same cleaned path, so that
-// "/etc" and "/etc/" are reported as duplicates just as the merge functions
-// would combine them. Rejected paths, whose cleaned entry is empty, are
-// skipped.
-func validateDuplicatePaths(report *merge.Collector, rules []PathRule, cleaned []string) {
-	seen := make(map[string]struct{}, len(rules))
-
-	for idx, rule := range rules {
-		if cleaned[idx] == "" {
-			continue
-		}
-
-		if _, ok := seen[cleaned[idx]]; ok {
-			report.Report(func() error {
-				return fmt.Errorf(
-					"%s: path %s: %w",
-					pathRuleRef(idx), merge.QuoteBounded(rule.Path), ErrDuplicateRule,
-				)
-			})
-		}
-
-		seen[cleaned[idx]] = struct{}{}
-	}
-}
-
 // ValidateArtifact validates an artifact: a profile the caller did not
 // write, such as one a container runtime pulled from a registry. It runs
 // every check of Validate and rejects what a kernel could not load: relative
@@ -488,22 +503,15 @@ func validateDuplicatePaths(report *merge.Collector, rules []PathRule, cleaned [
 // than at files: see the Lowered rule paths section of the package
 // documentation and LoweredRulePaths.
 func ValidateArtifact(profile *Profile) error {
-	err := validateRuleCount(profile)
-	if err != nil {
-		return err
-	}
+	_, err := validateProfile(profile, tierArtifact)
 
-	return validateLoadableProfile(profile, false)
+	return err
 }
 
 // validateRuleCount reports a profile holding more rules than
 // MaxArtifactRules. It runs first and on its own, so that an over-large
 // profile is refused rather than walked.
 func validateRuleCount(profile *Profile) error {
-	if profile == nil {
-		return nil
-	}
-
 	count := len(profile.PathRules) + len(profile.NetRules)
 	if count > MaxArtifactRules {
 		return fmt.Errorf("%d rules, at most %d: %w",
@@ -528,25 +536,9 @@ func validateRuleCount(profile *Profile) error {
 // holds two thousand. Intersect and Union deduplicate, prune unhandled
 // rights, and drop empty rules, so nothing else fails.
 func ValidateStrict(profile *Profile) error {
-	err := validateRuleCount(profile)
-	if err != nil {
-		return err
-	}
+	_, err := validateProfile(profile, tierStrict)
 
-	return validateLoadableProfile(profile, true)
-}
-
-func validateLoadableProfile(profile *Profile, checkDuplicates bool) error {
-	if profile == nil {
-		return ErrNilProfile
-	}
-
-	var report merge.Collector
-
-	collectProfile(&report, profile, checkDuplicates)
-	validateLoadable(&report, profile)
-
-	return report.Err()
+	return err
 }
 
 // RequiredABIVersion returns the lowest Landlock ABI version supporting every
@@ -614,7 +606,7 @@ func ValidateForABI(profile *Profile, abi ABIVersion) error {
 	if profile == nil {
 		report.Add(ErrNilProfile)
 	} else {
-		collectProfile(&report, profile, false)
+		collectProfile(&report, profile, tierMerge)
 	}
 
 	if abi < ABIV1 {
@@ -856,16 +848,24 @@ func validateDuplicateRights[T ~string](report *merge.Collector, context fieldRe
 	}
 }
 
-func validateDuplicatePorts(report *merge.Collector, rules []NetRule) {
-	seen := make(map[uint16]struct{}, len(rules))
+// validateDuplicateRules reports each of count rules whose key an earlier
+// rule has. A rule without a key, for which key reports false, is skipped;
+// duplicate builds the failure for a rule.
+func validateDuplicateRules[Key comparable](
+	report *merge.Collector, count int, key func(int) (Key, bool), duplicate func(int) error,
+) {
+	seen := make(map[Key]struct{}, count)
 
-	for idx, rule := range rules {
-		if _, ok := seen[rule.Port]; ok {
-			report.Report(func() error {
-				return fmt.Errorf("%s: port %d: %w", netRuleRef(idx), rule.Port, ErrDuplicateRule)
-			})
+	for idx := range count {
+		ruleKey, ok := key(idx)
+		if !ok {
+			continue
 		}
 
-		seen[rule.Port] = struct{}{}
+		if _, dup := seen[ruleKey]; dup {
+			report.Report(func() error { return duplicate(idx) })
+		}
+
+		seen[ruleKey] = struct{}{}
 	}
 }

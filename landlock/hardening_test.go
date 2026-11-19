@@ -482,7 +482,7 @@ func TestMergeErrorsNameInputIndices(t *testing.T) {
 
 		msg := err.Error()
 		for _, want := range []string{
-			`validate profile 1: `,
+			`profile 1: `,
 			`PathRules[2]: "/b/../c": path contains a ".." component`,
 			`PathRules[2]: unknown access right "bogus"`,
 		} {

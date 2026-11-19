@@ -22,12 +22,12 @@ import (
 )
 
 // ErrDuplicateKey, ErrUnknownField, ErrMisspelledField, ErrMissingField,
-// ErrInvalidUTF8 and ErrUnexpectedData are returned by UnmarshalStrict for a
-// document encoding/json would decode without a word: one repeating a
-// member, holding a member no field reads, holding a member that names a
-// field only ignoring case, leaving out the port of a network rule, holding
-// a byte the decoder replaces, or followed by more data. See the spm package
-// for each.
+// ErrInvalidUTF8, ErrUnexpectedData and ErrNotAnObject are returned by
+// UnmarshalStrict for a document encoding/json would decode without a word:
+// one repeating a member, holding a member no field reads, holding a member
+// that names a field only ignoring case, leaving out the port of a network
+// rule, holding a byte the decoder replaces, followed by more data, or not
+// an object at all, such as null. See the spm package for each.
 var (
 	ErrDuplicateKey    = spm.ErrDuplicateKey
 	ErrUnknownField    = spm.ErrUnknownField
@@ -35,6 +35,7 @@ var (
 	ErrMissingField    = spm.ErrMissingField
 	ErrInvalidUTF8     = spm.ErrInvalidUTF8
 	ErrUnexpectedData  = spm.ErrUnexpectedData
+	ErrNotAnObject     = spm.ErrNotAnObject
 )
 
 // UnmarshalStrict decodes a Landlock profile and rejects what encoding/json
@@ -45,7 +46,7 @@ var (
 // well: json.Unmarshal reads it as a rule on port 0, which is the port a
 // socket binds to for an ephemeral one, so an artifact that lost the member
 // would grant that. A document that is not a JSON object, such as null, is
-// rejected too.
+// rejected too ([ErrNotAnObject]).
 //
 // Each loses something a reader of an artifact must not lose. A
 // member a newer version of this format uses to handle a further access

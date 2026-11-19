@@ -19,8 +19,8 @@ limitations under the License.
 // times:
 //
 //   - SliceDiff, the one diff shape all three produce.
-//     seccomp.SliceDiff, landlock.RightsDiff and apparmor.StringSliceDiff
-//     are alias declarations of it, so a value of one is a value of the
+//     seccomp.SliceDiff, apparmor.SliceDiff and landlock.SliceDiff are
+//     alias declarations of it, so a value of one is a value of the
 //     others.
 //   - InputError and the sentinel errors below, which each package
 //     re-exports, so that errors.Is against a sentinel here matches an
@@ -109,12 +109,17 @@ var (
 	// when the document is followed by anything but whitespace. A profile
 	// is one JSON value, and a second one behind it would be dropped.
 	ErrUnexpectedData = errors.New("unexpected data after the profile")
+	// ErrNotAnObject is returned by UnmarshalStrict of every package when
+	// the document is not a JSON object, the shape of every profile.
+	// encoding/json decodes null into a struct as nothing at all, which
+	// would make it an empty profile.
+	ErrNotAnObject = errors.New("not a JSON object")
 )
 
 // InputError is returned by Intersect and Union of every package when one of
-// the profiles they were given is nil or fails validation. Index is that
-// profile's zero-based position among the arguments, so 0 is the first
-// profile, and Err what its validation reported.
+// the profiles they were given is nil or fails validation, and by Diff when
+// one is nil. Index is that profile's zero-based position among the
+// arguments, so 0 is the first profile, and Err what was wrong with it.
 //
 // A caller merging inputs of different standing needs to know which one
 // failed, not only that one did: a runtime refusing an artifact rejects a
@@ -126,7 +131,7 @@ type InputError struct {
 }
 
 func (e *InputError) Error() string {
-	return fmt.Sprintf("validate profile %d: %v", e.Index, e.Err)
+	return fmt.Sprintf("profile %d: %v", e.Index, e.Err)
 }
 
 func (e *InputError) Unwrap() error { return e.Err }
@@ -138,8 +143,8 @@ func (e *InputError) Unwrap() error { return e.Err }
 const MaxPathLen = 4095
 
 // SliceDiff represents added and removed items in a set-like slice. It is
-// what every package's slice diff is: seccomp.SliceDiff, landlock.RightsDiff
-// and apparmor.StringSliceDiff all name this type.
+// what every package's slice diff is: seccomp.SliceDiff, apparmor.SliceDiff
+// and landlock.SliceDiff all name this type.
 type SliceDiff[T comparable] struct {
 	Added   []T `json:"added,omitempty"`
 	Removed []T `json:"removed,omitempty"`

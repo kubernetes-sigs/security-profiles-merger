@@ -29,6 +29,7 @@ import (
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
 	"sigs.k8s.io/security-profiles-merger/internal/strictjson"
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 func TestReadFromStdinNilReader(t *testing.T) {
@@ -550,8 +551,8 @@ func TestNullIsNotAProfile(t *testing.T) {
 			t.Errorf("%v: exit code = %d, want 1: %s", args, code, stderr)
 		}
 
-		if !strings.Contains(stderr, errNotAnObject.Error()) {
-			t.Errorf("%v: stderr = %q, want %q", args, stderr, errNotAnObject)
+		if !strings.Contains(stderr, spm.ErrNotAnObject.Error()) {
+			t.Errorf("%v: stderr = %q, want %q", args, stderr, spm.ErrNotAnObject)
 		}
 	}
 

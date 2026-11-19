@@ -139,19 +139,23 @@ type globMatcher struct {
 	// starStar reports a usable pattern that is its literal prefix
 	// followed by "**", and nothing else.
 	starStar bool
-	// relativeExpr is the expression a globRelative pattern translates
-	// to. It is never compiled, since the pattern matches nothing, but it
-	// identifies the rule the pattern spells as expr does for a usable one.
-	relativeExpr string
 	// escapedNegation reports a class opened by an escaped "^", which the
 	// parser negates (see conversion.escapedNegation). The matcher models
 	// the negation, so it does not change what the pattern matches, only
 	// whether the validators accept it.
 	escapedNegation bool
-	// fragment is the translated expression of an absolute glob the
-	// matcher can model, which compileMatcher compiles into expr. It is
-	// empty for every other path.
+	// fragment is the expression a glob translates to, which identifies
+	// the rule the pattern spells (see pathKey), whether or not the
+	// pattern is compiled and whether or not it can match anything. It is
+	// empty for a literal, for a path past the length limit, and for a
+	// pattern the port cannot translate.
 	fragment string
+	// relative reports a translated pattern that does not start with "/";
+	// it is false for a literal and for a pattern the port cannot translate.
+	relative bool
+	// compilable reports an absolute glob within the matcher's limits,
+	// which compileMatcher compiles from fragment into expr.
+	compilable bool
 	// starStarForm reports a pattern that is its literal prefix followed
 	// by "**", which starStar reports once the pattern is compiled.
 	starStarForm bool
@@ -164,7 +168,7 @@ type globMatcher struct {
 // intersection keeps it where every input lists it word for word: the
 // result then grants it only with the permissions every input grants it.
 func (matcher *globMatcher) verbatimOnly() bool {
-	return matcher.compilable() && matcher.expr == nil
+	return matcher.compilable && matcher.expr == nil
 }
 
 // usable reports whether the matcher can match anything.
@@ -229,9 +233,10 @@ func literalMatcher(path string) *globMatcher {
 		prefix:   name[:strings.LastIndexByte(name, '/')+1],
 		starStar: false,
 
-		relativeExpr:    "",
 		escapedNegation: false,
 		fragment:        "",
+		relative:        false,
+		compilable:      false,
 		starStarForm:    false,
 	}
 }
@@ -252,9 +257,10 @@ func analyzePattern(pattern string, compile bool) *globMatcher {
 		prefix:   "",
 		starStar: false,
 
-		relativeExpr:    "",
 		escapedNegation: conv.escapedNegation,
 		fragment:        "",
+		relative:        false,
+		compilable:      false,
 		starStarForm:    conv.starStarOnly,
 	}
 
@@ -271,26 +277,13 @@ func analyzePattern(pattern string, compile bool) *globMatcher {
 		return matcher
 	}
 
-	if len(pattern) > maxGlobPatternLen || conv.alternatives > maxGlobAlternatives {
+	if len(pattern) > maxGlobPatternLen {
 		matcher.status = globTooComplex
 
 		return matcher
 	}
 
-	fragment, ok := translateRegex(conv.regex)
-	if !ok {
-		return matcher
-	}
-
-	if pattern[0] != '/' {
-		matcher.status = globRelative
-		matcher.relativeExpr = fragment
-
-		return matcher
-	}
-
-	matcher.status = globTooComplex
-	matcher.fragment = fragment
+	translateGlob(matcher, conv, pattern[0] != '/')
 
 	if compile {
 		compileMatcher(matcher)
@@ -299,11 +292,36 @@ func analyzePattern(pattern string, compile bool) *globMatcher {
 	return matcher
 }
 
+// translateGlob translates the regex of a glob within the length limit and
+// sets the status the translation gives it. A pattern the matcher can model
+// is left past its limits until compileMatcher compiles it.
+func translateGlob(matcher *globMatcher, conv conversion, relative bool) {
+	// The fragment is kept even for a pattern that matches nothing, since
+	// it is what identifies the rule the pattern spells.
+	fragment, translated := translateRegex(conv.regex)
+	if translated {
+		matcher.fragment = fragment
+		matcher.relative = relative
+	}
+
+	switch {
+	case conv.alternatives > maxGlobAlternatives:
+		matcher.status = globTooComplex
+	case !translated:
+		matcher.status = globInvalid
+	case relative:
+		matcher.status = globRelative
+	default:
+		matcher.status = globTooComplex
+		matcher.compilable = true
+	}
+}
+
 // compileMatcher compiles the expression of a pattern analyzePattern
 // translated without compiling it. It modifies the matcher, so it runs only
 // on one no other goroutine can see yet.
 func compileMatcher(matcher *globMatcher) {
-	if !matcher.compilable() {
+	if !matcher.compilable {
 		return
 	}
 
@@ -317,18 +335,12 @@ func compileMatcher(matcher *globMatcher) {
 	matcher.starStar = matcher.starStarForm
 }
 
-// compilable reports whether the matcher waits only for compiling to become
-// usable, or has been compiled.
-func (matcher *globMatcher) compilable() bool {
-	return matcher.fragment != ""
-}
-
 // compileCost is what compiling the pattern costs a call's budget (see
 // maxCallCompileBytes): its length, for a pattern that is compiled, and
 // nothing for one that is not. The budget is charged only for a compile that
 // succeeds (see matcherCache.matcher).
 func (matcher *globMatcher) compileCost(pattern string) int {
-	if !matcher.compilable() {
+	if !matcher.compilable {
 		return 0
 	}
 
@@ -357,7 +369,7 @@ func (matcher *globMatcher) uncompiled() *globMatcher {
 // shared cache bounds: the strings it keeps, and the program when it is
 // compiled (see programBytes).
 func (matcher *globMatcher) retainedBytes(pattern string) int {
-	size := len(pattern) + len(matcher.literal) + len(matcher.fragment) + len(matcher.relativeExpr)
+	size := len(pattern) + len(matcher.literal) + len(matcher.fragment)
 	if matcher.expr != nil {
 		size += programBytes(pattern, matcher.fragment)
 	}
@@ -550,7 +562,8 @@ func (cache *matcherCache) isGlob(path string) bool {
 	return strings.ContainsAny(path, patternSyntax) && cache.matcher(path).kind != kindLiteral
 }
 
-// key returns what keyForPath returns, reading the call's cache.
+// key returns the identity of a path (see pathKey), reading the call's
+// cache. Validation and the merge identify paths through it.
 func (cache *matcherCache) key(path string) pathKey {
 	return matcherKey(path, cache.matcher(path))
 }
@@ -603,36 +616,47 @@ func IsGlobPattern(path string) bool {
 // resolved, since apparmor_parser resolves them before it compiles the rule:
 // "/a/b" and `/a/\b` are one rule for one file. A pattern is identified by
 // the regular expression it translates to, which two spellings of one
-// pattern share whether or not the call compiled it, and by its text when
-// it translates to none the matcher can compile, since patterns that match
-// nothing are not thereby the same rule. A relative pattern matches
-// nothing either, but it has an expression two spellings of it share, and is
-// identified by that, apart from every absolute pattern.
+// pattern share, whether or not it is compiled: a pattern past the matcher's
+// limits, or past a call's compile budget, is one rule however it is spelled
+// as well. A pattern the port cannot translate, or one past the length
+// limit, is identified by its text, since patterns that match nothing are
+// not thereby the same rule. A relative pattern matches nothing either, but
+// it has an expression two spellings of it share, and is identified by
+// that, apart from every absolute pattern.
+//
+// The three are told apart by kind, never by text alone: the expression a
+// pattern translates to is itself a string some other path may spell, and
+// identifying both by their text would take the one for the other.
+//
+// Validation, the merge and Diff all identify a path this way, so a rule
+// one of them takes for two spellings of one path is one for all three.
 type pathKey struct {
-	glob     bool
+	kind     pathKeyKind
 	relative bool
 	text     string
 }
 
-// keyForPath returns the identity of a path.
-func keyForPath(path string) pathKey {
-	return matcherKey(path, matcherFor(path))
-}
+// pathKeyKind says what the text of a pathKey holds.
+type pathKeyKind int
+
+const (
+	// keyName is the name a literal path denotes.
+	keyName pathKeyKind = iota
+	// keyExpression is the expression a pattern translates to.
+	keyExpression
+	// keyText is the text of a pattern that translates to none.
+	keyText
+)
 
 // matcherKey returns the identity of a path given its analysis.
 func matcherKey(path string, matcher *globMatcher) pathKey {
 	switch {
 	case matcher.kind == kindLiteral:
-		return pathKey{glob: false, relative: false, text: matcher.literal}
+		return pathKey{kind: keyName, relative: false, text: matcher.literal}
 	case matcher.fragment != "":
-		// What expr.String() returns once compiled, but read from the
-		// translation, so that the key does not depend on whether the
-		// pattern fit the call's compile budget.
-		return pathKey{glob: true, relative: false, text: "^" + matcher.fragment + "$"}
-	case matcher.status == globRelative:
-		return pathKey{glob: true, relative: true, text: matcher.relativeExpr}
+		return pathKey{kind: keyExpression, relative: matcher.relative, text: matcher.fragment}
 	default:
-		return pathKey{glob: true, relative: false, text: path}
+		return pathKey{kind: keyText, relative: false, text: path}
 	}
 }
 

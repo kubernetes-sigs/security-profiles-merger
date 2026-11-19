@@ -50,7 +50,6 @@ var (
 	errStdinTooLarge = fmt.Errorf("stdin input exceeds %d bytes", maxInputSize)
 	errFileTooLarge  = fmt.Errorf("file exceeds %d byte limit", maxInputSize)
 	errInputTooLarge = fmt.Errorf("inputs exceed %d bytes in total", maxTotalInputSize)
-	errNotAnObject   = errors.New("not a JSON object")
 	errDecode        = errors.New("decoding failed")
 )
 

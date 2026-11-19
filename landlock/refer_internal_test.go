@@ -231,7 +231,7 @@ func TestMoveConflictsScaleLinearly(t *testing.T) {
 	measure := func(count int) (int, int) {
 		left, right := hostileUnionInputs(count)
 		result := unionTwo(left, right)
-		resultMasks := fsBits.ruleMasks(ruleMap(result.PathRules, pathRuleKey, pathRuleAccess))
+		resultMasks := pathRuleMasks(result.PathRules)
 		paths := inputRulePaths([]*Profile{left, right})
 		withRoot, withoutRoot := moveSides(left, resultMasks, paths)
 		_, withComparisons := withRoot.settle()
