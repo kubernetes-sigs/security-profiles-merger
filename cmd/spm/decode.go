@@ -17,7 +17,7 @@ limitations under the License.
 package main
 
 import (
-	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -82,22 +82,17 @@ func unmarshalAll[T any](
 
 		// null decodes into a struct as nothing at all; every other value
 		// but an object failed above.
-		if !isJSONObject(input.data) {
-			return nil, fmt.Errorf("parsing %s: %w", merge.SafeName(input.name), errNotAnObject)
+		err = strictjson.RequireObject(input.data)
+		if err != nil {
+			return nil, fmt.Errorf("parsing %s: %w", merge.SafeName(input.name), err)
 		}
 
-		checks := documentChecks(input.data, profile, hint, policy)
-
-		for _, check := range checks {
-			if check.err == nil {
-				continue
+		for finding := range strictjson.Findings(input.data, profile, hint) {
+			if policy.rejects(finding.Kind) {
+				return nil, fmt.Errorf("parsing %s: %w", merge.SafeName(input.name), finding.Err)
 			}
 
-			if check.reject {
-				return nil, fmt.Errorf("parsing %s: %w", merge.SafeName(input.name), check.err)
-			}
-
-			_, _ = fmt.Fprintf(stderr, "warning: %s: %v\n", merge.SafeName(input.name), check.err)
+			_, _ = fmt.Fprintf(stderr, "warning: %s: %v\n", merge.SafeName(input.name), finding.Err)
 		}
 
 		profiles[idx] = profile
@@ -106,41 +101,24 @@ func unmarshalAll[T any](
 	return profiles, nil
 }
 
-// documentCheck is one finding about a document that decoded, and whether
-// the policy it was decoded under rejects it.
-type documentCheck struct {
-	err    error
-	reject bool
-}
-
-// documentChecks looks for what the decoder read without a word in a
-// document that decoded into profile.
-func documentChecks[T any](
-	data []byte, profile *T, hint strictjson.Hint, policy decodePolicy,
-) []documentCheck {
-	duplicates, moreDuplicates := strictjson.DuplicateKeys(data)
-	unknown, moreUnknown := strictjson.UnknownFieldsFound[T](data, hint)
-	misspelled, moreMisspelled := strictjson.MisspelledFieldsOf[T](data)
-	missing, moreMissing := strictjson.MissingFieldsOf(data, profile)
-
-	return []documentCheck{
-		{
-			strictjson.PathsError(spm.ErrDuplicateKey, duplicates, moreDuplicates),
-			policy.rejectDuplicates,
-		},
-		{
-			strictjson.PathsError(spm.ErrUnknownField, unknown, moreUnknown),
-			policy.rejectUnknown,
-		},
-		{
-			strictjson.PathsError(spm.ErrMisspelledField, misspelled, moreMisspelled),
-			policy.rejectMisspelled,
-		},
-		{
-			strictjson.PathsError(spm.ErrMissingField, missing, moreMissing),
-			policy.rejectMissing,
-		},
-		{strictjson.InvalidUTF8(data), policy.rejectInvalidUTF8},
+// rejects reports whether the policy rejects a finding of the given kind
+// (see strictjson.Finding) rather than warning about it.
+func (policy decodePolicy) rejects(kind error) bool {
+	switch {
+	case errors.Is(kind, spm.ErrDuplicateKey):
+		return policy.rejectDuplicates
+	case errors.Is(kind, spm.ErrUnknownField):
+		return policy.rejectUnknown
+	case errors.Is(kind, spm.ErrMisspelledField):
+		return policy.rejectMisspelled
+	case errors.Is(kind, spm.ErrMissingField):
+		return policy.rejectMissing
+	case errors.Is(kind, spm.ErrInvalidUTF8):
+		return policy.rejectInvalidUTF8
+	default:
+		// A kind this policy does not know is refused rather than waved
+		// through: it is something strictjson found wrong.
+		return true
 	}
 }
 
@@ -154,10 +132,4 @@ func decodeError(name string, err error) error {
 		"parsing %s: %w: %s",
 		merge.SafeName(name), errDecode, merge.BoundedText(err.Error()),
 	)
-}
-
-// isJSONObject reports whether a document that decoded without error is an
-// object rather than null.
-func isJSONObject(data []byte) bool {
-	return bytes.HasPrefix(bytes.TrimLeft(data, " \t\r\n"), []byte("{"))
 }

@@ -700,3 +700,29 @@ func TestSafeText(t *testing.T) {
 		t.Errorf("WriteTexts renders one path and two paths alike: %s", one.String())
 	}
 }
+
+func TestRequireNonNil(t *testing.T) {
+	t.Parallel()
+
+	one, two := 1, 2
+
+	err := merge.RequireNonNil(&one, &two)
+	if err != nil {
+		t.Errorf("RequireNonNil of two profiles = %v, want nil", err)
+	}
+
+	err = merge.RequireNonNil[int]()
+	if err != nil {
+		t.Errorf("RequireNonNil of none = %v, want nil", err)
+	}
+
+	for want, profiles := range map[int][]*int{0: {nil, &two}, 1: {&one, nil}, 2: {&one, &two, nil, nil}} {
+		err := merge.RequireNonNil(profiles...)
+
+		var inputErr *spm.InputError
+		if !errors.As(err, &inputErr) || inputErr.Index != want ||
+			!errors.Is(err, spm.ErrNilProfile) {
+			t.Errorf("RequireNonNil(%v) = %v, want an InputError at %d", profiles, err, want)
+		}
+	}
+}

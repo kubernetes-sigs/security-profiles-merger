@@ -43,6 +43,42 @@ func newFlagSet(name string) *flag.FlagSet {
 	return flags
 }
 
+// commonOptions holds the flags every command that reads profiles takes.
+type commonOptions struct {
+	profileType  string
+	format       string
+	output       string
+	noDetectNote bool
+}
+
+// bind declares the common flags on the set. result names what the command
+// writes, which the help of --no-detect-note says still goes to stdout, and
+// outputDefault what --output defaults to, as its help says it.
+func (opts *commonOptions) bind(flags *flag.FlagSet, result, outputDefault string) {
+	flags.StringVar(
+		&opts.profileType, "type", "",
+		"profile type: seccomp, apparmor, landlock (auto-detected if omitted)",
+	)
+	flags.StringVar(&opts.format, "format", formatJSON, "output format: json, human")
+	flags.StringVar(
+		&opts.output, "output", "", "write output to file (default: "+outputDefault+")",
+	)
+	flags.BoolVar(
+		&opts.noDetectNote, "no-detect-note", false,
+		"do not note an auto-detected profile type on stderr; "+result+
+			", errors and warnings still go to their usual streams",
+	)
+}
+
+// check reports a --format or --type value no command takes.
+func (opts *commonOptions) check(stderr io.Writer) int {
+	if code := validateFormat(opts.format, stderr); code != 0 {
+		return code
+	}
+
+	return validateProfileType(opts.profileType, stderr)
+}
+
 // parseFlags parses a subcommand's arguments. Requested help goes to stdout
 // and exits 0. A parse error is reported on stderr, followed by the usage,
 // and exits with the usage code. The error quotes the argument it is about,

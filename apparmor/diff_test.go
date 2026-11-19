@@ -17,6 +17,8 @@ limitations under the License.
 package apparmor_test
 
 import (
+	"errors"
+	"fmt"
 	"reflect"
 	"runtime"
 	"slices"
@@ -36,19 +38,52 @@ func TestDiffNil(t *testing.T) {
 		Capabilities: nil,
 	}
 
-	_, err := apparmor.Diff(nil, profile)
-	if err == nil {
-		t.Fatal("expected error for nil left profile")
+	for _, testCase := range []struct {
+		name        string
+		left, right *apparmor.Profile
+		index       int
+	}{
+		{"left", nil, profile, 0},
+		{"right", profile, nil, 1},
+		{"both", nil, nil, 0},
+	} {
+		_, err := apparmor.Diff(testCase.left, testCase.right)
+
+		var inputErr *apparmor.InputError
+		if !errors.As(err, &inputErr) || inputErr.Index != testCase.index {
+			t.Errorf("%s nil: Diff = %v, want an InputError for input %d",
+				testCase.name, err, testCase.index)
+		}
+
+		if !errors.Is(err, apparmor.ErrNilProfile) {
+			t.Errorf("%s nil: Diff = %v, want ErrNilProfile", testCase.name, err)
+		}
+	}
+}
+
+// TestProfileDiffString pins that a diff prints as FormatDiff renders it,
+// through a pointer and a value alike, and that a nil diff prints too.
+func TestProfileDiffString(t *testing.T) {
+	t.Parallel()
+
+	diff, err := apparmor.Diff(readOnly("/etc/passwd"), readOnly("/etc/shadow"))
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	_, err = apparmor.Diff(profile, nil)
-	if err == nil {
-		t.Fatal("expected error for nil right profile")
+	want := apparmor.FormatDiff(diff)
+
+	if got := diff.String(); got != want {
+		t.Errorf("String = %q, want %q", got, want)
 	}
 
-	_, err = apparmor.Diff(nil, nil)
-	if err == nil {
-		t.Fatal("expected error for nil-nil profiles")
+	if got := fmt.Sprintf("diff %v", *diff); got != "diff "+want {
+		t.Errorf("formatting the value = %q, want %q", got, "diff "+want)
+	}
+
+	var none *apparmor.ProfileDiff
+	if got := fmt.Sprintf("diff %v", none); got != "diff <nil>" {
+		t.Errorf("formatting a nil diff = %q, want %q", got, "diff <nil>")
 	}
 }
 
@@ -1164,7 +1199,7 @@ func TestDiffComparesRulesNotSpellings(t *testing.T) {
 		t.Fatalf("Diff: %v", err)
 	}
 
-	want := &apparmor.StringSliceDiff{
+	want := &apparmor.SliceDiff[string]{
 		Added: []string{"/etc/shadow"}, Removed: []string{`/etc/\x70asswd`},
 	}
 	if diff.Equal || !reflect.DeepEqual(diff.Executables, want) {
@@ -1201,5 +1236,45 @@ func TestDiffAllocatesInProportionToItsInput(t *testing.T) {
 
 	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 8*uint64(len(path)) {
 		t.Errorf("Diff of a %d-byte path allocated %d bytes", len(path), allocated)
+	}
+}
+
+// TestPathIdentityIsSharedByDiffAndValidate pins that Diff, Validate and the
+// merge take the same spellings for one rule, including for patterns the
+// matcher does not compile: one past its alternative limit is one rule
+// however it is spelled, as one within the limit is. A path past MaxPathLen
+// holding only escapes is the file its escapes name, as a shorter one is.
+func TestPathIdentityIsSharedByDiffAndValidate(t *testing.T) {
+	t.Parallel()
+
+	alternatives := strings.Repeat("a,", 120) + "b"
+	tooComplex := "/etc/{" + alternatives + "}"
+	escapedTooComplex := `/\x65tc/{` + alternatives + "}"
+
+	long := "/" + strings.Repeat("a", apparmor.MaxPathLen)
+	escapedLong := "/" + strings.Repeat(`\x61`, apparmor.MaxPathLen)
+
+	for _, pair := range [][2]string{
+		{tooComplex, escapedTooComplex},
+		{long, escapedLong},
+	} {
+		diff, err := apparmor.Diff(readOnly(pair[0]), readOnly(pair[1]))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !diff.Equal {
+			t.Errorf("Diff of two spellings of one rule = %s", apparmor.FormatDiff(diff))
+		}
+	}
+
+	err := apparmor.Validate(readOnly(tooComplex, escapedTooComplex))
+	if !errors.Is(err, apparmor.ErrDuplicatePathInCategory) {
+		t.Errorf("Validate = %v, want ErrDuplicatePathInCategory", err)
+	}
+
+	got := mergeFs(t, apparmor.Union, readOnly(tooComplex), readOnly(escapedTooComplex))
+	if !slices.Equal(got.ReadOnlyPaths, []string{tooComplex}) {
+		t.Errorf("Union kept %d paths, want one spelling", len(got.ReadOnlyPaths))
 	}
 }

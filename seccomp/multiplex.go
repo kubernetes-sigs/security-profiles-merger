@@ -98,20 +98,29 @@ var multiplexedSyscalls = map[string]string{
 	"shmctl":      ipcMultiplexer,
 }
 
-// multiplexedBy returns the syscalls a multiplexer carries, sorted.
+// multiplexedBy returns the syscalls a multiplexer carries, sorted. The
+// slice is shared, so callers must not modify it.
 func multiplexedBy(multiplexer string) []string {
-	var names []string
+	return carriedSyscalls[multiplexer]
+}
 
-	for name, target := range multiplexedSyscalls {
-		if target == multiplexer {
-			names = append(names, name)
-		}
+// carriedSyscalls inverts multiplexedSyscalls once, at package
+// initialization, rather than on every lookup.
+//
+//nolint:gochecknoglobals // immutable lookup table derived from another
+var carriedSyscalls = func() map[string][]string {
+	carried := make(map[string][]string)
+
+	for name, multiplexer := range multiplexedSyscalls {
+		carried[multiplexer] = append(carried[multiplexer], name)
 	}
 
-	slices.Sort(names)
+	for _, names := range carried {
+		slices.Sort(names)
+	}
 
-	return names
-}
+	return carried
+}()
 
 // multiplexRules is what the multiplexer path needs to know about the rules
 // one profile loads for a multiplexer or a multiplexed syscall.

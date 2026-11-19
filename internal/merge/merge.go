@@ -61,6 +61,20 @@ func Fold[T any](
 	return result, nil
 }
 
+// RequireNonNil reports the first nil profile as an *spm.InputError naming
+// its position and wrapping spm.ErrNilProfile, or returns nil when there is
+// none. It is the check every Diff runs on its two inputs, so that a nil
+// one is reported as the merges report it.
+func RequireNonNil[T any](profiles ...*T) error {
+	for idx, profile := range profiles {
+		if profile == nil {
+			return &spm.InputError{Index: idx, Err: spm.ErrNilProfile}
+		}
+	}
+
+	return nil
+}
+
 // DiffSlice compares two slices as sets and returns, in this order, the
 // elements only right has (added) and the elements only left has (removed).
 // Duplicates within a slice are ignored. Results are sorted, which is why T

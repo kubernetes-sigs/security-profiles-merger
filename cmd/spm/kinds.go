@@ -549,9 +549,13 @@ func checkParsable(inputs []profileInput) error {
 
 		err := json.Unmarshal(input.data, &fields)
 		// null decodes into a map as a nil map, and is no more a profile
-		// than any other value that is not an object.
-		if err == nil && fields == nil {
-			return fmt.Errorf("parsing %s: %w", merge.SafeName(input.name), errNotAnObject)
+		// than any other value that is not an object. It is refused by the
+		// check the decoding of the profile itself runs.
+		if err == nil {
+			err = strictjson.RequireObject(input.data)
+			if err != nil {
+				return fmt.Errorf("parsing %s: %w", merge.SafeName(input.name), err)
+			}
 		}
 
 		if err != nil {
@@ -563,7 +567,7 @@ func checkParsable(inputs []profileInput) error {
 			// object" would point at the wrong thing.
 			if json.Valid(input.data) {
 				return fmt.Errorf(
-					"parsing %s: %w", merge.SafeName(input.name), errNotAnObject,
+					"parsing %s: %w", merge.SafeName(input.name), spm.ErrNotAnObject,
 				)
 			}
 

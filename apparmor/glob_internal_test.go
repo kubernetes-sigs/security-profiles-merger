@@ -379,7 +379,7 @@ func TestUnbalancedPatternsScanInLinearTime(t *testing.T) {
 
 		IsGlobPattern(pattern)
 		analyzePattern(pattern, false)
-		hasDotComponent(pattern)
+		dotComponentIn(pattern, newMatcherCache().matcher(pattern))
 
 		if elapsed := time.Since(start); testutil.UninstrumentedRun() && elapsed > 2*time.Second {
 			t.Errorf("analyzing %d bytes of %q took %v", size, char, elapsed)
@@ -982,7 +982,7 @@ func TestFailedCompileIsNotCharged(t *testing.T) {
 	const pattern = "/failed/*"
 
 	failed := analyzePattern(pattern, false)
-	if !failed.compilable() {
+	if !failed.compilable {
 		t.Fatal("the pattern is not one the matcher compiles")
 	}
 
@@ -1003,5 +1003,56 @@ func TestFailedCompileIsNotCharged(t *testing.T) {
 
 	if !matchers.matcher("/other/*").usable() {
 		t.Error("a later pattern was not compiled")
+	}
+}
+
+// TestPathKeysDoNotCollideAcrossKinds covers a path whose text is the
+// expression another pattern translates to. A pattern is identified by that
+// expression and a path the port cannot translate by its text, so the two
+// would be taken for one rule if the kind of the identity were not part of
+// it: Diff would call them equal, Validate would report them as one path
+// listed twice, and a merge would fold one into the other.
+func TestPathKeysDoNotCollideAcrossKinds(t *testing.T) {
+	t.Parallel()
+
+	// The expression of the first is a path the port refuses, as "\x{1}"
+	// leaves an alternation without a comma, and that of the second is past
+	// the length limit: both are identified by their text.
+	for _, pattern := range []string{`/\001*`, "/" + strings.Repeat("?", 2000)} {
+		expression := analyzePattern(pattern, false).fragment
+		if expression == "" {
+			t.Fatalf("%q translates to no expression", pattern)
+		}
+
+		diff, err := Diff(budgetProfile(pattern), budgetProfile(expression))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if diff.Equal {
+			t.Errorf("Diff takes %q and its expression for one rule",
+				pattern[:min(len(pattern), 8)])
+		}
+
+		if len(expression) > MaxPathLen {
+			continue
+		}
+
+		across := budgetProfile(pattern)
+		across.Filesystem.WriteOnlyPaths = []string{expression}
+
+		err = Validate(across)
+		if errors.Is(err, ErrDuplicatePath) {
+			t.Errorf("Validate = %v, want %q and its expression apart", err, pattern)
+		}
+
+		union, err := Union(budgetProfile(pattern, expression))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if got := len(union.Filesystem.ReadOnlyPaths); got != 2 {
+			t.Errorf("Union kept %d paths of %q and its expression, want both", got, pattern)
+		}
 	}
 }

@@ -184,9 +184,12 @@ func collectRules(syscalls []specs.LinuxSyscall, def *clause) map[string]*syscal
 // summarizedNames returns the syscalls collectRules reads in summarized
 // form, or nil when every syscall fits the budget.
 func summarizedNames(syscalls []specs.LinuxSyscall, def *clause) map[string]bool {
-	counts, total := clauseCounts(syscalls, def)
+	total := totalClauses(syscalls, def)
+	if total <= maxLoadedClauses {
+		return nil
+	}
 
-	return oversizedNames(counts, total)
+	return oversizedNames(clauseCounts(syscalls, def), total)
 }
 
 // entryClauseCount counts the clauses one entry loads for each of its names,
@@ -194,12 +197,7 @@ func summarizedNames(syscalls []specs.LinuxSyscall, def *clause) map[string]bool
 // entry equals the profile default, one per condition when it repeats an
 // argument index, and one otherwise.
 func entryClauseCount(entry *specs.LinuxSyscall, def *clause) uint64 {
-	result := clause{
-		action:   canonicalAction(entry.Action),
-		errnoRet: runtimeErrno(entry.Action, entry.ErrnoRet),
-		args:     nil,
-	}
-	if def != nil && result.sameResult(*def) {
+	if def != nil && baseClause(entry).sameResult(*def) {
 		return 0
 	}
 
@@ -225,12 +223,6 @@ func totalClauses(syscalls []specs.LinuxSyscall, def *clause) uint64 {
 	return total
 }
 
-// singleEquality reports whether a clause tests one argument for equality,
-// which is the only filter shape unifyErrno rewrites.
-func singleEquality(current clause) bool {
-	return len(current.args) == 1 && current.args[0].Op == specs.OpEqualTo
-}
-
 // oversizedNames returns the syscalls to read in summarized form so that the
 // clauses the others load stay inside maxLoadedClauses. The largest go
 // first, and only as many as the bound requires, so a profile spends its
@@ -238,10 +230,6 @@ func singleEquality(current clause) bool {
 // Names of equal size are ordered by name, so which syscall loses its
 // filters never depends on the order the entries arrive in.
 func oversizedNames(counts map[string]uint64, total uint64) map[string]bool {
-	if total <= maxLoadedClauses {
-		return nil
-	}
-
 	names := slices.Collect(maps.Keys(counts))
 	slices.SortFunc(names, func(first, second string) int {
 		if counts[first] != counts[second] {
@@ -265,12 +253,23 @@ func oversizedNames(counts map[string]uint64, total uint64) map[string]bool {
 	return summarized
 }
 
-// clauseCounts returns how many clauses each syscall name loads and how many
-// they are in total, counted as totalClauses counts them.
-func clauseCounts(syscalls []specs.LinuxSyscall, def *clause) (map[string]uint64, uint64) {
-	counts := make(map[string]uint64)
-
+// sumCounts returns the total of counts, which for the result of
+// clauseCounts is what totalClauses returns, without walking the entries a
+// second time.
+func sumCounts(counts map[string]uint64) uint64 {
 	var total uint64
+
+	for _, count := range counts {
+		total += count
+	}
+
+	return total
+}
+
+// clauseCounts returns how many clauses each syscall name loads, counted as
+// totalClauses counts them, whose total they add up to.
+func clauseCounts(syscalls []specs.LinuxSyscall, def *clause) map[string]uint64 {
+	counts := make(map[string]uint64)
 
 	for idx := range syscalls {
 		entry := &syscalls[idx]
@@ -282,11 +281,10 @@ func clauseCounts(syscalls []specs.LinuxSyscall, def *clause) (map[string]uint64
 
 		for _, name := range entry.Names {
 			counts[name] += rules
-			total += rules
 		}
 	}
 
-	return counts, total
+	return counts
 }
 
 // clauseSummary is how an over-budget input is read: the two clauses a
@@ -385,11 +383,7 @@ func summarizeRules(
 // Conditions that hold for every value are dropped, as libseccomp drops them,
 // so a clause left without conditions is unconditional.
 func entryClauses(entry *specs.LinuxSyscall) []clause {
-	base := clause{
-		action:   canonicalAction(entry.Action),
-		errnoRet: runtimeErrno(entry.Action, entry.ErrnoRet),
-		args:     nil,
-	}
+	base := baseClause(entry)
 
 	if !hasRepeatedIndex(entry.Args) {
 		base.args = loadedArgs(entry.Args)
@@ -407,6 +401,16 @@ func entryClauses(entry *specs.LinuxSyscall) []clause {
 	}
 
 	return clauses
+}
+
+// baseClause returns the result an entry applies, as a clause without
+// conditions: its action and errno as a runtime loads them.
+func baseClause(entry *specs.LinuxSyscall) clause {
+	return clause{
+		action:   canonicalAction(entry.Action),
+		errnoRet: runtimeErrno(entry.Action, entry.ErrnoRet),
+		args:     nil,
+	}
 }
 
 // loadedArgs returns the sorted, canonical conditions libseccomp keeps from a
@@ -576,9 +580,10 @@ func (m ruleMerger) settleInputs(rules map[string]*syscallRules, def *clause) {
 			continue
 		}
 
-		current.conditional = unifyErrno(current.conditional)
-		if safeShape(current.conditional) &&
-			(!m.narrow || !slices.ContainsFunc(current.conditional, wideClause)) {
+		var safe bool
+
+		current.conditional, safe = unifyErrno(current.conditional)
+		if safe && (!m.narrow || !slices.ContainsFunc(current.conditional, wideClause)) {
 			continue
 		}
 
@@ -601,8 +606,8 @@ func (m ruleMerger) settleInputs(rules map[string]*syscallRules, def *clause) {
 func (m ruleMerger) settleOutput(
 	def, fallback *clause, conditional []clause,
 ) (*clause, []clause) {
-	conditional = unifyErrno(conditional)
-	if len(conditional) == 0 || safeShape(conditional) {
+	conditional, safe := unifyErrno(conditional)
+	if safe {
 		return fallback, conditional
 	}
 
@@ -636,9 +641,16 @@ func (m ruleMerger) settleOutput(
 // evaluates it exactly as written: rewriting its errno values there would
 // lose what the inputs said for nothing, since no collapse threatens the
 // filters.
-func unifyErrno(clauses []clause) []clause {
+//
+// It also reports whether the clauses it returns form a safe shape, which
+// every caller needs next and which it has to find out anyway.
+func unifyErrno(clauses []clause) ([]clause, bool) {
+	if safeShape(clauses) {
+		return clauses, true
+	}
+
 	if !errnoUnifiable(clauses) {
-		return clauses
+		return clauses, false
 	}
 
 	unified := slices.Clone(clauses)
@@ -646,16 +658,15 @@ func unifyErrno(clauses []clause) []clause {
 		unified[idx].errnoRet = clauses[0].errnoRet
 	}
 
-	return unified
+	return unified, safeShape(unified)
 }
 
-// errnoUnifiable reports whether unifyErrno may rewrite these clauses: they
-// are several, they apply one errno-carrying action, they do not already
-// form a safe shape, each tests one argument for equality, no two test the
-// same argument for the same value, and they do not all report the same
-// errno already.
+// errnoUnifiable reports whether unifyErrno may rewrite clauses that do not
+// form a safe shape: they are several, they apply one errno-carrying action,
+// each tests one argument for equality, no two test the same argument for
+// the same value, and they do not all report the same errno already.
 func errnoUnifiable(clauses []clause) bool {
-	if len(clauses) < 2 || !errnoSignificant(clauses[0].action) || safeShape(clauses) {
+	if len(clauses) < 2 || !errnoSignificant(clauses[0].action) {
 		return false
 	}
 
@@ -684,6 +695,12 @@ func errnoUnifiable(clauses []clause) bool {
 	}
 
 	return differs
+}
+
+// singleEquality reports whether a clause tests one argument for equality,
+// which is the only filter shape unifyErrno rewrites.
+func singleEquality(current clause) bool {
+	return len(current.args) == 1 && current.args[0].Op == specs.OpEqualTo
 }
 
 // mergeRules merges the clauses of one syscall from two sides.

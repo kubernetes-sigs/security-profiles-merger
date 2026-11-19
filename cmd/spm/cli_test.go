@@ -28,6 +28,7 @@ import (
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 const testDuplicateProfile = `{"defaultAction":"SCMP_ACT_ERRNO","defaultAction":"SCMP_ACT_ALLOW"}`
@@ -647,10 +648,10 @@ func TestNonObjectInputReportsAlike(t *testing.T) {
 			{cmdValidate, flagType, typeLandlock},
 		} {
 			code, _, stderr := runCapture(t, args, strings.NewReader(document))
-			if code != 1 || !strings.Contains(stderr, errNotAnObject.Error()) ||
+			if code != 1 || !strings.Contains(stderr, spm.ErrNotAnObject.Error()) ||
 				strings.Contains(stderr, "Go value") {
 				t.Errorf("%s with %v: exit code = %d, stderr = %q, want 1 and %q",
-					document, args, code, stderr, errNotAnObject)
+					document, args, code, stderr, spm.ErrNotAnObject)
 			}
 		}
 	}

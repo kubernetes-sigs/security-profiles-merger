@@ -362,7 +362,7 @@ func FuzzUnknownFields(f *testing.F) {
 	f.Add(`{"x":1e400}`)
 
 	f.Fuzz(func(t *testing.T, raw string) {
-		paths, omitted := UnknownFieldsOf[specs.LinuxSeccomp]([]byte(raw))
+		paths, omitted := unknownFields[specs.LinuxSeccomp]([]byte(raw))
 
 		checkPathBound(t, raw, paths, omitted)
 
@@ -375,7 +375,7 @@ func FuzzUnknownFields(f *testing.F) {
 			decoder.DisallowUnknownFields()
 
 			if omitted != 0 {
-				t.Errorf("UnknownFieldsOf(%q) omitted %d with none reported", raw, omitted)
+				t.Errorf("unknownFields(%q) omitted %d with none reported", raw, omitted)
 			}
 
 			return
@@ -387,11 +387,11 @@ func FuzzUnknownFields(f *testing.F) {
 		strict.DisallowUnknownFields()
 
 		if strict.Decode(new(specs.LinuxSeccomp)) == nil {
-			t.Errorf("UnknownFieldsOf(%q) = %v, but the document decodes strictly", raw, paths)
+			t.Errorf("unknownFields(%q) = %v, but the document decodes strictly", raw, paths)
 		}
 
 		if !json.Valid([]byte(raw)) {
-			t.Errorf("UnknownFieldsOf reported %v for invalid JSON", paths)
+			t.Errorf("unknownFields reported %v for invalid JSON", paths)
 		}
 
 		for _, path := range paths {
@@ -399,7 +399,7 @@ func FuzzUnknownFields(f *testing.F) {
 			// the last segment must appear in it wherever the names are
 			// spelled literally.
 			if namesAppearLiterally(raw) && !strings.Contains(raw, lastPathSegment(path)) {
-				t.Errorf("UnknownFieldsOf reported %q, which %q does not hold", path, raw)
+				t.Errorf("unknownFields reported %q, which %q does not hold", path, raw)
 			}
 		}
 	})
@@ -601,9 +601,9 @@ func TestOutOfRangeNumberKeepsChecks(t *testing.T) {
 		t.Errorf("MisspelledFieldsOf = %v, want NAME", got)
 	}
 
-	got, _ = UnknownFieldsOf[walkSpelledA]([]byte(`{` + huge + `"bogus":1}`))
+	got, _ = unknownFields[walkSpelledA]([]byte(`{` + huge + `"bogus":1}`))
 	if !slices.Equal(got, []string{"bogus", "x"}) {
-		t.Errorf("UnknownFieldsOf = %v, want both members", got)
+		t.Errorf("unknownFields = %v, want both members", got)
 	}
 }
 
@@ -680,4 +680,52 @@ func TestDecodeIntoAFilledTarget(t *testing.T) {
 			t.Errorf("%s: value = %+v, want %+v", raw, got, want)
 		}
 	}
+}
+
+// requiredMaps holds required fields in the values of maps, which no profile
+// type has but the walk supports, keyed by a string and by a named string
+// type the decoder fills from the member name as well.
+type requiredMaps struct {
+	Named map[string]requiredRule   `json:"named"`
+	Keyed map[ruleName]requiredRule `json:"keyed"`
+}
+
+type ruleName string
+
+// TestMissingFieldsOfInMaps covers a required member of a map value: it is
+// reported with the member name as the path segment, in sorted order.
+func TestMissingFieldsOfInMaps(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		raw  string
+		want []string
+	}{
+		{`{"named":{"a":{"port":0}}}`, nil},
+		{`{"named":{"b":{"port":1},"a":{}}}`, []string{"named.a.port"}},
+		{`{"named":{"c":null,"a":{"name":"x"}}}`, []string{"named.a.port", "named.c.port"}},
+		{`{"keyed":{"x":{}},"named":{}}`, []string{"keyed.x.port"}},
+	} {
+		var decoded requiredMaps
+
+		err := json.Unmarshal([]byte(test.raw), &decoded)
+		if err != nil {
+			t.Fatalf("%s: %v", test.raw, err)
+		}
+
+		got, omitted := MissingFieldsOf([]byte(test.raw), &decoded)
+		if !slices.Equal(got, test.want) || omitted != 0 {
+			t.Errorf("%s: MissingFieldsOf = %v (%d omitted), want %v",
+				test.raw, got, omitted, test.want)
+		}
+	}
+}
+
+// unknownFields reports the unknown members of raw the way Unmarshal and the
+// spm command find them: Decode names the first on its way through, and
+// UnknownFieldsFound enumerates them only then.
+func unknownFields[T any](raw []byte) ([]string, int) {
+	hint, _ := Decode(raw, new(T))
+
+	return UnknownFieldsFound[T](raw, hint)
 }

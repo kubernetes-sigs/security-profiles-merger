@@ -33,10 +33,10 @@ type ProfileDiff struct {
 	Equal bool `json:"equal"`
 
 	// Executables is set when the allowed executables differ.
-	Executables *StringSliceDiff `json:"executables,omitempty"`
+	Executables *SliceDiff[string] `json:"executables,omitempty"`
 
 	// Libraries is set when the allowed libraries differ.
-	Libraries *StringSliceDiff `json:"libraries,omitempty"`
+	Libraries *SliceDiff[string] `json:"libraries,omitempty"`
 
 	// Filesystem is set when the filesystem rules differ.
 	Filesystem *FilesystemDiff `json:"filesystem,omitempty"`
@@ -45,21 +45,40 @@ type ProfileDiff struct {
 	Network *NetworkDiff `json:"network,omitempty"`
 
 	// Capabilities is set when the capabilities differ.
-	Capabilities *StringSliceDiff `json:"capabilities,omitempty"`
+	Capabilities *SliceDiff[string] `json:"capabilities,omitempty"`
 }
 
 // IsEqual reports whether the two compared profiles are equivalent after
-// normalization, as Equal does.
+// normalization, as Equal does. It has a value receiver, as the IsEqual of
+// the seccomp and landlock diffs does, so that ProfileDiff satisfies
+// spm.Diff by value as well as by pointer; called through a nil
+// *ProfileDiff it panics, like any value method.
 func (d ProfileDiff) IsEqual() bool { return d.Equal }
 
+// String returns what FormatDiff returns for the diff.
+//
+// It has a value receiver, as IsEqual has, so calling it on a nil
+// *ProfileDiff panics, and fmt prints such a pointer as <nil> rather than
+// as FormatDiff(nil) renders it.
+func (d ProfileDiff) String() string { return FormatDiff(&d) }
+
+// SliceDiff represents added and removed items in a set-like slice. It is
+// spm.SliceDiff, the slice diff every package of this module produces, so
+// a value of it is a seccomp.SliceDiff or landlock.SliceDiff of the same
+// item type.
+type SliceDiff[T comparable] = spm.SliceDiff[T]
+
 // StringSliceDiff represents added and removed items in a string slice.
-type StringSliceDiff = spm.SliceDiff[string]
+//
+// Deprecated: Use SliceDiff[string], the name the other packages use for the
+// same type.
+type StringSliceDiff = SliceDiff[string]
 
 // FilesystemDiff describes differences in filesystem rules.
 type FilesystemDiff struct {
-	ReadOnly  *StringSliceDiff `json:"readOnly,omitempty"`
-	WriteOnly *StringSliceDiff `json:"writeOnly,omitempty"`
-	ReadWrite *StringSliceDiff `json:"readWrite,omitempty"`
+	ReadOnly  *SliceDiff[string] `json:"readOnly,omitempty"`
+	WriteOnly *SliceDiff[string] `json:"writeOnly,omitempty"`
+	ReadWrite *SliceDiff[string] `json:"readWrite,omitempty"`
 }
 
 // NetworkDiff describes differences in network rules.
@@ -88,11 +107,13 @@ type BoolPtrDiff struct {
 // false that it denies the same as, which is how Intersect writes it. A
 // profile that says nothing about raw sockets and one that forbids them are
 // therefore equal, and Diff(p, Intersect(p)) is equal unless p has glob
-// patterns that match nothing, which Intersect drops. It returns
-// ErrNilProfile if either profile is nil.
+// patterns that match nothing, which Intersect drops. A nil profile is
+// reported as an InputError naming it (Index 0 for left, 1 for right) and
+// wrapping ErrNilProfile, as Intersect and Union report one.
 func Diff(left, right *Profile) (*ProfileDiff, error) {
-	if left == nil || right == nil {
-		return nil, ErrNilProfile
+	err := merge.RequireNonNil(left, right)
+	if err != nil {
+		return nil, err
 	}
 
 	normLeft := normalizeProfile(left)
@@ -192,7 +213,7 @@ func diffCapabilities(diff *ProfileDiff, left, right *Profile) {
 // spelling of it are one rule, so a profile and its merge result, which
 // keeps one spelling per rule, do not differ in it. A path only one side
 // holds is reported in that side's spelling.
-func diffPaths(left, right []string) *StringSliceDiff {
+func diffPaths(left, right []string) *SliceDiff[string] {
 	leftKeys := pathsByRule(left)
 	rightKeys := pathsByRule(right)
 
@@ -217,16 +238,16 @@ func diffPaths(left, right []string) *StringSliceDiff {
 	slices.Sort(added)
 	slices.Sort(removed)
 
-	return &StringSliceDiff{Added: added, Removed: removed}
+	return &SliceDiff[string]{Added: added, Removed: removed}
 }
 
 // pathsByRule maps the rule each path spells to the simplest spelling the
 // list holds for it.
-func pathsByRule(paths []string) map[string]string {
-	rules := make(map[string]string, len(paths))
+func pathsByRule(paths []string) map[pathKey]string {
+	rules := make(map[pathKey]string, len(paths))
 
 	for _, path := range paths {
-		key := ruleText(path)
+		key := ruleKey(path)
 		if kept, ok := rules[key]; !ok || simplestSpelling(path, kept) < 0 {
 			rules[key] = path
 		}
@@ -235,53 +256,27 @@ func pathsByRule(paths []string) map[string]string {
 	return rules
 }
 
-// ruleText identifies the rule a path spells without compiling it. Diff
-// validates nothing, so it must stay linear in what it is given: the name a
-// literal denotes, or the expression the matcher would compile for a
-// pattern, which two spellings of one pattern share and which is what
-// Validate and the merge identify it by (see keyForPath). That expression
-// spells a class by its members, so "[a-c]" and "[abc]" are one rule here as
-// they are there. A path the port rejects, or one too long for it, is
-// identified by its text.
-func ruleText(path string) string {
+// ruleKey identifies the rule a path spells as matcherCache.key does, but
+// from an analysis that is neither compiled nor cached. Diff validates
+// nothing, so it must stay linear in what it is given, and the identity of
+// a pattern does not depend on whether it is compiled (see pathKey). That
+// identity spells a class by its members, so "[a-c]" and "[abc]" are one
+// rule here as they are to Validate and the merge.
+func ruleKey(path string) pathKey {
 	if !strings.ContainsAny(path, patternSyntax) {
-		return "l:" + filterSlashes(path)
+		return matcherKey(path, literalMatcher(path))
 	}
 
-	if len(path) > maxGlobPatternLen {
-		return "t:" + path
-	}
-
-	conv := convertPattern(filterSlashes(decodeEscapes(path)))
-
-	switch conv.kind {
-	case kindLiteral:
-		return "l:" + literalBytes(conv.regex[:conv.literalEnd])
-	case kindGlob:
-		fragment, ok := translateRegex(conv.regex)
-
-		switch {
-		case !ok:
-		case path[0] != '/':
-			// A relative pattern loads no rule, so it is none an absolute
-			// pattern spells, whatever their expressions.
-			return "r:" + fragment
-		default:
-			return "g:" + fragment
-		}
-	case kindInvalid:
-	}
-
-	return "t:" + path
+	return matcherKey(path, analyzePattern(path, false))
 }
 
-func diffStringSlice(left, right []string) *StringSliceDiff {
+func diffStringSlice(left, right []string) *SliceDiff[string] {
 	added, removed := merge.DiffSlice(left, right)
 	if len(added) == 0 && len(removed) == 0 {
 		return nil
 	}
 
-	return &StringSliceDiff{Added: added, Removed: removed}
+	return &SliceDiff[string]{Added: added, Removed: removed}
 }
 
 // FormatDiff returns a human-readable representation of an AppArmor
@@ -329,7 +324,7 @@ func writeSliceDiff(
 	out *merge.Builder,
 	parts *merge.Joiner,
 	prefix string,
-	sliceDiff *StringSliceDiff,
+	sliceDiff *SliceDiff[string],
 ) {
 	if sliceDiff == nil {
 		return

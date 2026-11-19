@@ -1391,7 +1391,7 @@ func TestMergeNoDetectNoteSuppressesDetectionNote(t *testing.T) {
 
 // TestMergeNamesTheInputItRejected pins that every validation mode names the
 // file a failure came from, the default one included. The merge functions
-// name a position instead ("validate profile 0"), which is not an argument
+// name a position instead ("profile 0"), which is not an argument
 // index once stdin carries an array of profiles and is not something a
 // caller can act on either way.
 func TestMergeNamesTheInputItRejected(t *testing.T) {
@@ -1415,7 +1415,7 @@ func TestMergeNamesTheInputItRejected(t *testing.T) {
 			t.Errorf("stderr = %q, want it to contain %q", stderr, want)
 		}
 
-		if strings.Contains(stderr, "validate profile ") {
+		if strings.Contains(stderr, ": profile ") {
 			t.Errorf("stderr = %q, want no positional name", stderr)
 		}
 	}

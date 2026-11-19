@@ -51,8 +51,8 @@ The codebase is organized in layers:
   `UnmarshalStrict` returns), and `Diff`, the `IsEqual() bool` method all
   three `ProfileDiff` types carry. Each profile package re-exports what it
   uses under its own name, so a caller need not import `spm`, but naming
-  them once is what makes `seccomp.SliceDiff` and `apparmor.StringSliceDiff`
-  the same type rather than twins, and what lets pkg.go.dev link them. Keep
+  them once is what makes `seccomp.SliceDiff` and `apparmor.SliceDiff` the
+  same type rather than twins, and what lets pkg.go.dev link them. Keep
   it this small: the three profile types have no common shape, so nothing
   that needs to know which type it has belongs here. `cmd/spm/kinds.go` is
   where that knowledge lives, as a table of per-type function values.

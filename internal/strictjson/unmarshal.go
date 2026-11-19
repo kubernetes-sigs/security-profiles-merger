@@ -22,14 +22,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
-
-// errNotAnObject is returned by Unmarshal for a document that is not a JSON
-// object, the shape of every profile.
-var errNotAnObject = errors.New("decode profile: not a JSON object")
 
 // jsonSpace holds the bytes JSON allows between tokens.
 const jsonSpace = " \t\r\n"
@@ -42,8 +39,8 @@ const jsonSpace = " \t\r\n"
 // (spm.ErrMisspelledField), a required member left out or null
 // (spm.ErrMissingField), and anything but whitespace behind the document
 // (spm.ErrUnexpectedData). A document that is not a JSON object is refused
-// too: encoding/json decodes null into a struct as nothing at all, which
-// would make it an empty profile.
+// too (spm.ErrNotAnObject): encoding/json decodes null into a struct as
+// nothing at all, which would make it an empty profile.
 //
 // Every message is bounded (see merge.BoundedText), since the decoder quotes
 // back literals whose length the document chooses.
@@ -65,6 +62,17 @@ func Unmarshal[T any](data []byte, target *T) error {
 
 	hint, decoder, err := decodeFirst(data, &decoded)
 	if err != nil {
+		// A document whose value is not an object, such as an array, fails
+		// as a type error on the value itself; it is reported as what it
+		// is, so that spm.ErrNotAnObject matches every document whose value
+		// is not a JSON object, not only null, which decodes without error.
+		// The decoder reads the whole value before it decodes any of it, so
+		// such an error means the value is well-formed, whatever follows.
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &typeErr) && typeErr.Field == "" && RequireObject(data) != nil {
+			return fmt.Errorf("decode profile: %w", spm.ErrNotAnObject)
+		}
+
 		return fmt.Errorf("decode profile: %w", merge.BoundedError(err))
 	}
 
@@ -75,37 +83,16 @@ func Unmarshal[T any](data []byte, target *T) error {
 		return spm.ErrUnexpectedData
 	}
 
-	// Any other value but an object fails to decode into a struct.
-	if bytes.HasPrefix(bytes.TrimLeft(data, jsonSpace), []byte("null")) {
-		return errNotAnObject
+	err = RequireObject(data)
+	if err != nil {
+		return fmt.Errorf("decode profile: %w", err)
 	}
 
-	paths, omitted := DuplicateKeys(data)
-
-	err = PathsError(spm.ErrDuplicateKey, paths, omitted)
-	if err != nil {
-		return err
-	}
-
-	paths, omitted = UnknownFieldsFound[T](data, hint)
-
-	err = PathsError(spm.ErrUnknownField, paths, omitted)
-	if err != nil {
-		return err
-	}
-
-	paths, omitted = MisspelledFieldsOf[T](data)
-
-	err = PathsError(spm.ErrMisspelledField, paths, omitted)
-	if err != nil {
-		return err
-	}
-
-	paths, omitted = MissingFieldsOf(data, &decoded)
-
-	err = PathsError(spm.ErrMissingField, paths, omitted)
-	if err != nil {
-		return err
+	// The findings come in the order of their kinds, and only the first is
+	// reported, so the walks behind the others never run for a document
+	// that is refused anyway. Invalid UTF-8 was ruled out before decoding.
+	for finding := range findings(data, &decoded, hint, false) {
+		return finding.Err
 	}
 
 	*target = decoded
@@ -167,4 +154,112 @@ func decodeFirst[T any](data []byte, target *T) (Hint, *json.Decoder, error) {
 
 	//nolint:wrapcheck // the callers wrap it, or fail as json.Unmarshal fails
 	return Hint{unknown: name, found: unknown}, decoder, err
+}
+
+// RequireObject reports a document that is not a JSON object with
+// spm.ErrNotAnObject. It looks only at the first byte of the value, so it is
+// for a document known to be well-formed JSON, such as one that decoded into
+// a struct without error, which every value but an object and null fails to
+// do; it asks for an object rather than against null, so that it holds
+// whatever the decoder accepted.
+func RequireObject(data []byte) error {
+	if !bytes.HasPrefix(bytes.TrimLeft(data, jsonSpace), []byte("{")) {
+		return spm.ErrNotAnObject
+	}
+
+	return nil
+}
+
+// Finding is one kind of ambiguity a document that decoded holds.
+type Finding struct {
+	// Kind is the sentinel the finding is about: spm.ErrDuplicateKey,
+	// spm.ErrUnknownField, spm.ErrMisspelledField, spm.ErrMissingField or
+	// spm.ErrInvalidUTF8.
+	Kind error
+	// Err wraps Kind and names the members, or the byte, it is about.
+	Err error
+}
+
+// Findings yields what the decoder read without a word in a document that
+// decoded into decoded, one Finding per kind that occurs, in this order:
+// repeated members, unknown members, misspelled members, missing members
+// and invalid UTF-8. Unmarshal reports the first of them, except that it
+// rules out invalid UTF-8 before decoding. hint is what Decode returned for
+// the document. Each kind is only looked for once the caller asks for the
+// next finding, so a caller that stops at the first one does not pay for
+// the walks behind it.
+func Findings[T any](data []byte, decoded *T, hint Hint) iter.Seq[Finding] {
+	return findings(data, decoded, hint, true)
+}
+
+// findings is Findings, leaving out invalid UTF-8 unless withUTF8 is set,
+// for a caller that has checked it already and need not scan the document
+// a second time.
+func findings[T any](data []byte, decoded *T, hint Hint, withUTF8 bool) iter.Seq[Finding] {
+	last := findInvalidUTF8
+	if !withUTF8 {
+		last--
+	}
+
+	return func(yield func(Finding) bool) {
+		for kind := findDuplicate; kind <= last; kind++ {
+			err := find(kind, data, decoded, hint)
+			if err != nil && !yield(Finding{Kind: kind.sentinel(), Err: err}) {
+				return
+			}
+		}
+	}
+}
+
+// findingKind names one kind of Finding, in the order Findings yields them.
+type findingKind int
+
+const (
+	findDuplicate findingKind = iota
+	findUnknown
+	findMisspelled
+	findMissing
+	findInvalidUTF8
+)
+
+// sentinel returns the error a finding of the kind wraps.
+func (kind findingKind) sentinel() error {
+	switch kind {
+	case findDuplicate:
+		return spm.ErrDuplicateKey
+	case findUnknown:
+		return spm.ErrUnknownField
+	case findMisspelled:
+		return spm.ErrMisspelledField
+	case findMissing:
+		return spm.ErrMissingField
+	case findInvalidUTF8:
+		return spm.ErrInvalidUTF8
+	}
+
+	return nil
+}
+
+// find looks for the findings of one kind in a document that decoded into
+// decoded, and returns them as one error, or nil when there are none.
+func find[T any](kind findingKind, data []byte, decoded *T, hint Hint) error {
+	var (
+		paths   []string
+		omitted int
+	)
+
+	switch kind {
+	case findDuplicate:
+		paths, omitted = DuplicateKeys(data)
+	case findUnknown:
+		paths, omitted = UnknownFieldsFound[T](data, hint)
+	case findMisspelled:
+		paths, omitted = MisspelledFieldsOf[T](data)
+	case findMissing:
+		paths, omitted = MissingFieldsOf(data, decoded)
+	case findInvalidUTF8:
+		return InvalidUTF8(data)
+	}
+
+	return PathsError(kind.sentinel(), paths, omitted)
 }

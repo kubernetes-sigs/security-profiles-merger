@@ -125,24 +125,13 @@ func unicodeEscape(raw []byte) (rune, bool) {
 	return rune(value), true
 }
 
-// UnknownFieldsOf reports the members of raw that T has no field for.
+// UnknownFieldsFound reports the members of raw that T has no field for,
+// given the hint Decode returned for raw.
 //
 // Enumerating them needs the document decoded into interface values, which
-// costs more memory than the profile itself, so a strict decode runs first
-// to learn whether there is anything to report. A caller that decodes raw
-// with Decode has that answer already, and passes it to UnknownFieldsFound
-// instead of paying for a second decode of the whole document.
-func UnknownFieldsOf[T any](raw []byte) ([]string, int) {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-
-	name, unknown := decoderFieldName(decoder.Decode(new(T)))
-
-	return UnknownFieldsFound[T](raw, Hint{unknown: name, found: unknown})
-}
-
-// UnknownFieldsFound is UnknownFieldsOf for a document the caller decoded
-// with Decode, which returned hint.
+// costs more memory than the profile itself, so it runs only when the
+// decoder named an unknown member on its way through, which spares a
+// document that has none a second decode of the whole document.
 func UnknownFieldsFound[T any](raw []byte, hint Hint) ([]string, int) {
 	if !hint.found {
 		return nil, 0
@@ -198,11 +187,11 @@ func UnknownFields(raw []byte, target reflect.Type) ([]string, int) {
 // "syscalls". encoding/json fills the field from such a member, while a
 // reader that compares names exactly, as a C runtime does, drops it: the
 // two read different rules from one document. Neither DisallowUnknownFields
-// nor UnknownFieldsOf objects to one, since the decoder knows the field.
+// nor UnknownFieldsFound objects to one, since the decoder knows the field.
 //
-// Enumerating them costs what UnknownFieldsOf's walk costs, so a scan of the
-// member names runs first and the walk only follows when a name could be a
-// misspelling of some field of T.
+// Enumerating them costs what UnknownFieldsFound's walk costs, so a scan of
+// the member names runs first and the walk only follows when a name could
+// be a misspelling of some field of T.
 func MisspelledFieldsOf[T any](raw []byte) ([]string, int) {
 	target := reflect.TypeFor[T]()
 

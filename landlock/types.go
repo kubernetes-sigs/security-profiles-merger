@@ -16,6 +16,8 @@ limitations under the License.
 
 package landlock
 
+import "slices"
+
 // Profile represents a Landlock ruleset for merge operations.
 type Profile struct {
 	// HandledAccessFS is the set of filesystem access rights handled by this
@@ -36,6 +38,33 @@ type Profile struct {
 
 	// NetRules defines network access rules for specific ports.
 	NetRules []NetRule `json:"netRules,omitempty"`
+}
+
+// Clone returns a deep copy of the profile, sharing no slice with it, or nil
+// for a nil profile. A nil slice stays nil and an empty one empty, so the
+// copy encodes to the same JSON.
+func (p *Profile) Clone() *Profile {
+	if p == nil {
+		return nil
+	}
+
+	clone := &Profile{
+		HandledAccessFS:  slices.Clone(p.HandledAccessFS),
+		HandledAccessNet: slices.Clone(p.HandledAccessNet),
+		Scoped:           slices.Clone(p.Scoped),
+		PathRules:        slices.Clone(p.PathRules),
+		NetRules:         slices.Clone(p.NetRules),
+	}
+
+	for idx := range clone.PathRules {
+		clone.PathRules[idx].AccessFS = slices.Clone(clone.PathRules[idx].AccessFS)
+	}
+
+	for idx := range clone.NetRules {
+		clone.NetRules[idx].AccessNet = slices.Clone(clone.NetRules[idx].AccessNet)
+	}
+
+	return clone
 }
 
 // FSAccessRight represents a Landlock filesystem access right.

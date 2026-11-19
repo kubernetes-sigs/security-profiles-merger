@@ -88,17 +88,17 @@ import "sigs.k8s.io/security-profiles-merger/spm"
 ```
 
 Nothing needs to import it: each package re-exports what it uses under its own
-name, so `seccomp.SliceDiff`, `landlock.RightsDiff` and
-`apparmor.StringSliceDiff` all name `spm.SliceDiff`, and every sentinel below
-is the same variable in each package that exports it. Import it to match a
-sentinel without picking one of the three packages arbitrarily, or to hold a
-diff whose profile type was decided elsewhere.
+name, so `seccomp.SliceDiff`, `apparmor.SliceDiff` and `landlock.SliceDiff`
+all name `spm.SliceDiff`, and every sentinel below is the same variable in
+each package that exports it. Import it to match a sentinel without picking
+one of the three packages arbitrarily, or to hold a diff whose profile type
+was decided elsewhere.
 
 | Name | Description |
 |------|-------------|
 | `SliceDiff[T]` | Added and removed items in a set-like slice |
 | `Diff` | `interface { IsEqual() bool }`, satisfied by all three `ProfileDiff` types, by value and by pointer |
-| `InputError` | Returned by every `Intersect` and `Union` when an input is nil or fails validation: `Index` is its position among the arguments, `Err` what validation reported. Match it with `errors.As` to tell a bad artifact from a bad baseline; `errors.Is` sees through it to the sentinels |
+| `InputError` | Returned by every `Intersect` and `Union` when an input is nil or fails validation, and by `Diff` when one is nil: `Index` is its position among the arguments, `Err` what was wrong with it. Match it with `errors.As` to tell a bad artifact from a bad baseline; `errors.Is` sees through it to the sentinels |
 | `MaxPathLen` | 4095, the longest path `apparmor` and `landlock` accept: `PATH_MAX` less its terminating NUL |
 
 These sentinels are shared: `errors.Is` against the one here matches an error
@@ -107,12 +107,12 @@ from any of the three packages.
 | Sentinel | Raised by | Meaning |
 |----------|-----------|---------|
 | `ErrNoProfiles` | `Intersect` and `Union` of every package | No profiles were given |
-| `ErrNilProfile` | Every function that takes a profile and returns an error | A nil profile was given; a merge wraps it in an `InputError` |
+| `ErrNilProfile` | Every function that takes a profile and returns an error | A nil profile was given; a merge or `Diff` wraps it in an `InputError` |
 | `ErrMoreProblems` | Every validator, and every merge through its `InputError` | The report left failures out; see [reading a validation error](integration.md#reading-a-validation-error) |
 | `ErrEmptyPath` | `apparmor`, `landlock`: every validator and merge | A path is the empty string |
 | `ErrRelativePath` | `apparmor`, `landlock`: `ValidateArtifact` and `ValidateStrict` | A path does not start with `/` |
 | `ErrPathTooLong` | `apparmor`, `landlock`: every validator and merge | A path is longer than `MaxPathLen`. It is checked before the path is scanned; only the empty-path check and the artifact limits of `ValidateArtifact` and `ValidateStrict` run before it |
-| `ErrDuplicateKey`, `ErrUnknownField`, `ErrMisspelledField`, `ErrInvalidUTF8`, `ErrUnexpectedData` | `UnmarshalStrict` of every package | See [Strict decoding](#strict-decoding) |
+| `ErrDuplicateKey`, `ErrUnknownField`, `ErrMisspelledField`, `ErrInvalidUTF8`, `ErrUnexpectedData`, `ErrNotAnObject` | `UnmarshalStrict` of every package | See [Strict decoding](#strict-decoding) |
 | `ErrMissingField` | `landlock.UnmarshalStrict` | See [Strict decoding](#strict-decoding) |
 
 ### Strict decoding
@@ -130,14 +130,16 @@ artifact and the runtime that loads it:
 | `ErrMissingField` | No `port` in a Landlock network rule, or a null one | `encoding/json` decodes port 0, the port a socket binds to for an ephemeral one, so the rule would grant that. `json.Unmarshal` keeps reading it that way, which a producer writing the port with `omitempty` relies on |
 | `ErrInvalidUTF8` | A byte that is not valid UTF-8, or a `\u` escape spelling half a surrogate pair | `encoding/json` replaces both with U+FFFD, so names that differ only there decode alike and merge into one rule |
 | `ErrUnexpectedData` | Anything but whitespace after the profile | A second value would be dropped |
+| `ErrNotAnObject` | A document whose value is not a JSON object: `null`, an array, a string, a number or a boolean | `encoding/json` decodes `null` as nothing at all, an empty profile, and refuses the others with a type error that names no sentinel |
 
-A document that is not a JSON object, such as `null`, is refused too, with an
-error that matches no sentinel. `UnmarshalStrict` reports the first kind of
-problem it finds, naming every member of that kind up to a bound. Every
-message is bounded in length, since the decoder quotes back literals whose
-length the document chooses. The profile it is given is replaced only when
-decoding succeeds. Validate the result with `ValidateArtifact` afterwards:
-strict decoding checks the shape of the document, not the profile.
+Invalid UTF-8 is reported before anything else, and a value that is not an
+object before what follows it. A document that is not well-formed JSON
+otherwise gets the decoder's error. `UnmarshalStrict` reports the first kind
+of problem it finds, naming every member of that kind up to a bound. Every message is bounded
+in length, since the decoder quotes back literals whose length the document
+chooses. The profile it is given is replaced only when decoding succeeds.
+Validate the result with `ValidateArtifact` afterwards: strict decoding checks
+the shape of the document, not the profile.
 
 ## seccomp
 
@@ -178,15 +180,18 @@ Diff types (`ProfileDiff`, `ActionDiff`, `UintPtrDiff`, `StringDiff`,
 are documented in the
 [package reference](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#ProfileDiff).
 
-`SyscallEntry` and `SyscallDetail` implement `fmt.Stringer` for human-readable
-formatting, quoted and bounded as `FormatProfile` is.
+`ProfileDiff`, `SyscallEntry` and `SyscallDetail` implement `fmt.Stringer`
+for human-readable formatting, quoted and bounded as `FormatProfile` is; a
+non-nil `ProfileDiff` renders as `FormatDiff` does. `String` has a value
+receiver, so it panics on a nil `*ProfileDiff`, which `fmt` prints as
+`<nil>`.
 
 ### Errors
 
 | Sentinel | Raised by | Meaning |
 |----------|-----------|---------|
 | `ErrNoProfiles` | `Intersect`, `Union` | No profiles were given |
-| `ErrNilProfile` | Every validator, merge, `Diff`, `DiffForArch`, `UnmarshalStrict` | A profile is nil |
+| `ErrNilProfile` | Every validator, merge, `Diff`, `DiffForArch`, `UnmarshalStrict` | A profile is nil; the merges, `Diff` and `DiffForArch` wrap it in an `InputError` naming its position |
 | `ErrUnknownAction` | `Validate` and up | An action this package does not know |
 | `ErrEmptySyscallNames` | `Validate` and up | An entry has no names |
 | `ErrEmptySyscallName` | `Validate` and up | A name is the empty string |
@@ -209,7 +214,7 @@ formatting, quoted and bounded as `FormatProfile` is.
 | `ErrDuplicateSyscallName` | `ValidateStrict` | A name in several entries, or twice in one |
 | `ErrUnusedValueTwo` | `ValidateStrict` | `valueTwo` on an operator other than `SCMP_CMP_MASKED_EQ` |
 | `ErrMoreProblems` | Every validator | The report left failures out, so read any match as "and possibly others" |
-| `ErrDuplicateKey`, `ErrUnknownField`, `ErrMisspelledField`, `ErrInvalidUTF8`, `ErrUnexpectedData` | `UnmarshalStrict` | See [Strict decoding](#strict-decoding) |
+| `ErrDuplicateKey`, `ErrUnknownField`, `ErrMisspelledField`, `ErrInvalidUTF8`, `ErrUnexpectedData`, `ErrNotAnObject` | `UnmarshalStrict` | See [Strict decoding](#strict-decoding) |
 
 "`Validate` and up" means `Validate`, `ValidateArtifact` and `ValidateStrict`.
 Every merge input failing `Validate` comes back as an
@@ -334,7 +339,7 @@ import "sigs.k8s.io/security-profiles-merger/apparmor"
 | `ValidateArtifact` | `Validate` plus the [limits](#limits-1), checked first and on their own, and what a runtime could not load or would silently drop: relative paths, patterns apparmor_parser rejects, loads with another meaning than they spell, or the matcher cannot use, `.` or `..` components, NUL bytes, characters the lexer does not accept unescaped or that are not printable, capability names outside `[A-Za-z0-9_]` |
 | `ValidateStrict` | `ValidateArtifact` plus capability names outside the known set and duplicate executable or library paths |
 | `UnmarshalStrict` | Decode a profile, refusing what `encoding/json` accepts silently; see [strict decoding](#strict-decoding) |
-| `Diff` | Structured diff, comparing what AppArmor loads from the two profiles |
+| `Diff` | Structured diff, comparing what AppArmor loads from the two profiles. A nil profile is an `InputError` naming it, wrapping `ErrNilProfile` |
 | `FormatProfile`, `FormatDiff` | Human-readable profile and diff, quoted and cut at 64 KiB as in [seccomp](#functions) |
 | `IsGlobPattern` | Whether a path holds glob syntax, including syntax apparmor_parser rejects |
 
@@ -342,16 +347,18 @@ import "sigs.k8s.io/security-profiles-merger/apparmor"
 
 The types are `Profile` with its sections (`ExecutableRules`,
 `FilesystemRules`, `NetworkRules`, `AllowedProtocols`, `CapabilityRules`) and
-the diff types (`ProfileDiff`, `StringSliceDiff`, `FilesystemDiff`,
-`NetworkDiff`, `BoolPtrDiff`). `*Profile`, `ExecutableRules`,
-`FilesystemRules`, `NetworkRules` and `CapabilityRules` implement
-`fmt.Stringer`, quoted and bounded as `FormatProfile` is; a nil `*Profile`
-formats as `Profile{<nil>}`.
+the diff types (`ProfileDiff`, `SliceDiff[T]`, `FilesystemDiff`,
+`NetworkDiff`, `BoolPtrDiff`). `StringSliceDiff` is a deprecated name for
+`SliceDiff[string]`. `*Profile`, `ExecutableRules`, `FilesystemRules`,
+`NetworkRules`, `CapabilityRules` and `ProfileDiff` implement `fmt.Stringer`,
+quoted and bounded as `FormatProfile` is; a nil `*Profile` formats as
+`Profile{<nil>}`. `(*Profile).Clone` returns a deep copy, or nil for a nil
+profile.
 
 ### Errors
 
 `ErrNoProfiles`, `ErrNilProfile`, `ErrMoreProblems`, `ErrEmptyPath`,
-`ErrRelativePath`, `ErrPathTooLong` and the five `UnmarshalStrict` sentinels
+`ErrRelativePath`, `ErrPathTooLong` and the `UnmarshalStrict` sentinels
 are shared and listed under [spm](#spm). A merge fails with `ErrNoProfiles`
 when given nothing, and otherwise only on the rows that name it and on
 `ErrNilProfile`, `ErrEmptyPath`, `ErrPathTooLong` and `ErrMoreProblems`,
@@ -474,7 +481,7 @@ import "sigs.k8s.io/security-profiles-merger/landlock"
 | `DowngradeToABI` | A copy of a profile without the rights a given ABI version does not support. Another policy than the profile: a right dropped from a handled set is no longer restricted, and at `ABIV1` the moves a `refer` grant allowed are denied |
 | `LoweredRulePaths` | The rule paths of a result that carry access an input granted only on an ancestor path |
 | `UnmarshalStrict` | Decode a profile, refusing what `encoding/json` accepts silently; see [strict decoding](#strict-decoding) |
-| `Diff` | Structured diff of the cleaned rules as written, not of the access they grant |
+| `Diff` | Structured diff of the cleaned rules as written, not of the access they grant. A nil profile is an `InputError` naming it, wrapping `ErrNilProfile` |
 | `FormatProfile`, `FormatDiff` | Human-readable profile and diff, quoted and cut at 64 KiB as in [seccomp](#functions) |
 
 ### Types
@@ -482,16 +489,18 @@ import "sigs.k8s.io/security-profiles-merger/landlock"
 The types are `Profile`, the access rights (`FSAccessRight`, `NetAccessRight`,
 `ScopeRight`), `PathRule`, `NetRule`, `ABIVersion` with the constants `ABIV1`
 to `ABIV11` and `LatestABIVersion`, and the diff types (`ProfileDiff`,
-`RightsDiff`, `PathRulesDiff`, `PathRuleChange`, `NetRulesDiff`,
-`NetRuleChange`). The access rights mirror the Landlock UAPI, and each names
-the ABI version that introduced it. `*Profile`, `PathRule` and `NetRule`
-implement `fmt.Stringer`, quoted and bounded as `FormatProfile` is; a nil
-`*Profile` formats as `Profile{<nil>}`.
+`SliceDiff[T]`, `PathRulesDiff`, `PathRuleChange`, `NetRulesDiff`,
+`NetRuleChange`; `RightsDiff` is a deprecated name for `SliceDiff`). The
+access rights mirror the Landlock UAPI, and each names the ABI version that
+introduced it. `*Profile`, `PathRule`, `NetRule` and `ProfileDiff` implement
+`fmt.Stringer`, quoted and bounded as `FormatProfile` is; a nil `*Profile`
+formats as `Profile{<nil>}`. `(*Profile).Clone` returns a deep copy, or nil
+for a nil profile.
 
 ### Errors
 
 `ErrNoProfiles`, `ErrNilProfile`, `ErrMoreProblems`, `ErrEmptyPath`,
-`ErrRelativePath`, `ErrPathTooLong` and the five `UnmarshalStrict` sentinels
+`ErrRelativePath`, `ErrPathTooLong` and the `UnmarshalStrict` sentinels
 are shared and listed under [spm](#spm). A merge fails with `ErrNoProfiles`
 when given nothing, and otherwise only on the rows that name it and on
 `ErrNilProfile`, `ErrEmptyPath`, `ErrPathTooLong` and `ErrMoreProblems`,

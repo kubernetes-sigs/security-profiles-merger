@@ -16,6 +16,8 @@ limitations under the License.
 
 package apparmor
 
+import "fmt"
+
 // MatcherUsable reports whether the matcher can match anything with the
 // path, so that external tests can tell a pattern the merge keeps from one
 // it silently drops. Validate leaves such patterns to ValidateStrict and
@@ -27,12 +29,10 @@ func MatcherUsable(path string) bool {
 // PathIdentity returns the rule a path spells, so that external tests can
 // tell two spellings of one rule apart from two different rules the way the
 // package does. A merge keeps one spelling per rule, which is not always the
-// one an input used.
+// one an input used. It reads the identity as validation and the merge
+// do: through a call's cache, on the normalized path.
 func PathIdentity(path string) string {
-	key := keyForPath(path)
-	if key.glob {
-		return "glob:" + key.text
-	}
+	key := newMatcherCache().key(normalizePath(path))
 
-	return "literal:" + key.text
+	return fmt.Sprintf("%d:%t:%s", key.kind, key.relative, key.text)
 }

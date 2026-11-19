@@ -55,11 +55,9 @@ var errDiffRequiresTwo = errors.New("diff requires exactly 2 profiles")
 
 // diffOptions holds the parsed flags of the diff command.
 type diffOptions struct {
-	profileType  string
-	format       string
-	output       string
-	arch         string
-	noDetectNote bool
+	commonOptions
+
+	arch string
 }
 
 // bindDiffFlags declares the diff flags on the set and returns the struct
@@ -67,18 +65,8 @@ type diffOptions struct {
 func bindDiffFlags(flags *flag.FlagSet) *diffOptions {
 	opts := new(diffOptions)
 
-	flags.StringVar(
-		&opts.profileType, "type", "",
-		"profile type: seccomp, apparmor, landlock (auto-detected if omitted)",
-	)
-	flags.StringVar(&opts.format, "format", formatJSON, "output format: json, human")
-	flags.StringVar(&opts.output, "output", "", "write output to file (default: stdout)")
+	opts.bind(flags, "the diff", "stdout")
 	bindArchFlag(flags, &opts.arch, "implied on both sides")
-	flags.BoolVar(
-		&opts.noDetectNote, "no-detect-note", false,
-		"do not note an auto-detected profile type on stderr; the diff, "+
-			"errors and warnings still go to their usual streams",
-	)
 
 	return opts
 }
@@ -91,9 +79,13 @@ func runDiff(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	if code := validateDiffFlags(
-		flags.Args(), argsSeparated(flags, args), opts.format, opts.profileType, stderr,
-	); code != 0 {
+	// The flag order is checked first, so that a flag after the file
+	// arguments is reported as such, and then the flag values.
+	if code := checkFlagOrder(flags.Args(), argsSeparated(flags, args), stderr); code != 0 {
+		return code
+	}
+
+	if code := opts.check(stderr); code != 0 {
 		return code
 	}
 
@@ -142,22 +134,6 @@ func diffInputs(
 	}
 
 	return code
-}
-
-// validateDiffFlags checks the flag order first, so that a flag after the
-// file arguments is reported as such, and then the flag values.
-func validateDiffFlags(
-	args []string, separated bool, format, profileType string, stderr io.Writer,
-) int {
-	if code := checkFlagOrder(args, separated, stderr); code != 0 {
-		return code
-	}
-
-	if code := validateFormat(format, stderr); code != 0 {
-		return code
-	}
-
-	return validateProfileType(profileType, stderr)
 }
 
 func readDiffInputs(

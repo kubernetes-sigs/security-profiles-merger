@@ -60,7 +60,20 @@ type ProfileDiff struct {
 
 // IsEqual reports Equal: whether the two profiles compare equal in the
 // normalized form Diff describes.
+//
+// It has a value receiver, so that a ProfileDiff satisfies spm.Diff by value
+// as well as by pointer, and therefore needs a diff to read: calling it on a
+// nil *ProfileDiff panics. Diff and DiffForArch return a nil diff only
+// together with an error.
 func (d ProfileDiff) IsEqual() bool { return d.Equal }
+
+// String returns FormatDiff of the diff, so that fmt prints a diff the way
+// FormatDiff renders it.
+//
+// It has a value receiver, as IsEqual has, so calling it on a nil
+// *ProfileDiff panics, and fmt prints such a pointer as <nil> rather than
+// as FormatDiff(nil) renders it.
+func (d ProfileDiff) String() string { return FormatDiff(&d) }
 
 // ActionDiff represents a change in seccomp action.
 type ActionDiff struct {
@@ -115,7 +128,9 @@ type SyscallDetail struct {
 
 // Diff compares two seccomp profiles by the rules a runtime loads from them
 // and returns a structured diff. Unlike Intersect and Union, it does not
-// validate the profiles. It returns ErrNilProfile if either profile is nil.
+// validate the profiles. A nil profile is reported as an *InputError
+// naming its side, Index 0 for left and 1 for right, which matches
+// ErrNilProfile.
 //
 // Entries are normalized as a merge reads them: entries equal to the
 // profile default are ignored, an unconditional entry hides the conditional
@@ -165,8 +180,9 @@ func DiffForArch(
 		return nil, err
 	}
 
-	if left == nil || right == nil {
-		return nil, ErrNilProfile
+	err = merge.RequireNonNil(left, right)
+	if err != nil {
+		return nil, err
 	}
 
 	diff := &ProfileDiff{

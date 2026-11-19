@@ -18,11 +18,10 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"io"
 	"slices"
-
-	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
 const validateUsage = `Usage: spm validate [options] [files...]
@@ -50,43 +49,47 @@ checks do not depend on it, so it needs --artifact or --strict.
 Options:
 `
 
-//nolint:funlen // declares its flags one by one, unlike merge and diff
-func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	flags := newFlagSet(cmdValidate)
+// validateOptions holds the parsed flags of the validate command.
+type validateOptions struct {
+	commonOptions
 
-	profileType := flags.String(
-		"type", "", "profile type: seccomp, apparmor, landlock (auto-detected if omitted)",
-	)
-	strict := flags.Bool(
-		"strict", false,
+	strict   bool
+	artifact bool
+	quiet    bool
+	arch     string
+}
+
+// bindValidateFlags declares the validate flags on the set and returns the
+// struct they fill in.
+func bindValidateFlags(flags *flag.FlagSet) *validateOptions {
+	opts := new(validateOptions)
+
+	opts.bind(flags, "the validated profiles", "stdout, not with --quiet")
+	flags.BoolVar(
+		&opts.strict, "strict", false,
 		"use strict validation, which also rejects unknown, repeated and "+
 			"misspelled fields and invalid UTF-8 (not with --artifact)",
 	)
-	artifact := flags.Bool(
-		"artifact", false,
+	flags.BoolVar(
+		&opts.artifact, "artifact", false,
 		"validate as an artifact, the untrusted profile a container runtime "+
 			"pulls, rejecting unknown, repeated and misspelled fields and invalid UTF-8",
 	)
-	format := flags.String("format", formatJSON, "output format: json, human")
-	output := flags.String(
-		"output", "", "write output to file (default: stdout, not with --quiet)",
-	)
-	quiet := flags.Bool(
-		"quiet", false,
+	flags.BoolVar(
+		&opts.quiet, "quiet", false,
 		"write no profile on success and note no auto-detected type; errors and "+
 			"warnings still go to stderr (not with --output or --format)",
 	)
-	noDetectNote := flags.Bool(
-		"no-detect-note", false,
-		"do not note an auto-detected profile type on stderr; the validated "+
-			"profiles, errors and warnings still go to their usual streams",
-	)
-
-	var archValue string
-
 	bindArchFlag(
-		flags, &archValue, "of the node that loads the profiles, for --artifact or --strict",
+		flags, &opts.arch, "of the node that loads the profiles, for --artifact or --strict",
 	)
+
+	return opts
+}
+
+func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	flags := newFlagSet(cmdValidate)
+	opts := bindValidateFlags(flags)
 
 	if done, code := parseFlags(flags, validateUsage, args, stdout, stderr); done {
 		return code
@@ -96,21 +99,15 @@ func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	code := validateValidateFlags(validateFlags{
-		profileType: *profileType,
-		format:      *format,
-		output:      *output,
-		strict:      *strict,
-		artifact:    *artifact,
-		quiet:       *quiet,
-		formatSet:   flagNamed(flags, "format"),
-		archSet:     flagNamed(flags, flagNameArch),
+	code := validateValidateFlags(opts, validateFlagsNamed{
+		format: flagNamed(flags, "format"),
+		arch:   flagNamed(flags, flagNameArch),
 	}, stderr)
 	if code != 0 {
 		return code
 	}
 
-	arch, code := parseArchFlag(flags, archValue, stderr)
+	arch, code := parseArchFlag(flags, opts.arch, stderr)
 	if code != 0 {
 		return code
 	}
@@ -119,85 +116,72 @@ func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	return validateInputs(
-		flags.Args(), *profileType, modeFromFlags(*strict, *artifact), arch,
-		*format, *output, *quiet, *noDetectNote, stdin, stdout, stderr,
-	)
-}
-
-// validateInputs reads, validates, and writes back the profiles named by
-// args, which may be empty to read from stdin.
-func validateInputs(
-	args []string, profileType string, mode validateMode, arch archOption,
-	format, output string, quiet, noDetectNote bool,
-	stdin io.Reader, stdout, stderr io.Writer,
-) int {
-	inputs, err := readInputs(args, stdin)
+	inputs, err := readInputs(flags.Args(), stdin)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 
 		return readErrorExit(err)
 	}
 
+	return validateInputs(opts, arch, inputs, stdout, stderr)
+}
+
+// validateInputs validates the profiles that were read, and writes them
+// back.
+func validateInputs(
+	opts *validateOptions, arch archOption, inputs []profileInput, stdout, stderr io.Writer,
+) int {
 	// --quiet promises a silent stderr on success, so it implies
 	// --no-detect-note.
-	kind, code := resolveKind(profileType, inputs, 1, quiet || noDetectNote, stderr)
+	kind, code := resolveKind(
+		opts.profileType, inputs, 1, opts.quiet || opts.noDetectNote, stderr,
+	)
 	if code != 0 {
 		return code
 	}
 
 	var out bytes.Buffer
 
-	code = kind.validate(inputs, mode, arch, format, &out, stderr)
+	code = kind.validate(inputs, opts.mode(), arch, opts.format, &out, stderr)
 	if code != 0 {
 		return code
 	}
 
-	if quiet {
+	if opts.quiet {
 		return 0
 	}
 
-	return flushOutput(output, out.Bytes(), stdout, stderr)
+	return flushOutput(opts.output, out.Bytes(), stdout, stderr)
 }
 
-// modeFromFlags maps the validate flags to a mode; the flags have already
-// been checked not to be set together.
-func modeFromFlags(strict, artifact bool) validateMode {
+// mode maps the validate flags to a mode; the flags have already been
+// checked not to be set together.
+func (opts *validateOptions) mode() validateMode {
 	switch {
-	case artifact:
+	case opts.artifact:
 		return modeArtifact
-	case strict:
+	case opts.strict:
 		return modeStrict
 	default:
 		return modeDefault
 	}
 }
 
-// validateFlags holds the parsed flags of the validate command.
-type validateFlags struct {
-	profileType string
-	format      string
-	output      string
-	strict      bool
-	artifact    bool
-	quiet       bool
-	// formatSet reports whether --format was named, which a default value
-	// cannot tell apart from the flag being left out.
-	formatSet bool
-	// archSet reports whether --arch was named, for the same reason.
-	archSet bool
+// validateFlagsNamed reports which validate flags were named, which a
+// default value cannot tell apart from the flag being left out.
+type validateFlagsNamed struct {
+	format bool
+	arch   bool
 }
 
-func validateValidateFlags(opts validateFlags, stderr io.Writer) int {
-	if code := validateFormat(opts.format, stderr); code != 0 {
+func validateValidateFlags(
+	opts *validateOptions, named validateFlagsNamed, stderr io.Writer,
+) int {
+	if code := opts.check(stderr); code != 0 {
 		return code
 	}
 
-	if code := validateProfileType(opts.profileType, stderr); code != 0 {
-		return code
-	}
-
-	if code := checkModeFlags(opts, stderr); code != 0 {
+	if code := checkModeFlags(opts, named.arch, stderr); code != 0 {
 		return code
 	}
 
@@ -211,7 +195,7 @@ func validateValidateFlags(opts validateFlags, stderr io.Writer) int {
 
 	// --format shapes the profile --quiet suppresses, so naming both says
 	// two things that cannot both be meant, as --output does.
-	if opts.quiet && opts.formatSet {
+	if opts.quiet && named.format {
 		_, _ = fmt.Fprintln(
 			stderr, "error: --quiet cannot be combined with --format",
 		)
@@ -223,8 +207,8 @@ func validateValidateFlags(opts validateFlags, stderr io.Writer) int {
 }
 
 // checkModeFlags checks the flags that choose the validation mode and what
-// it depends on.
-func checkModeFlags(opts validateFlags, stderr io.Writer) int {
+// it depends on. archNamed reports whether --arch was named.
+func checkModeFlags(opts *validateOptions, archNamed bool, stderr io.Writer) int {
 	if opts.strict && opts.artifact {
 		_, _ = fmt.Fprintln(
 			stderr, "error: --strict cannot be combined with --artifact",
@@ -236,7 +220,7 @@ func checkModeFlags(opts validateFlags, stderr io.Writer) int {
 	// The default checks do not depend on the architecture, so --arch
 	// without the checks that do would be a flag that quietly does nothing,
 	// as it would be for a profile type without architectures.
-	if opts.archSet && !opts.strict && !opts.artifact {
+	if archNamed && !opts.strict && !opts.artifact {
 		_, _ = fmt.Fprintln(
 			stderr, "error: --arch only applies with --strict or --artifact",
 		)
@@ -267,18 +251,7 @@ func validateProfiles[T any](
 		return 1
 	}
 
-	var failed bool
-
-	for idx, profile := range profiles {
-		err := check(profile)
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "error: %s: %v\n", merge.SafeName(inputs[idx].name), err)
-
-			failed = true
-		}
-	}
-
-	if failed {
+	if checkInputs(profiles, func(int) func(*T) error { return check }, inputs, stderr) {
 		return 1
 	}
 
