@@ -325,6 +325,19 @@ limitations under the License.
 // shapes. [Union] always does the latter, in its direction, since dropping
 // an architecture an input covers would deny what that input permits.
 //
+// On those 32-bit architectures, libseccomp drops a SCMP_CMP_MASKED_EQ whose
+// mask sets only upper bits, so a rule whose every condition is one holds
+// for every call there; any other condition keeps a lower half to test, as
+// SCMP_CMP_EQ against 1<<32 tests for 0. libseccomp keeps the first
+// unconditional rule of a syscall, so such a rule added before the
+// syscall's unconditional one decides every call on a 32-bit architecture
+// while the unconditional one decides them elsewhere. A single profile has
+// that form even where [Intersect] keeps the 32-bit architectures, as for
+// Intersect(p) or a 32-bit native architecture, so wherever a result covers
+// a 32-bit architecture, once its architectures are settled, both merges
+// read such a syscall as its one unconditional rule: the more restrictive
+// of the two for [Intersect] and the less restrictive for [Union].
+//
 // On x86, 32-bit MIPS, ppc, ppc64, ppc64le, s390, s390x, m68k and sh, the
 // socket and SysV IPC syscalls are reached through socketcall(2) and ipc(2)
 // as well:
@@ -463,8 +476,13 @@ limitations under the License.
 // They settle the multiplexer path as a merge does (see the Architectures
 // section), but keep values above 32 bits: the rules they keep are the ones
 // the profile loads, so they mean on a 32-bit architecture what the profile
-// means there. Intersect(p) of a profile that notifies keeps the action and
-// the listener.
+// means there. The exception is a syscall whose unconditional rule follows
+// a rule that holds for every call on a 32-bit architecture the profile
+// covers (see the Architectures section): the result cannot keep both in
+// the order libseccomp reads them, so Intersect(p) and Union(p) read the
+// syscall as the stricter or the looser of the two everywhere, which is
+// not exact on the architectures where the other one decides. Intersect(p)
+// of a profile that notifies keeps the action and the listener.
 //
 // # Diff
 //
@@ -482,8 +500,14 @@ limitations under the License.
 // compared with the native architecture implied on both sides.
 //
 // Diff(p, Intersect(p)) is equal exactly when every syscall of p is in a
-// safe shape and nothing needed settling for a multiplexing architecture,
-// and otherwise reports what the merge settled. Diff compares the rules a
+// safe shape, nothing needed settling for a multiplexing architecture, and
+// no syscall has an unconditional rule after one that holds for every call
+// on a 32-bit architecture p covers, and otherwise reports what the merge
+// settled. A profile listing x86 next to x86_64 with personality
+// SCMP_ACT_KILL_PROCESS if SCMP_CMP_MASKED_EQ(a0, 0xffffffff00000000, 0)
+// and then personality SCMP_ACT_ALLOW is in a safe shape, yet the diff
+// reports personality as changed from SCMP_ACT_ALLOW to
+// SCMP_ACT_KILL_PROCESS. Diff compares the rules a
 // runtime adds, not whether libseccomp accepts them: two profiles holding
 // the same rules in a different order compare equal although libseccomp
 // may refuse one of them with EEXIST, which depends on the order.
@@ -564,7 +588,10 @@ limitations under the License.
 // restrictive than every action in the lists, as in an allowlist, and that
 // no entry equals it, since a runtime would skip that entry. Under that
 // assumption [IntersectSyscalls] never permits more than either list and
-// [UnionSyscalls] never less.
+// [UnionSyscalls] never less, as a filter of a 64-bit architecture that
+// multiplexes nothing loads them: without a profile they know no
+// architectures, and read no rule as it loads on a 32-bit or multiplexing
+// one (see the Architectures section).
 //
 // [IntersectSyscalls] leaves calls a list leaves to the default to it:
 // syscalls in only one list are dropped, a conditional entry survives only
