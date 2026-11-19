@@ -1,10 +1,34 @@
+# One pull request per ecosystem and week, for updates released at least
+# three days earlier: a release that gets pulled or patched within days
+# never reaches a pull request.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
+    groups:
+      github-actions:
+        patterns: ["*"]
   - package-ecosystem: gomod
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
+    groups:
+      gomod:
+        patterns: ["*"]
+  # The tools the Makefile runs with go tool. Their module is not imported
+  # by consumers, so its updates are grouped apart from the library's.
+  - package-ecosystem: gomod
+    directory: /hack/tools
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+    groups:
+      tools:
+        patterns: ["*"]

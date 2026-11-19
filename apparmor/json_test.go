@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 )
 
 func TestJSONRoundTripFull(t *testing.T) {
@@ -49,7 +50,7 @@ func TestJSONRoundTripFull(t *testing.T) {
 		},
 	}
 
-	assertJSONRoundTrip(t, profile)
+	testutil.AssertJSONRoundTrip(t, profile)
 }
 
 func TestJSONRoundTripNilFields(t *testing.T) {
@@ -62,7 +63,7 @@ func TestJSONRoundTripNilFields(t *testing.T) {
 		Capabilities: nil,
 	}
 
-	assertJSONRoundTrip(t, profile)
+	testutil.AssertJSONRoundTrip(t, profile)
 }
 
 func TestJSONRoundTripEmptySubStructs(t *testing.T) {
@@ -131,7 +132,7 @@ func TestJSONRoundTripPartialFields(t *testing.T) {
 		},
 	}
 
-	assertJSONRoundTrip(t, profile)
+	testutil.AssertJSONRoundTrip(t, profile)
 }
 
 // goldenProfileJSON is the wire form of goldenProfile, as a consumer of this
@@ -195,26 +196,6 @@ func TestJSONGoldenDocument(t *testing.T) {
 
 	if !reflect.DeepEqual(decoded, profile) {
 		t.Errorf("decoding the golden document gave\n  %+v\nwant\n  %+v", decoded, profile)
-	}
-}
-
-func assertJSONRoundTrip(t *testing.T, profile apparmor.Profile) {
-	t.Helper()
-
-	data, err := json.Marshal(profile)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-
-	var got apparmor.Profile
-
-	err = json.Unmarshal(data, &got)
-	if err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
-	if !reflect.DeepEqual(profile, got) {
-		t.Errorf("round-trip mismatch:\n  got:  %+v\n  want: %+v", got, profile)
 	}
 }
 

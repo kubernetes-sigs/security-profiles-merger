@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 	"sigs.k8s.io/security-profiles-merger/landlock"
 )
 
@@ -65,7 +66,7 @@ func TestJSONRoundTripFull(t *testing.T) {
 		},
 	}
 
-	assertJSONRoundTrip(t, &profile)
+	testutil.AssertJSONRoundTrip(t, &profile)
 }
 
 func TestJSONRoundTripScoped(t *testing.T) {
@@ -82,7 +83,7 @@ func TestJSONRoundTripScoped(t *testing.T) {
 		NetRules:  nil,
 	}
 
-	assertJSONRoundTrip(t, &profile)
+	testutil.AssertJSONRoundTrip(t, &profile)
 }
 
 func TestJSONRoundTripEmpty(t *testing.T) {
@@ -96,7 +97,7 @@ func TestJSONRoundTripEmpty(t *testing.T) {
 		NetRules:         nil,
 	}
 
-	assertJSONRoundTrip(t, &profile)
+	testutil.AssertJSONRoundTrip(t, &profile)
 }
 
 func TestJSONRoundTripFSOnly(t *testing.T) {
@@ -117,7 +118,7 @@ func TestJSONRoundTripFSOnly(t *testing.T) {
 		NetRules: nil,
 	}
 
-	assertJSONRoundTrip(t, &profile)
+	testutil.AssertJSONRoundTrip(t, &profile)
 }
 
 func TestJSONRoundTripEmptyAccessLists(t *testing.T) {
@@ -146,26 +147,6 @@ func TestJSONRoundTripEmptyAccessLists(t *testing.T) {
 	if got.HandledAccessFS != nil || got.HandledAccessNet != nil ||
 		got.PathRules != nil || got.NetRules != nil {
 		t.Error("expected nil slices after round-trip of empty slices (omitempty)")
-	}
-}
-
-func assertJSONRoundTrip(t *testing.T, profile *landlock.Profile) {
-	t.Helper()
-
-	data, err := json.Marshal(profile)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-
-	var got landlock.Profile
-
-	err = json.Unmarshal(data, &got)
-	if err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
-	if !reflect.DeepEqual(*profile, got) {
-		t.Errorf("round-trip mismatch:\n  got:  %+v\n  want: %+v", got, *profile)
 	}
 }
 

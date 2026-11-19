@@ -71,9 +71,8 @@ func TestHasRepeatedIndex(t *testing.T) {
 	}
 }
 
+//nolint:paralleltest // a wall-clock bound, so it runs before the parallel tests
 func TestHasRepeatedIndexIsLinear(t *testing.T) {
-	t.Parallel()
-
 	const (
 		count          = 400000
 		generousBudget = time.Second

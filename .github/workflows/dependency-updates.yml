@@ -1,10 +1,10 @@
-# Dependabot updates go.mod and the pinned action SHAs. The tool versions in
-# dependencies.yaml live in a Makefile variable or a workflow env, where it
-# cannot see them, so this workflow asks each upstream once a week whether
-# the pin is still the current release. An outdated pin is news rather than
-# an error of this repository: the report goes to one tracking issue, with a
-# comment whenever it changes, the issue is closed once the pins are
-# current, and only a check that cannot run fails.
+# Dependabot updates go.mod, hack/tools/go.mod and the pinned action SHAs.
+# The tool versions in dependencies.yaml live in a Makefile variable or a
+# workflow env, where it cannot see them, so this workflow asks each upstream
+# once a week whether the pin is still the current release. An outdated pin
+# is news rather than an error of this repository: the report goes to one
+# tracking issue, with a comment whenever it changes, the issue is closed
+# once the pins are current, and only a check that cannot run fails.
 name: dependency-updates
 
 on:
@@ -15,12 +15,20 @@ on:
 permissions:
   contents: read
 
+# bash with -eo pipefail for every run step, as in ci.yml.
+defaults:
+  run:
+    shell: bash
+
 # Runs take turns, so that a manual run does not race the scheduled one.
 concurrency:
   group: dependency-updates
   cancel-in-progress: false
 
 env:
+  # The Go the tools in hack/tools/go.mod run with, the one ci.yml pins;
+  # dependencies.yaml keeps the copies in sync.
+  GO_VERSION: "1.27.4"
   ISSUE_TITLE: "Tool pins behind their upstream releases"
   ISSUE_LABEL: dependency-updates
 
@@ -38,19 +46,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Not go.mod: the go command picks its toolchain from go.mod even
+      # under -modfile, and the floor there is older than the Go the tools
+      # need.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
       - name: Check the pinned versions against their upstreams
         id: check
         env:
           # zeitgeist reads GITHUB_TOKEN, and the unauthenticated API budget
           # does not stretch to a release listing per dependency.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # The remote command needs a newer Go than the module's floor; let
-          # go run fetch the toolchain its module asks for, as the
-          # dependencies job does in ci.yml.
-          GOTOOLCHAIN: auto
         # report-upstream prints the outdated pins and fails only when the
         # check itself does; tee keeps the output visible while it runs.
         run: |
@@ -81,12 +88,15 @@ jobs:
       # a known report back without hiding a new one.
       - name: Update the tracking issue
         run: |
+          # The backticks in single quotes below are Markdown code fences,
+          # meant literally, which is all shellcheck's SC2016 objects to.
           set -euo pipefail
           gh label create "${ISSUE_LABEL}" --force --color ededed \
             --description "The weekly check of the pinned tool versions reports here"
           issue=$(gh issue list --state all --label "${ISSUE_LABEL}" --limit 1 --json number,state,body)
           number=$(echo "${issue}" | jq -r '.[0].number // empty')
           state=$(echo "${issue}" | jq -r '.[0].state // empty')
+          # shellcheck disable=SC2016
           previous=$(echo "${issue}" | jq -r '.[0].body // empty' | tr -d '\r' | sed -n '/^```$/,/^```$/p' | grep '^Update available' || true)
           if [ -z "${REPORT}" ]; then
             if [ -n "${number}" ] && [ "${state}" = "OPEN" ]; then
@@ -94,6 +104,7 @@ jobs:
             fi
             exit 0
           fi
+          # shellcheck disable=SC2016
           body=$(printf 'The weekly check found newer releases of pinned tools:\n\n```\n%s\n```\n\nUpdate the versions in `dependencies.yaml` and in the files its `refPaths` name (`make verify-dependencies` checks that they agree). libseccomp has no refPaths: add the release and the sha256 of its tarball to the `test-libseccomp` matrix in `ci.yml` as well. This issue is updated by every run and closed once the pins are current.\n\nLast run: %s\n' "${REPORT}" "${RUN_URL}")
           if [ -z "${number}" ]; then
             gh issue create --title "${ISSUE_TITLE}" --label "${ISSUE_LABEL}" --body "${body}"
@@ -109,4 +120,5 @@ jobs:
             gh issue reopen "${number}"
           fi
           gh issue edit "${number}" --body "${body}"
+          # shellcheck disable=SC2016
           gh issue comment "${number}" --body "$(printf 'The report changed:\n\n```\n%s\n```\n' "${REPORT}")"
