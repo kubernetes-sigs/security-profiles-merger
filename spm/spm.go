@@ -132,8 +132,10 @@ func (e *InputError) Error() string {
 func (e *InputError) Unwrap() error { return e.Err }
 
 // MaxPathLen is the longest path the apparmor and landlock packages accept,
-// in bytes: PATH_MAX, which no Linux path exceeds.
-const MaxPathLen = 4096
+// in bytes. Linux's PATH_MAX is 4096, but it counts the terminating NUL, so
+// the kernel refuses a path of 4096 bytes with ENAMETOOLONG and 4095 is the
+// longest it opens.
+const MaxPathLen = 4095
 
 // SliceDiff represents added and removed items in a set-like slice. It is
 // what every package's slice diff is: seccomp.SliceDiff, landlock.RightsDiff

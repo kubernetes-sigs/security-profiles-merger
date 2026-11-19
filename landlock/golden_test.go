@@ -186,8 +186,8 @@ func TestGoldenABIVersions(t *testing.T) {
 		assertABIBoundary(t, string(right), profile, want)
 	}
 
-	if landlock.LatestABIVersion != landlock.ABIV10 {
-		t.Errorf("LatestABIVersion = v%d, want v10", landlock.LatestABIVersion)
+	if landlock.LatestABIVersion != landlock.ABIV11 {
+		t.Errorf("LatestABIVersion = v%d, want v11", landlock.LatestABIVersion)
 	}
 }
 

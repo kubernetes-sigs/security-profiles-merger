@@ -17,6 +17,7 @@ limitations under the License.
 package seccomp_test
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -117,13 +118,8 @@ func fuzzProfile(
 	act1 := actions[int(action1Idx)%len(actions)]
 	act2 := actions[int(action2Idx)%len(actions)]
 
-	if name1 == "" {
-		name1 = syscallRead
-	}
-
-	if name2 == "" {
-		name2 = syscallWrite
-	}
+	name1 = fuzzName(name1, syscallRead)
+	name2 = fuzzName(name2, syscallWrite)
 
 	name1 = notifiableName(act1, name1)
 	name2 = notifiableName(act2, name2)
@@ -191,6 +187,19 @@ func fuzzDefault(index int, actions []specs.LinuxSeccompAction) specs.LinuxSecco
 	return action
 }
 
+// fuzzName returns the name a generated entry carries for a drawn one:
+// fallback for an empty name, and for a syscall some architecture lacks,
+// whose rules a merge may drop or settle by architecture to keep libseccomp
+// from losing rules (see TestMergesKeepRulesBehindAnAbsentSyscall), which
+// the oracles here, judging calls by name alone, do not model.
+func fuzzName(name, fallback string) string {
+	if name == "" || seccomp.LackedSomewhere(name) {
+		return fallback
+	}
+
+	return name
+}
+
 // fuzzListener is the listener a generated profile names when it notifies.
 const fuzzListener = "/run/fuzz-notify.sock"
 
@@ -203,6 +212,49 @@ func listenerFor(actions ...specs.LinuxSeccompAction) string {
 	}
 
 	return ""
+}
+
+// intersectSharingListener intersects copies of the profiles that all name
+// the listener (see sharedListener).
+func intersectSharingListener(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
+	result, err := seccomp.Intersect(sharedListener(profiles)...)
+	if err != nil {
+		return nil, fmt.Errorf("intersect: %w", err)
+	}
+
+	return result, nil
+}
+
+// sharedListener returns copies of the profiles that all name the listener
+// the first of them to name one names. Intersect takes the listener from its
+// first input only (see seccomp.ErrConflictingListener), so a generated pair
+// in which only the second input notifies would be refused rather than
+// merged; naming the listener in every input models a baseline that runs
+// it. Generated profiles all name one listener, and a listener decides no
+// call, so the merge is checked as before.
+func sharedListener(profiles []*specs.LinuxSeccomp) []*specs.LinuxSeccomp {
+	listener := ""
+
+	for _, profile := range profiles {
+		if profile.ListenerPath != "" {
+			listener = profile.ListenerPath
+
+			break
+		}
+	}
+
+	shared := make([]*specs.LinuxSeccomp, 0, len(profiles))
+
+	for _, profile := range profiles {
+		named := *profile
+		if listener != "" {
+			named.ListenerPath = listener
+		}
+
+		shared = append(shared, &named)
+	}
+
+	return shared
 }
 
 // notifiableName keeps SCMP_ACT_NOTIFY off the write syscall, which runc
@@ -542,7 +594,7 @@ func FuzzIntersect(f *testing.F) {
 	addFuzzSeeds(f)
 
 	cfg := fuzzMergeConfig{
-		merge:       seccomp.Intersect,
+		merge:       intersectSharingListener,
 		pickDefault: seccomp.MoreRestrictive,
 		bound:       intersectSafety().bound,
 	}
@@ -920,8 +972,8 @@ func FuzzSyscallListsMatchProfileMerge(f *testing.F) {
 		// SCMP_ACT_KILL_PROCESS is the most restrictive action, so it
 		// satisfies the assumption the bare-list functions make.
 		// The listener keeps SCMP_ACT_NOTIFY entries in the profile merge:
-		// without one, Intersect degrades them and Union refuses, neither
-		// of which the bare-list functions model.
+		// without one, Validate rejects the profiles, which the bare-list
+		// functions do not model.
 		withDefault := func(syscalls []specs.LinuxSyscall) *specs.LinuxSeccomp {
 			return &specs.LinuxSeccomp{
 				DefaultAction: specs.ActKillProcess,

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 	"sigs.k8s.io/security-profiles-merger/spm"
@@ -72,13 +73,16 @@ var (
 	// class, or a trailing backslash. It is also returned for the character
 	// class forms the parser accepts but translates into something other
 	// than what they say: "*" or "?" inside a class, an escaped "," inside a
-	// class, and "[]" or "[^]". The merge functions treat such a pattern as
-	// matching nothing.
+	// class, "[]" or "[^]", and an escaped "^" opening a class, such as
+	// `[\^x]`, which the parser negates. The merge functions treat such a
+	// pattern as matching nothing, except the escaped "^", which they match
+	// as the negated class the parser loads.
 	ErrInvalidGlob = errors.New("invalid AppArmor path pattern")
 
 	// ErrPathTooLong is returned by every validator and by a merge when a
 	// path is longer than MaxPathLen, the longest pattern the matcher
-	// accepts and longer than any Linux path. The length is checked before
+	// accepts and the longest name the kernel hands AppArmor to match
+	// against (see MaxPathLen). The length is checked before
 	// any other path check, so an oversized path costs no further work;
 	// only the size limits of ValidateArtifact and ValidateStrict come
 	// first.
@@ -116,6 +120,19 @@ var (
 	// lexer does not read as an escape is reported too: one after a comma,
 	// as in `/a,\ b`, where the space ends the path all the same, and one
 	// that ends the path, which escapes the space rendered after it.
+	//
+	// So is a character that does not print as itself: a C0 control or
+	// DEL, a character strconv.IsPrint refuses, such as U+0085, U+2028 or a
+	// bidirectional override, and one it accepts that renders as nothing or
+	// as a blank, such as U+3164 HANGUL FILLER, U+2800 BRAILLE PATTERN BLANK
+	// or a variation selector, with which "/usr/bin" reads as itself while
+	// naming another file. The parser loads it, but a consumer rendering
+	// or logging the profile writes it out raw, where a terminal acts on an
+	// escape sequence and line-based tools end a line at a vertical tab, a
+	// form feed, U+0085 or U+2028. Each has an escaped form (`\x1b`,
+	// `\xc2\x85`). Bytes that are not valid UTF-8 are not reported, since a
+	// file name may be in another encoding. Validate does not check this, so
+	// a trusted baseline may name such a file.
 	ErrUnquotablePath = errors.New("path contains a character that must be escaped")
 
 	// ErrNulInPath is returned by ValidateStrict and ValidateArtifact when a
@@ -154,8 +171,13 @@ var (
 )
 
 // MaxPathLen is the longest path this package accepts, in bytes, which is
-// also the longest pattern the matcher compiles. It is the limit the
-// landlock package applies to its rule paths.
+// also the longest pattern the matcher compiles. It is the longest path a
+// process can pass to open(2), PATH_MAX less its terminating NUL, which is
+// the limit the landlock package applies to the rule paths it opens, so
+// that one bound holds for both packages. AppArmor never opens a rule path,
+// and the names it matches can be longer, as its path buffer defaults to
+// twice PATH_MAX and a file reached by relative opens may have a longer full
+// name, but a profile naming such paths is beyond what this package models.
 const MaxPathLen = spm.MaxPathLen
 
 // MaxArtifactPaths bounds how many paths a profile accepted by
@@ -181,18 +203,15 @@ const MaxArtifactPaths = 1024
 // pattern syntax count: a literal path is matched by comparison, while a
 // pattern is compiled into a program first.
 //
-// A compiled pattern is cached, since the merge matches the same pattern
-// against many names and validation reads it again. The cache is bounded,
-// as anything holding data from a profile must be, so a profile whose
-// patterns do not fit it is recompiled instead of reused: a profile of a
-// thousand four-kilobyte patterns spent 38 seconds in ValidateArtifact and
-// 14 in a merge against a four-rule baseline, none of it in matching. The
-// byte bound admits two profiles of this size at once and leaves room for a
-// baseline. The cache also holds at most 1024 patterns, as many as
-// MaxArtifactPaths admits, so a profile a runtime accepts is compiled once
-// unless it and the profiles merged with it spell more patterns than that
-// together; past it a quarter of the cache is evicted, and an evicted
-// pattern is compiled again when it is next used.
+// Compiling a pattern costs time and memory in proportion to its length,
+// and one call compiles each pattern it reads once. A merge bounds what it
+// compiles on its own, at four times this bound per call, in the order of
+// its inputs, so a baseline of up to twice this bound and two artifacts
+// this bound admits are compiled and matched in full. A pattern past the
+// merge's bound matches no name and no other pattern: an intersection keeps
+// it only where every input lists it word for word, and a union keeps it. Compiled patterns are also kept
+// across calls in a cache bounded by an estimate of the memory they hold,
+// which only saves a later call the compiling.
 //
 // Profiles of the size KEP-6061 recommends runtimes accept spell a few
 // patterns of a few dozen bytes each.
@@ -268,12 +287,13 @@ func isKnownCapability(name string) bool {
 // and capability names outside the known set pass here and are reported by
 // ValidateArtifact or ValidateStrict.
 //
-// Validate is what Intersect and Union run on each input after folding the
-// duplicates within one list, so a merge fails on what Validate reports
-// except a path or capability listed twice in one list. A profile listing
-// one path twice is still worth reporting wherever a profile is checked
-// rather than merged, since it says twice what it means once. See the
-// Validation section of the package documentation.
+// Intersect and Union run these checks on each input as the caller wrote
+// it, except the two for a path or capability listed twice in one list,
+// which the merge folds instead, so a failure names the entry at the index
+// the caller gave it. A profile listing one path twice is still worth
+// reporting wherever a profile is checked rather than merged, since it says
+// twice what it means once. See the Validation section of the package
+// documentation.
 //
 // Failures are collected and returned together, up to 32: past that the
 // error lists the first 32 and a count of the rest and matches
@@ -284,65 +304,108 @@ func Validate(profile *Profile) error {
 		return ErrNilProfile
 	}
 
-	_, err := validateStructure(profile)
+	check := newValidator(newMatcherCache())
+	check.structure(profile, true)
 
-	return err
+	return check.report.Err()
 }
 
-// validateStructure runs the checks of Validate on a non-nil profile and
-// reports whether it stopped at an oversized path. ValidateStrict and
-// ValidateArtifact read that flag rather than measuring every path again:
-// their pattern checks have nothing to work on once a path is oversized.
-func validateStructure(profile *Profile) (bool, error) {
-	// Oversized paths are reported on their own: every other check scans
-	// the paths.
-	err := validatePathLengths(profile)
-	if err != nil {
-		return true, err
+// validateMergeInput runs the checks a merge makes on one of its inputs:
+// those of Validate except the duplicates within one list, which the merge
+// folds. It reads the profile as the caller wrote it, so that a failure
+// names the caller's index and spelling rather than those of the
+// deduplicated copy the merge goes on to work with.
+func validateMergeInput(profile *Profile, matchers *matcherCache) error {
+	if profile == nil {
+		return ErrNilProfile
 	}
 
-	var errs []error
+	check := newValidator(matchers)
+	if check.structure(profile, false) {
+		return check.report.Err()
+	}
+
+	err := check.report.Err()
+	if err != nil {
+		return err
+	}
+
+	// Analyze every path of the input now, before the next input is read,
+	// so that the call's compile budget goes to the inputs in the order
+	// they are given: a baseline listed first is compiled before anything
+	// the artifacts after it hold. structure has analyzed the filesystem
+	// rules already, and the merge reads the paths normalized, so that is
+	// how they are analyzed here.
+	visitPathLists(profile, func(_ string, paths []string) {
+		for _, path := range normalizePaths(paths) {
+			matchers.matcher(path)
+		}
+	})
+
+	return nil
+}
+
+// validator holds the state of one validation call: the failures found so
+// far, which are formatted only while the report has room for them, and the
+// analyses of the patterns the call reads.
+type validator struct {
+	report   merge.Collector
+	matchers *matcherCache
+	// strict reports a ValidateStrict call, which takes a misspelled
+	// capability name for an unknown one as well.
+	strict bool
+}
+
+func newValidator(matchers *matcherCache) *validator {
+	return &validator{report: merge.Collector{}, matchers: matchers, strict: false}
+}
+
+// structure runs the checks of Validate on a non-nil profile and reports
+// whether it stopped at an oversized path. ValidateStrict and
+// ValidateArtifact read that flag rather than measuring every path again:
+// their pattern checks have nothing to work on once a path is oversized.
+// listDuplicates selects the checks for a path or capability listed twice
+// within one list, which a merge leaves out.
+func (check *validator) structure(profile *Profile, listDuplicates bool) bool {
+	// Oversized paths are reported on their own: every other check scans
+	// the paths.
+	var lengths merge.Collector
 
 	visitPathLists(profile, func(context string, paths []string) {
-		errs = append(errs, validateEmptyPaths(context, paths)...)
-		errs = append(errs, validateNoVariables(context, paths)...)
+		rejectPaths(&lengths, context, paths, func(path string) bool {
+			return len(path) > maxGlobPatternLen
+		}, ErrPathTooLong, false)
+	})
+
+	err := lengths.Err()
+	if err != nil {
+		check.report.Add(err)
+
+		return true
+	}
+
+	visitPathLists(profile, func(context string, paths []string) {
+		check.reject(context, paths, func(path string) bool {
+			return path == ""
+		}, ErrEmptyPath, false)
+		check.reject(context, paths, referencesVariable, ErrUnsupportedVariable, true)
 	})
 
 	if profile.Filesystem != nil {
-		normalized := &FilesystemRules{
-			ReadOnlyPaths:  normalizePaths(profile.Filesystem.ReadOnlyPaths),
-			WriteOnlyPaths: normalizePaths(profile.Filesystem.WriteOnlyPaths),
-			ReadWritePaths: normalizePaths(profile.Filesystem.ReadWritePaths),
-		}
-
-		err := validateFilesystemPaths(normalized)
-		if err != nil {
-			errs = append(errs, err)
-		}
-
-		err = validateDuplicatePathsInCategory(normalized)
-		if err != nil {
-			errs = append(errs, err)
-		}
+		check.filesystemDuplicates(profile.Filesystem, listDuplicates)
 	}
 
 	if profile.Capabilities != nil {
-		err := validateEmptyCapabilities(
-			profile.Capabilities.AllowedCapabilities,
-		)
-		if err != nil {
-			errs = append(errs, err)
-		}
+		caps := profile.Capabilities.AllowedCapabilities
 
-		err = validateDuplicateCapabilities(
-			profile.Capabilities.AllowedCapabilities,
-		)
-		if err != nil {
-			errs = append(errs, err)
+		check.emptyCapabilities(caps)
+
+		if listDuplicates {
+			check.duplicateCapabilities(caps)
 		}
 	}
 
-	return false, merge.JoinLimited(errs...)
+	return false
 }
 
 // ValidateStrict validates a profile a person wrote. It rejects everything
@@ -351,7 +414,9 @@ func validateStructure(profile *Profile) (bool, error) {
 // paths in AllowedExecutables or AllowedLibraries, compared as the merge
 // matches them (ErrDuplicateExecutablePath). A profile that passes here
 // therefore passes ValidateArtifact and Validate, the same order of
-// strictness the seccomp and landlock packages use.
+// strictness the seccomp and landlock packages use. A misspelled name is
+// reported once, by a failure that matches both ErrInvalidCapabilityName and
+// ErrUnknownCapability.
 //
 // It applies the limits ValidateArtifact applies (MaxArtifactPaths,
 // MaxArtifactPatternBytes and MaxArtifactCapabilities), first and on their
@@ -360,44 +425,48 @@ func validateStructure(profile *Profile) (bool, error) {
 // deduplicates executable and library paths and treats capability names as
 // opaque, so Validate and ValidateArtifact accept both.
 func ValidateStrict(profile *Profile) error {
-	errs, err := artifactErrors(profile)
+	check := newValidator(newMatcherCache())
+	check.strict = true
+
+	err := check.artifact(profile)
 	if err != nil {
 		return err
 	}
 
 	if profile.Capabilities != nil {
-		errs = append(errs, validateCapabilityNames(profile.Capabilities.AllowedCapabilities))
+		check.capabilityNames(profile.Capabilities.AllowedCapabilities)
 	}
 
 	if profile.Executable != nil {
-		errs = append(errs, validateDuplicatesInSlice(
-			"AllowedExecutables",
+		check.listDuplicates(
+			"AllowedExecutables", profile.Executable.AllowedExecutables,
 			normalizePaths(profile.Executable.AllowedExecutables),
 			ErrDuplicateExecutablePath,
-		)...)
-		errs = append(errs, validateDuplicatesInSlice(
-			"AllowedLibraries",
+		)
+		check.listDuplicates(
+			"AllowedLibraries", profile.Executable.AllowedLibraries,
 			normalizePaths(profile.Executable.AllowedLibraries),
 			ErrDuplicateExecutablePath,
-		)...)
+		)
 	}
 
-	return merge.JoinLimited(errs...)
+	return check.report.Err()
 }
 
 // ValidateArtifact validates an artifact: a profile the caller did not
 // write, such as one a container runtime pulled from a registry. It runs
 // every check of Validate and adds what a runtime could not load or would
 // silently drop: relative paths (ErrRelativePath), patterns apparmor_parser
-// rejects (ErrInvalidGlob), patterns past the matcher's limits
-// (ErrGlobTooComplex), which would vanish from an intersection without a
-// trace, "." or ".." components (ErrDotComponent) and NUL bytes
-// (ErrNulInPath), which match nothing, characters apparmor_parser's lexer
-// does not accept unescaped (ErrUnquotablePath), which a consumer rendering
-// the profile would turn into rules of the author's choosing, and capability
-// names that are not a word of letters, digits and "_"
-// (ErrInvalidCapabilityName). See the Paths the validators reject section
-// of the package documentation.
+// rejects or loads with another meaning than they spell (ErrInvalidGlob),
+// patterns past the matcher's limits (ErrGlobTooComplex), which would vanish
+// from an intersection without a trace, "." or ".." components
+// (ErrDotComponent) and NUL bytes (ErrNulInPath), which match nothing,
+// characters apparmor_parser's lexer does not accept unescaped and
+// characters that are not printable (ErrUnquotablePath), which a consumer
+// rendering the profile would turn into rules of the author's choosing or
+// write out raw, and capability names that are not a word of letters,
+// digits and "_" (ErrInvalidCapabilityName). See the Paths the validators
+// reject section of the package documentation.
 //
 // A profile past MaxArtifactPaths (ErrTooManyPaths),
 // MaxArtifactPatternBytes (ErrTooManyPatternBytes) or
@@ -410,50 +479,44 @@ func ValidateStrict(profile *Profile) error {
 // ValidateArtifact does not compare the profile against a baseline; callers
 // intersect the result with their baseline afterwards.
 func ValidateArtifact(profile *Profile) error {
-	errs, err := artifactErrors(profile)
+	check := newValidator(newMatcherCache())
+
+	err := check.artifact(profile)
 	if err != nil {
 		return err
 	}
 
-	return merge.JoinLimited(errs...)
+	return check.report.Err()
 }
 
-// artifactErrors runs the checks of ValidateArtifact and returns what they
-// found. ValidateStrict starts from the same list and adds to it, so that a
+// artifact runs the checks of ValidateArtifact, collecting what they find.
+// ValidateStrict starts from the same report and adds to it, so that a
 // profile it accepts is one ValidateArtifact accepts by construction rather
 // than by two functions being kept alike.
 //
-// The second result is a failure that ends validation on its own: a nil
-// profile, or one past a size limit, which is refused rather than scanned.
-func artifactErrors(profile *Profile) ([]error, error) {
+// The result is a failure that ends validation on its own: a nil profile,
+// or one past a size limit, which is refused rather than scanned.
+func (check *validator) artifact(profile *Profile) error {
 	if profile == nil {
-		return nil, ErrNilProfile
+		return ErrNilProfile
 	}
 
 	err := validatePathCount(profile)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	oversized, err := validateStructure(profile)
-
-	var errs []error
-
-	if err != nil {
-		errs = append(errs, err)
-	}
+	oversized := check.structure(profile, true)
 
 	if profile.Capabilities != nil {
-		errs = append(errs, validateCapabilitySpelling(
-			profile.Capabilities.AllowedCapabilities,
-		)...)
+		check.capabilitySpelling(profile.Capabilities.AllowedCapabilities)
 	}
 
 	if !oversized {
-		errs = append(errs, validateLoadablePaths(profile)...)
+		check.loadablePaths(profile)
 	}
 
-	return errs, nil
+	return nil
 }
 
 // validatePathCount reports a profile holding more paths than
@@ -498,13 +561,11 @@ func validatePathCount(profile *Profile) error {
 	return nil
 }
 
-// validateLoadablePaths reports the paths apparmor_parser would refuse and
-// the glob patterns the matcher drops, which ValidateStrict and
-// ValidateArtifact both check. Callers run it only when no path is
-// oversized, which validateStructure has already reported.
-func validateLoadablePaths(profile *Profile) []error {
-	var errs []error
-
+// loadablePaths reports the paths apparmor_parser would refuse and the glob
+// patterns the matcher drops, which ValidateStrict and ValidateArtifact both
+// check. Callers run it only when no path is oversized, which structure has
+// already reported.
+func (check *validator) loadablePaths(profile *Profile) {
 	visitPathLists(profile, func(context string, paths []string) {
 		// Normalizing never changes whether a path is absolute, which
 		// characters it holds, or which escapes it spells beyond dropping
@@ -513,33 +574,16 @@ func validateLoadablePaths(profile *Profile) []error {
 		// apply to the normalized form, which is what the merge matches.
 		normalized := normalizePaths(paths)
 
-		errs = append(errs, validateAbsolutePaths(context, paths)...)
-		errs = append(errs, rejectPaths(
-			context, paths, hasUnquotableChar, ErrUnquotablePath, true,
-		)...)
-		errs = append(errs, rejectPaths(
-			context, paths, hasNul, ErrNulInPath, true,
-		)...)
-		errs = append(errs, validateGlobStatus(context, normalized)...)
-		errs = append(errs, rejectPaths(
-			context, normalized, hasDotComponent, ErrDotComponent, true,
-		)...)
+		check.reject(context, paths, func(path string) bool {
+			return path != "" && path[0] != '/'
+		}, ErrRelativePath, true)
+		check.reject(context, paths, hasUnquotableChar, ErrUnquotablePath, true)
+		check.reject(context, paths, hasNul, ErrNulInPath, true)
+		check.globStatus(context, normalized)
+		check.reject(context, normalized, func(path string) bool {
+			return dotComponentIn(path, check.matchers.matcher(path))
+		}, ErrDotComponent, true)
 	})
-
-	return errs
-}
-
-// validatePathLengths reports the paths longer than the pattern limit.
-func validatePathLengths(profile *Profile) error {
-	var errs []error
-
-	visitPathLists(profile, func(context string, paths []string) {
-		errs = append(errs, rejectPaths(context, paths, func(path string) bool {
-			return len(path) > maxGlobPatternLen
-		}, ErrPathTooLong, false)...)
-	})
-
-	return merge.JoinLimited(errs...)
 }
 
 // hasDotComponent reports whether a path has a "." or ".." component, with
@@ -549,8 +593,12 @@ func validatePathLengths(profile *Profile) error {
 // dot component inside an alternation, as in "/{a,b/./c}", only rules out
 // that alternative.
 func hasDotComponent(path string) bool {
-	matcher := matcherFor(path)
+	return dotComponentIn(path, matcherFor(path))
+}
 
+// dotComponentIn reports what hasDotComponent reports, given the analysis
+// of the path.
+func dotComponentIn(path string, matcher *globMatcher) bool {
 	switch matcher.kind {
 	case kindInvalid:
 		return false
@@ -651,59 +699,61 @@ func (scan *dotScanner) endComponent() bool {
 }
 
 // dotComponent reports whether a slash-separated text has a component that
-// is exactly "." or "..".
+// is exactly "." or "..". It walks the components with strings.Cut rather
+// than strings.SplitSeq, whose iterator allocates on every call before Go
+// 1.25, and validation calls it for every path.
 func dotComponent(text string) bool {
-	for component := range strings.SplitSeq(text, "/") {
+	for {
+		component, rest, more := strings.Cut(text, "/")
 		if component == "." || component == ".." {
 			return true
 		}
-	}
 
-	return false
+		if !more {
+			return false
+		}
+
+		text = rest
+	}
 }
 
 // rejectPaths reports every path for which reject holds, quoting the path
-// unless quote is false.
+// unless quote is false. A failure is formatted only while the report has
+// room for it.
 func rejectPaths(
+	report *merge.Collector,
 	context string, paths []string, reject func(string) bool, sentinel error, quote bool,
-) []error {
-	var errs []error
-
+) {
 	for idx, path := range paths {
 		if !reject(path) {
 			continue
 		}
 
-		if quote {
-			errs = append(errs, fmt.Errorf(
-				"%s[%d]: %s: %w", context, idx, merge.QuoteBounded(path), sentinel,
-			))
-		} else {
-			errs = append(errs, fmt.Errorf("%s[%d]: %w", context, idx, sentinel))
-		}
+		report.Report(func() error {
+			if quote {
+				return fmt.Errorf(
+					"%s[%d]: %s: %w", context, idx, merge.QuoteBounded(path), sentinel,
+				)
+			}
+
+			return fmt.Errorf("%s[%d]: %w", context, idx, sentinel)
+		})
 	}
-
-	return errs
 }
 
-// validateNoVariables reports paths that reference an AppArmor variable. The
-// parser resolves escapes before it expands variables, so `\x40{HOME}`
-// references one as much as "@{HOME}" does: the check looks at the path with
-// its escapes resolved too.
-func validateNoVariables(context string, paths []string) []error {
-	return rejectPaths(context, paths, func(path string) bool {
-		return strings.Contains(path, "@{") ||
-			strings.Contains(decodeEscapes(path), "@{")
-	}, ErrUnsupportedVariable, true)
+// reject reports every path for which reject holds, as rejectPaths does.
+func (check *validator) reject(
+	context string, paths []string, reject func(string) bool, sentinel error, quote bool,
+) {
+	rejectPaths(&check.report, context, paths, reject, sentinel, quote)
 }
 
-// validateAbsolutePaths reports paths that do not start with "/", the only
-// form apparmor_parser accepts for a file rule. Empty paths are reported by
-// Validate instead.
-func validateAbsolutePaths(context string, paths []string) []error {
-	return rejectPaths(context, paths, func(path string) bool {
-		return path != "" && path[0] != '/'
-	}, ErrRelativePath, true)
+// referencesVariable reports whether a path references an AppArmor
+// variable. The parser resolves escapes before it expands variables, so
+// `\x40{HOME}` references one as much as "@{HOME}" does: the check looks at
+// the path with its escapes resolved too.
+func referencesVariable(path string) bool {
+	return strings.Contains(path, "@{") || strings.Contains(decodeEscapes(path), "@{")
 }
 
 // unquotableChars are the characters apparmor_parser's lexer does not accept
@@ -750,11 +800,19 @@ var lexerPath = regexp.MustCompile(`^(?:[^ \t\r\n"!,]|,[^ \t\r\n"!,]|\\[ \t"!,])
 // Pairing each backslash with the next byte is how the merge reads a path,
 // not how the lexer splits it, so the path also has to be one token to the
 // lexer (see splitsLexerToken).
+//
+// A character that is not printable is reported too (see hasUnprintable),
+// although the lexer reads it as part of the path: it has an escape that
+// spells it, and written out raw it reaches whoever reads the rendered
+// profile or a log of it.
 func hasUnquotableChar(path string) bool {
-	if splitsLexerToken(path) {
-		return true
-	}
+	return splitsLexerToken(path) || hasUnprintable(path) || hasUnescapedChar(path)
+}
 
+// hasUnescapedChar reports whether a path, read as the merge reads it,
+// holds one of unquotableChars unescaped, a comma that does not continue
+// the path, or a backslash followed by a control byte.
+func hasUnescapedChar(path string) bool {
 	for idx := 0; idx < len(path); idx++ {
 		char := path[idx]
 
@@ -785,6 +843,37 @@ func hasUnquotableChar(path string) bool {
 // permissions that follow it.
 func splitsLexerToken(path string) bool {
 	return strings.HasSuffix(path, `\`) || !lexerPath.MatchString(path)
+}
+
+// hasUnprintable reports whether a path holds a character encoded as UTF-8
+// that does not print as itself (see merge.PrintsAsItself): a C0 or C1
+// control, DEL, a format character such as a bidirectional override, a
+// separator other than the ASCII space, such as U+2028, or a character that
+// renders as nothing or as a blank, such as U+3164. A terminal acts on an
+// escape sequence a profile carries in the clear, a vertical tab, a form
+// feed, U+0085 and U+2028 end a line for many line-based tools, and a blank
+// hides which file a path names, so a consumer rendering or logging such a
+// path writes out text of the author's choosing. It is what the package's
+// error messages escape when they quote a path, so a path they would show
+// escaped is one ValidateArtifact refuses.
+// Bytes that are not valid UTF-8 are left alone: a file name is a sequence
+// of bytes, and one in another encoding is still a name the kernel can hand
+// AppArmor.
+func hasUnprintable(path string) bool {
+	for idx := 0; idx < len(path); {
+		char, size := utf8.DecodeRuneInString(path[idx:])
+		idx += size
+
+		if char == utf8.RuneError && size == 1 {
+			continue
+		}
+
+		if !merge.PrintsAsItself(char) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // isControlByte reports whether a byte is one no rule can carry in the
@@ -830,24 +919,33 @@ func hasNul(path string) bool {
 	return false
 }
 
-// validateCapabilitySpelling reports the capability names holding a
-// character that cannot spell one. An empty name is left to
-// validateEmptyCapabilities, which reports it as ErrEmptyCapability.
-func validateCapabilitySpelling(caps []string) []error {
-	var errs []error
-
+// capabilitySpelling reports the capability names holding a character that
+// cannot spell one. An empty name is left to emptyCapabilities, which
+// reports it as ErrEmptyCapability. For ValidateStrict such a name is also
+// one outside the known set, and the one failure reporting it matches
+// ErrUnknownCapability as well, so that a caller matching either sentinel
+// finds it while the report names it once.
+func (check *validator) capabilitySpelling(caps []string) {
 	for idx, name := range caps {
 		if name == "" || capabilityWord(name) {
 			continue
 		}
 
-		errs = append(errs, fmt.Errorf(
-			"AllowedCapabilities[%d]: %s: %w",
-			idx, merge.QuoteBounded(name), ErrInvalidCapabilityName,
-		))
-	}
+		check.report.Report(func() error {
+			if check.strict {
+				return fmt.Errorf(
+					"AllowedCapabilities[%d]: %s: %w, so an %w",
+					idx, merge.QuoteBounded(name), ErrInvalidCapabilityName,
+					ErrUnknownCapability,
+				)
+			}
 
-	return errs
+			return fmt.Errorf(
+				"AllowedCapabilities[%d]: %s: %w",
+				idx, merge.QuoteBounded(name), ErrInvalidCapabilityName,
+			)
+		})
+	}
 }
 
 // capabilityWord reports whether a name is spelled the way a capability is:
@@ -884,179 +982,142 @@ func visitPathLists(profile *Profile, visit func(context string, paths []string)
 	}
 }
 
-// validateGlobStatus reports patterns apparmor_parser rejects and glob
-// patterns that exceed the matcher's limits, both of which never match. It
-// runs on normalized patterns, the form the merge matches, so it agrees with
-// Intersect on what is dropped. A pattern over the limits is left out of the
-// message, since it has over 100 alternatives.
-func validateGlobStatus(context string, paths []string) []error {
-	invalid := rejectPaths(context, paths, func(pattern string) bool {
-		return matcherFor(pattern).status == globInvalid
+// globStatus reports patterns apparmor_parser rejects or loads with another
+// meaning than they spell, and glob patterns that exceed the matcher's
+// limits, which never match. It runs on normalized patterns, the form the
+// merge matches, so it agrees with Intersect on what is dropped. A pattern
+// over the limits is left out of the message, since it has over 100
+// alternatives.
+func (check *validator) globStatus(context string, paths []string) {
+	check.reject(context, paths, func(pattern string) bool {
+		matcher := check.matchers.matcher(pattern)
+
+		return matcher.status == globInvalid || matcher.misleading()
 	}, ErrInvalidGlob, true)
 
-	tooComplex := rejectPaths(context, paths, func(pattern string) bool {
-		return matcherFor(pattern).status == globTooComplex
+	check.reject(context, paths, func(pattern string) bool {
+		matcher := check.matchers.matcher(pattern)
+
+		return matcher.status == globTooComplex && !matcher.misleading()
 	}, ErrGlobTooComplex, false)
-
-	return append(invalid, tooComplex...)
 }
 
-func validateEmptyPaths(context string, paths []string) []error {
-	return rejectPaths(context, paths, func(path string) bool {
-		return path == ""
-	}, ErrEmptyPath, false)
-}
-
-// validateRawPaths checks a profile for empty and oversized paths as the
-// caller wrote them, before a merge normalizes them, so that no
-// normalization work is spent on an oversized path. Validate reports both
-// again on the normalized profile, where neither can appear anymore.
-func validateRawPaths(profile *Profile) error {
-	if profile == nil {
-		return ErrNilProfile
+// filesystemDuplicates reports the paths listed in more than one category
+// and, with listDuplicates, the paths one category lists twice. Paths are
+// compared by the rule they spell, not by their text, so that two spellings
+// of one path are the pair of rules they are to apparmor_parser (see
+// keyForPath). They are compared normalized, as the merge compares them,
+// and reported as the caller wrote them, at the caller's index.
+func (check *validator) filesystemDuplicates(rules *FilesystemRules, listDuplicates bool) {
+	categories := []struct {
+		name            string
+		raw, normalized []string
+	}{
+		{"ReadOnlyPaths", rules.ReadOnlyPaths, normalizePaths(rules.ReadOnlyPaths)},
+		{"WriteOnlyPaths", rules.WriteOnlyPaths, normalizePaths(rules.WriteOnlyPaths)},
+		{"ReadWritePaths", rules.ReadWritePaths, normalizePaths(rules.ReadWritePaths)},
 	}
 
-	err := validatePathLengths(profile)
-	if err != nil {
-		return err
-	}
-
-	var errs []error
-
-	visitPathLists(profile, func(context string, paths []string) {
-		errs = append(errs, validateEmptyPaths(context, paths)...)
-	})
-
-	return merge.JoinLimited(errs...)
-}
-
-// validateFilesystemPaths reports the paths listed in more than one
-// category. Paths are compared by the rule they spell, not by their text, so
-// that two spellings of one path are the pair of rules they are to
-// apparmor_parser (see keyForPath). A path one category lists twice is left
-// to validateDuplicatePathsInCategory.
-func validateFilesystemPaths(rules *FilesystemRules) error {
 	seen := make(map[pathKey]string)
 
-	var errs []error
-
-	for _, path := range rules.ReadOnlyPaths {
-		seen[keyForPath(path)] = "ReadOnlyPaths"
+	for _, path := range categories[0].normalized {
+		seen[check.matchers.key(path)] = categories[0].name
 	}
 
-	for _, category := range []struct {
-		name  string
-		paths []string
-	}{
-		{"WriteOnlyPaths", rules.WriteOnlyPaths},
-		{"ReadWritePaths", rules.ReadWritePaths},
-	} {
-		for _, path := range category.paths {
-			key := keyForPath(path)
+	for _, category := range categories[1:] {
+		for idx, path := range category.normalized {
+			key := check.matchers.key(path)
 
 			if earlier, ok := seen[key]; ok && earlier != category.name {
-				errs = append(errs, fmt.Errorf(
-					"path %s in both %s and %s: %w",
-					merge.QuoteBounded(path), earlier, category.name,
-					ErrDuplicatePath,
-				))
+				check.report.Report(func() error {
+					return fmt.Errorf(
+						"path %s in both %s and %s: %w",
+						merge.QuoteBounded(category.raw[idx]), earlier, category.name,
+						ErrDuplicatePath,
+					)
+				})
 			}
 
 			seen[key] = category.name
 		}
 	}
 
-	return merge.JoinLimited(errs...)
-}
-
-func validateDuplicatePathsInCategory(rules *FilesystemRules) error {
-	roErrs := validateDuplicatesInSlice(
-		"ReadOnlyPaths", rules.ReadOnlyPaths, ErrDuplicatePathInCategory,
-	)
-	woErrs := validateDuplicatesInSlice(
-		"WriteOnlyPaths", rules.WriteOnlyPaths, ErrDuplicatePathInCategory,
-	)
-	rwErrs := validateDuplicatesInSlice(
-		"ReadWritePaths", rules.ReadWritePaths, ErrDuplicatePathInCategory,
-	)
-
-	errs := make([]error, 0, len(roErrs)+len(woErrs)+len(rwErrs))
-	errs = append(errs, roErrs...)
-	errs = append(errs, woErrs...)
-	errs = append(errs, rwErrs...)
-
-	return merge.JoinLimited(errs...)
-}
-
-func validateEmptyCapabilities(caps []string) error {
-	var errs []error
-
-	for idx, capability := range caps {
-		if capability == "" {
-			errs = append(errs, fmt.Errorf(
-				"AllowedCapabilities[%d]: %w", idx, ErrEmptyCapability,
-			))
-		}
+	if !listDuplicates {
+		return
 	}
 
-	return merge.JoinLimited(errs...)
+	for _, category := range categories {
+		check.listDuplicates(
+			category.name, category.raw, category.normalized, ErrDuplicatePathInCategory,
+		)
+	}
 }
 
-func validateDuplicateCapabilities(caps []string) error {
-	seen := make(map[string]struct{}, len(caps))
+func (check *validator) emptyCapabilities(caps []string) {
+	for idx, capability := range caps {
+		if capability == "" {
+			check.report.Report(func() error {
+				return fmt.Errorf("AllowedCapabilities[%d]: %w", idx, ErrEmptyCapability)
+			})
+		}
+	}
+}
 
-	var errs []error
+func (check *validator) duplicateCapabilities(caps []string) {
+	seen := make(map[string]struct{}, len(caps))
 
 	for idx, name := range caps {
 		upper := asciiUpper(name)
 		if _, ok := seen[upper]; ok {
-			errs = append(errs, fmt.Errorf(
-				"AllowedCapabilities[%d]: %s: %w",
-				idx, merge.QuoteBounded(name), ErrDuplicateCapability,
-			))
+			check.report.Report(func() error {
+				return fmt.Errorf(
+					"AllowedCapabilities[%d]: %s: %w",
+					idx, merge.QuoteBounded(name), ErrDuplicateCapability,
+				)
+			})
 		}
 
 		seen[upper] = struct{}{}
 	}
-
-	return merge.JoinLimited(errs...)
 }
 
-func validateCapabilityNames(caps []string) error {
-	var errs []error
-
+// capabilityNames reports the names outside the known set. A name that is
+// empty or not spelled as a capability is left out, since structure and
+// capabilitySpelling have reported it already, the latter matching
+// ErrUnknownCapability too.
+func (check *validator) capabilityNames(caps []string) {
 	for idx, name := range caps {
-		if name != "" && !isKnownCapability(name) {
-			errs = append(errs, fmt.Errorf(
+		if name == "" || !capabilityWord(name) || isKnownCapability(name) {
+			continue
+		}
+
+		check.report.Report(func() error {
+			return fmt.Errorf(
 				"AllowedCapabilities[%d]: %s: %w",
 				idx, merge.QuoteBounded(name), ErrUnknownCapability,
-			))
-		}
+			)
+		})
 	}
-
-	return merge.JoinLimited(errs...)
 }
 
-// validateDuplicatesInSlice reports the paths of one list that spell a rule
-// an earlier path of the list already spells (see keyForPath).
-func validateDuplicatesInSlice(
-	context string, items []string, sentinel error,
-) []error {
-	seen := make(map[pathKey]struct{}, len(items))
+// listDuplicates reports the paths of one list that spell a rule an earlier
+// path of the list already spells (see keyForPath). normalized holds the
+// paths of raw normalized, which is what is compared, while raw is what is
+// reported.
+func (check *validator) listDuplicates(context string, raw, normalized []string, sentinel error) {
+	seen := make(map[pathKey]struct{}, len(normalized))
 
-	var errs []error
-
-	for idx, item := range items {
-		key := keyForPath(item)
+	for idx, path := range normalized {
+		key := check.matchers.key(path)
 
 		if _, ok := seen[key]; ok {
-			errs = append(errs, fmt.Errorf(
-				"%s[%d]: %s: %w", context, idx, merge.QuoteBounded(item), sentinel,
-			))
+			check.report.Report(func() error {
+				return fmt.Errorf(
+					"%s[%d]: %s: %w", context, idx, merge.QuoteBounded(raw[idx]), sentinel,
+				)
+			})
 		}
 
 		seen[key] = struct{}{}
 	}
-
-	return errs
 }

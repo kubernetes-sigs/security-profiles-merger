@@ -61,9 +61,11 @@ Commands:
   merge      Merge one or more security profiles
   validate   Validate one or more security profiles
   diff       Compare two security profiles
-  version    Print the version
+  version    Print the version (also: spm --version, spm -v)
+  help       Print this help, or a command's (also: spm --help, spm -h)
 
-Flags must precede file arguments.
+Flags must precede file arguments, and -- ends them. A file argument of -
+reads stdin.
 Run 'spm help <command>' or 'spm <command> --help' for details on each command.
 `
 
@@ -128,15 +130,28 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 // runHelp prints the usage of the named command, or the overview without
-// one.
+// one. It names at most one command, as the overview says, so anything
+// after it is refused as runVersion refuses an argument.
 func runHelp(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		return printHelp(usage, stdout, stderr)
 	}
 
+	if len(args) > 1 {
+		_, _ = fmt.Fprintf(
+			stderr, "error: unexpected argument: %s\n\n%s", merge.SafeName(args[1]), usage,
+		)
+
+		return exitUsage
+	}
+
 	switch args[0] {
 	case cmdMerge, cmdValidate, cmdDiff, cmdVersion:
 		return run([]string{args[0], flagHelp}, stdin, stdout, stderr)
+	case cmdHelp, flagHelp, "-h":
+		// "spm help --help" asks for the help of help, which is the
+		// overview, as "spm help help" does.
+		return printHelp(usage, stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "unknown command: %s\n\n%s", merge.SafeName(args[0]), usage)
 
@@ -154,7 +169,7 @@ func runVersion(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if flags.NArg() > 0 {
-		_, _ = fmt.Fprintf(stderr, "error: unexpected argument %q\n", flags.Arg(0))
+		_, _ = fmt.Fprintf(stderr, "error: unexpected argument: %s\n", merge.SafeName(flags.Arg(0)))
 
 		printUsage(flags, versionUsage, stderr)
 

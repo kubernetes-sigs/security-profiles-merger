@@ -74,6 +74,67 @@ func TestValidateArtifactRejectsUnquotablePaths(t *testing.T) {
 	}
 }
 
+// TestValidateArtifactRejectsUnprintablePaths covers the characters the
+// lexer reads as part of a path but that do not print as themselves: a
+// terminal acts on an escape sequence written out raw, a vertical tab, a
+// form feed, U+0085 and U+2028 end a line for line-based tools, and a blank
+// such as U+3164 makes "/usr/bin" read as itself while naming another file. Each has an escaped
+// spelling, which is accepted, as are bytes that are not UTF-8 at all.
+func TestValidateArtifactRejectsUnprintablePaths(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		raw, escaped string
+	}{
+		{"/tmp/\x1bc", `/tmp/\x1bc`},
+		{"/tmp/a\vb\fc", `/tmp/a\x0bb\x0cc`},
+		{"/tmp/a\x01b", `/tmp/a\001b`},
+		{"/tmp/a\x7fb", `/tmp/a\x7fb`},
+		{"/tmp/a\u0085b", `/tmp/a\xc2\x85b`},
+		{"/tmp/a\u2028b", `/tmp/a\xe2\x80\xa8b`},
+		{"/tmp/a\u2029b", `/tmp/a\xe2\x80\xa9b`},
+		{"/tmp/a\u202eb", `/tmp/a\xe2\x80\xaeb`},
+		{"/tmp/a\u00a0b", `/tmp/a\xc2\xa0b`},
+		{"/usr/bin\u3164", `/usr/bin\xe3\x85\xa4`},
+		{"/usr/bin\u2800", `/usr/bin\xe2\xa0\x80`},
+		{"/usr/bin\ufe0f", `/usr/bin\xef\xb8\x8f`},
+		{"/usr/bin\u115f", `/usr/bin\xe1\x85\x9f`},
+	} {
+		for name, validate := range loadableValidators {
+			err := validate(readOnly(testCase.raw))
+			if !errors.Is(err, apparmor.ErrUnquotablePath) {
+				t.Errorf("%s(%q) = %v, want ErrUnquotablePath", name, testCase.raw, err)
+			}
+
+			err = validate(readOnly(testCase.escaped))
+			if err != nil {
+				t.Errorf("%s(%q) = %v, want nil", name, testCase.escaped, err)
+			}
+		}
+
+		// A trusted baseline may name such a file, and the merge matches
+		// it as the parser would.
+		err := apparmor.Validate(readOnly(testCase.raw))
+		if err != nil {
+			t.Errorf("Validate(%q) = %v, want nil", testCase.raw, err)
+		}
+
+		// The merge keeps a spelling a consumer can render where an input
+		// holds one.
+		got := mergeFs(t, apparmor.Union, readOnly(testCase.raw), readOnly(testCase.escaped))
+		if !slices.Equal(got.ReadOnlyPaths, []string{testCase.escaped}) {
+			t.Errorf("Union kept %q, want %q", got.ReadOnlyPaths, testCase.escaped)
+		}
+	}
+
+	for _, path := range []string{"/tmp/caf\u00e9", "/tmp/\xff\xfe", "/tmp/\u03bb"} {
+		err := apparmor.ValidateArtifact(readOnly(path))
+		if err != nil {
+			t.Errorf("ValidateArtifact(%q) = %v, want nil", path, err)
+		}
+	}
+}
+
 // TestValidateArtifactAcceptsEscapedPaths covers the escaped forms of those
 // characters, which the parser accepts and this package resolves, and the
 // commas that go on spelling a path.
@@ -172,10 +233,17 @@ func TestValidateArtifactRejectsCapabilityNames(t *testing.T) {
 		}
 
 		// ValidateStrict reports the same names, as none of them is a
-		// capability, and Validate reports none of them.
+		// capability, and a misspelled name is an unknown one too: the
+		// failure matches both sentinels but is reported once, so the
+		// report holds no second failure. Validate reports none of them.
 		err = apparmor.ValidateStrict(profile)
-		if err == nil {
-			t.Errorf("ValidateStrict(%q) = nil, want an error", name)
+		if !errors.Is(err, apparmor.ErrInvalidCapabilityName) ||
+			!errors.Is(err, apparmor.ErrUnknownCapability) {
+			t.Errorf("ValidateStrict(%q) = %v, want both capability sentinels", name, err)
+		}
+
+		if err != nil && strings.Contains(err.Error(), "\n") {
+			t.Errorf("ValidateStrict(%q) = %v, want the name reported once", name, err)
 		}
 
 		err = apparmor.Validate(profile)

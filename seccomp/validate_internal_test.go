@@ -17,6 +17,8 @@ limitations under the License.
 package seccomp
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -92,6 +94,206 @@ func TestFormatEntries(t *testing.T) {
 	} {
 		if got := formatEntries(testCase.entries); got != testCase.want {
 			t.Errorf("formatEntries(%v) = %q, want %q", testCase.entries, got, testCase.want)
+		}
+	}
+}
+
+// failingProfile returns a profile in which every one of count repetitions
+// fails every check validatorsPastTheLimit runs, most of them several times.
+func failingProfile(count int) *specs.LinuxSeccomp {
+	one, large := uint(1), uint(maxErrno+1)
+
+	profile := &specs.LinuxSeccomp{
+		DefaultAction:    specs.ActErrno,
+		DefaultErrnoRet:  nil,
+		Architectures:    nil,
+		Flags:            nil,
+		ListenerPath:     "",
+		ListenerMetadata: "",
+		Syscalls:         nil,
+	}
+
+	for range count {
+		profile.Architectures = append(profile.Architectures, specs.ArchX86, "SCMP_ARCH_BOGUS")
+		profile.Flags = append(
+			profile.Flags,
+			specs.LinuxSeccompFlagLog,
+			"SECCOMP_FILTER_FLAG_BOGUS",
+		)
+		profile.Syscalls = append(profile.Syscalls,
+			specs.LinuxSyscall{
+				Names:    []string{"re\x00ad", "", "x\x01y"},
+				Action:   "SCMP_ACT_BOGUS",
+				ErrnoRet: nil,
+				Args: []specs.LinuxSeccompArg{
+					{Index: maxSyscallArgIndex + 1, Value: 0, ValueTwo: 1, Op: "SCMP_CMP_BOGUS"},
+				},
+			},
+			specs.LinuxSyscall{
+				Names: []string{
+					notifyWriteSyscall,
+				},
+				Action:   specs.ActNotify,
+				ErrnoRet: &one,
+				Args:     nil,
+			},
+			specs.LinuxSyscall{
+				Names:    []string{"read"},
+				Action:   specs.ActErrno,
+				ErrnoRet: &large,
+				Args: []specs.LinuxSeccompArg{
+					{Index: 0, Value: 1 << 40, ValueTwo: 0, Op: specs.OpEqualTo},
+				},
+			},
+		)
+	}
+
+	return profile
+}
+
+// TestValidatorsDoNotBuildFailuresPastTheLimit checks that a validator
+// counts the failures its report leaves out rather than formatting each one:
+// a profile ten times the size, with ten times the failures, costs about as
+// many allocations once the report is full. A validator that formatted every
+// failure would allocate at least once per omitted one, thousands of times
+// more here, while the slack allowed covers the maps a check sizes by its
+// input, such as the one finding duplicate architectures.
+//
+//nolint:paralleltest // AllocsPerRun refuses to run in a parallel test
+func TestValidatorsDoNotBuildFailuresPastTheLimit(t *testing.T) {
+	const count = 100
+
+	small, large := failingProfile(count), failingProfile(10*count)
+
+	for _, testCase := range []struct {
+		name  string
+		check profileCheck
+	}{
+		{name: "Validate", check: Validate},
+		{name: "validateWellFormed", check: validateWellFormed},
+		{name: "validateSyscallNameSpelling", check: validateSyscallNameSpelling},
+		{name: "validateNoNotify", check: validateNoNotify},
+		{name: "validateUnusedErrnoRet", check: validateUnusedErrnoRet},
+		{name: "validateUnusedValueTwo", check: validateUnusedValueTwo},
+		{
+			name: "validateValueWidth",
+			check: func(profile *specs.LinuxSeccomp) error {
+				return validateValueWidth(profile, specs.ArchX86)
+			},
+		},
+	} {
+		err := testCase.check(large)
+		if err == nil || !strings.HasSuffix(err.Error(), ErrMoreProblems.Error()) {
+			t.Fatalf("%s: err = %v, want a report that left failures out", testCase.name, err)
+		}
+
+		smallAllocs := testing.AllocsPerRun(10, func() { _ = testCase.check(small) })
+		largeAllocs := testing.AllocsPerRun(10, func() { _ = testCase.check(large) })
+
+		if largeAllocs > smallAllocs+count/4 {
+			t.Errorf(
+				"%s: %v allocations for %d repetitions, %v for %d, want about the same",
+				testCase.name, largeAllocs, 10*count, smallAllocs, count,
+			)
+		}
+	}
+}
+
+// TestValidateCostsNothingPerValidEntry checks that Validate allocates
+// nothing for an entry that passes: a runtime runs it on every input of a
+// merge, and an entry costs only the few bytes of JSON it takes, so any
+// allocation per entry would let a small document cost a large heap.
+//
+//nolint:paralleltest // AllocsPerRun refuses to run in a parallel test
+func TestValidateCostsNothingPerValidEntry(t *testing.T) {
+	valid := func(count int) *specs.LinuxSeccomp {
+		profile := &specs.LinuxSeccomp{
+			DefaultAction:    specs.ActErrno,
+			DefaultErrnoRet:  nil,
+			Architectures:    nil,
+			Flags:            nil,
+			ListenerPath:     "",
+			ListenerMetadata: "",
+			Syscalls:         nil,
+		}
+
+		for range count {
+			profile.Syscalls = append(profile.Syscalls, specs.LinuxSyscall{
+				Names:    []string{"read", "write"},
+				Action:   specs.ActAllow,
+				ErrnoRet: nil,
+				Args: []specs.LinuxSeccompArg{
+					{Index: 0, Value: 1, ValueTwo: 0, Op: specs.OpEqualTo},
+				},
+			})
+		}
+
+		return profile
+	}
+
+	small, large := valid(100), valid(1000)
+
+	smallAllocs := testing.AllocsPerRun(10, func() { _ = Validate(small) })
+	largeAllocs := testing.AllocsPerRun(10, func() { _ = Validate(large) })
+
+	// One allocation per entry would be 900 more for the larger profile. A
+	// small slack rather than equality keeps the test independent of the
+	// few the race detector and the runtime add on their own.
+	const slack = 8
+
+	if largeAllocs > smallAllocs+slack {
+		t.Errorf(
+			"Validate allocated %v times for 1000 valid entries, %v for 100, want about the same",
+			largeAllocs,
+			smallAllocs,
+		)
+	}
+}
+
+// TestValidateArtifactRefusesTooManyEntriesFirst checks that a profile past
+// MaxArtifactEntries is refused before any check reads an entry: a few
+// megabytes of "{}" are millions of entries, each of which every check
+// would otherwise visit.
+//
+//nolint:paralleltest // AllocsPerRun refuses to run in a parallel test
+func TestValidateArtifactRefusesTooManyEntriesFirst(t *testing.T) {
+	empty := func(count int) *specs.LinuxSeccomp {
+		return &specs.LinuxSeccomp{
+			DefaultAction:    specs.ActErrno,
+			DefaultErrnoRet:  nil,
+			Architectures:    nil,
+			Flags:            nil,
+			ListenerPath:     "",
+			ListenerMetadata: "",
+			Syscalls:         make([]specs.LinuxSyscall, count),
+		}
+	}
+
+	small, large := empty(2*MaxArtifactEntries), empty(20*MaxArtifactEntries)
+
+	for name, validate := range map[string]profileCheck{
+		"ValidateArtifact": ValidateArtifact,
+		"ValidateStrict":   ValidateStrict,
+	} {
+		err := validate(large)
+		if !errors.Is(err, ErrTooManyProfileEntries) || errors.Is(err, ErrEmptySyscallNames) {
+			t.Errorf("%s = %v, want ErrTooManyProfileEntries alone", name, err)
+		}
+
+		// Per-entry work would cost tens of thousands of allocations here.
+		// A fixed bound rather than equality keeps the test independent of
+		// the few the race detector and the runtime add on their own.
+		const maxAllocs = 16
+
+		for count, profile := range map[int]*specs.LinuxSeccomp{
+			2 * MaxArtifactEntries:  small,
+			20 * MaxArtifactEntries: large,
+		} {
+			allocs := testing.AllocsPerRun(10, func() { _ = validate(profile) })
+			if allocs > maxAllocs {
+				t.Errorf("%s allocated %v times for %d entries, want at most %d",
+					name, allocs, count, maxAllocs)
+			}
 		}
 	}
 }

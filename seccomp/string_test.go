@@ -17,10 +17,14 @@ limitations under the License.
 package seccomp_test
 
 import (
+	"strconv"
+	"strings"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
 
@@ -378,5 +382,109 @@ func TestFormatProfileQuotesSeparators(t *testing.T) {
 
 	if one == two {
 		t.Errorf("one name and two names render alike: %s", one)
+	}
+}
+
+// manyNames returns an artifact ValidateArtifact accepts that holds the
+// given number of entries of MaxArtifactNamesPerEntry distinct names each,
+// all with the given action.
+func manyNames(entries int, action specs.LinuxSeccompAction) *specs.LinuxSeccomp {
+	syscalls := make([]specs.LinuxSyscall, entries)
+	for idx := range syscalls {
+		names := make([]string, seccomp.MaxArtifactNamesPerEntry)
+		for name := range names {
+			names[name] = "syscall_" + strconv.Itoa(idx*len(names)+name)
+		}
+
+		syscalls[idx] = specs.LinuxSyscall{Names: names, Action: action}
+	}
+
+	return &specs.LinuxSeccomp{DefaultAction: specs.ActErrno, Syscalls: syscalls}
+}
+
+// TestFormattersAreBounded covers accepted artifacts whose rendering runs
+// to megabytes: entries equal to the default load no rule, so no limit on
+// rules bounds how many there are, and an artifact of 220000 names rendered
+// to 3 MB; one loading the most rules an artifact may load lists each of
+// them in its diff. Each output is cut at the bound with the marker, and
+// what it costs to render is bounded with it: the formatter stops at the
+// bound rather than render the rest only to drop it. The String methods are
+// also given values no validator passes, since Diff validates nothing.
+//
+//nolint:paralleltest // it reads the allocation counters of the whole process
+func TestFormattersAreBounded(t *testing.T) {
+	ignored := manyNames(215, specs.ActErrno)
+	loaded := manyNames(seccomp.MaxArtifactClauses/seccomp.MaxArtifactNamesPerEntry, specs.ActAllow)
+
+	for name, artifact := range map[string]*specs.LinuxSeccomp{"ignored": ignored, "loaded": loaded} {
+		err := seccomp.ValidateArtifact(artifact)
+		if err != nil {
+			t.Fatalf("ValidateArtifact(%s) = %v", name, err)
+		}
+	}
+
+	diff, err := seccomp.Diff(&specs.LinuxSeccomp{DefaultAction: specs.ActErrno}, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	longName := strings.Repeat("\x7f", 1<<20)
+	manyArgs := make([]specs.LinuxSeccompArg, 1<<16)
+
+	for name, format := range map[string]func() string{
+		"FormatProfile(ignored)": func() string { return seccomp.FormatProfile(ignored) },
+		"FormatProfile(loaded)":  func() string { return seccomp.FormatProfile(loaded) },
+		"FormatDiff(loaded)":     func() string { return seccomp.FormatDiff(diff) },
+		"SyscallEntry.String": func() string {
+			return seccomp.SyscallEntry{Name: "read", Action: specs.ActAllow, ErrnoRet: nil, Args: manyArgs}.String()
+		},
+		"SyscallDetail.String": func() string {
+			return seccomp.SyscallDetail{Action: specs.ActAllow, ErrnoRet: nil, Args: manyArgs}.String()
+		},
+		"SyscallEntry.String(long name)": func() string {
+			return seccomp.SyscallEntry{Name: longName, Action: specs.ActAllow, ErrnoRet: nil, Args: nil}.String()
+		},
+	} {
+		testutil.CheckTruncated(t, name, format())
+
+		if allocated := testutil.AllocatedBytes(
+			func() { _ = format() },
+		); allocated > testutil.MaxFormatAllocBytes {
+			t.Errorf(
+				"%s allocated %d bytes, want at most %d",
+				name,
+				allocated,
+				testutil.MaxFormatAllocBytes,
+			)
+		}
+	}
+}
+
+// TestFormatDefaultsUntruncated covers the largest real outputs the tests
+// know of, the CRI-O default profile and its diff against a profile that
+// allows everything, which must render whole and with room to spare.
+func TestFormatDefaultsUntruncated(t *testing.T) {
+	t.Parallel()
+
+	profile := loadDefault(t, "crio-amd64.json")
+
+	diff, err := seccomp.Diff(profile, &specs.LinuxSeccomp{DefaultAction: specs.ActAllow})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, output := range map[string]string{
+		"FormatProfile": seccomp.FormatProfile(profile),
+		"FormatDiff":    seccomp.FormatDiff(diff),
+	} {
+		if strings.HasSuffix(output, merge.TruncationMarker) ||
+			len(output) > merge.MaxFormattedBytes/4 {
+			t.Errorf("%s of the CRI-O default is %d bytes, want it whole and under a quarter of %d",
+				name, len(output), merge.MaxFormattedBytes)
+		}
+
+		if !strings.HasSuffix(output, "}") {
+			t.Errorf("%s of the CRI-O default ends in %q", name, output[len(output)-20:])
+		}
 	}
 }

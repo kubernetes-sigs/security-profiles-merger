@@ -168,7 +168,8 @@ type NetRule struct {
 type ABIVersion int
 
 // Landlock ABI versions. The rights each one introduced are listed on the
-// access right constants.
+// access right constants. Some versions also added what a Profile cannot
+// express, which this package neither needs nor checks.
 const (
 	ABIV1 ABIVersion = iota + 1
 	ABIV2
@@ -180,11 +181,20 @@ const (
 	ABIV7
 	ABIV8
 	ABIV9
+	// ABIV10 added the UDP rights and, beyond them, the quiet_access_fs,
+	// quiet_access_net and quiet_scoped masks of a ruleset and the
+	// LANDLOCK_ADD_RULE_QUIET flag of landlock_add_rule, which a Profile
+	// cannot express.
 	ABIV10
+	// ABIV11 added only the LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS flag of
+	// landlock_restrict_self, and no access rights.
+	ABIV11
 )
 
-// LatestABIVersion is the newest Landlock ABI this package knows rights for.
-const LatestABIVersion = ABIV10
+// LatestABIVersion is the newest Landlock ABI this package knows. A newer
+// one is read as this one, since every right a Profile can hold is known
+// from it on.
+const LatestABIVersion = ABIV11
 
 // The tables below are the single source of the rights this package knows,
 // each with the Landlock ABI version that introduced it. Validate accepts

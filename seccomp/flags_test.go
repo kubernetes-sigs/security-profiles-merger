@@ -277,6 +277,14 @@ func TestMergeDropsTsyncNextToListener(t *testing.T) {
 		DefaultAction: specs.ActErrno,
 		Flags:         flags{tsync},
 	}
+	// Intersect takes the listener from its first input only, so where the
+	// flag comes first, that input names the listener too, while the other
+	// one notifies.
+	withTsyncAndListener := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Flags:         flags{tsync},
+		ListenerPath:  listenerSock,
+	}
 	withListener := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
 		ListenerPath:  listenerSock,
@@ -297,7 +305,11 @@ func TestMergeDropsTsyncNextToListener(t *testing.T) {
 	}{
 		// The list the flag was alone in stays set, so that the result
 		// does not turn SPEC_ALLOW on.
-		{name: "flag first", inputs: []*specs.LinuxSeccomp{withTsync, withListener}, want: flags{}},
+		{
+			name:   "flag first",
+			inputs: []*specs.LinuxSeccomp{withTsyncAndListener, withListener},
+			want:   flags{},
+		},
 		{name: "listener first", inputs: []*specs.LinuxSeccomp{withListener, withTsync}, want: flags{}},
 		{
 			name:   "one profile with both",

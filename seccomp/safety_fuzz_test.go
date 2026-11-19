@@ -107,8 +107,11 @@ func (r *byteReader) exhausted() bool { return r.pos >= len(r.data) }
 // syscall names, mix unconditional and conditional rules, and carry up to
 // two argument filters on indices 0 and 1. With errnos disabled, no
 // ErrnoRet is set anywhere. A profile that notifies names a listener, as a
-// loadable one must: without one, Intersect degrades the action and Union
-// refuses the merge.
+// loadable one must: without one, Validate rejects it with
+// ErrNotifyWithoutListener, so both merges would refuse it. Every profile
+// names the same listener, since the merges refuse different ones with
+// ErrConflictingListener, and the intersection merges copies that all name
+// it (see sharedListener).
 func safetyProfile(reader *byteReader, errnos bool) *specs.LinuxSeccomp {
 	const (
 		maxEntries = 6
@@ -250,7 +253,7 @@ func intersectSafety() safetyDirection {
 	return safetyDirection{
 		name: "intersect",
 		merge: func(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
-			return seccomp.IntersectForArch(specs.ArchX86_64, profiles...)
+			return seccomp.IntersectForArch(specs.ArchX86_64, sharedListener(profiles)...)
 		},
 		bare:  seccomp.IntersectSyscalls,
 		safe:  permitsAtMost,

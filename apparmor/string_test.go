@@ -22,6 +22,8 @@ import (
 	"testing"
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 )
 
 func TestProfileString(t *testing.T) {
@@ -354,5 +356,96 @@ func TestFormatProfileQuotesSeparators(t *testing.T) {
 
 	if got, want := apparmor.FormatDiff(diff), `Diff{caps:+"KILL,-CHOWN,+SYS_ADMIN"}`; got != want {
 		t.Errorf("FormatDiff() = %s, want %s", got, want)
+	}
+}
+
+// TestFormattersAreBounded covers an accepted artifact whose rendering runs
+// to megabytes: MaxArtifactPaths paths of MaxPathLen bytes that are not
+// valid UTF-8, which a file name may be and which each render as a
+// four-byte escape. Its diff was a single line of 16 MB. Each output is cut
+// at the bound with the marker and never inside a quoted path, and what it
+// costs to render is bounded with it: the formatter stops at the bound
+// rather than render the rest only to drop it.
+//
+//nolint:paralleltest // it reads the allocation counters of the whole process
+func TestFormattersAreBounded(t *testing.T) {
+	paths := make([]string, apparmor.MaxArtifactPaths)
+	for idx := range paths {
+		prefix := "/" + strconv.Itoa(idx)
+		paths[idx] = prefix + strings.Repeat("\xff", apparmor.MaxPathLen-len(prefix))
+	}
+
+	caps := make([]string, apparmor.MaxArtifactCapabilities)
+	for idx := range caps {
+		caps[idx] = strings.Repeat("A", 200) + strconv.Itoa(idx)
+	}
+
+	artifact := &apparmor.Profile{
+		Executable: &apparmor.ExecutableRules{AllowedExecutables: paths, AllowedLibraries: nil},
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths: nil, WriteOnlyPaths: nil, ReadWritePaths: nil,
+		},
+		Network:      nil,
+		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: caps},
+	}
+
+	err := apparmor.ValidateArtifact(artifact)
+	if err != nil {
+		t.Fatalf("ValidateArtifact() = %v", err)
+	}
+
+	diff, err := apparmor.Diff(&apparmor.Profile{
+		Executable: nil, Filesystem: nil, Network: nil, Capabilities: nil,
+	}, artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	filesystem := apparmor.FilesystemRules{
+		ReadOnlyPaths:  paths,
+		WriteOnlyPaths: nil,
+		ReadWritePaths: nil,
+	}
+
+	for name, format := range map[string]func() string{
+		"FormatProfile":          func() string { return apparmor.FormatProfile(artifact) },
+		"FormatDiff":             func() string { return apparmor.FormatDiff(diff) },
+		"ExecutableRules.String": artifact.Executable.String,
+		"FilesystemRules.String": filesystem.String,
+		"CapabilityRules.String": artifact.Capabilities.String,
+	} {
+		testutil.CheckTruncated(t, name, format())
+
+		if allocated := testutil.AllocatedBytes(
+			func() { _ = format() },
+		); allocated > testutil.MaxFormatAllocBytes {
+			t.Errorf(
+				"%s allocated %d bytes, want at most %d",
+				name,
+				allocated,
+				testutil.MaxFormatAllocBytes,
+			)
+		}
+	}
+}
+
+// TestFormatProfileShowsWholePaths covers paths of MaxPathLen bytes, every
+// one of them escaped: a profile holding a few of them renders whole, so
+// the bound does not hide a rule of an ordinary profile.
+func TestFormatProfileShowsWholePaths(t *testing.T) {
+	t.Parallel()
+
+	path := "/" + strings.Repeat("\xff", apparmor.MaxPathLen-1)
+	profile := readOnly(path+"a", path+"b", path+"c")
+
+	got := apparmor.FormatProfile(profile)
+	if strings.HasSuffix(got, merge.TruncationMarker) {
+		t.Fatalf("FormatProfile() of three escaped paths is cut at %d bytes", len(got))
+	}
+
+	for _, suffix := range []string{"a", "b", "c"} {
+		if !strings.Contains(got, strconv.Quote(path+suffix)) {
+			t.Errorf("FormatProfile() does not show the path ending in %q whole", suffix)
+		}
 	}
 }

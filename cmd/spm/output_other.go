@@ -24,6 +24,10 @@ import "os"
 // behaves as it always has there.
 const oNoFollow = 0
 
+// oNonBlock is zero where opening a file does not wait for a reader the way
+// opening a FIFO does on Unix.
+const oNonBlock = 0
+
 // refuseSymlinks is false where the platform has no O_NOFOLLOW: a symlink at
 // the --output path is followed there, as it always has been, and only a
 // regular file it leads to is replaced.
@@ -44,5 +48,11 @@ func isMountPoint(_ error) bool {
 // isSymlinkRefusal is always false where oNoFollow is zero, so no open
 // failure can be blamed on a symlink.
 func isSymlinkRefusal(_ error) bool {
+	return false
+}
+
+// isNoDevice is always false where opening a file does not wait for a
+// reader, so no open failure stands for a FIFO without one.
+func isNoDevice(_ error) bool {
 	return false
 }

@@ -418,6 +418,46 @@ func richGoldenCases() []goldenCase {
 			wantStderr: false,
 		},
 		{
+			// A 32-bit node never matches a condition on a value above
+			// 32 bits, so the merge settles the rule away there and keeps
+			// it on a 64-bit host; --arch makes the answer the same
+			// wherever the merge runs.
+			name: "merge seccomp intersect for a 32-bit architecture",
+			args: []string{
+				cmdMerge,
+				flagType,
+				typeSeccomp,
+				flagStrategy,
+				strategyIntersect,
+				flagArch,
+				"SCMP_ARCH_X86",
+				"testdata/seccomp_wide_value.json",
+				"testdata/seccomp_wide_value.json",
+			},
+			stdinFile:  "",
+			wantCode:   0,
+			golden:     "testdata/merge_seccomp_intersect_x86.golden",
+			wantStderr: false,
+		},
+		{
+			// A value above 32 bits passes on a 64-bit host and fails on a
+			// 32-bit one; --arch makes the answer the same everywhere.
+			name: "validate seccomp artifact for a 32-bit architecture",
+			args: []string{
+				cmdValidate,
+				flagType,
+				typeSeccomp,
+				"--artifact",
+				flagArch,
+				"SCMP_ARCH_X86",
+				"testdata/seccomp_wide_value.json",
+			},
+			stdinFile:  "",
+			wantCode:   1,
+			golden:     "testdata/validate_seccomp_wide_value_x86.golden",
+			wantStderr: true,
+		},
+		{
 			name: "diff apparmor rich json",
 			args: []string{
 				cmdDiff,

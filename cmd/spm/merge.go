@@ -34,7 +34,10 @@ const mergeUsage = `Usage: spm merge [options] [files...]
 Merge one or more security profiles using the given strategy.
 A single profile is normalized without merging.
 Reads from stdin when no files are provided: a single profile, or a JSON
-array of profiles.
+array of profiles. A file argument of - reads stdin beside the files.
+Flags must precede file arguments, and -- ends them.
+Exit status: 0 on success, 1 when a profile is invalid or cannot be read or
+the result cannot be written, 2 on a usage error.
 
 --validate names the checks to run on the inputs before merging: one mode
 for all of them, or one mode per input, separated by commas. A container
@@ -43,8 +46,17 @@ default,artifact: the defaults runtimes ship fail strict, which also
 rejects a notification listener.
 
 Input order decides seccomp tie-breaks: errnoRet follows the earlier input
-where actions tie, and listenerPath and listenerMetadata come from the first
-input that sets a listenerPath.
+where actions tie. A seccomp result has one notification listener:
+intersect takes listenerPath and listenerMetadata from the first input only
+and fails when a later input names another listener, or names one where the
+first names none; union fails when two inputs name different listeners.
+
+--arch names the native seccomp architecture of the node that loads the
+result, which decides how the 32-bit and multiplexing architectures are
+settled and which values the artifact and strict checks accept. It defaults
+to the architecture this program runs on, so the same inputs can merge
+differently on another machine; pass a name such as SCMP_ARCH_X86_64 for
+the target node, or --arch none to imply no architecture.
 
 Options:
 `
@@ -56,6 +68,7 @@ type mergeOptions struct {
 	format       string
 	output       string
 	validate     string
+	arch         string
 	noDetectNote bool
 }
 
@@ -78,6 +91,7 @@ func bindMergeFlags(flags *flag.FlagSet) *mergeOptions {
 		"checks to run on the inputs before merging: default, strict, artifact; "+
 			"or one mode per input, comma separated",
 	)
+	bindArchFlag(flags, &opts.arch, "of the node that loads the result")
 	flags.BoolVar(
 		&opts.noDetectNote, "no-detect-note", false,
 		"do not note an auto-detected profile type on stderr; the merged "+
@@ -103,6 +117,11 @@ func runMerge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return code
 	}
 
+	arch, code := parseArchFlag(flags, opts.arch, stderr)
+	if code != 0 {
+		return code
+	}
+
 	if code := checkStdin(flags, mergeUsage, stdin, stderr); code != 0 {
 		return code
 	}
@@ -114,12 +133,12 @@ func runMerge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return readErrorExit(err)
 	}
 
-	return mergeInputs(opts, inputs, stdout, stderr)
+	return mergeInputs(opts, arch, inputs, stdout, stderr)
 }
 
 // mergeInputs validates, merges and writes the profiles that were read.
 func mergeInputs(
-	opts *mergeOptions, inputs []profileInput, stdout, stderr io.Writer,
+	opts *mergeOptions, arch archOption, inputs []profileInput, stdout, stderr io.Writer,
 ) int {
 	// The mode count is checked against the inputs, which a "-" argument
 	// may expand into several, so this waits until they are read.
@@ -137,7 +156,7 @@ func mergeInputs(
 
 	var out bytes.Buffer
 
-	code = kind.merge(inputs, opts.strategy, modes, opts.format, &out, stderr)
+	code = kind.merge(inputs, opts.strategy, modes, arch, opts.format, &out, stderr)
 	if code != 0 {
 		return code
 	}
@@ -157,8 +176,10 @@ func parseValidateModes(value string, inputs int) ([]validateMode, error) {
 
 	parsed := make([]validateMode, 0, len(names))
 
-	for _, name := range names {
-		mode, ok := modeByName(strings.TrimSpace(name))
+	for _, spelled := range names {
+		name := strings.TrimSpace(spelled)
+
+		mode, ok := modeByName(name)
 		if !ok {
 			return nil, fmt.Errorf(
 				"%w %q (use %s, %s, or %s)",

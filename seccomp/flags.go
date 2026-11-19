@@ -71,6 +71,8 @@ func polarityOf(flag specs.LinuxSeccompFlag) flagPolarity {
 // need every profile; the other two combinations need any profile. A
 // listener flag belongs to the listener, so it follows the profile the
 // listener comes from and is dropped when that profile does not set it.
+// Where both profiles set a listener it is the same one, since the merges
+// refuse different ones (see checkListeners), and it comes from the left.
 func keepFlag(polarity flagPolarity, inLeft, inRight, intersect, listenerFromLeft bool) bool {
 	if polarity == flagListener {
 		if listenerFromLeft {

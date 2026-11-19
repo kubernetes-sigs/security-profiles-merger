@@ -18,6 +18,7 @@ package apparmor_test
 
 import (
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -1168,5 +1169,37 @@ func TestDiffComparesRulesNotSpellings(t *testing.T) {
 	}
 	if diff.Equal || !reflect.DeepEqual(diff.Executables, want) {
 		t.Errorf("Diff = %s, want %v", apparmor.FormatDiff(diff), want)
+	}
+}
+
+// TestDiffAllocatesInProportionToItsInput covers Diff on a path far past
+// MaxPathLen. Diff validates nothing, so it normalizes whatever it is given,
+// and splitting an escaped path into its escape sequences before collapsing
+// slashes allocated some twenty-five times the length of this one, where
+// Diff now allocates about twice it. The bound leaves room for the copies
+// Diff makes on purpose: the normalized path, its identity and the diff that
+// reports it.
+//
+//nolint:paralleltest // it reads the allocation counters of the whole process
+func TestDiffAllocatesInProportionToItsInput(t *testing.T) {
+	path := "/" + strings.Repeat(`\x41/`, 1<<18)
+
+	var before, after runtime.MemStats
+
+	runtime.ReadMemStats(&before)
+
+	diff, err := apparmor.Diff(readOnly(path), readOnly("/etc/passwd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runtime.ReadMemStats(&after)
+
+	if diff.Equal {
+		t.Fatal("Diff reports the profiles equal")
+	}
+
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 8*uint64(len(path)) {
+		t.Errorf("Diff of a %d-byte path allocated %d bytes", len(path), allocated)
 	}
 }

@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"testing"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
@@ -294,7 +293,7 @@ func TestFoldMergeErrorSubsequentPair(t *testing.T) {
 	}
 }
 
-func TestFormatSliceDiff(t *testing.T) {
+func TestWriteSliceDiff(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -346,27 +345,33 @@ func TestFormatSliceDiff(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := merge.FormatSliceDiff(test.prefix, spm.SliceDiff[string]{
+			var out merge.Builder
+
+			merge.WriteSliceDiff(&out, test.prefix, spm.SliceDiff[string]{
 				Added:   test.added,
 				Removed: test.removed,
 			})
-			if got != test.want {
-				t.Errorf("FormatSliceDiff() = %q, want %q", got, test.want)
+
+			if got := out.String(); got != test.want {
+				t.Errorf("WriteSliceDiff() = %q, want %q", got, test.want)
 			}
 		})
 	}
 }
 
-// TestFormatSliceDiffOfDiffSlice checks that the results of DiffSlice land
+// TestWriteSliceDiffOfDiffSlice checks that the results of DiffSlice land
 // on the right side of the formatted diff.
-func TestFormatSliceDiffOfDiffSlice(t *testing.T) {
+func TestWriteSliceDiffOfDiffSlice(t *testing.T) {
 	t.Parallel()
 
 	added, removed := merge.DiffSlice([]string{"a", "b"}, []string{"b", "c"})
 
-	got := merge.FormatSliceDiff("x", spm.SliceDiff[string]{Added: added, Removed: removed})
-	if want := "x:-a,+c"; got != want {
-		t.Errorf("FormatSliceDiff() = %q, want %q", got, want)
+	var out merge.Builder
+
+	merge.WriteSliceDiff(&out, "x", spm.SliceDiff[string]{Added: added, Removed: removed})
+
+	if got, want := out.String(), "x:-a,+c"; got != want {
+		t.Errorf("WriteSliceDiff() = %q, want %q", got, want)
 	}
 }
 
@@ -655,12 +660,43 @@ func TestSafeText(t *testing.T) {
 		}
 	}
 
+	// A rune that prints as nothing is quoted, and spelled out within the
+	// quotes, by SafeText, SafeName and QuoteBounded alike, so that a path
+	// holding one never reads as the path without it.
+	for value, want := range map[string]string{
+		"/usr\u3164/bin":     `"/usr\u3164/bin"`,
+		"/usr/bin\ufe0f":     `"/usr/bin\ufe0f"`,
+		"/usr/bin\U000e0100": `"/usr/bin\U000e0100"`,
+		"/usr/\u202ebin":     `"/usr/\u202ebin"`,
+		"/usr/\u00adbin":     `"/usr/\u00adbin"`,
+		"/usr/\u009bbin":     `"/usr/\u009bbin"`,
+		"/usr/bin\u3164":     `"/usr/bin\u3164"`,
+		"/usr/\u2800bin":     `"/usr/\u2800bin"`,
+		"/usr/\u3000bin":     `"/usr/\u3000bin"`,
+		"/usr/\u00a0bin":     `"/usr/\u00a0bin"`,
+		"/usr/\u2007bin":     `"/usr/\u2007bin"`,
+		"/usr/\u115fbin":     `"/usr/\u115fbin"`,
+		"/usr/\u1160bin":     `"/usr/\u1160bin"`,
+		"/usr/\uffa0bin":     `"/usr/\uffa0bin"`,
+	} {
+		for name, quote := range map[string]func(string) string{
+			"SafeText": merge.SafeText, "SafeName": merge.SafeName,
+			"QuoteBounded": merge.QuoteBounded,
+		} {
+			if got := quote(value); got != want {
+				t.Errorf("%s(%+q) = %s, want %s", name, value, got, want)
+			}
+		}
+	}
+
 	// Rendered as a list, one path with an alternation and two paths that
 	// split it differ.
-	one := strings.Join(merge.SafeTexts([]string{"/etc/{a,b}"}), ",")
-	two := strings.Join(merge.SafeTexts([]string{"/etc/{a", "b}"}), ",")
+	var one, two merge.Builder
 
-	if one == two {
-		t.Errorf("SafeTexts renders one path and two paths alike: %s", one)
+	merge.WriteTexts(&one, []string{"/etc/{a,b}"}, ",")
+	merge.WriteTexts(&two, []string{"/etc/{a", "b}"}, ",")
+
+	if one.String() == two.String() {
+		t.Errorf("WriteTexts renders one path and two paths alike: %s", one.String())
 	}
 }

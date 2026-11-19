@@ -43,8 +43,10 @@ const (
 	// unknown, repeated and misspelled JSON members.
 	modeStrict
 	// modeArtifact runs the checks runtimes apply to untrusted artifacts and
-	// rejects repeated and misspelled JSON members, which other parsers may
-	// read differently.
+	// rejects unknown, repeated and misspelled JSON members, as the
+	// UnmarshalStrict a runtime decodes an artifact with does: other parsers
+	// may read a repeated or misspelled member differently, and an unknown
+	// one drops the rule it was meant to carry.
 	modeArtifact
 )
 
@@ -72,7 +74,7 @@ func modeByName(name string) (validateMode, bool) {
 // decodePolicy returns the JSON ambiguities the mode rejects.
 func (mode validateMode) decodePolicy() decodePolicy {
 	return decodePolicy{
-		rejectUnknown:    mode == modeStrict,
+		rejectUnknown:    mode == modeStrict || mode == modeArtifact,
 		rejectDuplicates: mode == modeStrict || mode == modeArtifact,
 		// A member whose name matches a field only ignoring case is read
 		// here and dropped by a runtime that compares names exactly.
@@ -88,17 +90,20 @@ func (mode validateMode) decodePolicy() decodePolicy {
 
 // profileKind wires one profile type into the merge, diff, and validate
 // commands. The merge takes one mode per input, so a baseline and an
-// artifact can be checked the way each deserves in a single run.
+// artifact can be checked the way each deserves in a single run. Each
+// command takes the architecture --arch names, which only a profile type
+// with architectures accepts.
 type profileKind struct {
 	merge func(
-		inputs []profileInput, strategy string, modes []validateMode,
+		inputs []profileInput, strategy string, modes []validateMode, arch archOption,
 		format string, stdout, stderr io.Writer,
 	) int
 	diff func(
-		inputs []profileInput, arch diffArch, format string, stdout, stderr io.Writer,
+		inputs []profileInput, arch archOption, format string, stdout, stderr io.Writer,
 	) int
 	validate func(
-		inputs []profileInput, mode validateMode, format string, stdout, stderr io.Writer,
+		inputs []profileInput, mode validateMode, arch archOption,
+		format string, stdout, stderr io.Writer,
 	) int
 }
 
@@ -111,41 +116,127 @@ type kindOps[T any, D spm.Diff] struct {
 	validateArtifact func(*T) error
 	format           func(*T) string
 	diff             func(*T, *T) (*D, error)
-	// diffForArch compares as a node running the named architecture would,
-	// and is nil for a profile type that has no architectures.
-	diffForArch func(specs.Arch, *T, *T) (*D, error)
-	formatDiff  func(*D) string
+	formatDiff       func(*D) string
+	// forArch holds the variants that take the native architecture, and is
+	// nil for a profile type that has no architectures.
+	forArch *archOps[T, D]
 }
 
-// diffCommand compares two profiles, honouring --arch where the profile
-// type has architectures and rejecting it where it has none: a run that
-// names an architecture for a profile type that cannot have one asked for
-// something the answer would silently ignore.
+// archOps holds the package functions of a profile type that run as a node
+// with the given native architecture would, rather than as the one this
+// program runs on. Validate has no such variant, since what it checks does
+// not depend on the architecture.
+type archOps[T any, D spm.Diff] struct {
+	intersect        func(specs.Arch, ...*T) (*T, error)
+	union            func(specs.Arch, ...*T) (*T, error)
+	validateStrict   func(specs.Arch, *T) error
+	validateArtifact func(specs.Arch, *T) error
+	diff             func(specs.Arch, *T, *T) (*D, error)
+}
+
+// atArch returns the functions to run for the architecture --arch names.
+// It reports false, after saying why, when --arch was named for a profile
+// type that has no architectures: a run that names one for a profile type
+// that cannot have one asked for something the answer would silently
+// ignore. Without an explicit architecture the functions are those of the
+// profile type, which settle for the architecture this program runs on.
+func (ops kindOps[T, D]) atArch(arch archOption, stderr io.Writer) (kindOps[T, D], bool) {
+	if rejectArch(arch, ops.forArch != nil, stderr) {
+		return ops, false
+	}
+
+	if !arch.explicit {
+		return ops, true
+	}
+
+	native, forArch := arch.value, ops.forArch
+
+	ops.intersect = func(profiles ...*T) (*T, error) {
+		return forArch.intersect(native, profiles...)
+	}
+	ops.union = func(profiles ...*T) (*T, error) {
+		return forArch.union(native, profiles...)
+	}
+	ops.validateStrict = func(profile *T) error {
+		return forArch.validateStrict(native, profile)
+	}
+	ops.validateArtifact = func(profile *T) error {
+		return forArch.validateArtifact(native, profile)
+	}
+	ops.diff = func(left, right *T) (*D, error) {
+		return forArch.diff(native, left, right)
+	}
+
+	return ops, true
+}
+
+// diffCommand compares two profiles.
 func (ops kindOps[T, D]) diffCommand(
-	inputs []profileInput, arch diffArch, format string, stdout, stderr io.Writer,
+	inputs []profileInput, arch archOption, format string, stdout, stderr io.Writer,
 ) int {
-	diffFn := ops.diff
-
-	// The usage error turns on whether --arch was named at all, not on
-	// whether its value changes anything: "--arch native" asks for what the
-	// flag's absence already implies, but naming it for a kind that has no
-	// architectures is the same mistake the other values are, rather than a
-	// flag that quietly does nothing.
-	if arch.named && ops.diffForArch == nil {
-		_, _ = fmt.Fprintf(
-			stderr, "error: --arch only applies to %s profiles\n", typeSeccomp,
-		)
-
+	ops, ok := ops.atArch(arch, stderr)
+	if !ok {
 		return exitUsage
 	}
 
-	if arch.explicit {
-		diffFn = func(left, right *T) (*D, error) {
-			return ops.diffForArch(arch.value, left, right)
-		}
+	return diffProfiles(inputs, format, ops.diff, ops.formatDiff, stdout, stderr)
+}
+
+// mergeCommand checks every input under its own mode and merges them.
+func (ops kindOps[T, D]) mergeCommand(
+	inputs []profileInput, strategy string, modes []validateMode, arch archOption,
+	format string, stdout, stderr io.Writer,
+) int {
+	ops, ok := ops.atArch(arch, stderr)
+	if !ok {
+		return exitUsage
 	}
 
-	return diffProfiles(inputs, format, diffFn, ops.formatDiff, stdout, stderr)
+	checks := make([]func(*T) error, len(modes))
+	policies := make([]decodePolicy, len(modes))
+
+	for idx, mode := range modes {
+		// modeDefault is what the merge functions run on their own inputs,
+		// and they run it on the profile they normalized rather than on the
+		// one the caller passed: a profile the merge deduplicates would fail
+		// a check run here. The merge names an input by position, which is
+		// not something a caller can act on, so nameMergeFailure maps that
+		// name onto the input afterwards instead.
+		if mode != modeDefault {
+			checks[idx] = ops.checker(mode)
+		}
+
+		policies[idx] = mode.decodePolicy()
+	}
+
+	return mergeProfiles(
+		mergeRequest[T]{
+			inputs:    inputs,
+			strategy:  strategy,
+			format:    format,
+			checks:    checks,
+			policies:  policies,
+			intersect: ops.intersect,
+			union:     ops.union,
+			formatFn:  ops.format,
+		},
+		stdout, stderr,
+	)
+}
+
+// validateCommand checks every input under one mode.
+func (ops kindOps[T, D]) validateCommand(
+	inputs []profileInput, mode validateMode, arch archOption,
+	format string, stdout, stderr io.Writer,
+) int {
+	ops, ok := ops.atArch(arch, stderr)
+	if !ok {
+		return exitUsage
+	}
+
+	return validateProfiles(
+		inputs, ops.checker(mode), mode.decodePolicy(), format, ops.format, stdout, stderr,
+	)
 }
 
 // checker returns the validation function for a mode.
@@ -164,51 +255,9 @@ func (ops kindOps[T, D]) checker(mode validateMode) func(*T) error {
 
 func newKind[T any, D spm.Diff](ops kindOps[T, D]) profileKind {
 	return profileKind{
-		merge: func(
-			inputs []profileInput, strategy string, modes []validateMode,
-			format string, stdout, stderr io.Writer,
-		) int {
-			checks := make([]func(*T) error, len(modes))
-			policies := make([]decodePolicy, len(modes))
-
-			for idx, mode := range modes {
-				// modeDefault is what the merge functions run on their own
-				// inputs, and they run it on the profile they normalized
-				// rather than on the one the caller passed: a profile the
-				// merge deduplicates would fail a check run here. The merge
-				// names an input by position, which is not something a
-				// caller can act on, so nameMergeFailure maps that name
-				// onto the input afterwards instead.
-				if mode != modeDefault {
-					checks[idx] = ops.checker(mode)
-				}
-
-				policies[idx] = mode.decodePolicy()
-			}
-
-			return mergeProfiles(
-				mergeRequest[T]{
-					inputs:    inputs,
-					strategy:  strategy,
-					format:    format,
-					checks:    checks,
-					policies:  policies,
-					intersect: ops.intersect,
-					union:     ops.union,
-					formatFn:  ops.format,
-				},
-				stdout, stderr,
-			)
-		},
-		diff: ops.diffCommand,
-		validate: func(
-			inputs []profileInput, mode validateMode, format string, stdout, stderr io.Writer,
-		) int {
-			return validateProfiles(
-				inputs, ops.checker(mode), mode.decodePolicy(),
-				format, ops.format, stdout, stderr,
-			)
-		},
+		merge:    ops.mergeCommand,
+		diff:     ops.diffCommand,
+		validate: ops.validateCommand,
 	}
 }
 
@@ -224,8 +273,14 @@ func kindByName(name string) (profileKind, bool) {
 			validateArtifact: seccomp.ValidateArtifact,
 			format:           seccomp.FormatProfile,
 			diff:             seccomp.Diff,
-			diffForArch:      seccomp.DiffForArch,
 			formatDiff:       seccomp.FormatDiff,
+			forArch: &archOps[specs.LinuxSeccomp, seccomp.ProfileDiff]{
+				intersect:        seccomp.IntersectForArch,
+				union:            seccomp.UnionForArch,
+				validateStrict:   seccomp.ValidateStrictForArch,
+				validateArtifact: seccomp.ValidateArtifactForArch,
+				diff:             seccomp.DiffForArch,
+			},
 		}), true
 	case typeAppArmor:
 		return newKind(kindOps[apparmor.Profile, apparmor.ProfileDiff]{
@@ -236,8 +291,8 @@ func kindByName(name string) (profileKind, bool) {
 			validateArtifact: apparmor.ValidateArtifact,
 			format:           apparmor.FormatProfile,
 			diff:             apparmor.Diff,
-			diffForArch:      nil,
 			formatDiff:       apparmor.FormatDiff,
+			forArch:          nil,
 		}), true
 	case typeLandlock:
 		return newKind(kindOps[landlock.Profile, landlock.ProfileDiff]{
@@ -248,8 +303,8 @@ func kindByName(name string) (profileKind, bool) {
 			validateArtifact: landlock.ValidateArtifact,
 			format:           landlock.FormatProfile,
 			diff:             landlock.Diff,
-			diffForArch:      nil,
 			formatDiff:       landlock.FormatDiff,
+			forArch:          nil,
 		}), true
 	default:
 		var none profileKind
@@ -265,11 +320,12 @@ func kindByName(name string) (profileKind, bool) {
 // noted on stderr unless noDetectNote is set, so that a command in a
 // pipeline can stay silent about what it inferred.
 //
-// A named type is checked against the inputs as well, rather than taken on
-// faith: only the members of that type are decoded, so an input of another
-// kind, or of none, decodes into an empty profile, which an intersection
-// reads as permitting nothing and a diff reads as equal to anything. Both
-// would otherwise succeed, with an unknown-field warning as the only sign.
+// The type is checked against the inputs as well, whether named or
+// detected, rather than taken on faith: only the members of that type are
+// decoded, so an input of another kind, or of none, decodes into an empty
+// profile, which an intersection reads as permitting nothing and a diff
+// reads as equal to anything. Both would otherwise succeed, with an
+// unknown-field warning as the only sign.
 func resolveKind(
 	profileType string, inputs []profileInput, parseExit int, noDetectNote bool,
 	stderr io.Writer,
@@ -304,13 +360,23 @@ func resolveKind(
 		}
 
 		if detected == "" {
-			_, _ = fmt.Fprintln(
-				stderr, "error: could not detect profile type from input, use --type",
-			)
+			reportUndetected(inputs, stderr)
 
 			var none profileKind
 
 			return none, exitUsage
+		}
+
+		// An input whose members reveal no type defers to the others, but
+		// only when it holds none at all: one holding members only other
+		// formats know, such as a profile wrapped in an object, would decode
+		// into an empty profile of the detected type, exactly as it would
+		// under --type.
+		code := checkTypeMatchesInputs(detected, inputs, stderr)
+		if code != 0 {
+			var none profileKind
+
+			return none, code
 		}
 
 		profileType = detected
@@ -364,6 +430,24 @@ func checkTypeMatchesInputs(
 	return 0
 }
 
+// reportUndetected explains that no input revealed a profile type, naming
+// the input, or the first of them, so that a caller holding many knows where
+// to look.
+func reportUndetected(inputs []profileInput, stderr io.Writer) {
+	from := "input"
+	if len(inputs) > 0 {
+		from = merge.SafeName(inputs[0].name)
+	}
+
+	if len(inputs) > 1 {
+		from += " or any other input"
+	}
+
+	_, _ = fmt.Fprintf(
+		stderr, "error: could not detect profile type from %s, use --type\n", from,
+	)
+}
+
 // reportTypeConflict explains why the profile type could not be resolved:
 // either the inputs are of different types, or one of them carries the
 // members of two. Both leave the command no type it could use without
@@ -411,7 +495,9 @@ type typeConflict struct {
 // carry. Every input is inspected, not only the first: merging profiles of
 // different types would drop whatever the chosen type has no field for, so a
 // disagreement is reported rather than resolved. An input whose type cannot
-// be told apart, such as an empty object, defers to the others.
+// be told apart, such as an empty object, defers to the others; the caller
+// then checks that it holds nothing another format would (see
+// checkTypeMatchesInputs).
 //
 // A single input carrying members of two types is a disagreement too:
 // picking one of them by a fixed precedence would validate or merge a

@@ -307,3 +307,99 @@ func TestBoundedText(t *testing.T) {
 		t.Error("BoundedError(nil) != nil")
 	}
 }
+
+func TestCollectorBuildsOnlyWhatItKeeps(t *testing.T) {
+	t.Parallel()
+
+	const total = merge.MaxJoinedErrors + 17
+
+	var (
+		collector merge.Collector
+		built     int
+	)
+
+	for idx := range total {
+		collector.Report(func() error {
+			built++
+
+			return fmt.Errorf("%w %d", errProblem, idx)
+		})
+	}
+
+	if built != merge.MaxJoinedErrors {
+		t.Errorf("Collector built %d failures, want %d", built, merge.MaxJoinedErrors)
+	}
+
+	err := collector.Err()
+
+	lines := strings.Count(err.Error(), "\n") + 1
+	if want := merge.MaxJoinedErrors + 1; lines != want {
+		t.Errorf("Collector of %d failures reported %d lines, want %d", total, lines, want)
+	}
+
+	if !errors.Is(err, spm.ErrMoreProblems) {
+		t.Errorf("Collector error = %q, want it to report the omission", err.Error())
+	}
+
+	want := fmt.Sprintf("%d ", total-merge.MaxJoinedErrors)
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("Collector error = %q, want it to count %q", err.Error(), want)
+	}
+}
+
+func TestCollectorMatchesJoinLimited(t *testing.T) {
+	t.Parallel()
+
+	var empty merge.Collector
+
+	err := empty.Err()
+	if err != nil {
+		t.Errorf("empty Collector = %v, want nil", err)
+	}
+
+	var single merge.Collector
+
+	single.Add(nil)
+	single.Report(func() error { return errFirst })
+
+	err = single.Err()
+	if err == nil || err.Error() != errFirst.Error() || errors.Unwrap(err) != nil {
+		t.Errorf("Collector of one failure = %v, want the failure itself", err)
+	}
+
+	nested := make([]error, 0, merge.MaxJoinedErrors+1)
+	for range merge.MaxJoinedErrors + 1 {
+		nested = append(nested, errProblem)
+	}
+
+	var flattened merge.Collector
+
+	flattened.Add(errFirst)
+	flattened.Add(merge.JoinLimited(nested...))
+
+	want := merge.JoinLimited(errFirst, merge.JoinLimited(nested...))
+
+	got := flattened.Err()
+	if got.Error() != want.Error() {
+		t.Errorf("Collector flattened a nested report to %q, want %q", got, want)
+	}
+}
+
+//nolint:paralleltest // testing.AllocsPerRun refuses to run in a parallel test
+func TestCollectorDoesNotAllocatePastTheLimit(t *testing.T) {
+	var collector merge.Collector
+	for range merge.MaxJoinedErrors {
+		collector.Report(func() error { return errProblem })
+	}
+
+	name := "value"
+
+	allocs := testing.AllocsPerRun(100, func() {
+		collector.Report(func() error {
+			return fmt.Errorf("%w: %s", errProblem, merge.QuoteBounded(name))
+		})
+	})
+	if allocs != 0 {
+		t.Errorf("Report past the limit allocated %v times, want 0", allocs)
+	}
+}

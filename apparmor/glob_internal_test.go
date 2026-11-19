@@ -17,7 +17,10 @@ limitations under the License.
 package apparmor
 
 import (
+	"errors"
 	"fmt"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -75,12 +78,20 @@ func TestGlobRegexCacheByteEviction(t *testing.T) {
 
 	const patternLen = maxGlobPatternLen / 2
 
-	fits := maxGlobCacheBytes / patternLen
+	pattern := func(idx int) string {
+		filler := strings.Repeat("a", patternLen-len("/x/*")-len(strconv.Itoa(idx)))
+
+		return "/" + filler + strconv.Itoa(idx) + "/*"
+	}
+
+	// The bound weighs what an analysis retains, which for a compiled
+	// pattern is many times its length.
+	sample := pattern(0)
+	fits := maxGlobCacheBytes / analyzePattern(sample, true).retainedBytes(sample)
 	fewest := maxGlobCacheEntries
 
 	for idx := range 2 * fits {
-		filler := strings.Repeat("a", patternLen-len("/x/*")-len(strconv.Itoa(idx)))
-		matcherFor("/" + filler + strconv.Itoa(idx) + "/*")
+		matcherFor(pattern(idx))
 
 		count, bytes := cacheState()
 
@@ -122,7 +133,7 @@ func TestOversizePatternLeavesCacheAlone(t *testing.T) {
 	}
 
 	count, bytes := cacheState()
-	if count != 1 || bytes != len("/etc/*") {
+	if count != 1 || bytes != matcherFor("/etc/*").retainedBytes("/etc/*") {
 		t.Errorf("cache holds %d entries and %d bytes, want only /etc/*", count, bytes)
 	}
 }
@@ -516,5 +527,481 @@ func TestExpandedByGuards(t *testing.T) {
 					testCase.glob, testCase.base, got, testCase.want, testCase.description)
 			}
 		})
+	}
+}
+
+// TestCallAnalyzesEachPatternOnce covers a call reading more patterns than
+// the shared cache holds. The cache evicts a quarter of itself when it is
+// full, so without a cache of the call's own nearly every read of a pattern
+// missed and compiled it again, and a merge of two thousand patterns
+// allocated hundreds of times per pattern what a merge of a thousand did.
+// With every pattern compiled once per call, the cost per pattern does not
+// grow with the count.
+// testing.AllocsPerRun refuses to run in a parallel test.
+func TestCallAnalyzesEachPatternOnce(t *testing.T) {
+	swapGlobCache(t)
+
+	perPattern := func(count int) float64 {
+		left := coldProfile(count, "left")
+		right := coldProfile(count, "right")
+
+		allocs := testing.AllocsPerRun(2, func() {
+			resetGlobCache()
+
+			_, err := Union(left, right)
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+
+		return allocs / float64(2*count)
+	}
+
+	small := perPattern(maxGlobCacheEntries / 4)
+	large := perPattern(maxGlobCacheEntries)
+
+	if large > 1.5*small {
+		t.Errorf("a merge of %d patterns allocated %.1f times per pattern, "+
+			"one of %d allocated %.1f", 2*maxGlobCacheEntries, large,
+			maxGlobCacheEntries/2, small)
+	}
+}
+
+// TestLiteralIsMappedOnce covers matching one literal against many patterns:
+// the literal is mapped by latin1 when its side is built, not again for every
+// pattern it is compared with, which for a name outside ASCII allocated on
+// every comparison. testing.AllocsPerRun refuses to run in a parallel test.
+func TestLiteralIsMappedOnce(t *testing.T) {
+	const patterns = 64
+
+	perms := make(map[string]fsPermission, patterns)
+	for idx := range patterns {
+		perms[fmt.Sprintf("/café/{x%d,*}", idx)] = fsPermission{read: true, write: false}
+	}
+
+	side := buildFsSide(perms, newMatcherCache())
+	literal := buildFsSide(
+		map[string]fsPermission{"/café/crème": {read: false, write: true}}, nil,
+	).literals[0]
+
+	var granted fsPermission
+
+	allocs := testing.AllocsPerRun(10, func() {
+		granted = side.grants(literal)
+	})
+
+	if !granted.read || granted.write {
+		t.Fatalf("grants = %+v, want read only", granted)
+	}
+
+	if allocs >= patterns {
+		t.Errorf("matching a literal against %d patterns allocated %v times", patterns, allocs)
+	}
+}
+
+// TestPrefixIndexCandidates checks the index against what it replaces:
+// every pattern filed under a directory prefix of the name, in the order of
+// the prefixes, although only the prefixes of a recorded length are probed.
+func TestPrefixIndexCandidates(t *testing.T) {
+	t.Parallel()
+
+	index := newPrefixIndex()
+	for _, prefix := range []string{"/", "/a/", "/a/b/", "/a/bc/", "/ab/", "/x/y/z/", "/a/b/c/d/"} {
+		index.add(prefix, prefix+"*")
+		index.add(prefix, prefix+"?")
+	}
+
+	for _, name := range []string{
+		"/a/b/c/d/e", "/a/b", "/a/bc/d", "/ab", "/ab/c", "/x/y/z/", "/q", "", "a/b/",
+		"/a/b/c/d/" + strings.Repeat("e/", 100),
+	} {
+		var got []string
+
+		index.candidates(name, func(pattern string) bool {
+			got = append(got, pattern)
+
+			return false
+		})
+
+		var want []string
+
+		for idx := range len(name) {
+			if name[idx] == '/' {
+				want = append(want, index.patterns[name[:idx+1]]...)
+			}
+		}
+
+		if !slices.Equal(got, want) {
+			t.Errorf("candidates(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+// TestCallCompileBudget covers the bound on what one call compiles. A
+// profile checked only with Validate may hold megabytes of patterns, and
+// compiling them costs time and memory no matching budget sees. Past the
+// budget a pattern is analyzed but not compiled, and so matches nothing.
+func TestCallCompileBudget(t *testing.T) {
+	t.Parallel()
+
+	const patternLen = maxGlobPatternLen - 64
+
+	matchers := newMatcherCache()
+	compiled := 0
+
+	for idx := range 2 * maxCallCompileBytes / patternLen {
+		prefix := fmt.Sprintf("/budget/%d/", idx)
+		matcher := matchers.matcher(prefix + strings.Repeat("a", patternLen-len(prefix)-1) + "*")
+
+		if matcher.usable() {
+			compiled += patternLen
+		}
+	}
+
+	if compiled > maxCallCompileBytes || compiled < maxCallCompileBytes-patternLen {
+		t.Errorf("compiled %d bytes of patterns, want just under %d", compiled, maxCallCompileBytes)
+	}
+
+	// A short pattern still fits once a long one no longer does.
+	if !matchers.matcher("/etc/*").usable() {
+		t.Error("a pattern that fits the remaining budget was not compiled")
+	}
+}
+
+// TestCallCompileBudgetIgnoresTheSharedCache covers what a call past its
+// compile budget does with a pattern the shared cache holds compiled: it
+// treats it as uncompiled all the same, since what a merge keeps must not
+// depend on what earlier calls left in the cache. It swaps the shared
+// cache, so it does not run in parallel.
+func TestCallCompileBudgetIgnoresTheSharedCache(t *testing.T) {
+	swapGlobCache(t)
+
+	const patternLen = maxGlobPatternLen - 64
+
+	paths := make([]string, 0, maxCallCompileBytes/patternLen+2)
+	for idx := range cap(paths) - 1 {
+		prefix := fmt.Sprintf("/budget/%d/", idx)
+		paths = append(paths, prefix+strings.Repeat("a", patternLen-len(prefix)-1)+"*")
+	}
+
+	// The pattern covering the baseline's file comes last and is too long
+	// for what the budget has left.
+	late := "/etc/{passwd," + strings.Repeat("b", patternLen) + "}"
+	paths = append(paths, late)
+
+	artifact := budgetProfile(paths...)
+	baseline := budgetProfile("/etc/passwd")
+
+	cold, err := Intersect(artifact, baseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !matcherFor(late).usable() {
+		t.Fatal("the late pattern does not compile on its own")
+	}
+
+	warm, err := Intersect(artifact, baseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(cold.Filesystem.ReadOnlyPaths) != 0 || len(warm.Filesystem.ReadOnlyPaths) != 0 {
+		t.Errorf("Intersect kept %q cold and %q warm, want nothing past the budget",
+			cold.Filesystem.ReadOnlyPaths, warm.Filesystem.ReadOnlyPaths)
+	}
+}
+
+// budgetFiller returns patterns whose lengths add up to a call's compile
+// budget exactly, so that every pattern a call reads after them is past it.
+func budgetFiller() []string {
+	return fillerPatterns("fill", maxCallCompileBytes)
+}
+
+// fillerPatterns returns distinct patterns under /<name>/ whose lengths add
+// up to total exactly.
+func fillerPatterns(name string, total int) []string {
+	var paths []string
+
+	for left, idx := total, 0; left > 0; idx++ {
+		prefix := fmt.Sprintf("/%s/%d/", name, idx)
+
+		length := min(maxGlobPatternLen-64, left)
+		if left-length < 64 {
+			length = left
+		}
+
+		paths = append(paths, prefix+strings.Repeat("a", length-len(prefix)-1)+"*")
+		left -= length
+	}
+
+	return paths
+}
+
+// TestDuplicatesPastTheCompileBudget covers the identity of a pattern the
+// call no longer compiles: it is the expression the pattern translates to,
+// as for a compiled one, so two spellings of one rule are still reported
+// as duplicates however many patterns came before them.
+func TestDuplicatesPastTheCompileBudget(t *testing.T) {
+	t.Parallel()
+
+	for _, filler := range [][]string{nil, budgetFiller()} {
+		across := budgetProfile(append(slices.Clone(filler), "/x/b*")...)
+		across.Filesystem.WriteOnlyPaths = []string{`/x/\x62*`}
+
+		err := Validate(across)
+		if !errors.Is(err, ErrDuplicatePath) {
+			t.Errorf("after %d patterns, Validate across categories = %v, want ErrDuplicatePath",
+				len(filler), err)
+		}
+
+		within := budgetProfile(append(slices.Clone(filler), "/x/b*", `/x/\x62*`)...)
+
+		err = Validate(within)
+		if !errors.Is(err, ErrDuplicatePathInCategory) {
+			t.Errorf("after %d patterns, Validate within a category = %v, "+
+				"want ErrDuplicatePathInCategory", len(filler), err)
+		}
+	}
+}
+
+// TestUnionKeepsPatternsPastTheCompileBudget covers a union whose patterns
+// do not all fit the call's compile budget. A pattern past it matches
+// nothing, so it prunes none of the other side's literals, but it is kept
+// itself, so the union permits what the exact one does, in either order.
+func TestUnionKeepsPatternsPastTheCompileBudget(t *testing.T) {
+	t.Parallel()
+
+	patterns := budgetProfile(append(budgetFiller(), "/z/*", "/w/**")...)
+	literals := budgetProfile("/z/a", "/w/x/y")
+	literals.Filesystem.ReadWritePaths = []string{"/z/b"}
+
+	for _, order := range [][]*Profile{{patterns, literals}, {literals, patterns}} {
+		result, err := Union(order...)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for _, want := range []string{"/z/*", "/w/**", "/z/a", "/w/x/y"} {
+			if !slices.Contains(result.Filesystem.ReadOnlyPaths, want) {
+				t.Errorf("Union lost the read-only path %q", want)
+			}
+		}
+
+		if !slices.Equal(result.Filesystem.ReadWritePaths, []string{"/z/b"}) {
+			t.Errorf("Union kept the read-write paths %q, want /z/b",
+				result.Filesystem.ReadWritePaths)
+		}
+	}
+}
+
+// TestRetainedBytesBoundsPrograms checks the shared cache's estimate of what
+// a compiled pattern holds against what compiling it allocates and keeps,
+// over the shapes whose programs grow fastest per pattern byte, so that the
+// cache's byte bound is one on memory. A run of "*/" components peaks at a
+// few hundred bytes, so those shapes are measured there too. The strings an
+// analysis keeps exist before the pattern is compiled, so only the program
+// is weighed. It reads the heap of the whole process, so it does not run in
+// parallel.
+func TestRetainedBytesBoundsPrograms(t *testing.T) {
+	shapes := map[string]func(size int) string{
+		"literal":    func(size int) string { return "/" + strings.Repeat("a", size-2) + "*" },
+		"question":   func(size int) string { return "/" + strings.Repeat("?", size-1) },
+		"letterQ":    func(size int) string { return "/" + strings.Repeat("a?", (size-1)/2) },
+		"starStar":   func(size int) string { return "/" + strings.Repeat("**/", (size-1)/3) },
+		"letterSS":   func(size int) string { return "/" + strings.Repeat("a**", (size-1)/3) },
+		"class":      func(size int) string { return "/" + strings.Repeat("[a-z]", (size-1)/5) },
+		"directory":  func(size int) string { return "/" + strings.Repeat("a/", (size-2)/2) + "*" },
+		"starSlash":  func(size int) string { return "/" + strings.Repeat("*/", (size-2)/2) + "x" },
+		"letterStar": func(size int) string { return "/" + strings.Repeat("a*/", (size-2)/3) + "x" },
+		"starSlashQ": func(size int) string { return "/" + strings.Repeat("*/?", (size-1)/3) },
+	}
+
+	for name, shape := range shapes {
+		for _, size := range []int{64, 150, 250, 400, 512, maxGlobPatternLen - 8} {
+			const count = 10
+
+			paths := make([]string, count)
+			matchers := make([]*globMatcher, count)
+
+			for idx := range count {
+				paths[idx] = fmt.Sprintf("/%d", idx) + shape(size)
+				matchers[idx] = analyzePattern(paths[idx], false)
+			}
+
+			var before, after runtime.MemStats
+
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+
+			for _, matcher := range matchers {
+				compileMatcher(matcher)
+			}
+
+			runtime.GC()
+			runtime.ReadMemStats(&after)
+			runtime.KeepAlive(matchers)
+
+			estimate := 0
+
+			for idx, matcher := range matchers {
+				if !matcher.usable() {
+					t.Fatalf("%s of %d bytes does not compile", name, size)
+				}
+
+				estimate += programBytes(paths[idx], matcher.fragment)
+			}
+
+			retained := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+			if retained > int64(estimate) {
+				t.Errorf("%s of %d bytes: %d programs retain %d bytes, estimated %d",
+					name, size, count, retained, estimate)
+			}
+		}
+	}
+}
+
+// TestBudgetGoesToInputsInOrder covers which patterns a merge compiles when
+// its inputs hold more than its compile budget: those of the first input,
+// all of its lists, before any of the next. An executable pattern of the
+// baseline is analyzed with the rest of the baseline, rather than after the
+// filesystem rules of an artifact that use up the budget, and so still
+// matches the artifact's executables.
+func TestBudgetGoesToInputsInOrder(t *testing.T) {
+	t.Parallel()
+
+	baseline := &Profile{
+		Executable: &ExecutableRules{
+			AllowedExecutables: []string{"/bin/*"}, AllowedLibraries: nil,
+		},
+		Filesystem:   nil,
+		Network:      nil,
+		Capabilities: nil,
+	}
+
+	artifact := budgetProfile(budgetFiller()...)
+	artifact.Executable = &ExecutableRules{
+		AllowedExecutables: []string{"/bin/sh"}, AllowedLibraries: nil,
+	}
+
+	result, err := Intersect(baseline, artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := result.Executable.AllowedExecutables; !slices.Equal(got, []string{"/bin/sh"}) {
+		t.Errorf("Intersect kept the executables %q, want /bin/sh", got)
+	}
+}
+
+// TestIntersectKeepsSharedPatternsPastTheCompileBudget covers a pattern
+// every input lists word for word when the call no longer compiles it. It
+// matches nothing here, but every input grants it, so the intersection keeps
+// it with the permissions all of them grant, as it does for a compiled one,
+// while a pattern past the budget that only one input lists still covers
+// nothing of the other.
+func TestIntersectKeepsSharedPatternsPastTheCompileBudget(t *testing.T) {
+	t.Parallel()
+
+	// A trusted baseline larger than the budget, which no artifact limit
+	// bounds: its own patterns use the budget up.
+	baseline := budgetProfile(append(budgetFiller(), "/opt/*")...)
+	baseline.Filesystem.ReadWritePaths = []string{"/srv/**", "/var/**"}
+
+	artifact := budgetProfile("/opt/x", "/var/**")
+	artifact.Filesystem.ReadWritePaths = []string{"/srv/**"}
+
+	result, err := Intersect(baseline, artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := result.Filesystem.ReadWritePaths; !slices.Equal(got, []string{"/srv/**"}) {
+		t.Errorf("Intersect kept the read-write paths %q, want /srv/**", got)
+	}
+
+	if got := result.Filesystem.ReadOnlyPaths; !slices.Equal(got, []string{"/var/**"}) {
+		t.Errorf("Intersect kept the read-only paths %q, want /var/** only", got)
+	}
+
+	// Intersecting the baseline alone keeps what intersecting it with
+	// itself keeps.
+	alone, err := Intersect(baseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := alone.Filesystem.ReadWritePaths; !slices.Equal(got, []string{"/srv/**", "/var/**"}) {
+		t.Errorf("Intersect of the baseline alone kept %q", got)
+	}
+}
+
+// TestIntersectOfManyInputsKeepsSharedPatterns covers the budget running out
+// across inputs rather than within one: five inputs share a pattern, the
+// first four spelling it with an escape and the last plainly, after the
+// first four have used the budget up. The merge gives every input the plain
+// spelling, which is the one past the budget, and still keeps the pattern.
+func TestIntersectOfManyInputsKeepsSharedPatterns(t *testing.T) {
+	t.Parallel()
+
+	const escaped, plain = `/s\x72v/**`, "/srv/**"
+
+	filler := fillerPatterns("many", maxCallCompileBytes-len(escaped))
+	quarter := (len(filler) + 3) / 4
+
+	inputs := make([]*Profile, 0, 5)
+
+	for idx := range 4 {
+		part := filler[min(idx*quarter, len(filler)):min((idx+1)*quarter, len(filler))]
+		input := budgetProfile(slices.Clone(part)...)
+		input.Filesystem.ReadWritePaths = []string{escaped}
+		inputs = append(inputs, input)
+	}
+
+	last := budgetProfile()
+	last.Filesystem.ReadWritePaths = []string{plain}
+	inputs = append(inputs, last)
+
+	result, err := Intersect(inputs...)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := result.Filesystem.ReadWritePaths; !slices.Equal(got, []string{plain}) {
+		t.Errorf("Intersect kept the read-write paths %q, want %s", got, plain)
+	}
+}
+
+// TestFailedCompileIsNotCharged covers a pattern the shared cache holds as a
+// failed compile: reading it costs the call's budget nothing, as a fresh
+// compile that failed would not, so the budget left does not depend on the
+// shared cache. It swaps the shared cache, so it does not run in parallel.
+func TestFailedCompileIsNotCharged(t *testing.T) {
+	swapGlobCache(t)
+
+	const pattern = "/failed/*"
+
+	failed := analyzePattern(pattern, false)
+	if !failed.compilable() {
+		t.Fatal("the pattern is not one the matcher compiles")
+	}
+
+	storeSharedMatcher(pattern, failed)
+
+	matchers := newMatcherCache()
+
+	got := matchers.matcher(pattern)
+	if got.usable() || !got.verbatimOnly() {
+		t.Errorf("a failed compile read as usable %v, verbatim only %v",
+			got.usable(), got.verbatimOnly())
+	}
+
+	if matchers.compileBudget != maxCallCompileBytes {
+		t.Errorf("reading a failed compile left a budget of %d, want %d",
+			matchers.compileBudget, maxCallCompileBytes)
+	}
+
+	if !matchers.matcher("/other/*").usable() {
+		t.Error("a later pattern was not compiled")
 	}
 }

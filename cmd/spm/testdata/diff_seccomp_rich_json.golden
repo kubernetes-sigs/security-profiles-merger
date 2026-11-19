@@ -20,11 +20,11 @@
   },
   "listenerPath": {
     "left": "/run/seccomp/notify.sock",
-    "right": "/run/seccomp/other.sock"
+    "right": ""
   },
   "listenerMetadata": {
     "left": "baseline-v1",
-    "right": "artifact-v2"
+    "right": ""
   },
   "syscalls": {
     "added": [

@@ -20,8 +20,14 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
+
+	"sigs.k8s.io/security-profiles-merger/apparmor"
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
 const testDuplicateProfile = `{"defaultAction":"SCMP_ACT_ERRNO","defaultAction":"SCMP_ACT_ALLOW"}`
@@ -72,6 +78,69 @@ func TestHelpVersionAndUnknown(t *testing.T) {
 	}
 }
 
+// TestHelpTexts covers what the help says beyond the flags: "spm help help"
+// is the overview, the overview names the flags that stand for commands,
+// and every command's help names stdin, the end of the flags and its exit
+// codes.
+func TestHelpTexts(t *testing.T) {
+	t.Parallel()
+
+	for _, second := range []string{cmdHelp, flagHelp, "-h"} {
+		code, stdout, stderr := runCapture(t, []string{cmdHelp, second}, nil)
+		if code != 0 || stderr != "" || stdout != usage {
+			t.Errorf("help %s: exit code = %d, stdout = %q, stderr = %q, want the overview",
+				second, code, stdout, stderr)
+		}
+	}
+
+	for _, want := range []string{"--version", "-v)", "--help", "-h)", "-- ends them", "of -"} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("the overview does not mention %q", want)
+		}
+	}
+
+	for _, command := range []string{cmdMerge, cmdValidate, cmdDiff} {
+		_, stdout, _ := runCapture(t, []string{cmdHelp, command}, nil)
+
+		for _, want := range []string{"argument of - reads stdin", "-- ends them", "0 ", "1 ", "2 "} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("help %s does not mention %q", command, want)
+			}
+		}
+	}
+}
+
+// TestHelpRejectsExtraArguments covers help naming more than one command:
+// what follows the first is an unexpected argument, as for version.
+func TestHelpRejectsExtraArguments(t *testing.T) {
+	t.Parallel()
+
+	for _, args := range [][]string{
+		{cmdHelp, cmdMerge, testBogus}, {cmdHelp, cmdHelp, testBogus},
+	} {
+		code, stdout, stderr := runCapture(t, args, nil)
+		if code != exitUsage || stdout != "" ||
+			!strings.Contains(stderr, "unexpected argument: bogus") {
+			t.Errorf("%v: exit code = %d, stdout = %q, stderr = %q, want %d and the argument",
+				args, code, stdout, stderr, exitUsage)
+		}
+	}
+}
+
+// TestUnknownValidateModeIsQuotedTrimmed covers a --validate list with
+// spaces around a name: the error quotes the name it looked up.
+func TestUnknownValidateModeIsQuotedTrimmed(t *testing.T) {
+	t.Parallel()
+
+	code, _, stderr := runCapture(t, []string{
+		cmdMerge, flagStrategy, strategyUnion, "--validate", "default, strikt", testdataSeccompA,
+	}, nil)
+	if code != exitUsage || !strings.Contains(stderr, `unknown validation mode "strikt"`) {
+		t.Errorf("exit code = %d, stderr = %q, want %d and the trimmed name",
+			code, stderr, exitUsage)
+	}
+}
+
 func TestVersionHelp(t *testing.T) {
 	t.Parallel()
 
@@ -96,8 +165,8 @@ func TestVersionRejectsArguments(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{cmdVersion, testBogus}, `unexpected argument "bogus"`},
-		{[]string{"-v", testBogus}, `unexpected argument "bogus"`},
+		{[]string{cmdVersion, testBogus}, "unexpected argument: bogus"},
+		{[]string{"-v", testBogus}, "unexpected argument: bogus"},
 		{[]string{cmdVersion, "--bogus"}, "flag provided but not defined"},
 	} {
 		code, stdout, stderr := runCapture(t, test.args, nil)
@@ -384,6 +453,106 @@ func TestInputLimitsAtTheirBoundary(t *testing.T) {
 	})
 }
 
+// TestOutOfRangeNumberKeepsChecks covers a number past the float64 range,
+// which the typed decode skips in a member the type does not know: it must
+// neither hide what the strict checks find in the rest of the document nor
+// stop the count that bounds a stdin array.
+func TestOutOfRangeNumberKeepsChecks(t *testing.T) {
+	t.Parallel()
+
+	const huge = `"x":1e400,`
+
+	artifact := `{` + huge + `"netRules":[{"accessNet":["bind_tcp"]}],"handledAccessNet":["bind_tcp"]}`
+
+	// The default mode warns about every finding rather than stopping at
+	// the unknown member, which the artifact mode refuses first.
+	code, _, stderr := runCapture(t,
+		[]string{cmdValidate, flagType, typeLandlock}, strings.NewReader(artifact))
+	if code != 0 || !strings.Contains(stderr, `missing field "netRules[0].port"`) {
+		t.Errorf("missing port: exit code = %d, stderr = %q, want 0 and the port", code, stderr)
+	}
+
+	items := make([]string, maxInputFiles+1)
+	for idx := range items {
+		items[idx] = `{"defaultAction":"SCMP_ACT_ERRNO"}`
+	}
+
+	items[0] = `{` + huge + `"defaultAction":"SCMP_ACT_ERRNO"}`
+
+	code, _, stderr = runCapture(t, []string{cmdValidate, flagType, typeSeccomp, "--quiet"},
+		strings.NewReader("["+strings.Join(items, ",")+"]"))
+	if code != exitUsage || !strings.Contains(stderr, errTooManyStdin.Error()) {
+		t.Errorf("array: exit code = %d, stderr = %q, want %d and the bound",
+			code, stderr, exitUsage)
+	}
+}
+
+// TestJSONOutputEscapesInvisibleRunes covers a value holding runes that do
+// not print as themselves: the JSON output spells them out as escapes, which
+// keep it valid JSON that decodes to the same profile.
+func TestJSONOutputEscapesInvisibleRunes(t *testing.T) {
+	t.Parallel()
+
+	paths := []string{
+		"/usr/\u202ebin", "/usr/\u009bbin", "/usr\u3164/bin", "/usr/bin\ufe0f",
+		"/usr/bin\U000e0100", "/usr/\u2800bin", "/etc/\u00e9t\u00e9",
+	}
+
+	profile := apparmor.Profile{
+		Executable:   &apparmor.ExecutableRules{AllowedExecutables: paths, AllowedLibraries: nil},
+		Filesystem:   nil,
+		Network:      nil,
+		Capabilities: nil,
+	}
+
+	code, stdout, stderr := runCapture(t,
+		[]string{cmdValidate, flagType, typeAppArmor}, strings.NewReader(marshal(t, &profile)))
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q, want 0", code, stderr)
+	}
+
+	for _, char := range stdout {
+		if char >= utf8.RuneSelf && !merge.PrintsAsItself(char) {
+			t.Errorf("output holds %U unescaped: %s", char, stdout)
+		}
+	}
+
+	if !strings.Contains(stdout, `\u202e`) || !strings.Contains(stdout, `\udb40\udd00`) ||
+		!strings.Contains(stdout, "/etc/\u00e9t\u00e9") {
+		t.Errorf("output = %s, want the escapes and the printable rune as it is", stdout)
+	}
+
+	var decoded apparmor.Profile
+
+	unmarshalOutput(t, stdout, &decoded)
+
+	if decoded.Executable == nil || !slices.Equal(decoded.Executable.AllowedExecutables, paths) {
+		t.Errorf("decoded = %+v, want the paths back", decoded.Executable)
+	}
+}
+
+// TestEscapeInvisibleKeepsCleanOutput covers the output escapeInvisible
+// leaves alone: it is returned itself rather than copied, and bytes that do
+// not decode, such as half a rune, are kept as they are.
+func TestEscapeInvisibleKeepsCleanOutput(t *testing.T) {
+	t.Parallel()
+
+	clean := []byte("{\"path\": \"/etc/\u00e9t\u00e9\"}\n\xe2\x80")
+	if got := escapeInvisible(clean); &got[0] != &clean[0] || len(got) != len(clean) {
+		t.Errorf("escapeInvisible(%q) = %q, want the same slice", clean, got)
+	}
+
+	// DEL is the one ASCII control the encoder leaves as it is.
+	if got, want := string(escapeInvisible([]byte(`"/a`+"\x7f"+`b"`))), `"/a\u007fb"`; got != want {
+		t.Errorf("escapeInvisible of DEL = %q, want %q", got, want)
+	}
+
+	mixed := []byte("\xe2\u202e\xe2\x80")
+	if got, want := string(escapeInvisible(mixed)), "\xe2\\u202e\xe2\x80"; got != want {
+		t.Errorf("escapeInvisible(%q) = %q, want %q", mixed, got, want)
+	}
+}
+
 // TestTypeFlagRejectsInputOfNoKind covers a document holding members none
 // of which the named type knows, such as a profile wrapped in an object of
 // another format. Only the members of the named type are decoded, so it
@@ -413,6 +582,55 @@ func TestTypeFlagRejectsInputOfNoKind(t *testing.T) {
 		[]string{cmdValidate, flagType, typeAppArmor}, strings.NewReader("{}"))
 	if code != 0 {
 		t.Errorf("empty object: exit code = %d, stderr = %q, want 0", code, stderr)
+	}
+}
+
+// TestDetectedTypeRejectsInputOfNoKind covers the same documents without
+// --type: an input whose members reveal no type defers to the others, but
+// one holding members only another format knows would decode into an empty
+// profile of the type the others reveal, and is refused as it is under
+// --type.
+func TestDetectedTypeRejectsInputOfNoKind(t *testing.T) {
+	t.Parallel()
+
+	baseline := writeTemp(t, apparmorJSON(t, "chown"))
+	wrapped := writeTemp(t, `{"apparmorProfile":`+apparmorJSON(t, "chown")+`}`)
+	landlockBaseline := writeTemp(t, landlockJSON(t, "read_file"))
+
+	for _, args := range [][]string{
+		{cmdMerge, flagStrategy, strategyIntersect, baseline, wrapped},
+		{cmdMerge, flagStrategy, strategyIntersect, wrapped, baseline},
+		{cmdValidate, baseline, wrapped},
+		{cmdDiff, landlockBaseline, wrapped},
+	} {
+		code, stdout, stderr := runCapture(t, args, nil)
+		if code != exitUsage || stdout != "" ||
+			!strings.Contains(stderr, wrapped+" holds no member of") {
+			t.Errorf("%v: exit code = %d, stdout = %q, stderr = %q, want %d and the reason",
+				args, code, stdout, stderr, exitUsage)
+		}
+	}
+
+	// An empty object still defers to the others.
+	code, _, stderr := runCapture(t,
+		[]string{cmdMerge, flagStrategy, strategyUnion, baseline, "-"},
+		strings.NewReader("{}"))
+	if code != 0 {
+		t.Errorf("empty object: exit code = %d, stderr = %q, want 0", code, stderr)
+	}
+
+	// With no input revealing a type, the error names where it looked.
+	code, _, stderr = runCapture(t, []string{cmdValidate, wrapped}, nil)
+	if code != exitUsage ||
+		!strings.Contains(stderr, "could not detect profile type from "+wrapped+",") {
+		t.Errorf("no type: exit code = %d, stderr = %q, want %d and the input",
+			code, stderr, exitUsage)
+	}
+
+	code, _, stderr = runCapture(t, []string{cmdValidate, wrapped, wrapped}, nil)
+	if code != exitUsage || !strings.Contains(stderr, wrapped+" or any other input") {
+		t.Errorf("no type in two: exit code = %d, stderr = %q, want %d and the inputs",
+			code, stderr, exitUsage)
 	}
 }
 
@@ -512,6 +730,64 @@ func TestHelpSpellsFlagsAndReportsWriteFailures(t *testing.T) {
 		if code != 1 || !strings.Contains(stderr, errWriteFailed.Error()) {
 			t.Errorf("%v: exit code = %d, stderr = %q, want 1 and the write failure",
 				args, code, stderr)
+		}
+	}
+}
+
+// TestHumanOutputWarnsWhenCut covers a human output cut at the bound the
+// formatters keep: stdout ends in the marker and stderr says so, pointing
+// at the JSON format, while the exit code stays what it would be.
+func TestHumanOutputWarnsWhenCut(t *testing.T) {
+	t.Parallel()
+
+	paths := make([]string, 4000)
+	for idx := range paths {
+		paths[idx] = "/usr/lib/a-library-with-a-long-name-" + strconv.Itoa(idx) + ".so"
+	}
+
+	large := writeTemp(t, marshal(t, &apparmor.Profile{
+		Executable:   &apparmor.ExecutableRules{AllowedExecutables: paths, AllowedLibraries: nil},
+		Filesystem:   nil,
+		Network:      nil,
+		Capabilities: nil,
+	}))
+	small := writeTemp(t, apparmorJSON(t, "CHOWN"))
+
+	const want = "warning: human output cut at 65536 bytes; use --format json for the full output\n"
+
+	for _, test := range []struct {
+		args []string
+		code int
+	}{
+		{[]string{cmdValidate, flagFormat, formatHuman, large}, 0},
+		{[]string{cmdValidate, flagFormat, formatHuman, small, large}, 0},
+		{[]string{cmdMerge, flagStrategy, strategyUnion, flagFormat, formatHuman, large}, 0},
+		{[]string{cmdDiff, flagFormat, formatHuman, small, large}, exitDiff},
+	} {
+		args := append([]string{test.args[0], flagType, typeAppArmor}, test.args[1:]...)
+
+		code, stdout, stderr := runCapture(t, args, nil)
+		if code != test.code || stderr != want ||
+			!strings.HasSuffix(stdout, merge.TruncationMarker+"\n") {
+			t.Errorf(
+				"%v: exit code = %d, stderr = %q, stdout ends in %q, want %d, %q and the marker",
+				args,
+				code,
+				stderr,
+				stdout[max(0, len(stdout)-40):],
+				test.code,
+				want,
+			)
+		}
+	}
+
+	// The JSON format is never cut, and a short human output is not either.
+	for _, args := range [][]string{
+		{cmdValidate, flagType, typeAppArmor, large},
+		{cmdValidate, flagType, typeAppArmor, flagFormat, formatHuman, small},
+	} {
+		if code, _, stderr := runCapture(t, args, nil); code != 0 || stderr != "" {
+			t.Errorf("%v: exit code = %d, stderr = %q, want 0 and no warning", args, code, stderr)
 		}
 	}
 }

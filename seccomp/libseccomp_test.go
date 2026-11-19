@@ -778,13 +778,19 @@ type libseccompDirection struct {
 	merge func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error)
 	// safe reports whether the merged action is safe against an input's.
 	safe func(got, input specs.LinuxSeccompAction) bool
+	// foreign marks a merge for a native architecture other than the one
+	// libseccomp builds the filter for here, which adds this one: the
+	// result is settled for a filter of other architectures than the one
+	// it is checked in.
+	foreign bool
 }
 
 func intersectDirection() libseccompDirection {
 	return libseccompDirection{
-		name:  "Intersect",
-		merge: seccomp.Intersect,
-		safe:  atMostAsPermissive,
+		name:    "Intersect",
+		merge:   seccomp.Intersect,
+		safe:    atMostAsPermissive,
+		foreign: false,
 	}
 }
 
@@ -795,6 +801,7 @@ func unionDirection() libseccompDirection {
 		safe: func(got, input specs.LinuxSeccompAction) bool {
 			return atMostAsPermissive(input, got)
 		},
+		foreign: false,
 	}
 }
 
@@ -1168,14 +1175,13 @@ func randomProfile(
 		}
 
 		profile.Syscalls = append(profile.Syscalls, entry)
-
-		// A filter that notifies needs a listener, or the merge degrades
-		// the action (intersection) or refuses (union), neither of which
-		// says anything about libseccomp.
-		if entry.Action == specs.ActNotify {
-			profile.ListenerPath = "/run/libseccomp-notify.sock"
-		}
 	}
+
+	// A filter that notifies needs a listener, or Validate rejects it, and
+	// Intersect takes the listener from its first input only. Every profile
+	// names the same one, so that neither says anything about libseccomp
+	// rather than the merge.
+	profile.ListenerPath = "/run/libseccomp-notify.sock"
 
 	return profile
 }
@@ -1200,23 +1206,31 @@ func profileMergeCase(t *testing.T, left, right *specs.LinuxSeccomp) mergeCase {
 	results := make([]mergeResult, 0, 2*len(directions))
 
 	for _, direction := range directions {
-		merged, err := direction.merge(left, right)
-		if err != nil {
-			t.Fatalf("%s: %v", direction.name, err)
-		}
+		for _, inputs := range [][]int{{0, 1}, {0}} {
+			profiles := []*specs.LinuxSeccomp{left, right}[:len(inputs)]
 
-		self, err := direction.merge(left)
-		if err != nil {
-			t.Fatalf("%s: %v", direction.name, err)
-		}
+			merged, err := direction.merge(profiles...)
+			if refusedLostRules(err) {
+				continue
+			}
 
-		results = append(results,
-			mergeResult{direction: direction, profile: merged, inputs: []int{0, 1}},
-			mergeResult{direction: direction, profile: self, inputs: []int{0}},
-		)
+			if err != nil {
+				t.Fatalf("%s: %v", direction.name, err)
+			}
+
+			results = append(results,
+				mergeResult{direction: direction, profile: merged, inputs: inputs})
+		}
 	}
 
 	return mergeCase{inputs: []*specs.LinuxSeccomp{left, right}, results: results}
+}
+
+// refusedLostRules reports a union refused for a result libseccomp would
+// lose the rules of, which is a merge the caller cannot have rather than a
+// result to check.
+func refusedLostRules(err error) bool {
+	return errors.Is(err, seccomp.ErrLostRules)
 }
 
 // bareMergeCase merges the syscalls of both profiles as bare lists. The

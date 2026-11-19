@@ -60,12 +60,12 @@ limitations under the License.
 // ValidateStrict check [MaxArtifactRules] first and on their own, and every
 // validator rejects an oversized path before scanning it.
 //
-// A merge result passes ValidateStrict when the inputs use absolute paths,
-// the result handles or scopes at least one right, and it holds no more
-// than MaxArtifactRules rules: Intersect and Union deduplicate, prune
-// unhandled rights and drop empty rules, but a merge of large inputs can
-// exceed the limit, as the union of two profiles of a thousand distinct
-// rules holds two thousand.
+// A merge result passes ValidateStrict when the inputs use absolute paths
+// that are valid UTF-8, the result handles or scopes at least one right, and
+// it holds no more than MaxArtifactRules rules: Intersect and Union
+// deduplicate, prune unhandled rights and drop empty rules, but a merge of
+// large inputs can exceed the limit, as the union of two profiles of a
+// thousand distinct rules holds two thousand.
 //
 // # Handled access
 //
@@ -199,6 +199,14 @@ limitations under the License.
 // symlink "/srv/data/../public" need not be "/srv/public". Diff cleans paths
 // the same way and keeps ".." components as written.
 //
+// ValidateArtifact and ValidateStrict also reject a path other than the
+// root that ends in "/" or "/." ([ErrTrailingSlash]): the kernel opens it
+// only as a directory, so a rule on "/srv/f/" for a regular file cannot be
+// loaded, and cleaning would turn it into one that can. They reject a path
+// that is not valid UTF-8 ([ErrInvalidUTF8Path]) too, which the JSON form
+// of a profile cannot carry. Validate accepts such a path, since the merge
+// compares paths as bytes and a profile built in Go may name such a file.
+//
 // # Lowered rule paths
 //
 // Hierarchy resolution is textual: the merge treats a rule as covering
@@ -223,7 +231,20 @@ limitations under the License.
 // RESOLVE_NO_SYMLINKS relative to the covering ancestor), refuse a profile
 // that has any, or skip the merge and enforce the rulesets as separate
 // Landlock layers (one landlock_restrict_self call each), which the kernel
-// intersects on the resolved files rather than on path strings.
+// checks on the resolved files rather than on path strings.
+//
+// Stacked layers are not quite the intersection, though: they can deny
+// more. Once some layer of the stack handles a filesystem right, the kernel
+// denies moving or linking a file into another directory (EXDEV) in every
+// layer that does not grant refer on both directories, including a layer
+// that handles no filesystem right at all, such as one restricting only
+// network access or scopes; such a layer on its own allows the move.
+// Intersect reads such an input as permitting every filesystem access,
+// refer included, so a move its result and each input on its own allow
+// fails once the inputs are stacked.
+// A runtime stacking layers should give a layer that handles no filesystem
+// right a handled access set of [FSAccessRefer] and a rule granting refer
+// on "/", which keeps moves as the profile meant them.
 //
 // # ABI versions
 //

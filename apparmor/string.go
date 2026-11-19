@@ -17,15 +17,19 @@ limitations under the License.
 package apparmor
 
 import (
-	"fmt"
-	"slices"
 	"strconv"
-	"strings"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
-// FormatProfile returns a human-readable representation of an AppArmor profile.
+// FormatProfile returns a human-readable representation of an AppArmor
+// profile, as a single line that is safe to log: a value holding a control
+// character, an invisible rune, a byte that is not valid UTF-8 or the
+// punctuation the format is built from is quoted, and the line is cut at
+// 64 KiB, ending in "... (output truncated)" where it is. No real profile
+// comes near that bound; it is there because an artifact chooses how many
+// paths it holds and how many of their bytes need escaping. The result is
+// for people, not for apparmor_parser.
 func FormatProfile(profile *Profile) string {
 	return profile.String()
 }
@@ -39,117 +43,180 @@ func (p *Profile) String() string {
 		return "Profile{<nil>}"
 	}
 
-	var parts []string
+	var out merge.Builder
 
-	if p.Executable != nil {
-		if s := p.Executable.String(); s != "" {
-			parts = append(parts, s)
-		}
+	out.WriteString("Profile{")
+
+	parts := merge.NewJoiner(&out, " ")
+
+	if p.Executable != nil && p.Executable.hasRules() {
+		parts.Next()
+		p.Executable.writeTo(&out)
 	}
 
-	if p.Filesystem != nil {
-		if s := p.Filesystem.String(); s != "" {
-			parts = append(parts, s)
-		}
+	if p.Filesystem != nil && p.Filesystem.hasRules() {
+		parts.Next()
+		p.Filesystem.writeTo(&out)
 	}
 
-	if p.Network != nil {
-		if s := p.Network.String(); s != "" {
-			parts = append(parts, s)
-		}
+	if p.Network != nil && p.Network.hasRules() {
+		parts.Next()
+		p.Network.writeTo(&out)
 	}
 
 	if p.Capabilities != nil {
-		parts = append(parts, p.Capabilities.String())
+		parts.Next()
+		p.Capabilities.writeTo(&out)
 	}
 
-	return fmt.Sprintf("Profile{%s}", strings.Join(parts, " "))
+	out.WriteString("}")
+
+	return out.String()
 }
 
-// String returns a human-readable representation of the executable rules.
+// String returns a human-readable representation of the executable rules,
+// quoted and bounded as FormatProfile is.
 func (e ExecutableRules) String() string {
-	var parts []string
+	var out merge.Builder
 
-	if len(e.AllowedExecutables) > 0 {
-		parts = append(parts, "exec:"+strings.Join(merge.SafeTexts(e.AllowedExecutables), ","))
-	}
+	e.writeTo(&out)
 
-	if len(e.AllowedLibraries) > 0 {
-		parts = append(parts, "lib:"+strings.Join(merge.SafeTexts(e.AllowedLibraries), ","))
-	}
-
-	return strings.Join(parts, " ")
+	return out.String()
 }
 
-// String returns a human-readable representation of the filesystem rules.
+// hasRules reports whether the section renders as anything.
+func (e ExecutableRules) hasRules() bool {
+	return len(e.AllowedExecutables) > 0 || len(e.AllowedLibraries) > 0
+}
+
+func (e ExecutableRules) writeTo(out *merge.Builder) {
+	parts := merge.NewJoiner(out, " ")
+
+	writePathList(out, &parts, "exec:", e.AllowedExecutables)
+	writePathList(out, &parts, "lib:", e.AllowedLibraries)
+}
+
+// String returns a human-readable representation of the filesystem rules,
+// quoted and bounded as FormatProfile is.
 func (f FilesystemRules) String() string {
-	var parts []string
+	var out merge.Builder
 
-	if len(f.ReadOnlyPaths) > 0 {
-		parts = append(parts, "r:"+strings.Join(merge.SafeTexts(f.ReadOnlyPaths), ","))
+	f.writeTo(&out)
+
+	return out.String()
+}
+
+// hasRules reports whether the section renders as anything.
+func (f FilesystemRules) hasRules() bool {
+	return len(f.ReadOnlyPaths) > 0 || len(f.WriteOnlyPaths) > 0 || len(f.ReadWritePaths) > 0
+}
+
+func (f FilesystemRules) writeTo(out *merge.Builder) {
+	parts := merge.NewJoiner(out, " ")
+
+	writePathList(out, &parts, "r:", f.ReadOnlyPaths)
+	writePathList(out, &parts, "w:", f.WriteOnlyPaths)
+	writePathList(out, &parts, "rw:", f.ReadWritePaths)
+}
+
+// writePathList writes a list of paths after its prefix, as a part of its
+// section, unless it is empty.
+func writePathList(out *merge.Builder, parts *merge.Joiner, prefix string, paths []string) {
+	if len(paths) == 0 {
+		return
 	}
 
-	if len(f.WriteOnlyPaths) > 0 {
-		parts = append(parts, "w:"+strings.Join(merge.SafeTexts(f.WriteOnlyPaths), ","))
-	}
-
-	if len(f.ReadWritePaths) > 0 {
-		parts = append(parts, "rw:"+strings.Join(merge.SafeTexts(f.ReadWritePaths), ","))
-	}
-
-	return strings.Join(parts, " ")
+	parts.Next()
+	out.WriteString(prefix)
+	merge.WriteTexts(out, paths, ",")
 }
 
 // String returns a human-readable representation of the network rules.
 func (n NetworkRules) String() string {
-	var parts []string
+	var out merge.Builder
+
+	if n.hasRules() {
+		n.writeTo(&out)
+	}
+
+	return out.String()
+}
+
+// hasRules reports whether the section renders as anything: an empty one
+// renders as nothing rather than as "net:".
+func (n NetworkRules) hasRules() bool {
+	return n.AllowRaw != nil ||
+		n.Protocols != nil && (n.Protocols.AllowTCP != nil || n.Protocols.AllowUDP != nil)
+}
+
+func (n NetworkRules) writeTo(out *merge.Builder) {
+	out.WriteString("net:")
+
+	parts := merge.NewJoiner(out, ",")
 
 	if n.AllowRaw != nil {
-		parts = append(parts, formatBool("raw", *n.AllowRaw))
+		parts.Next()
+		writeBool(out, "raw", *n.AllowRaw)
 	}
 
 	if n.Protocols != nil {
 		if n.Protocols.AllowTCP != nil {
-			parts = append(parts, formatBool("tcp", *n.Protocols.AllowTCP))
+			parts.Next()
+			writeBool(out, "tcp", *n.Protocols.AllowTCP)
 		}
 
 		if n.Protocols.AllowUDP != nil {
-			parts = append(parts, formatBool("udp", *n.Protocols.AllowUDP))
+			parts.Next()
+			writeBool(out, "udp", *n.Protocols.AllowUDP)
 		}
 	}
-
-	if len(parts) == 0 {
-		return ""
-	}
-
-	return "net:" + strings.Join(parts, ",")
 }
 
-func formatBool(name string, val bool) string {
-	if val {
-		return name
+func writeBool(out *merge.Builder, name string, val bool) {
+	if !val {
+		out.WriteString("!")
 	}
 
-	return "!" + name
+	out.WriteString(name)
 }
 
 // emptyCapabilities is how an empty capability list reads.
 const emptyCapabilities = "none"
 
-// String returns a human-readable representation of the capability rules.
-// An empty list reads "none", so a capability spelled that way is quoted,
-// which keeps a profile naming it apart from one granting nothing.
+// String returns a human-readable representation of the capability rules,
+// quoted and bounded as FormatProfile is. An empty list reads "none", so a
+// capability spelled that way is quoted, which keeps a profile naming it
+// apart from one granting nothing.
 func (c CapabilityRules) String() string {
+	var out merge.Builder
+
+	c.writeTo(&out)
+
+	return out.String()
+}
+
+func (c CapabilityRules) writeTo(out *merge.Builder) {
+	out.WriteString("caps:")
+
 	if len(c.AllowedCapabilities) == 0 {
-		return "caps:" + emptyCapabilities
+		out.WriteString(emptyCapabilities)
+
+		return
 	}
 
-	names := slices.Clone(merge.SafeTexts(c.AllowedCapabilities))
-	for idx, name := range names {
+	for idx, name := range c.AllowedCapabilities {
+		if out.Full() {
+			return
+		}
+
+		if idx > 0 {
+			out.WriteString(",")
+		}
+
 		if name == emptyCapabilities {
-			names[idx] = strconv.Quote(name)
+			out.WriteString(strconv.Quote(name))
+		} else {
+			out.WriteText(name)
 		}
 	}
-
-	return "caps:" + strings.Join(names, ",")
 }

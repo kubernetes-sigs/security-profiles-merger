@@ -22,8 +22,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
 func capsFromMask(mask uint64) []string {
@@ -737,19 +739,7 @@ func FuzzAppArmorValidateArtifact(f *testing.F) {
 
 		forEachFuzzPathList(profile, func(context string, paths []string) {
 			for _, path := range paths {
-				if !strings.HasPrefix(path, "/") {
-					t.Errorf(
-						"%s: ValidateArtifact accepted the relative path %q", context, path,
-					)
-				}
-
-				// An unusable pattern matches nothing, so an intersection
-				// would drop it without a trace.
-				if apparmor.IsGlobPattern(path) && !apparmor.MatcherUsable(path) {
-					t.Errorf(
-						"%s: ValidateArtifact accepted the unusable pattern %q", context, path,
-					)
-				}
+				assertArtifactPath(t, context, path)
 			}
 		})
 
@@ -765,6 +755,36 @@ func FuzzAppArmorValidateArtifact(f *testing.F) {
 			t.Fatalf("Intersect of an accepted artifact yields an invalid profile: %v", err)
 		}
 	})
+}
+
+// assertArtifactPath checks one path of a profile ValidateArtifact accepted:
+// it is absolute, printable and, when it is a pattern, usable.
+func assertArtifactPath(t *testing.T, context, entry string) {
+	t.Helper()
+
+	if !strings.HasPrefix(entry, "/") {
+		t.Errorf(
+			"%s: ValidateArtifact accepted the relative path %q", context, entry,
+		)
+	}
+
+	// A consumer renders and logs the paths it accepted, so none
+	// may carry a character that is not printable.
+	if strings.ContainsFunc(entry, func(char rune) bool {
+		return char != utf8.RuneError && !merge.PrintsAsItself(char)
+	}) {
+		t.Errorf(
+			"%s: ValidateArtifact accepted the unprintable path %q", context, entry,
+		)
+	}
+
+	// An unusable pattern matches nothing, so an intersection
+	// would drop it without a trace.
+	if apparmor.IsGlobPattern(entry) && !apparmor.MatcherUsable(entry) {
+		t.Errorf(
+			"%s: ValidateArtifact accepted the unusable pattern %q", context, entry,
+		)
+	}
 }
 
 // fuzzPathList is one named list of paths in a profile.

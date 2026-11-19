@@ -1,0 +1,7 @@
+go test fuzz v1
+uint64(4096)
+string("/tmp/\x1bc\vx")
+string("/tmp/a\u0085b\u2028c")
+bool(true)
+bool(true)
+bool(false)

@@ -19,7 +19,6 @@ package merge
 import (
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -46,10 +45,10 @@ const MaxJoinedErrors = 32
 // rather than from this package.
 func QuoteBounded(value string) string {
 	if len(value) <= MaxQuotedBytes {
-		return strconv.Quote(value)
+		return quoteVisible(value)
 	}
 
-	return strconv.Quote(value[:runeBoundary(value, MaxQuotedBytes)]) + "..."
+	return quoteVisible(value[:runeBoundary(value, MaxQuotedBytes)]) + "..."
 }
 
 // runeBoundary returns the largest index up to limit at which text can be
@@ -131,6 +130,53 @@ func JoinLimited(errs ...error) error {
 	case len(report.kept) == 1 && report.omitted == 0:
 		return report.kept[0]
 	default:
+		return &report
+	}
+}
+
+// Collector gathers failures under the same bound as JoinLimited, but builds
+// a failure only while the report has room for it. JoinLimited receives
+// errors that are already formatted, so a profile with a million bad entries
+// costs a million formatted messages for a report that shows 32 of them;
+// Report skips the formatting once the report is full and only counts the
+// failure. The zero value is ready to use.
+type Collector struct {
+	report limitedError
+}
+
+// Report adds the failure build returns, calling build only when the report
+// still has room for it. Past the limit the failure is counted as omitted
+// without being built, so Report is for a check that has already failed:
+// build must return a non-nil error and have no other effect.
+func (c *Collector) Report(build func() error) {
+	if len(c.report.kept) < MaxJoinedErrors {
+		c.report.add(build())
+
+		return
+	}
+
+	c.report.omitted++
+}
+
+// Add adds err, flattening a result of JoinLimited or Collector.Err into the
+// report as JoinLimited does. A nil err is ignored.
+func (c *Collector) Add(err error) {
+	c.report.add(err)
+}
+
+// Err returns the collected report with the semantics of JoinLimited: nil
+// when nothing failed, the failure itself when exactly one did and nothing
+// was omitted, and otherwise a report that matches spm.ErrMoreProblems when
+// it left failures out.
+func (c *Collector) Err() error {
+	switch {
+	case len(c.report.kept) == 0 && c.report.omitted == 0:
+		return nil
+	case len(c.report.kept) == 1 && c.report.omitted == 0:
+		return c.report.kept[0]
+	default:
+		report := limitedError{kept: slices.Clone(c.report.kept), omitted: c.report.omitted}
+
 		return &report
 	}
 }

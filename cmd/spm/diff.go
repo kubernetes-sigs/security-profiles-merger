@@ -23,11 +23,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
-	"strings"
 
-	specs "github.com/opencontainers/runtime-spec/specs-go"
-
-	"sigs.k8s.io/security-profiles-merger/seccomp"
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
@@ -39,6 +35,8 @@ const (
 
 Compare two security profiles and show their differences.
 Reads from stdin (as a JSON array of exactly 2 profiles) when no files are provided.
+A file argument of - reads stdin beside the other file.
+Flags must precede file arguments, and -- ends them.
 Exit code 0 means equal, 1 means different, 2 means error.
 
 --arch selects the seccomp architecture implied on both sides, which a node
@@ -51,63 +49,9 @@ Options:
 `
 )
 
-const (
-	// archNative implies the architecture this program runs on, which is
-	// what diff has always done.
-	archNative = "native"
-	// archNone implies none, so architecture lists compare as written.
-	archNone = "none"
-	// archPrefix is what a seccomp architecture name starts with.
-	archPrefix = "SCMP_ARCH_"
-)
-
-var (
-	errDiffRequiresTwo = errors.New("diff requires exactly 2 profiles")
-	errUnknownArchName = errors.New("unknown architecture")
-)
-
-// diffArch is the architecture a diff implies on both sides. It is only
-// explicit when --arch named one, so that the default stays whatever the
-// profile type's own Diff does.
-type diffArch struct {
-	// named reports whether --arch was given at all, whatever its value.
-	named    bool
-	value    specs.Arch
-	explicit bool
-}
-
-// parseDiffArch turns an --arch value into the architecture to imply. The
-// name is checked against the ones the seccomp package knows, not only
-// against the prefix: an architecture nothing runs on is implied by neither
-// profile, so a misspelling such as SCMP_ARCH_ARM64 would otherwise compare
-// as --arch none does and report a difference the named node does not have.
-func parseDiffArch(value string, named bool) (diffArch, error) {
-	switch {
-	case value == archNative:
-		return diffArch{named: named, value: "", explicit: false}, nil
-	case value == archNone:
-		return diffArch{named: named, value: "", explicit: true}, nil
-	case strings.HasPrefix(value, archPrefix) && knownArch(specs.Arch(value)):
-		return diffArch{named: named, value: specs.Arch(value), explicit: true}, nil
-	default:
-		return diffArch{named: named, value: "", explicit: false}, fmt.Errorf(
-			"%w %q (use %s, %s, or a name such as %sX86_64)",
-			errUnknownArchName, value, archNative, archNone, archPrefix,
-		)
-	}
-}
-
-// knownArch reports whether the seccomp package knows the architecture. It
-// has no predicate for a single name, so the name is checked the way a
-// profile carrying it is.
-func knownArch(arch specs.Arch) bool {
-	err := seccomp.Validate(&specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Architectures: []specs.Arch{arch},
-	})
-
-	return !errors.Is(err, seccomp.ErrUnknownArch)
-}
+// errDiffRequiresTwo reports a diff given another number of profiles than
+// two.
+var errDiffRequiresTwo = errors.New("diff requires exactly 2 profiles")
 
 // diffOptions holds the parsed flags of the diff command.
 type diffOptions struct {
@@ -129,11 +73,7 @@ func bindDiffFlags(flags *flag.FlagSet) *diffOptions {
 	)
 	flags.StringVar(&opts.format, "format", formatJSON, "output format: json, human")
 	flags.StringVar(&opts.output, "output", "", "write output to file (default: stdout)")
-	flags.StringVar(
-		&opts.arch, "arch", archNative,
-		"seccomp architecture implied on both sides: native, none, or a "+
-			"name such as "+archPrefix+"X86_64",
-	)
+	bindArchFlag(flags, &opts.arch, "implied on both sides")
 	flags.BoolVar(
 		&opts.noDetectNote, "no-detect-note", false,
 		"do not note an auto-detected profile type on stderr; the diff, "+
@@ -157,11 +97,9 @@ func runDiff(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	arch, err := parseDiffArch(opts.arch, flagNamed(flags, "arch"))
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
-
-		return exitUsage
+	arch, code := parseArchFlag(flags, opts.arch, stderr)
+	if code != 0 {
+		return code
 	}
 
 	if code := checkStdin(flags, diffUsage, stdin, stderr); code != 0 {
@@ -181,7 +119,7 @@ func runDiff(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // diffInputs resolves the profile type, compares the two profiles, and
 // writes the result.
 func diffInputs(
-	opts *diffOptions, arch diffArch, inputs []profileInput, stdout, stderr io.Writer,
+	opts *diffOptions, arch archOption, inputs []profileInput, stdout, stderr io.Writer,
 ) int {
 	// Exit code 1 means "different" for diff, so unparsable input is a
 	// usage error like every other diff failure.

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -118,9 +119,9 @@ func TestOutputNameAtTheLengthLimit(t *testing.T) {
 }
 
 // TestOutputRefusesDirectoryPaths covers an --output value whose last
-// element names a directory, however it is spelled. Cleaning such a path
-// drops that element, and the result must not be a regular file named after
-// the directory, whether or not the directory exists.
+// element names a directory, however it is spelled. The result must not be
+// a regular file named after the directory, whether or not the directory
+// exists.
 func TestOutputRefusesDirectoryPaths(t *testing.T) {
 	t.Parallel()
 
@@ -149,6 +150,110 @@ func TestOutputRefusesDirectoryPaths(t *testing.T) {
 		err := checkOutputPath(filepath.Join("dir", name))
 		if err != nil {
 			t.Errorf("%q is refused: %v", name, err)
+		}
+	}
+}
+
+// TestPathsThroughSymlinkedDirectories covers a path that climbs out of a
+// symlinked directory with "..". The kernel resolves ".." against the
+// directory the link points to, so "link/../x" names a file beside that
+// directory, not one beside the link: cleaning the path lexically would read
+// and write another file than the one cat or a shell redirection reaches.
+func TestPathsThroughSymlinkedDirectories(t *testing.T) {
+	t.Parallel()
+
+	root := symlinkedTree(t)
+
+	through := func(name string) string {
+		return filepath.Join(root, "dl") + "/../" + name
+	}
+
+	code, _, stderr := runCapture(t, []string{
+		cmdValidate, flagType, typeSeccomp, "--quiet", through("in.json"),
+	}, nil)
+	if code != 0 {
+		t.Errorf("validate: exit code = %d, stderr = %q, want 0", code, stderr)
+	}
+
+	// Run twice, so that both a new file and the replacement of an existing
+	// one go through the symlinked directory.
+	for range 2 {
+		code, _, stderr = runCapture(t, []string{
+			cmdMerge, flagType, typeSeccomp, flagStrategy, strategyUnion,
+			"--output", through("out.json"), through("in.json"),
+		}, nil)
+		if code != 0 {
+			t.Fatalf("merge: exit code = %d, stderr = %q, want 0", code, stderr)
+		}
+	}
+
+	assertEntries(t, root, "deep", "dl")
+	assertEntries(t, filepath.Join(root, "deep", "a"), "b", "in.json", "out.json")
+
+	if isMountedFile(through("out.json")) {
+		t.Error("the output file is taken for a mount point")
+	}
+}
+
+// symlinkedTree makes a directory holding deep/a/b, a symlink dl to it, and
+// a profile in deep/a, and returns its path.
+func symlinkedTree(t *testing.T) string {
+	t.Helper()
+
+	root := t.TempDir()
+
+	err := os.MkdirAll(filepath.Join(root, "deep", "a", "b"), 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = os.Symlink(filepath.Join("deep", "a", "b"), filepath.Join(root, "dl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = os.WriteFile(
+		filepath.Join(root, "deep", "a", "in.json"), []byte(seccompJSON(t, testSyscallRead)), 0o600,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return root
+}
+
+// assertEntries checks that a directory holds the named entries and no
+// others.
+func assertEntries(t *testing.T, dir string, want ...string) {
+	t.Helper()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := make([]string, len(entries))
+	for idx, entry := range entries {
+		got[idx] = entry.Name()
+	}
+
+	if !slices.Equal(got, want) {
+		t.Errorf("%s holds %v, want %v", dir, got, want)
+	}
+}
+
+func TestParentDir(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct{ path, want string }{
+		{"x.json", "."},
+		{"/x.json", "/"},
+		{"a/x.json", "a/"},
+		{"link/../x.json", "link/../"},
+		{"a//x.json", "a//"},
+	} {
+		if got := parentDir(test.path); got != test.want {
+			t.Errorf("parentDir(%q) = %q, want %q", test.path, got, test.want)
 		}
 	}
 }

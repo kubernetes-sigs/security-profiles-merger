@@ -96,12 +96,56 @@ func TestValidateArtifactAcceptsValidPatterns(t *testing.T) {
 	for _, pattern := range []string{
 		nestedAlternation(49), "/etc/{a,}", `/etc/[\]a]`, "/etc/[^^]", "/etc/[-a]",
 		`/etc/\{a\}`, "/etc/a,b", `/etc/\x41`, `/etc/\\a`, "/etc/[z-a]", `/etc/[\!a]`,
-		`/etc/[\*\?]`, "/etc/[{,}]",
+		`/etc/[\*\?]`, "/etc/[{,}]", `/etc/[a\^x]`, `/etc/[^\^x]`, `/etc/\^x`,
 	} {
 		err := apparmor.ValidateArtifact(readOnly(pattern))
 		if err != nil {
 			t.Errorf("ValidateArtifact(%q) = %v, want nil", pattern, err)
 		}
+	}
+}
+
+// TestValidatorsRejectAnEscapedCaretOpeningAClass covers a class whose first
+// member is an escaped "^". It reads as "^ or x", but the parser keeps the
+// escape until it drops the backslash inside the class, and the "^" left
+// negates it: the rule grants every byte but x, "/" included. The merge
+// matches the class as the parser loads it, so it is reported as the other
+// class forms that load with another meaning are, by the validators that
+// check patterns.
+func TestValidatorsRejectAnEscapedCaretOpeningAClass(t *testing.T) {
+	t.Parallel()
+
+	for _, pattern := range []string{
+		`/etc[\^x]passwd`, `/etc[\x5ex]passwd`, `/etc[\136x]passwd`, `/etc[\d094x]passwd`,
+	} {
+		t.Run(pattern, func(t *testing.T) {
+			t.Parallel()
+
+			profile := readOnly(pattern)
+
+			for name, validate := range loadableValidators {
+				err := validate(profile)
+				if !errors.Is(err, apparmor.ErrInvalidGlob) {
+					t.Errorf("%s = %v, want ErrInvalidGlob", name, err)
+				}
+			}
+
+			err := apparmor.Validate(profile)
+			if err != nil {
+				t.Errorf("Validate = %v, want nil", err)
+			}
+
+			// The merge models what the parser loads: the class is negated
+			// and matches "/" and "^", but not the "x" it spells.
+			baseline := readOnly("/etc/passwd", "/etcxpasswd", "/etc^passwd")
+
+			got := mergeFs(t, apparmor.Intersect, profile, baseline)
+
+			want := []string{"/etc/passwd", "/etc^passwd"}
+			if !slices.Equal(got.ReadOnlyPaths, want) {
+				t.Errorf("Intersect kept %q, want %q", got.ReadOnlyPaths, want)
+			}
+		})
 	}
 }
 
@@ -122,9 +166,9 @@ func TestValidateRejectsOverlongPaths(t *testing.T) {
 	}
 
 	for _, path := range []string{
-		"/" + strings.Repeat("a", 4096),
+		"/" + strings.Repeat("a", 4095),
 		"/" + strings.Repeat("{", 40000),
-		"/" + strings.Repeat("a", 4094) + "/*",
+		"/" + strings.Repeat("a", 4093) + "/*",
 	} {
 		profile := readOnly(path)
 
@@ -145,9 +189,9 @@ func TestValidateRejectsOverlongPaths(t *testing.T) {
 		}
 	}
 
-	err := apparmor.Validate(readOnly("/" + strings.Repeat("a", 4095)))
+	err := apparmor.Validate(readOnly("/" + strings.Repeat("a", 4094)))
 	if err != nil {
-		t.Errorf("Validate rejected a 4096 byte path: %v", err)
+		t.Errorf("Validate rejected a 4095 byte path: %v", err)
 	}
 }
 
