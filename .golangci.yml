@@ -6,122 +6,15 @@ run:
   # is never analyzed. The exclusions below only apply under it too.
   build-tags:
     - libseccomp
-  concurrency: 6
 linters:
-  default: none
-  enable:
-    - arangolint
-    - asasalint
-    - asciicheck
-    - bidichk
-    - bodyclose
-    - canonicalheader
-    - clickhouselint
-    - containedctx
-    - contextcheck
-    - copyloopvar
-    - cyclop
-    - decorder
-    - depguard
-    - dogsled
-    - dupl
-    - dupword
-    - durationcheck
-    - embeddedstructfieldcheck
-    - err113
-    - errcheck
-    - errchkjson
-    - errname
-    - errorlint
-    - exhaustive
-    - exhaustruct_v5
-    - exptostd
-    - fatcontext
-    - forbidigo
-    - forcetypeassert
-    - funcorder
-    - funlen
-    - ginkgolinter
-    - gocheckcompilerdirectives
-    - gochecknoglobals
-    - gochecknoinits
-    - gochecksumtype
-    - gocognit
-    - goconst
-    - gocritic
-    - gocyclo
-    - godoclint
-    - godot
-    - godox
-    - goheader
-    - gomoddirectives
-    - gomodguard_v2
-    - goprintffuncname
-    - gosec
-    - gosmopolitan
-    - govet
-    - grouper
-    - iface
-    - importas
-    - inamedparam
-    - ineffassign
-    - interfacebloat
-    - intrange
-    - iotamixing
-    - ireturn
-    - lll
-    - loggercheck
-    - maintidx
-    - makezero
-    - mirror
-    - misspell
-    - mnd
-    - modernize
-    - musttag
-    - nakedret
-    - nestif
-    - nilerr
-    - nilnesserr
-    - nilnil
-    - nlreturn
-    - noctx
-    - noinlineerr
-    - nolintlint
-    - nonamedreturns
-    - nosprintfhostport
-    - paralleltest
-    - perfsprint
-    - prealloc
-    - predeclared
-    - promlinter
-    - protogetter
-    - reassign
-    - recvcheck
-    - revive
-    - rowserrcheck
-    - sloglint
-    - spancheck
-    - sqlclosecheck
-    - staticcheck
-    - tagalign
-    - tagliatelle
-    - testableexamples
-    - testifylint
-    - testpackage
-    - thelper
-    - tparallel
-    - unconvert
-    - unparam
-    - unqueryvet
-    - unused
-    - usestdlibvars
-    - usetesting
-    - varnamelen
-    - wastedassign
-    - whitespace
-    - wrapcheck
-    - wsl_v5
-    - zerologlint
+  # Every linter, so that one a new release adds is enabled by the bump
+  # rather than by someone remembering to list it. The disabled ones are
+  # deprecated; exhaustruct_v5, gomodguard_v2 and wsl_v5 replace them.
+  default: all
+  disable:
+    - exhaustruct
+    - gomodguard
+    - wsl
   settings:
     wrapcheck:
       # The failures internal/merge joins are this module's own.
@@ -134,6 +27,12 @@ linters:
             - $gostd
             - github.com/opencontainers/runtime-spec
             - sigs.k8s.io/security-profiles-merger
+    # The module level of the depguard rule above: the one module a
+    # dependency may come from, and no replace pointing at a local path.
+    gomodguard_v2:
+      local-replace-directives: true
+      allowed:
+        - module: github.com/opencontainers/runtime-spec
     exhaustruct_v5:
       ignore-patterns:
         - 'github\.com/opencontainers/runtime-spec/specs-go\..*'
@@ -185,14 +84,13 @@ linters:
           - gocritic
           - nlreturn
         path: internal/libseccomp/bridge\.go
+# gofumpt is a stricter gofmt and gci a stricter goimports, so neither of
+# those two runs on its own.
 formatters:
   enable:
     - gci
-    - gofmt
     - gofumpt
-    - goimports
     - golines
-    - swaggo
   settings:
     gci:
       sections:

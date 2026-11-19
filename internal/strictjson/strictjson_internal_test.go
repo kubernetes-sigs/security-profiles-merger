@@ -110,35 +110,6 @@ func TestUnknownFieldsWalksPromotedAndMapFields(t *testing.T) {
 	}
 }
 
-func addJSONFuzzSeeds(f *testing.F) {
-	f.Helper()
-
-	for _, seed := range []string{
-		`{"defaultAction":"SCMP_ACT_ERRNO"}`,
-		`{"defaultAction":"SCMP_ACT_ERRNO","DefaultAction":"SCMP_ACT_ALLOW"}`,
-		`{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[{"names":["read"],"names":["write"]}]}`,
-		`{"syscalls":[{"args":[{"index":0,"bogus":1}]}]}`,
-		`{"handledAccessFs":["read_file"],"pathRules":[{"path":"/etc"}]}`,
-		`{"executable":{"allowedExecutables":["/bin/sh"]},"capability":{}}`,
-		`{}`,
-		`[]`,
-		`[[[[[[[[[[1]]]]]]]]]]`,
-		`{"a":{"a":{"a":{"a":1,"A":2}}}}`,
-		// Two repeated members in different objects whose paths would
-		// collide if a name that is not a plain segment were written bare.
-		`{"":{"":1,"":2},"":3}`,
-		`{"a":{"b":1,"b":2},"a.b":0,"a.b":9}`,
-		`{"ſ":1,"s":2}`,
-		// An escape hides the member name from the raw bytes: the scan
-		// reports the decoded name, which the document does not spell.
-		`{"\u0061b":1,"\u0061b":2}`,
-		`not json`,
-		``,
-	} {
-		f.Add(seed)
-	}
-}
-
 // TestDuplicateKeysBoundsPathWork covers a document nesting deeply under
 // long names, whose paths are megabytes each: naming the repeated members
 // must not copy a path per level, and the report shows the same start of
@@ -215,7 +186,7 @@ func TestDuplicateKeysCutsPathsWhereAReportDoes(t *testing.T) {
 // document holds, and report nothing for a document that cannot hold a
 // repeated member.
 func FuzzDuplicateKeys(f *testing.F) {
-	addJSONFuzzSeeds(f)
+	testutil.AddJSONFuzzSeeds(f)
 
 	f.Fuzz(func(t *testing.T, raw string) {
 		paths, omitted := DuplicateKeys([]byte(raw))
@@ -386,7 +357,7 @@ func foldsMemberNames(value any) bool {
 // every path it reports must name a member the document really holds, and a
 // document the type decodes strictly must yield none.
 func FuzzUnknownFields(f *testing.F) {
-	addJSONFuzzSeeds(f)
+	testutil.AddJSONFuzzSeeds(f)
 
 	f.Fuzz(func(t *testing.T, raw string) {
 		paths, omitted := UnknownFieldsOf[specs.LinuxSeccomp]([]byte(raw))
@@ -449,7 +420,7 @@ func TestUnknownFieldsPrefersShallowerField(t *testing.T) {
 // FuzzMisspelledFields checks that the scan MisspelledFieldsOf runs before
 // its walk never skips a walk that would find something.
 func FuzzMisspelledFields(f *testing.F) {
-	addJSONFuzzSeeds(f)
+	testutil.AddJSONFuzzSeeds(f)
 	f.Add(`{"ſyscalls":[{"names":["x"],"ACTION":"y"}]}`)
 
 	f.Fuzz(func(t *testing.T, raw string) {

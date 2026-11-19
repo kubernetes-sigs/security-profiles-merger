@@ -28,8 +28,13 @@ We have full documentation on how to get started contributing here:
 - The libseccomp headers (`libseccomp-dev` on Debian and Ubuntu), for
   `make lint` and `make test-libseccomp`; see
   [Local Development](#local-development).
-- Nothing else for the Makefile: it runs the pinned golangci-lint, mdtoc,
-  govulncheck and zeitgeist through `go run`.
+- Nothing else for the Makefile: it runs the pinned golangci-lint through
+  `go run`, and mdtoc, govulncheck, zeitgeist, actionlint and gorelease
+  through `go tool` from their own module, `hack/tools/go.mod`. The targets
+  that run those tools need a Go at least as new as that module's `go`
+  line, since the go command picks its toolchain from `go.mod` alone. CI
+  runs them with the Go pinned as `GO_VERSION` in the workflows, so a tools
+  update that raises that `go` line has to raise `GO_VERSION` too.
 
 Fill in the `release-note` block of the pull request template in every pull
 request, with `NONE` if a consumer sees no change. The release notes are
@@ -44,13 +49,13 @@ The codebase is organized in layers:
   common: `SliceDiff`, `InputError`, `MaxPathLen`, the sentinel errors they
   share (such as `ErrNilProfile`, `ErrMoreProblems` and the ones
   `UnmarshalStrict` returns), and `Diff`, the `IsEqual() bool` method all
-  three `ProfileDiff` types carry. Each profile package re-exports these under
-  its own name, so a caller need not import it, but naming them once is what
-  makes `seccomp.SliceDiff` and `apparmor.StringSliceDiff` the same type
-  rather than twins, and what lets pkg.go.dev link them. Keep it this small:
-  the three profile types have no common shape, so nothing that needs to know
-  which type it has belongs here. `cmd/spm/kinds.go` is where that knowledge
-  lives, as a table of per-type function values.
+  three `ProfileDiff` types carry. Each profile package re-exports what it
+  uses under its own name, so a caller need not import `spm`, but naming
+  them once is what makes `seccomp.SliceDiff` and `apparmor.StringSliceDiff`
+  the same type rather than twins, and what lets pkg.go.dev link them. Keep
+  it this small: the three profile types have no common shape, so nothing
+  that needs to know which type it has belongs here. `cmd/spm/kinds.go` is
+  where that knowledge lives, as a table of per-type function values.
 - `internal/merge/` holds what the packages share beyond `spm`. The generic
   merge primitives: `Fold` folds any profile type pairwise,
   `IntersectSlice`, `UnionSlice` and `DeduplicateSlice` work with any
@@ -69,6 +74,8 @@ The codebase is organized in layers:
   scans one by one, since its default mode warns where the strict modes
   reject.
 - `internal/testutil/` holds what the tests of several packages share.
+- `internal/snippets/` holds no code; its test type-checks the Go snippets
+  of the documentation (see [Documentation](#documentation)).
 - `seccomp/`, `apparmor/`, `landlock/` each expose the same public API surface:
   `Intersect`, `Union`, `Validate`, `ValidateStrict`, `ValidateArtifact`,
   `UnmarshalStrict`, `Diff`, `FormatDiff`, and `FormatProfile`. Each package
@@ -113,7 +120,31 @@ Each fact has one home, and the others link to it:
 Write plain, direct prose that describes behavior as it is, without history
 such as "used to" or "before this change". Wrap markdown at 80 columns
 (tables and links excepted) and Go comments like the code around them. Run
-`make verify-mdtoc` after changing a heading.
+`make update-mdtoc` after changing a heading; `make verify-mdtoc` checks the
+tables of contents without writing them.
+
+The test in `internal/snippets/` type-checks every ` ```go ` block of
+README.md and `docs/*.md` against the module. A block that starts with
+`package` is checked as a file, one of top-level declarations (such as an
+import line) as a file of its own imports, and anything else as the body of
+a function returning `error`, with `errors`, `fmt`, `log`, `strings`,
+`specs`, `spm`, `seccomp`, `apparmor` and `landlock` imported. Declare the
+variables such a fragment takes as given in an HTML comment right above the
+fence, which a reader does not see:
+
+````markdown
+<!-- go-snippet
+var baseline, artifact *specs.LinuxSeccomp
+-->
+```go
+effective, err := seccomp.Intersect(baseline, artifact)
+```
+````
+
+Unused variables and imports are not reported. Blocks are checked at the
+language version of the go line in `go.mod`, and a `go-snippet` comment above
+a block that is not a fragment is an error, since it would be ignored. Use
+another fence, such as ` ```text `, for code that is not meant to compile.
 
 ## Local Development
 
@@ -123,18 +154,22 @@ make help                # display available targets
 make build               # build the spm binary (static)
 make test                # run tests with race detection and coverage
 make lint                # run golangci-lint
+make lint-actions        # run actionlint on the workflows
 make fuzz                # run all fuzz tests (default 30s, set FUZZTIME to adjust)
 make test-libseccomp     # check the seccomp model against libseccomp
 make bench               # run benchmarks
 make verify              # run the verifications CI runs
 make verify-coverage     # verify test coverage meets threshold (default 95%)
-make verify-tidy         # verify go.mod is tidy
+make verify-tidy         # verify go.mod and hack/tools/go.mod are tidy
 make verify-mdtoc        # verify table of contents in markdown files
+make update-mdtoc        # regenerate table of contents in markdown files
 make verify-golden       # regenerate the CLI golden files and fail if any changed
 make verify-dependencies # verify external dependencies
-make verify-upstream     # check the pinned tool versions against their upstream releases
+make report-upstream     # print the pinned tool versions behind upstream
+make verify-upstream     # fail if a pinned tool version is behind upstream
 make govulncheck         # run govulncheck
-make tidy                # run go mod tidy
+make api-report          # report API changes since the latest release
+make tidy                # run go mod tidy on go.mod and hack/tools/go.mod
 make clean               # remove build artifacts
 ```
 
@@ -151,28 +186,36 @@ Notes on the targets:
   `make verify` run `lint`, so they need the headers too.
 - `make test-libseccomp` needs cgo and the libseccomp headers. Set
   `LIBSECCOMP_VERSION` to require a particular version, as CI does.
-- `make verify` rewrites the TOCs, `go.mod` and the goldens in place before
-  checking that nothing changed.
-- `make verify-upstream` needs `GITHUB_TOKEN`.
+- `make verify` rewrites `go.mod`, `hack/tools/go.mod` and the goldens in
+  place before checking that nothing changed.
+- `make report-upstream` and `make verify-upstream` need `GITHUB_TOKEN`.
+- `make api-report` compares against the newest tag before `HEAD`, and
+  gorelease refuses a working tree with uncommitted changes.
+- `make lint-actions` runs shellcheck on the run steps when it is on `PATH`,
+  as it is in CI.
 
 `make verify` runs `verify-coverage` (the test suite with the race detector,
 then the coverage floor), `lint`, `verify-tidy`, `verify-mdtoc`,
-`verify-golden`, `verify-dependencies` and `govulncheck` in one command, with
-the Go on your `PATH`. It does not build the binary; `make build` does. These
-CI jobs need something the Makefile does not install or a machine it does not
-have:
+`verify-golden`, `verify-dependencies`, `govulncheck` and `lint-actions` in
+one command, with the Go on your `PATH`. It does not build the binary;
+`make build` does. These CI jobs need something the Makefile does not
+install or a machine it does not have:
 
 | CI job | Local equivalent | Needs |
 |--------|------------------|-------|
 | `typos` | `typos` | [crate-ci/typos](https://github.com/crate-ci/typos) |
 | `snapshot` | `goreleaser release --snapshot --skip=sign --clean` | goreleaser and syft |
-| `test / macos-latest`, `test / windows-latest` | `go test -count=1 ./...` | a macOS or Windows machine |
+| `lint` (second run) | `GOOS=windows golangci-lint run ./cmd/...` | nothing more; it lints the files of `cmd/spm` for hosts that are not Unix |
+| `test / macos-latest / floor go`, `test / macos-latest / release go`, `test / windows-latest / floor go`, `test / windows-latest / release go` | `go test -count=1 ./...` | a macOS or Windows machine, and for `release go` the Go pinned as `GO_VERSION` in the workflows |
+| `test / linux-386` | `GOARCH=386 CGO_ENABLED=0 go test -count=1 ./...` | nothing more on amd64 |
+| `test / linux-arm64` | `CGO_ENABLED=0 go test -count=1 ./...` | an arm64 machine |
 | `vet / linux-<arch>` | `GOOS=linux GOARCH=<arch> go vet ./...` | nothing more |
 | `test / bounds` | `go test -count=1 ./...` | nothing more; it runs without the race detector and coverage |
 | `test / release go` | `go test -count=1 ./...` | the Go pinned as `GO_VERSION` in the workflows |
 | `fuzz / <target>` | `make fuzz` | time |
 | `benchmark / <package>` | `make bench` | time |
-| `test-libseccomp / <version>` | `make test-libseccomp` | cgo and that libseccomp version |
+| `test-libseccomp / <version>` | `make test-libseccomp`, then `SPM_LIBSECCOMP_OPTIMIZE=2 make test-libseccomp TESTFLAGS='-run Libseccomp'` | cgo and that libseccomp version |
+| `api / gorelease` | `make api-report` | a clean working tree; the job only reports |
 
 ### Golden files
 

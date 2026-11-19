@@ -21,6 +21,13 @@ concurrency:
 permissions:
   contents: read
 
+# bash, not the runner's default shell, on every runner including Windows:
+# GitHub starts it with -eo pipefail, so a failure inside a pipe fails the
+# step instead of hiding behind the exit code of the command after it.
+defaults:
+  run:
+    shell: bash
+
 # go.mod's go line is the oldest Go the library supports, and the jobs that
 # use go-version-file test that floor. The release binaries are built with
 # this one instead, a current stable release, so that they do not ship a
@@ -99,8 +106,10 @@ jobs:
 
   # The algorithmic bounds in the suite only assert wall-clock limits when
   # neither coverage nor the race detector is instrumenting the code, so the
-  # job above measures nothing. This one runs the same tests plain, which is
-  # the only place those bounds are a real assertion.
+  # job above measures nothing. This one runs the same tests plain on the
+  # floor Go and amd64; test / release go, test / linux-<arch> and the test
+  # jobs on macOS and Windows run uninstrumented as well, so the bounds are
+  # a real assertion there too.
   test-bounds:
     name: test / bounds
     runs-on: ubuntu-latest
@@ -362,15 +371,15 @@ jobs:
       # thirty seconds and pass. The matrix completeness check counts the
       # declarations; this checks that the run did something. The matrix
       # values reach the script through the environment rather than being
-      # written into it.
-      - shell: bash
-        env:
+      # written into it. -run limits the plain tests to the target's seed
+      # corpus, rather than running the whole package under the fuzzing
+      # instrumentation first.
+      - env:
           FUZZ_TARGET: ${{ matrix.fuzz.target }}
           FUZZ_PACKAGE: ${{ matrix.fuzz.package }}
         run: |
-          set -o pipefail
-          go test -fuzz="^${FUZZ_TARGET}\$" -fuzztime=30s \
-            "$FUZZ_PACKAGE" 2>&1 | tee fuzz.log
+          go test -run="^${FUZZ_TARGET}\$" -fuzz="^${FUZZ_TARGET}\$" \
+            -fuzztime=30s "$FUZZ_PACKAGE" 2>&1 | tee fuzz.log
           if grep -q "no fuzz tests to fuzz" fuzz.log; then
             echo "::error::${FUZZ_TARGET} matched no fuzz target"
             exit 1
@@ -404,15 +413,12 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      # The default shell does not set pipefail, so without it the pipe
-      # into tee hides a failing or panicking benchmark behind tee's own
-      # exit code, and the job stays green on partial output.
-      - shell: bash
-        env:
+      # pipefail, which the workflow's default shell sets, keeps a failing
+      # or panicking benchmark from hiding behind the exit code of tee, which
+      # would leave the job green on partial output.
+      - env:
           BENCH_PACKAGE: ${{ matrix.package }}
-        run: |
-          set -o pipefail
-          go test -bench=. -benchmem -count=5 -run=^$ "$BENCH_PACKAGE" | tee benchmark.txt
+        run: go test -bench=. -benchmem -count=5 -run='^$' "$BENCH_PACKAGE" | tee benchmark.txt
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: benchmark-${{ matrix.name }}
@@ -466,8 +472,8 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
       # govulncheck reports standard library vulnerabilities for the Go it
       # runs under, so it runs under the Go the release is built with. local
-      # keeps go run from switching to another toolchain, and so to another
-      # standard library, should govulncheck ever require a newer one.
+      # keeps go tool from switching to another toolchain, and so to another
+      # standard library, should hack/tools/go.mod ever require a newer one.
       - run: make govulncheck
         env:
           GOTOOLCHAIN: local
@@ -490,9 +496,14 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
       - run: make verify-tidy
 
+  # The jobs that touch hack/tools/go.mod (govulncheck, tidy, mdtoc,
+  # actionlint, api and dependencies) use the Go the release is built with:
+  # that module's go line is newer than the floor in go.mod, setup-go sets
+  # GOTOOLCHAIN=local, and the go command picks its toolchain from go.mod
+  # even under -modfile, so it would not switch by itself.
   mdtoc:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -502,8 +513,57 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
       - run: make verify-mdtoc
+
+  # actionlint runs shellcheck on every run step, which the runner image
+  # provides.
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: make lint-actions
+
+  # The module's API against the latest release, as gorelease reports it,
+  # with the version it suggests for the next one. It is a report, not a
+  # gate: a pull request that adds API is expected to show up here, and
+  # whether a change is allowed is for the review and RELEASE.md to decide.
+  # The base is the newest tag before HEAD, so that a tag run compares
+  # against the release before it rather than against itself.
+  api:
+    name: api / gorelease
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      # The report is captured before it goes to the summary, so that the
+      # code fence around it closes even when gorelease fails. It is kept
+      # outside the checkout, which gorelease refuses to read with an
+      # untracked file in it.
+      - run: |
+          status=0
+          report="${RUNNER_TEMP}/api-report.txt"
+          make -s api-report > "${report}" 2>&1 || status=$?
+          cat "${report}"
+          {
+            echo '```'
+            cat "${report}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
 
   golden:
     runs-on: ubuntu-latest
@@ -526,12 +586,8 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
-      # zeitgeist needs a newer Go than the module's floor; let go run
-      # fetch the toolchain its module requires.
+          go-version: ${{ env.GO_VERSION }}
       - run: make verify-dependencies
-        env:
-          GOTOOLCHAIN: auto
 
   snapshot:
     runs-on: ubuntu-latest

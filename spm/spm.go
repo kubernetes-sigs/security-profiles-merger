@@ -113,8 +113,8 @@ var (
 
 // InputError is returned by Intersect and Union of every package when one of
 // the profiles they were given is nil or fails validation. Index is that
-// profile's position among the arguments and Err what its validation
-// reported.
+// profile's zero-based position among the arguments, so 0 is the first
+// profile, and Err what its validation reported.
 //
 // A caller merging inputs of different standing needs to know which one
 // failed, not only that one did: a runtime refusing an artifact rejects a

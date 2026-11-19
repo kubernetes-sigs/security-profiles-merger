@@ -7,13 +7,16 @@
 A standalone Go library for merging security profiles
 ([seccomp](https://man7.org/linux/man-pages/man2/seccomp.2.html),
 [AppArmor](https://apparmor.net/),
-[Landlock](https://landlock.io/)) used by [Kubernetes](https://kubernetes.io) CRI runtimes and the
+[Landlock](https://landlock.io/)) for [Kubernetes](https://kubernetes.io) CRI
+runtimes and the
 [Security Profiles Operator](https://sigs.k8s.io/security-profiles-operator).
 
 <!-- toc -->
 - [Overview](#overview)
 - [Documentation](#documentation)
 - [Installation](#installation)
+  - [Library](#library)
+  - [Command-line tool](#command-line-tool)
 - [Packages](#packages)
 - [API stability](#api-stability)
 - [Usage](#usage)
@@ -23,7 +26,6 @@ A standalone Go library for merging security profiles
   - [Landlock profile merge](#landlock-profile-merge)
 - [Examples](#examples)
 - [CLI](#cli)
-  - [Install](#install)
 - [Contributing](#contributing)
 - [Community, discussion, contribution, and support](#community-discussion-contribution-and-support)
   - [Code of Conduct](#code-of-conduct)
@@ -34,10 +36,9 @@ A standalone Go library for merging security profiles
 This library provides core operations on security profiles:
 
 - **Intersect**: Produces an effective profile that permits an operation only if
-  all input profiles permit it. Used by CRI runtimes (CRI-O, containerd) to
-  merge an artifact, a profile pulled from a registry, with the runtime's
-  baseline per
-  [KEP-6061](https://github.com/kubernetes/enhancements/issues/6061).
+  all input profiles permit it. A CRI runtime such as CRI-O uses it to merge
+  an artifact, a profile pulled from a registry, with the runtime's baseline
+  per [KEP-6061](https://github.com/kubernetes/enhancements/issues/6061).
 - **Union**: Produces a profile that permits an operation if any input profile
   permits it. Used by the
   [Security Profiles Operator](https://github.com/kubernetes-sigs/security-profiles-operator)
@@ -57,8 +58,51 @@ This library provides core operations on security profiles:
 
 ## Installation
 
-```
+### Library
+
+```sh
 go get sigs.k8s.io/security-profiles-merger
+```
+
+The module needs Go 1.24 or newer, the `go` line of `go.mod`. It builds on
+any operating system, but what it models is how Linux loads a profile: the
+seccomp, AppArmor and Landlock semantics are those of a Linux node, and
+profile paths are Linux paths on every host.
+
+### Command-line tool
+
+Download a pre-built binary from the
+[releases page](https://github.com/kubernetes-sigs/security-profiles-merger/releases).
+[RELEASE.md](RELEASE.md) lists the platforms a release covers. Each release
+includes cosign-signed checksums, SBOMs, and build provenance attestations.
+
+To verify a downloaded binary:
+
+```sh
+# Verify checksums signature
+cosign verify-blob \
+  --bundle checksums.txt.sigstore.json \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/kubernetes-sigs/security-profiles-merger/\.github/workflows/release\.yml@refs/tags/v' \
+  checksums.txt
+
+# Verify the downloaded binaries against the signed checksums
+sha256sum --ignore-missing -c checksums.txt
+
+# Or verify build provenance directly
+gh attestation verify spm_*_linux_amd64 -R kubernetes-sigs/security-profiles-merger
+```
+
+Or install from source:
+
+```sh
+go install sigs.k8s.io/security-profiles-merger/cmd/spm@latest
+```
+
+Or build statically from source:
+
+```sh
+make build   # produces build/spm
 ```
 
 ## Packages
@@ -75,13 +119,12 @@ to an artifact, a profile it did not author
   in this package.
 - **[landlock](docs/api.md#landlock)** - Merges Linux unprivileged sandboxing
   rulesets.
-- **[spm](docs/api.md#spm)** - What the three have in common (`SliceDiff`,
-  `InputError`, `MaxPathLen`, the shared sentinel errors and `Diff`); each
-  package re-exports it, so no import is needed.
+- **[spm](docs/api.md#spm)** - What the three have in common, such as
+  `SliceDiff`, `InputError` and the shared sentinel errors. Each package
+  re-exports what it uses under its own name, so no import is needed.
 
-All exported functions are safe to call from several goroutines at once, so a
-runtime may merge profiles for concurrent container starts without
-serializing them. See [Concurrency](docs/api.md#concurrency).
+See [Concurrency](docs/api.md#concurrency) for calling the functions from
+several goroutines at once.
 
 ## API stability
 
@@ -106,6 +149,10 @@ loads only the intersection with its baseline, which comes first.
 flow, including the baseline check at config load, the pod spec's own
 profile as a middle input, and how to tell a bad baseline from a bad artifact.
 
+<!-- go-snippet
+var baseline *specs.LinuxSeccomp
+var artifactBytes []byte
+-->
 ```go
 // Once, at config load: a baseline the merge cannot read exactly loses
 // those rules in every merge, so it is a misconfiguration, not an artifact
@@ -147,6 +194,9 @@ result.
 
 ### Security Profiles Operator: combine recorded profiles (union)
 
+<!-- go-snippet
+var recording1, recording2, recording3 *specs.LinuxSeccomp
+-->
 ```go
 combined, err := seccomp.Union(recording1, recording2, recording3)
 if err != nil {
@@ -161,6 +211,9 @@ Input order decides tie-breaks such as errno values; see
 
 ### AppArmor profile merge
 
+<!-- go-snippet
+var baseline, artifact, recorded1, recorded2 *apparmor.Profile
+-->
 ```go
 // A section a profile omits denies everything it covers, as it does in
 // AppArmor, so a baseline without a capability section grants no
@@ -173,6 +226,7 @@ log.Print(apparmor.FormatProfile(aaEffective))
 
 // Capability names come back upper-cased ("CHOWN"), while apparmor_parser
 // accepts only lower-case ones, so lower-case them when rendering rules.
+var rules strings.Builder
 if aaEffective.Capabilities != nil {
     for _, name := range aaEffective.Capabilities.AllowedCapabilities {
         fmt.Fprintf(&rules, "  capability %s,\n", strings.ToLower(name))
@@ -189,6 +243,10 @@ log.Print(apparmor.FormatProfile(aaCombined))
 
 ### Landlock profile merge
 
+<!-- go-snippet
+var baseline, artifact, recorded1, recorded2 *landlock.Profile
+var nodeABI landlock.ABIVersion
+-->
 ```go
 llEffective, err := landlock.Intersect(baseline, artifact)
 if err != nil {
@@ -196,7 +254,8 @@ if err != nil {
 }
 
 // A kernel rejects a right its ABI does not know, so check the result
-// against the ABI version of the node that applies it.
+// against the ABI version of the node that applies it, which
+// landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION) returns.
 if err := landlock.ValidateForABI(llEffective, nodeABI); err != nil {
     return err
 }
@@ -245,43 +304,6 @@ stdin. `spm help <command>` lists the options of a command, and
 modes and what each refuses, input limits, how inputs are named in messages,
 and what `--output` guards against.
 
-### Install
-
-Download a pre-built binary from the
-[releases page](https://github.com/kubernetes-sigs/security-profiles-merger/releases).
-Each release covers Linux on `amd64`, `arm64`, `ppc64le` and `s390x`, and
-macOS and Windows on `amd64` and `arm64` (see [RELEASE.md](RELEASE.md)), and
-includes cosign-signed checksums, SBOMs, and build provenance attestations.
-
-To verify a downloaded binary:
-
-```sh
-# Verify checksums signature
-cosign verify-blob \
-  --bundle checksums.txt.sigstore.json \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity-regexp '^https://github.com/kubernetes-sigs/security-profiles-merger/\.github/workflows/release\.yml@refs/tags/v' \
-  checksums.txt
-
-# Verify the downloaded binaries against the signed checksums
-sha256sum --ignore-missing -c checksums.txt
-
-# Or verify build provenance directly
-gh attestation verify spm_*_linux_amd64 -R kubernetes-sigs/security-profiles-merger
-```
-
-Or install from source:
-
-```
-go install sigs.k8s.io/security-profiles-merger/cmd/spm@latest
-```
-
-Or build statically from source:
-
-```
-make build   # produces build/spm
-```
-
 ## Contributing
 
 [CONTRIBUTING.md](CONTRIBUTING.md) is where to start: it describes how the
@@ -300,10 +322,10 @@ change to a merge has to keep passing.
 ## Community, discussion, contribution, and support
 
 Learn how to engage with the Kubernetes community on the
-[community page](http://kubernetes.io/community/).
+[community page](https://kubernetes.io/community/).
 
 You can reach the maintainers of this project at the
-[SIG Node mailing list](https://groups.google.com/forum/#!forum/kubernetes-sig-node).
+[SIG Node mailing list](https://groups.google.com/a/kubernetes.io/g/sig-node).
 
 ### Code of Conduct
 

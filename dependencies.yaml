@@ -1,14 +1,17 @@
-# Dependabot tracks pinned action SHAs and go.mod. The tool versions below
-# live in a Makefile variable or a workflow env, where it cannot see them:
-# refPaths keep those copies in sync with each other, and the upstream
-# stanzas let the scheduled dependencies workflow ask each project whether
-# the pin is still the current release.
+# Dependabot tracks pinned action SHAs, go.mod and hack/tools/go.mod, which
+# pins mdtoc, govulncheck, zeitgeist, actionlint and gorelease. The tool
+# versions below live in a Makefile variable or a workflow env, where it
+# cannot see them: refPaths keep those copies in sync with each other, and
+# the upstream stanzas let the scheduled dependencies workflow ask each
+# project whether the pin is still the current release.
 dependencies:
-  # The Go the release binaries are built with, which CI also tests and
-  # scans with govulncheck. It is not go.mod's go line: that is the oldest
-  # Go the library supports, which raising would raise for every consumer.
-  # golang/go publishes tags but no GitHub releases, and its tags are not
-  # semver, so the official image's tags are what upstream is read from.
+  # The Go the release binaries are built with, which CI also tests, scans
+  # with govulncheck and runs the tools of hack/tools/go.mod with, so it
+  # must not be older than that module's go line. It is not go.mod's go
+  # line: that is the oldest Go the library supports, which raising would
+  # raise for every consumer. golang/go publishes tags but no GitHub
+  # releases, and its tags are not semver, so the official image's tags are
+  # what upstream is read from.
   - name: go
     version: 1.27.4
     upstream:
@@ -18,6 +21,8 @@ dependencies:
       - path: .github/workflows/ci.yml
         match: "GO_VERSION: \""
       - path: .github/workflows/release.yml
+        match: "GO_VERSION: \""
+      - path: .github/workflows/dependency-updates.yml
         match: "GO_VERSION: \""
 
   - name: golangci-lint
@@ -61,34 +66,6 @@ dependencies:
     refPaths:
       - path: .github/workflows/release.yml
         match: "COSIGN_VERSION: v"
-
-  - name: mdtoc
-    version: 1.4.0
-    upstream:
-      flavour: github
-      url: kubernetes-sigs/mdtoc
-    refPaths:
-      - path: Makefile
-        match: ^MDTOC_VERSION
-
-  # No upstream stanza: govulncheck is tagged far ahead of what golang/vuln
-  # publishes as a GitHub release, and the github flavour reads releases
-  # whenever a repository has any, so a stanza here would report this pin as
-  # current forever. go.mod-style tracking would be needed instead.
-  - name: govulncheck
-    version: 1.10.0
-    refPaths:
-      - path: Makefile
-        match: ^GOVULNCHECK_VERSION
-
-  - name: zeitgeist
-    version: 0.9.0
-    upstream:
-      flavour: github
-      url: kubernetes-sigs/zeitgeist
-    refPaths:
-      - path: Makefile
-        match: ^ZEITGEIST_VERSION
 
   # The libseccomp versions the seccomp model is checked against are a
   # matrix in ci.yml, not one pin, so there is no single line for a refPath

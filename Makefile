@@ -3,9 +3,17 @@ FUZZTIME ?= 30s
 RACE ?= -race
 
 GOLANGCI_LINT_VERSION = 2.15.0
-GOVULNCHECK_VERSION = v1.10.0
-MDTOC_VERSION = v1.4.0
-ZEITGEIST_VERSION = v0.9.0
+
+# The other tools are pinned in their own module, hack/tools/go.mod, which
+# Dependabot keeps current and go.sum vouches for. A tool needs both a tool
+# directive there and an import in hack/tools/tools.go: the directive alone
+# leaves it an indirect requirement, which Dependabot does not update. The
+# module's go line can be newer than the floor in go.mod, since no consumer
+# builds it. The go command picks its toolchain from go.mod and not from
+# -modfile, so the targets that run these tools need a Go on PATH at least
+# as new as that go line. CI runs them with GO_VERSION of the workflows, so
+# a tools bump that raises that go line has to raise GO_VERSION as well.
+TOOL = $(GO) tool -modfile=hack/tools/go.mod
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
@@ -16,9 +24,9 @@ NOCOLOR := \033[0m
 
 PACKAGES := $(shell $(GO) list ./...)
 
-# verify is deliberately not part of all: verify-tidy, verify-mdtoc and
-# verify-golden rewrite tracked files in place before checking that nothing
-# changed, which a default target must not do to someone's working tree.
+# verify is deliberately not part of all: verify-tidy and verify-golden
+# rewrite tracked files in place before checking that nothing changed, which
+# a default target must not do to someone's working tree.
 .PHONY: all
 all: build lint test ## Build, lint, and test the project
 
@@ -65,10 +73,11 @@ test-libseccomp: ## Check the seccomp evaluation model against libseccomp itself
 
 .PHONY: fuzz
 fuzz: ## Run all fuzz tests (use FUZZTIME to adjust, default 30s)
-	@for pkg in $(PACKAGES); do \
-		for target in $$($(GO) test -list 'Fuzz.*' $$pkg 2>/dev/null | grep '^Fuzz'); do \
+	@set -e; for pkg in $(PACKAGES); do \
+		targets=$$($(GO) test -list '^Fuzz' $$pkg); \
+		for target in $$(echo "$$targets" | grep '^Fuzz' || true); do \
 			echo "fuzzing $$pkg $$target"; \
-			$(GO) test -fuzz="^$$target\$$" -fuzztime=$(FUZZTIME) $$pkg || exit 1; \
+			$(GO) test -run="^$$target\$$" -fuzz="^$$target\$$" -fuzztime=$(FUZZTIME) $$pkg; \
 		done; \
 	done
 
@@ -104,38 +113,49 @@ verify-coverage: test ## Verify test coverage meets threshold
 # Makefile does not install: the typos scan, the release snapshot build,
 # the macOS and Windows runs, the cross-architecture vet, the fuzz matrix,
 # the benchmarks, the uninstrumented bounds run, the test run on the Go the
-# release is built with, and the libseccomp differential tests.
-# test-libseccomp, fuzz and bench run those locally.
+# release is built with, the API report, and the libseccomp differential
+# tests. test-libseccomp, fuzz, bench and api-report run those locally.
 #
-# verify-mdtoc, verify-tidy and verify-golden rewrite files in place and
-# then check that nothing changed, which is why verify is not part of the
-# default target.
+# verify-tidy and verify-golden rewrite files in place and then check that
+# nothing changed, which is why verify is not part of the default target.
 .PHONY: verify
-verify: verify-coverage lint verify-tidy verify-mdtoc verify-golden verify-dependencies govulncheck ## Run the verifications CI runs (rewrites the TOCs, go.mod and the goldens in place)
+verify: verify-coverage lint verify-tidy verify-mdtoc verify-golden verify-dependencies govulncheck lint-actions ## Run the verifications CI runs (rewrites go.mod and the goldens in place)
 
 # Built from source rather than downloaded, so that the module checksum
-# database vouches for it the way it does for mdtoc and govulncheck.
+# database vouches for it the way it does for the tools in hack/tools. It
+# stays out of that module because golangci-lint asks not to be installed
+# as a dependency of another module, whose requirements would change it.
 .PHONY: lint
 lint: ## Run golangci-lint (needs the libseccomp headers; the config lints the cgo bridge too)
 	$(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(GOLANGCI_LINT_VERSION) run
 
 MDOCS := README.md docs/api.md docs/cli.md docs/integration.md
 
+# --dryrun fails when a table of contents is stale and writes nothing.
 .PHONY: verify-mdtoc
 verify-mdtoc: ## Verify table of contents in markdown files
-	$(GO) run sigs.k8s.io/mdtoc@$(MDTOC_VERSION) --inplace $(MDOCS)
-	git diff --exit-code $(MDOCS)
+	$(TOOL) sigs.k8s.io/mdtoc --inplace --dryrun $(MDOCS)
+
+.PHONY: update-mdtoc
+update-mdtoc: ## Regenerate the table of contents in markdown files
+	$(TOOL) sigs.k8s.io/mdtoc --inplace $(MDOCS)
+
+# actionlint runs shellcheck on the run steps when it is on PATH, as it is
+# on the CI runners.
+.PHONY: lint-actions
+lint-actions: ## Lint the GitHub workflows with actionlint
+	$(TOOL) github.com/rhysd/actionlint/cmd/actionlint
 
 .PHONY: verify-dependencies
 verify-dependencies: ## Verify external dependencies
-	$(GO) run sigs.k8s.io/zeitgeist@$(ZEITGEIST_VERSION) \
+	$(TOOL) sigs.k8s.io/zeitgeist \
 		validate --local-only --base-path . --config dependencies.yaml
 
 # Only the remote command can reach upstream; the plain one refuses. It
 # reports an outdated pin on stdout and still exits 0. Neither target is
 # part of verify: they need the network and a token, and a release someone
 # else cut is not a reason to fail a pull request.
-ZEITGEIST_REMOTE = $(GO) run sigs.k8s.io/zeitgeist/remote/zeitgeist@$(ZEITGEIST_VERSION) \
+ZEITGEIST_REMOTE = $(TOOL) sigs.k8s.io/zeitgeist/remote/zeitgeist \
 	validate --local-only=false --base-path . --config dependencies.yaml
 
 .PHONY: report-upstream
@@ -166,19 +186,31 @@ verify-golden: ## Verify the CLI golden files are what the code produces
 	fi
 
 .PHONY: verify-tidy
-verify-tidy: ## Verify go.mod is tidy
+verify-tidy: ## Verify go.mod and hack/tools/go.mod are tidy
 	$(GO) mod tidy
-	git diff --exit-code go.mod go.sum
+	cd hack/tools && $(GO) mod tidy
+	git diff --exit-code go.mod go.sum hack/tools/go.mod hack/tools/go.sum
 
 .PHONY: govulncheck
 govulncheck: ## Run govulncheck
-	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+	$(TOOL) golang.org/x/vuln/cmd/govulncheck ./...
+
+# The newest tag before HEAD, so that on a tagged commit the report compares
+# against the release before it rather than against the tag itself.
+API_BASE ?= $(shell git describe --tags --abbrev=0 HEAD^ 2>/dev/null)
+
+# gorelease refuses a working tree with uncommitted changes.
+.PHONY: api-report
+api-report: ## Report API changes since the latest release and the version they suggest (needs a clean tree)
+	@if [ -z "$(API_BASE)" ]; then echo "no release tag to compare against"; exit 1; fi
+	$(TOOL) golang.org/x/exp/cmd/gorelease -base=$(API_BASE)
 
 ##@ Maintenance
 
 .PHONY: tidy
-tidy: ## Run go mod tidy
+tidy: ## Run go mod tidy on go.mod and hack/tools/go.mod
 	$(GO) mod tidy
+	cd hack/tools && $(GO) mod tidy
 
 .PHONY: clean
 clean: ## Remove build artifacts

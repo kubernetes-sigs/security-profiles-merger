@@ -19,6 +19,8 @@ package main
 import (
 	"slices"
 	"testing"
+
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 )
 
 // The CLI walks the same bytes a runtime pulls from an OCI artifact, before
@@ -27,40 +29,11 @@ import (
 // type has no field for. These targets fuzz those walkers, which recurse
 // over attacker-shaped JSON.
 
-func addJSONFuzzSeeds(f *testing.F) {
-	f.Helper()
-
-	for _, seed := range []string{
-		`{"defaultAction":"SCMP_ACT_ERRNO"}`,
-		`{"defaultAction":"SCMP_ACT_ERRNO","DefaultAction":"SCMP_ACT_ALLOW"}`,
-		`{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[{"names":["read"],"names":["write"]}]}`,
-		`{"syscalls":[{"args":[{"index":0,"bogus":1}]}]}`,
-		`{"handledAccessFs":["read_file"],"pathRules":[{"path":"/etc"}]}`,
-		`{"executable":{"allowedExecutables":["/bin/sh"]},"capability":{}}`,
-		`{}`,
-		`[]`,
-		`[[[[[[[[[[1]]]]]]]]]]`,
-		`{"a":{"a":{"a":{"a":1,"A":2}}}}`,
-		// Two repeated members in different objects whose paths would
-		// collide if a name that is not a plain segment were written bare.
-		`{"":{"":1,"":2},"":3}`,
-		`{"a":{"b":1,"b":2},"a.b":0,"a.b":9}`,
-		`{"ſ":1,"s":2}`,
-		// An escape hides the member name from the raw bytes: the scan
-		// reports the decoded name, which the document does not spell.
-		`{"\u0061b":1,"\u0061b":2}`,
-		`not json`,
-		``,
-	} {
-		f.Add(seed)
-	}
-}
-
 // FuzzDetectProfileType checks the type detection: it must terminate, answer
 // with types the CLI knows or nothing at all, and report a conflict for one
 // input only when that input really carries the members of two types.
 func FuzzDetectProfileType(f *testing.F) {
-	addJSONFuzzSeeds(f)
+	testutil.AddJSONFuzzSeeds(f)
 
 	// Seeds mixing the key families of two profile types, which the seeds
 	// above never do: each is one document the CLI must call ambiguous

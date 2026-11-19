@@ -69,21 +69,30 @@ profile that carries a `defaultAction` member as an almost empty seccomp
 profile.
 
 Input order decides the seccomp tie-breaks: `errnoRet` follows the earlier
-input where the actions tie, and `listenerPath` and `listenerMetadata` come
-from the first input that sets a `listenerPath`. So `spm merge a.json b.json`
-and `spm merge b.json a.json` are not the same command, and a runtime lists
-its inputs from most to least trusted.
+input where the actions tie. An intersection takes `listenerPath` and
+`listenerMetadata` from the first input only and fails when a later one
+names a different listener; a union fails when two inputs do. So
+`spm merge a.json b.json` and `spm merge b.json a.json` are not the same
+command, and a runtime lists its inputs from most to least trusted.
 
 A seccomp profile without a `flags` member leaves the flags to the runtime,
 and runc and crun then set `SECCOMP_FILTER_FLAG_SPEC_ALLOW`, while
 `"flags": []` sets none. The merge keeps the two apart, and its output
 carries `"flags": []` where the flag has to stay off.
 
+A seccomp merge result depends on the architecture: a 32-bit architecture
+compares half of each value, and one that multiplexes socket and IPC calls
+reads those rules a second way (see
+[What the models leave out](integration.md#what-the-models-leave-out)). The
+merge and its `--validate artifact` and `--validate strict` checks settle for
+the host architecture unless `--arch` is given, so run them on the node that
+loads the result.
+
 `--validate` names the checks to run on the inputs before merging: `default`
 (what the merge itself applies), `strict`, or `artifact`, as described under
 [Validate profiles](#validate-profiles). Give one mode for all inputs, or one
 mode per input separated by commas. A container runtime merging an artifact
-into its baseline runs the checks of the
+into its baseline runs the per-artifact checks of the
 [runtime flow](integration.md#the-runtime-flow) in one command:
 
 ```sh
@@ -93,11 +102,20 @@ spm merge --type seccomp --strategy intersect --validate default,artifact \
 
 The merge only runs if every input passes. The baseline gets `default`, as
 in the library flow: the seccomp defaults runtimes ship fail `strict`, which
-also rejects `SCMP_ACT_NOTIFY` and the listener settings. One difference from the library flow
-remains: `artifact` only warns about a member the profile type has no field
-for, where `UnmarshalStrict` refuses it. A runtime that must refuse such an
-artifact treats the warning on stderr as a failure or decodes with the
-library.
+also rejects `SCMP_ACT_NOTIFY` and the listener settings. The check the flow
+runs once at config load, that the merge reads every rule of the baseline,
+is a merge of the baseline alone followed by a diff, which exits `0` when
+the two are equal:
+
+```sh
+spm merge --strategy intersect baseline.json > settled.json &&
+  spm diff baseline.json settled.json
+```
+
+One difference from the library flow remains: `artifact` only warns about a
+member the profile type has no field for, where `UnmarshalStrict` refuses
+it. A runtime that must refuse such an artifact treats the warning on stderr
+as a failure or decodes with the library.
 
 Profiles can also be read from stdin, as a single profile or a JSON array of
 profiles, and `-` reads stdin alongside file arguments:
@@ -168,7 +186,9 @@ library, and handle what `encoding/json` accepts silently as follows. The
 | Data after the profile, or a document that is not an object | reject | reject | reject |
 
 `--artifact` is for a profile a runtime did not author, `--strict` for one a
-person wrote; they cannot be combined.
+person wrote; they cannot be combined. For seccomp, what both accept depends
+on the architecture, as for the merge: they settle for the host architecture
+unless `--arch` is given.
 
 A field repeated within one JSON object, including one that differs only in
 capitalization, is ambiguous: spm, like other Go programs, matches field
