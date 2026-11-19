@@ -32,7 +32,7 @@ dependencies:
         match: "^\\s+version: v"
 
   - name: syft
-    version: 1.57.1
+    version: 1.57.2
     upstream:
       flavour: github
       url: anchore/syft
@@ -76,13 +76,13 @@ dependencies:
   # whenever a repository has any, so a stanza here would report this pin as
   # current forever. go.mod-style tracking would be needed instead.
   - name: govulncheck
-    version: 1.8.0
+    version: 1.10.0
     refPaths:
       - path: Makefile
         match: ^GOVULNCHECK_VERSION
 
   - name: zeitgeist
-    version: 0.8.0
+    version: 0.9.0
     upstream:
       flavour: github
       url: kubernetes-sigs/zeitgeist
