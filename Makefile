@@ -3,9 +3,9 @@ FUZZTIME ?= 30s
 RACE ?= -race
 
 GOLANGCI_LINT_VERSION = 2.15.0
-GOVULNCHECK_VERSION = v1.8.0
+GOVULNCHECK_VERSION = v1.10.0
 MDTOC_VERSION = v1.4.0
-ZEITGEIST_VERSION = v0.8.0
+ZEITGEIST_VERSION = v0.9.0
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
