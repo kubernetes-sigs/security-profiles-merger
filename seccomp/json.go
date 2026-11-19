@@ -37,11 +37,11 @@ var (
 	ErrUnexpectedData  = spm.ErrUnexpectedData
 )
 
-// UnmarshalStrict decodes a seccomp profile and rejects what encoding/json accepts
-// silently: members the profile type has no field for, members that name a
-// field only ignoring case, members repeated within one object, bytes that
-// are not valid UTF-8, data behind the profile, and a document that is not
-// a JSON object, such as null. Its error messages are bounded in length,
+// UnmarshalStrict decodes a seccomp profile and rejects what encoding/json
+// accepts silently: members the profile type has no field for, members that
+// name a field only ignoring case, members repeated within one object, bytes
+// that are not valid UTF-8, data behind the profile, and a document that is
+// not a JSON object, such as null. Its error messages are bounded in length,
 // however long the literals the document quotes.
 //
 // Each loses something a reader of an untrusted profile must not lose. A

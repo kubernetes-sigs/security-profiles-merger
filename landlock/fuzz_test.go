@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 	"sigs.k8s.io/security-profiles-merger/landlock"
@@ -488,7 +489,7 @@ func assertIntersectInvariants(
 
 // assertResultShape checks what every merge result satisfies: it validates,
 // its rules are sorted, and it is loadable unless an input uses a relative
-// path or the result restricts nothing.
+// or non-UTF-8 path or the result restricts nothing.
 func assertResultShape(t *testing.T, result *landlock.Profile, inputs ...*landlock.Profile) {
 	t.Helper()
 
@@ -505,12 +506,8 @@ func assertResultShape(t *testing.T, result *landlock.Profile, inputs ...*landlo
 		t.Error("result path rules are not sorted")
 	}
 
-	for _, input := range inputs {
-		for _, rule := range input.PathRules {
-			if !strings.HasPrefix(rule.Path, "/") {
-				return
-			}
-		}
+	if !loadablePaths(inputs) {
+		return
 	}
 
 	if len(result.HandledAccessFS) == 0 && len(result.HandledAccessNet) == 0 &&
@@ -522,6 +519,21 @@ func assertResultShape(t *testing.T, result *landlock.Profile, inputs ...*landlo
 	if err != nil {
 		t.Errorf("merge result is not loadable: %v\nresult=%s", err, landlock.FormatProfile(result))
 	}
+}
+
+// loadablePaths reports whether every path of the inputs is absolute and
+// valid UTF-8. ValidateStrict rejects any other path, which Validate lets
+// through to the merge and the merge keeps.
+func loadablePaths(inputs []*landlock.Profile) bool {
+	for _, input := range inputs {
+		for _, rule := range input.PathRules {
+			if !strings.HasPrefix(rule.Path, "/") || !utf8.ValidString(rule.Path) {
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 // assertReferFromInputRules checks that every rule of the result granting
@@ -1296,21 +1308,31 @@ func assertDiffFormat(t *testing.T, diff *landlock.ProfileDiff, left, right *lan
 		)
 	}
 
-	if diff.PathRules == nil {
+	// A diff cut at merge.MaxFormattedBytes names the paths before the cut
+	// only, which is what the bound is for.
+	if diff.PathRules == nil || strings.HasSuffix(formatted, merge.TruncationMarker) {
 		return
 	}
+
+	assertDiffNamesPaths(t, formatted, diff.PathRules)
+}
+
+// assertDiffNamesPaths checks that a rendered diff names every path of the
+// path rules it carries.
+func assertDiffNamesPaths(t *testing.T, formatted string, pathRules *landlock.PathRulesDiff) {
+	t.Helper()
 
 	// A path holding a control byte or invalid UTF-8 is quoted rather than
 	// written through, so it is looked for as the formatter writes it: a
 	// runtime's log and an operator's terminal are not places to let a
 	// profile choose the bytes.
-	for _, rule := range slices.Concat(diff.PathRules.Added, diff.PathRules.Removed) {
+	for _, rule := range slices.Concat(pathRules.Added, pathRules.Removed) {
 		if !strings.Contains(formatted, merge.SafeText(rule.Path)) {
 			t.Errorf("FormatDiff = %q, missing the path %q", formatted, rule.Path)
 		}
 	}
 
-	for _, change := range diff.PathRules.Changed {
+	for _, change := range pathRules.Changed {
 		if !strings.Contains(formatted, merge.SafeText(change.Path)) {
 			t.Errorf("FormatDiff = %q, missing the changed path %q", formatted, change.Path)
 		}
@@ -1492,10 +1514,7 @@ func assertLandlockLoadable(t *testing.T, profile *landlock.Profile) {
 	handledFS := rightSet(profile.HandledAccessFS)
 
 	for idx, rule := range profile.PathRules {
-		if !strings.HasPrefix(rule.Path, "/") {
-			t.Errorf("PathRules[%d]: accepted the relative path %q", idx, rule.Path)
-		}
-
+		assertLandlockPath(t, idx, rule.Path)
 		assertLandlockRuleRights(
 			t, fmt.Sprintf("PathRules[%d]", idx), rule.AccessFS, handledFS,
 		)
@@ -1508,6 +1527,40 @@ func assertLandlockLoadable(t *testing.T, profile *landlock.Profile) {
 			t, fmt.Sprintf("NetRules[%d]", idx), rule.AccessNet, handledNet,
 		)
 	}
+}
+
+// assertLandlockPath checks that the kernel can open a rule path as the
+// merge reads it: absolute, and not ending in a slash, which makes the
+// kernel open it only as a directory while the merge cleans the slash away.
+// It also checks that JSON can carry the path.
+func assertLandlockPath(t *testing.T, idx int, path string) {
+	t.Helper()
+
+	if !strings.HasPrefix(path, "/") {
+		t.Errorf("PathRules[%d]: accepted the relative path %q", idx, path)
+	}
+
+	trailing := strings.HasSuffix(path, "/") || strings.HasSuffix(path, "/.")
+	if trailing && !namesRoot(path) {
+		t.Errorf("PathRules[%d]: accepted the trailing slash of %q", idx, path)
+	}
+
+	if !utf8.ValidString(path) {
+		t.Errorf("PathRules[%d]: accepted the invalid UTF-8 path %q", idx, path)
+	}
+}
+
+// namesRoot reports whether an absolute path names the root, a directory,
+// because every component is empty or ".". A component such as "..." is a
+// name like any other.
+func namesRoot(path string) bool {
+	for part := range strings.SplitSeq(path, "/") {
+		if part != "" && part != "." {
+			return false
+		}
+	}
+
+	return strings.HasPrefix(path, "/")
 }
 
 // assertLandlockRuleRights checks that a rule grants at least one right and

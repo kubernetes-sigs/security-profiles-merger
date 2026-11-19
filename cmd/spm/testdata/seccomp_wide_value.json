@@ -1,0 +1,1 @@
+{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[{"names":["read"],"action":"SCMP_ACT_ALLOW","args":[{"index":0,"value":4294967296,"op":"SCMP_CMP_EQ"}]}]}

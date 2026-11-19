@@ -47,10 +47,39 @@ var (
 	// filter and then refuses to create the container without a
 	// listenerPath, so the profile does not load at all.
 	ErrNotifyWithoutListener = errors.New("SCMP_ACT_NOTIFY without a listener")
+	// ErrConflictingListener is returned by Union when two inputs name
+	// different listeners: different non-empty listenerPath values, or one
+	// listenerPath with different listenerMetadata. A filter hands every
+	// notification to one listener, so a result can keep only one of them,
+	// and whichever it kept would deliver the other input's notifications to
+	// a supervisor that never asked for them. Both merges wrap it in an
+	// *InputError naming the later of the two inputs, which brought the
+	// conflict, and name the listener it conflicts with by value in the
+	// message. Intersect returns it when an
+	// input after the first sets either listenerPath or listenerMetadata
+	// without setting both exactly as the first input does, including where
+	// the first sets none and where a later one repeats the path but leaves
+	// the metadata out: its first input is the trusted baseline, and a
+	// listener is a node-local socket only the baseline may name (see the
+	// Listener section of the package documentation).
+	ErrConflictingListener = errors.New("conflicting listeners")
+	// ErrLostRules is returned by Union when its result would hold rules
+	// libseccomp loses on a covered architecture: the block of that
+	// architecture would test a syscall it lacks first, which libseccomp
+	// 2.5.5 and 2.6.1 compile without loading the syscall number, so every
+	// call of the architecture gets the default action. Intersect drops an
+	// architecture instead, which Union cannot do without denying what an
+	// input permits, and returns it only where it cannot drop one: where the
+	// affected architecture is native and the syscall applies there too, or
+	// where the native architecture is not known and the affected one is the
+	// last listed (see the Architectures section of the package
+	// documentation).
+	ErrLostRules = errors.New("libseccomp would lose the rules of an architecture")
 )
 
 // InputError is returned by Intersect and Union when one of the profiles
-// they were given fails validation, naming its position among the arguments.
+// they were given fails validation or names a listener the merge refuses
+// (ErrConflictingListener), naming its position among the arguments.
 type InputError = spm.InputError
 
 // Intersect merges seccomp profiles via intersection: the result permits a
@@ -69,9 +98,13 @@ type InputError = spm.InputError
 // When inputs share an action, DefaultErrnoRet and per-syscall ErrnoRet
 // come from the earliest of them (see Errno values). ListenerPath,
 // ListenerMetadata and SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV come from the
-// first input that sets a ListenerPath, and a result that would notify
-// without one is refused with ErrNotifyWithoutListener (see Listener).
-// 32-bit and multiplexing architectures may be dropped from the list, and
+// first input that sets a ListenerPath, which for Intersect is always the
+// first input: a later input naming another listener, or any listener where
+// the first names none, is refused with ErrConflictingListener. A result
+// that would notify without a listener is refused with
+// ErrNotifyWithoutListener (see Listener).
+// 32-bit and multiplexing architectures may be dropped from the list, as
+// may one whose rules libseccomp would lose to a syscall it lacks, and
 // the result depends on the native architecture of the running program, so
 // run Intersect on the node that loads its result (see Architectures).
 // SECCOMP_FILTER_FLAG_SPEC_ALLOW survives only if every input sets it and
@@ -83,6 +116,10 @@ type InputError = spm.InputError
 // argument filter, action and errno, so equal inputs give equal output. The
 // result passes Validate, but often lists one syscall in several entries,
 // which ValidateStrict rejects (see Evaluation model).
+//
+// Input order matters: pass the inputs from most to least trusted, the
+// baseline first. Ties in errno go to the earlier input, and only the first
+// may name a listener.
 //
 // This implements the merge KEP-6061 defines for a CRI runtime combining an
 // artifact with its baseline.
@@ -101,15 +138,19 @@ func Intersect(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 //
 // Inputs are validated, results with SCMP_ACT_NOTIFY but no listener are
 // refused, and ties in errno and the listener are broken, as for Intersect.
+// Unlike Intersect, any input may name the listener, since union inputs are
+// peers rather than a baseline and what it constrains; inputs naming
+// different listeners are refused with ErrConflictingListener.
 // Past the pair or combined budget a syscall collapses to its least
 // restrictive action (see Cost bounds). Flags mirror Intersect:
 // SECCOMP_FILTER_FLAG_SPEC_ALLOW survives if any input sets it,
 // SECCOMP_FILTER_FLAG_LOG only if every input does. The covered
 // architectures are the union of the inputs', and Union never drops one:
 // where a 32-bit or multiplexing architecture would need settling, the
-// affected syscalls collapse to their least restrictive action instead (see
-// Architectures). Single profiles, output order and which validators the
-// result passes are as for Intersect.
+// affected syscalls collapse to their least restrictive action instead, and
+// a result in which libseccomp would lose the rules of an architecture is
+// refused with ErrLostRules (see Architectures). Single profiles, output
+// order and which validators the result passes are as for Intersect.
 //
 // This implements the merge the Security Profiles Operator uses to combine
 // recorded profiles.
@@ -176,6 +217,11 @@ func foldProfiles(
 		}
 	}
 
+	err := checkListeners(profiles, rules.intersect)
+	if err != nil {
+		return nil, err
+	}
+
 	result, err := merge.Fold(
 		profiles,
 		// A single profile is normalized to the form a merge result takes,
@@ -189,6 +235,11 @@ func foldProfiles(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("merge: %w", err)
+	}
+
+	err = rules.settleAbsentSyscalls(result)
+	if err != nil {
+		return nil, err
 	}
 
 	err = resolveListener(result)
@@ -247,6 +298,10 @@ func mergeTwo(
 	// than from the left unconditionally: the action lattice can carry
 	// SCMP_ACT_NOTIFY in from the right, and a result that notifies without
 	// a listenerPath does not load, however loadable both inputs were.
+	// checkListeners has refused inputs naming different listeners, so
+	// where both sides set one it is the same. Intersect never gets past it
+	// with a listener on the right that the left lacks: the left holds the
+	// first input.
 	listener := left
 	if left.ListenerPath == "" && right.ListenerPath != "" {
 		listener = right
@@ -348,6 +403,109 @@ func withoutAny(archs []specs.Arch, set map[specs.Arch]bool) []specs.Arch {
 	})
 }
 
+// checkListeners refuses inputs whose listeners a merge cannot reconcile
+// (see ErrConflictingListener). The merge takes the listener from the first
+// input that sets a listenerPath, which is only sound when every other input
+// that names one names the same listener.
+//
+// Intersect goes further and takes the listener from its first input only.
+// Its first input is the baseline the runtime trusts and the others are
+// artifacts or pod settings it does not (see Intersect), and a listener is a
+// socket on the node: runc hands the notification fd to whatever listens
+// there, so an artifact that named a listener and notified on a syscall the
+// baseline allows would choose who answers the workload's calls. A later
+// input that sets neither listenerPath nor listenerMetadata leaves the
+// listener to the baseline; one that sets either must set both exactly as
+// the baseline does, which keeps merging a baseline with an earlier result
+// of the same merge working. Repeating the path without the metadata is
+// refused rather than read as leaving the metadata to the baseline: it
+// says something about the listener, and what it says differs.
+//
+// Inputs are compared by their listener alone, whether or not they notify.
+// Where only one of two inputs with different listeners notifies, Union
+// could take the listener from that one instead, but which actions reach
+// the result depends on the rules of every input, so whether a merge
+// succeeds would then change with an unrelated rule. A listener is also a
+// node-local setting chosen for a reason the merge cannot see, so the
+// conservative reading is that two listeners conflict wherever both are
+// named. For Union an input without a listenerPath names no listener: the
+// merge has always ignored its listenerMetadata, which a runtime hands only
+// to a listener.
+func checkListeners(profiles []*specs.LinuxSeccomp, intersect bool) error {
+	if intersect {
+		return checkBaselineListener(profiles)
+	}
+
+	first := -1
+
+	for idx, profile := range profiles {
+		if profile.ListenerPath == "" {
+			continue
+		}
+
+		if first < 0 {
+			first = idx
+
+			continue
+		}
+
+		err := sameListener(profiles, first, idx)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// checkBaselineListener is checkListeners for Intersect: every input after
+// the first that sets a listenerPath or listenerMetadata must set both as
+// the first input does.
+func checkBaselineListener(profiles []*specs.LinuxSeccomp) error {
+	for idx, profile := range profiles {
+		if idx == 0 || (profile.ListenerPath == "" && profile.ListenerMetadata == "") {
+			continue
+		}
+
+		err := sameListener(profiles, 0, idx)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// sameListener reports an ErrConflictingListener unless the profiles at
+// first and idx set the same listenerPath and listenerMetadata. The error
+// is an *InputError naming idx, the later input, which is the one that
+// brought the conflict: the listener it conflicts with is named by value.
+func sameListener(profiles []*specs.LinuxSeccomp, first, idx int) error {
+	chosen, profile := profiles[first], profiles[idx]
+
+	var err error
+
+	switch {
+	case profile.ListenerPath != chosen.ListenerPath:
+		err = fmt.Errorf(
+			"%w: listenerPath %s, but the merge's listener is %s",
+			ErrConflictingListener,
+			merge.QuoteBounded(profile.ListenerPath), merge.QuoteBounded(chosen.ListenerPath),
+		)
+	case profile.ListenerMetadata != chosen.ListenerMetadata:
+		err = fmt.Errorf(
+			"%w: listenerMetadata %s, but the merge's listener has %s",
+			ErrConflictingListener,
+			merge.QuoteBounded(profile.ListenerMetadata),
+			merge.QuoteBounded(chosen.ListenerMetadata),
+		)
+	default:
+		return nil
+	}
+
+	return &spm.InputError{Index: idx, Err: err}
+}
+
 // resolveListener keeps SCMP_ACT_NOTIFY and the listener together in the
 // result, for either strategy. runc refuses to create a container for a
 // filter that notifies without a listenerPath, so such a result is refused
@@ -357,8 +515,8 @@ func withoutAny(archs []specs.Arch, set map[specs.Arch]bool) []specs.Arch {
 //
 // It holds for every result the two merges can build. The action of an entry
 // is always the action of an input entry (see pickClause), Validate requires
-// a listenerPath from every input that notifies, and the listener is taken
-// from the first input that sets one, so an input notifies only alongside a
+// a listenerPath from every input that notifies, and checkListeners refuses
+// inputs naming different listeners, so an input notifies only alongside a
 // listener the result keeps. The default action is never SCMP_ACT_NOTIFY
 // either, since Validate rejects it on every input and the merged default is
 // one of theirs. This is the check that keeps that reasoning true.

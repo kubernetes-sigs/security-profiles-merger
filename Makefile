@@ -119,7 +119,7 @@ verify-coverage: test ## Verify test coverage meets threshold
 # verify-tidy and verify-golden rewrite files in place and then check that
 # nothing changed, which is why verify is not part of the default target.
 .PHONY: verify
-verify: verify-coverage lint verify-tidy verify-mdtoc verify-golden verify-dependencies govulncheck lint-actions ## Run the verifications CI runs (rewrites go.mod and the goldens in place)
+verify: verify-coverage lint verify-tidy verify-mdtoc verify-golden verify-syscalls verify-dependencies govulncheck lint-actions ## Run the verifications CI runs (rewrites go.mod and the goldens in place)
 
 # Built from source rather than downloaded, so that the module checksum
 # database vouches for it the way it does for the tools in hack/tools. It
@@ -169,6 +169,27 @@ verify-upstream: ## Fail if a pinned version is behind its upstream release (nee
 	out=$$($(ZEITGEIST_REMOTE)); \
 	echo "$${out}"; \
 	if echo "$${out}" | grep -q 'Update available'; then exit 1; fi
+
+# The libseccomp releases whose syscalls.csv seccomp/syscalls.go is
+# generated from, with the SHA-256 of each file. Keep the versions in step
+# with syscallTableVersions in seccomp/syscalls_gen_internal_test.go. The
+# table is generated from these files rather than from the libseccomp a
+# host links, so that it does not depend on the host, and regenerating it
+# and asking git whether anything moved keeps it in step with them.
+SYSCALL_CSVS = 2.5.5:1a268ddf08313e5982dd7ecfff52c6718cc5a24b97a87b8465ce0dfe6c5f1c72 \
+	2.6.1:ab64e55719254d44bc279d967845568ab9940e81ed7800e9d1066f664a9f5231
+
+.PHONY: verify-syscalls
+verify-syscalls: ## Regenerate seccomp/syscalls.go from libseccomp's syscalls.csv and verify it is unchanged (needs network)
+	@dir=$$(mktemp -d); trap 'rm -rf "$$dir"' EXIT; \
+	for entry in $(SYSCALL_CSVS); do \
+		version=$${entry%%:*}; sum=$${entry#*:}; \
+		curl -sSfL -o "$$dir/syscalls-$$version.csv" \
+			"https://raw.githubusercontent.com/seccomp/libseccomp/v$$version/src/syscalls.csv" || exit 1; \
+		echo "$$sum  $$dir/syscalls-$$version.csv" | sha256sum --check --strict --quiet || exit 1; \
+	done; \
+	SPM_SYSCALL_CSV_DIR="$$dir" $(GO) test -count=1 -run '^TestGenerateSyscallTable$$' ./seccomp/
+	git diff --exit-code seccomp/syscalls.go
 
 # The golden files carry the CLI's output contract, and -update rewrites
 # them from whatever the code does now. Regenerating them here and then

@@ -652,7 +652,8 @@ func unifyErrno(clauses []clause) []clause {
 // errnoUnifiable reports whether unifyErrno may rewrite these clauses: they
 // are several, they apply one errno-carrying action, they do not already
 // form a safe shape, each tests one argument for equality, no two test the
-// same one, and they do not all report the same errno already.
+// same argument for the same value, and they do not all report the same
+// errno already.
 func errnoUnifiable(clauses []clause) bool {
 	if len(clauses) < 2 || !errnoSignificant(clauses[0].action) || safeShape(clauses) {
 		return false

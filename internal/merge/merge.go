@@ -17,15 +17,14 @@ limitations under the License.
 // Package merge holds what the three profile packages and the command share
 // beyond the public spm package: the generic merge primitives (Fold and the
 // slice helpers), the bounds on error reports (JoinLimited, BoundedError,
-// QuoteBounded) and the quoting of profile values for output (SafeText,
-// SafeName).
+// QuoteBounded), the quoting of profile values for output (SafeText,
+// SafeName) and the bounded output of the formatters (Builder).
 package merge
 
 import (
 	"cmp"
 	"path"
 	"slices"
-	"strings"
 
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
@@ -60,25 +59,6 @@ func Fold[T any](
 	}
 
 	return result, nil
-}
-
-// FormatSliceDiff formats a SliceDiff as a prefixed diff string, listing the
-// removed items with a "-" and then the added items with a "+", as in
-// "caps:-CHOWN,+KILL". An item holding bytes that are not safe to print is
-// quoted (see SafeText): a diff is computed over profiles nothing validated,
-// and its rendering is what a runtime logs.
-func FormatSliceDiff[T ~string](prefix string, diff spm.SliceDiff[T]) string {
-	items := make([]string, 0, len(diff.Removed)+len(diff.Added))
-
-	for _, r := range diff.Removed {
-		items = append(items, "-"+SafeText(string(r)))
-	}
-
-	for _, a := range diff.Added {
-		items = append(items, "+"+SafeText(string(a)))
-	}
-
-	return prefix + ":" + strings.Join(items, ",")
 }
 
 // DiffSlice compares two slices as sets and returns, in this order, the

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 	"sigs.k8s.io/security-profiles-merger/spm"
@@ -75,6 +76,21 @@ var (
 	// paths for filesystem rules.
 	ErrRelativePath = spm.ErrRelativePath
 
+	// ErrTrailingSlash is returned by ValidateArtifact and ValidateStrict
+	// when a path rule other than one on the root ends in "/" or "/.". The
+	// kernel opens such a path only when it names a directory, so a rule on
+	// "/srv/f/" for a regular file "/srv/f" cannot be loaded, while the
+	// merge and Diff clean the suffix away and read it as a rule on
+	// "/srv/f", which can.
+	ErrTrailingSlash = errors.New(`path ends in "/" or "/."`)
+
+	// ErrInvalidUTF8Path is returned by ValidateArtifact and ValidateStrict
+	// when a path rule is not valid UTF-8. A profile travels as JSON, which
+	// cannot carry such a path: encoding/json writes U+FFFD in place of each
+	// invalid byte, so the profile written out names another file, and
+	// UnmarshalStrict refuses the document.
+	ErrInvalidUTF8Path = errors.New("path is not valid UTF-8")
+
 	// ErrEmptyRule is returned by ValidateArtifact and ValidateStrict when
 	// a path or network rule grants no access right. The kernel rejects
 	// such a rule with ENOMSG.
@@ -98,10 +114,11 @@ var (
 )
 
 // MaxPathLen is the longest rule path this package accepts, following the
-// PATH_MAX of Linux and the limit the apparmor package applies to its
-// patterns. A rule path names a file the kernel opens, so nothing longer
-// can ever be loaded, while resolving one against the paths of the other
-// rules costs time in the length of the path for every rule.
+// PATH_MAX of Linux less its terminating NUL, and the limit the apparmor
+// package applies to its patterns. A rule path names a file the kernel
+// opens, so nothing longer can ever be loaded, while resolving one against
+// the paths of the other rules costs time in the length of the path for
+// every rule.
 const MaxPathLen = spm.MaxPathLen
 
 // MaxArtifactRules bounds how many rules a profile accepted by
@@ -109,13 +126,17 @@ const MaxPathLen = spm.MaxPathLen
 // and its network rules together.
 //
 // Merging a profile costs the number of rules times the depth of their
-// paths, since an intersection resolves every rule against the ancestors of
-// every other: forty thousand rules of two-thousand-component paths took
-// fourteen seconds and allocated close to four gigabytes. MaxPathLen bounds
-// the depth of one path, and this bounds how many of them there are, so an
-// over-large profile is refused where the reason can still be reported
-// rather than merged slowly. The seccomp and apparmor packages bound an
-// artifact the same way.
+// paths, since both merges look up the ancestors of every rule path among
+// the rules: forty thousand rules of two-thousand-component paths took an
+// intersection fourteen seconds and close to four gigabytes. A union also
+// settles the moves between the directories the inputs name, comparing each
+// with at most 64 classes of the others, which keeps it linear in the rules
+// as well. MaxPathLen bounds the depth of one path, and this bounds how many
+// of them there are, so an over-large profile is refused where the reason
+// can still be reported rather than merged slowly. Validate, which is all
+// Intersect and Union run, counts no rules, so an artifact must pass
+// ValidateArtifact before it is merged. The seccomp and apparmor packages
+// bound an artifact the same way.
 //
 // Landlock profiles name the directories a workload may touch; the ones
 // KEP-6061 recommends runtimes accept hold a few dozen rules.
@@ -173,128 +194,160 @@ func validateProfile(profile *Profile, checkDuplicates bool) ([]string, error) {
 		return nil, ErrNilProfile
 	}
 
-	var errs []error
+	var report merge.Collector
 
-	errs = appendErr(errs, validateRights(handledFSRef(), profile.HandledAccessFS, isKnownFSRight))
-	errs = appendErr(
-		errs,
-		validateRights(handledNetRef(), profile.HandledAccessNet, isKnownNetRight),
-	)
-	errs = appendErr(errs, validateRights(scopedRef(), profile.Scoped, isKnownScopeRight))
+	cleaned := collectProfile(&report, profile, checkDuplicates)
+
+	return cleaned, report.Err()
+}
+
+// collectProfile reports the failures validateProfile returns for a profile
+// that is not nil, and returns the cleaned paths.
+//
+// Every check below reports a failure through the collector rather than
+// building it first: a report shows at most 32 failures, and a profile
+// holds as many as it holds rights and rules, so building the ones past
+// the limit only to count them costs memory in the size of the profile for
+// a report of fixed size.
+func collectProfile(report *merge.Collector, profile *Profile, checkDuplicates bool) []string {
+	validateRights(report, handledFSRef(), profile.HandledAccessFS, isKnownFSRight)
+	validateRights(report, handledNetRef(), profile.HandledAccessNet, isKnownNetRight)
+	validateRights(report, scopedRef(), profile.Scoped, isKnownScopeRight)
 
 	cleaned := make([]string, len(profile.PathRules))
 
 	for idx, rule := range profile.PathRules {
-		clean, err := validatePath(rule.Path)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", pathRuleRef(idx), err))
+		clean, problem := validatePath(rule.Path)
+		if problem != pathValid {
+			report.Report(func() error {
+				return fmt.Errorf("%s: %w", pathRuleRef(idx), problem.err(rule.Path))
+			})
 		}
 
 		cleaned[idx] = clean
-		errs = appendErr(errs, validateRights(pathRuleRef(idx), rule.AccessFS, isKnownFSRight))
+		validateRights(report, pathRuleRef(idx), rule.AccessFS, isKnownFSRight)
 	}
 
 	for idx, rule := range profile.NetRules {
-		errs = appendErr(errs, validateRights(netRuleRef(idx), rule.AccessNet, isKnownNetRight))
+		validateRights(report, netRuleRef(idx), rule.AccessNet, isKnownNetRight)
 	}
 
 	if checkDuplicates {
-		errs = append(errs, validateDuplicates(profile, cleaned)...)
+		validateDuplicates(report, profile, cleaned)
 	}
 
-	return cleaned, merge.JoinLimited(errs...)
+	return cleaned
 }
 
 // validateDuplicates reports duplicate rights in every set and rule, and
 // duplicate rules for the same cleaned path or port.
-func validateDuplicates(profile *Profile, cleaned []string) []error {
-	var errs []error
-
-	errs = appendErr(errs, validateDuplicateRights(handledFSRef(), profile.HandledAccessFS))
-	errs = appendErr(errs, validateDuplicateRights(handledNetRef(), profile.HandledAccessNet))
-	errs = appendErr(errs, validateDuplicateRights(scopedRef(), profile.Scoped))
+func validateDuplicates(report *merge.Collector, profile *Profile, cleaned []string) {
+	validateDuplicateRights(report, handledFSRef(), profile.HandledAccessFS)
+	validateDuplicateRights(report, handledNetRef(), profile.HandledAccessNet)
+	validateDuplicateRights(report, scopedRef(), profile.Scoped)
 
 	for idx, rule := range profile.PathRules {
-		errs = appendErr(errs, validateDuplicateRights(pathRuleRef(idx), rule.AccessFS))
+		validateDuplicateRights(report, pathRuleRef(idx), rule.AccessFS)
 	}
 
 	for idx, rule := range profile.NetRules {
-		errs = appendErr(errs, validateDuplicateRights(netRuleRef(idx), rule.AccessNet))
+		validateDuplicateRights(report, netRuleRef(idx), rule.AccessNet)
 	}
 
-	errs = appendErr(errs, validateDuplicatePaths(profile.PathRules, cleaned))
-	errs = appendErr(errs, validateDuplicatePorts(profile.NetRules))
-
-	return errs
-}
-
-func appendErr(errs []error, err error) []error {
-	if err == nil {
-		return errs
-	}
-
-	return append(errs, err)
+	validateDuplicatePaths(report, profile.PathRules, cleaned)
+	validateDuplicatePorts(report, profile.NetRules)
 }
 
 func validateRights[T ~string](
-	context fieldRef, rights []T, known func(T) bool,
-) error {
-	var errs []error
-
+	report *merge.Collector, context fieldRef, rights []T, known func(T) bool,
+) {
 	for _, right := range rights {
 		if !known(right) {
-			errs = append(errs, fmt.Errorf(
-				"%s: %w %s", context, ErrUnknownRight, merge.QuoteBounded(string(right)),
-			))
+			report.Report(func() error {
+				return fmt.Errorf(
+					"%s: %w %s", context, ErrUnknownRight, merge.QuoteBounded(string(right)),
+				)
+			})
 		}
 	}
+}
 
-	return merge.JoinLimited(errs...)
+// pathProblem is what validatePath found wrong with a path. It is a value
+// rather than an error, so that a profile of many bad paths costs an error
+// only for the ones a report shows.
+type pathProblem int
+
+const (
+	pathValid pathProblem = iota
+	pathEmpty
+	pathTooLong
+	pathNUL
+	pathParent
+	pathDot
+)
+
+// err returns the error reporting the problem for the path.
+func (p pathProblem) err(path string) error {
+	switch p {
+	case pathEmpty:
+		return ErrEmptyPath
+	case pathTooLong:
+		return fmt.Errorf("%d bytes: %w", len(path), ErrPathTooLong)
+	case pathNUL:
+		return fmt.Errorf("%s contains a NUL byte: %w", merge.QuoteBounded(path), ErrInvalidPath)
+	case pathParent:
+		return fmt.Errorf("%s: %w", merge.QuoteBounded(path), ErrParentPath)
+	case pathDot:
+		return fmt.Errorf("%s resolves to %q: %w", merge.QuoteBounded(path), ".", ErrEmptyPath)
+	case pathValid:
+	}
+
+	return nil
 }
 
 // validatePath rejects empty paths, paths longer than MaxPathLen, paths
 // with NUL bytes, paths with ".." components, and paths that clean to ".".
-// It returns the cleaned path.
+// It returns the cleaned path, or the problem it found.
 //
 // The length is checked first, so a path no kernel could take is rejected
 // without scanning or cleaning it.
-func validatePath(path string) (string, error) {
-	if path == "" {
-		return "", ErrEmptyPath
-	}
-
-	if len(path) > MaxPathLen {
-		return "", fmt.Errorf("%d bytes: %w", len(path), ErrPathTooLong)
-	}
-
-	if strings.ContainsRune(path, 0) {
-		return "", fmt.Errorf(
-			"%s contains a NUL byte: %w", merge.QuoteBounded(path), ErrInvalidPath,
-		)
-	}
-
-	if hasParentComponent(path) {
-		return "", fmt.Errorf("%s: %w", merge.QuoteBounded(path), ErrParentPath)
+func validatePath(path string) (string, pathProblem) {
+	switch {
+	case path == "":
+		return "", pathEmpty
+	case len(path) > MaxPathLen:
+		return "", pathTooLong
+	case strings.ContainsRune(path, 0):
+		return "", pathNUL
+	case hasParentComponent(path):
+		return "", pathParent
 	}
 
 	cleaned := cleanPath(path)
 	if cleaned == "." {
-		return "", fmt.Errorf(
-			"%s resolves to %q: %w", merge.QuoteBounded(path), ".", ErrEmptyPath,
-		)
+		return "", pathDot
 	}
 
-	return cleaned, nil
+	return cleaned, pathValid
 }
 
+// hasParentComponent reports whether a slash-separated path has a ".."
+// component. The path functions here walk components with strings.Cut
+// rather than strings.SplitSeq, whose iterator allocates on every call
+// before Go 1.25, since validation calls them for every rule.
 func hasParentComponent(path string) bool {
-	for part := range strings.SplitSeq(path, "/") {
+	for {
+		part, rest, more := strings.Cut(path, "/")
 		if part == ".." {
 			return true
 		}
-	}
 
-	return false
+		if !more {
+			return false
+		}
+
+		path = rest
+	}
 }
 
 // cleanPath returns the canonical form of a rule path: repeated slashes,
@@ -318,7 +371,10 @@ func cleanPath(path string) string {
 
 	first := true
 
-	for part := range strings.SplitSeq(path, "/") {
+	for rest, more := path, true; more; {
+		var part string
+
+		part, rest, more = strings.Cut(rest, "/")
 		if part == "" || part == "." {
 			continue
 		}
@@ -351,7 +407,10 @@ func isCleanPath(path string) bool {
 		return false
 	}
 
-	for part := range strings.SplitSeq(strings.TrimPrefix(path, "/"), "/") {
+	for rest, more := strings.TrimPrefix(path, "/"), true; more; {
+		var part string
+
+		part, rest, more = strings.Cut(rest, "/")
 		if part == "" || part == "." {
 			return false
 		}
@@ -382,10 +441,8 @@ func isKnownNetRight(right NetAccessRight) bool {
 // "/etc" and "/etc/" are reported as duplicates just as the merge functions
 // would combine them. Rejected paths, whose cleaned entry is empty, are
 // skipped.
-func validateDuplicatePaths(rules []PathRule, cleaned []string) error {
+func validateDuplicatePaths(report *merge.Collector, rules []PathRule, cleaned []string) {
 	seen := make(map[string]struct{}, len(rules))
-
-	var errs []error
 
 	for idx, rule := range rules {
 		if cleaned[idx] == "" {
@@ -393,27 +450,30 @@ func validateDuplicatePaths(rules []PathRule, cleaned []string) error {
 		}
 
 		if _, ok := seen[cleaned[idx]]; ok {
-			errs = append(errs, fmt.Errorf(
-				"%s: path %s: %w",
-				pathRuleRef(idx), merge.QuoteBounded(rule.Path), ErrDuplicateRule,
-			))
+			report.Report(func() error {
+				return fmt.Errorf(
+					"%s: path %s: %w",
+					pathRuleRef(idx), merge.QuoteBounded(rule.Path), ErrDuplicateRule,
+				)
+			})
 		}
 
 		seen[cleaned[idx]] = struct{}{}
 	}
-
-	return merge.JoinLimited(errs...)
 }
 
 // ValidateArtifact validates an artifact: a profile the caller did not
 // write, such as one a container runtime pulled from a registry. It runs
-// every check of Validate and rejects what a kernel could not load:
-// relative paths (ErrRelativePath), rules granting a right outside the
-// profile's handled access set (ErrUnhandledRight, EINVAL), rules granting
-// no right (ErrEmptyRule, ENOMSG), and a ruleset that handles and scopes
-// nothing (ErrEmptyRuleset, ENOMSG). A profile holding more than
-// MaxArtifactRules rules (ErrTooManyRules) is refused first and on its own,
-// rather than walked.
+// every check of Validate and rejects what a kernel could not load: relative
+// paths (ErrRelativePath), paths that only load when they name a directory,
+// which the merge would clean into paths that load either way
+// (ErrTrailingSlash), rules granting a right outside the profile's handled
+// access set (ErrUnhandledRight, EINVAL), rules granting no right
+// (ErrEmptyRule, ENOMSG), and a ruleset that handles and scopes nothing
+// (ErrEmptyRuleset, ENOMSG). It also rejects paths that are not valid UTF-8
+// (ErrInvalidUTF8Path), which the JSON form of a profile cannot carry. A
+// profile holding more than MaxArtifactRules rules (ErrTooManyRules) is
+// refused first and on its own, rather than walked.
 //
 // Duplicate rules and rights are accepted, as the kernel and the merge fold
 // them; ValidateStrict reports them. ValidateArtifact does not check the
@@ -461,12 +521,12 @@ func validateRuleCount(profile *Profile) error {
 // detected on cleaned paths, so "/etc", "/etc/" and "//etc" count as the
 // same rule.
 //
-// A merge result passes ValidateStrict when the inputs use absolute paths,
-// the result handles or scopes at least one right, and it holds no more
-// than MaxArtifactRules rules, which a merge of large inputs can exceed:
-// the union of two profiles of a thousand distinct rules holds two
-// thousand. Intersect and Union deduplicate, prune unhandled rights, and
-// drop empty rules, so nothing else fails.
+// A merge result passes ValidateStrict when the inputs use absolute paths
+// that are valid UTF-8, the result handles or scopes at least one right, and
+// it holds no more than MaxArtifactRules rules, which a merge of large
+// inputs can exceed: the union of two profiles of a thousand distinct rules
+// holds two thousand. Intersect and Union deduplicate, prune unhandled
+// rights, and drop empty rules, so nothing else fails.
 func ValidateStrict(profile *Profile) error {
 	err := validateRuleCount(profile)
 	if err != nil {
@@ -477,15 +537,16 @@ func ValidateStrict(profile *Profile) error {
 }
 
 func validateLoadableProfile(profile *Profile, checkDuplicates bool) error {
-	_, err := validateProfile(profile, checkDuplicates)
 	if profile == nil {
-		return err
+		return ErrNilProfile
 	}
 
-	errs := appendErr(nil, err)
-	errs = append(errs, validateLoadable(profile)...)
+	var report merge.Collector
 
-	return merge.JoinLimited(errs...)
+	collectProfile(&report, profile, checkDuplicates)
+	validateLoadable(&report, profile)
+
+	return report.Err()
 }
 
 // RequiredABIVersion returns the lowest Landlock ABI version supporting every
@@ -548,33 +609,39 @@ func highestABI[T ~string](rights []T, table map[T]ABIVersion) ABIVersion {
 // highest version any input needs; Union can raise it to ABIV2 in one case.
 // See the ABI versions section of the package documentation.
 func ValidateForABI(profile *Profile, abi ABIVersion) error {
-	errs := appendErr(nil, Validate(profile))
+	var report merge.Collector
+
+	if profile == nil {
+		report.Add(ErrNilProfile)
+	} else {
+		collectProfile(&report, profile, false)
+	}
 
 	if abi < ABIV1 {
-		errs = append(errs, fmt.Errorf(
-			"%w: v%d (the first is v%d)", ErrUnknownABIVersion, abi, ABIV1,
-		))
+		report.Report(func() error {
+			return fmt.Errorf("%w: v%d (the first is v%d)", ErrUnknownABIVersion, abi, ABIV1)
+		})
 
-		return merge.JoinLimited(errs...)
+		return report.Err()
 	}
 
 	if profile == nil {
-		return merge.JoinLimited(errs...)
+		return report.Err()
 	}
 
-	errs = append(errs, abiErrors(handledFSRef(), profile.HandledAccessFS, abi, fsAccessABI)...)
-	errs = append(errs, abiErrors(handledNetRef(), profile.HandledAccessNet, abi, netAccessABI)...)
-	errs = append(errs, abiErrors(scopedRef(), profile.Scoped, abi, scopeABI)...)
+	abiErrors(&report, handledFSRef(), profile.HandledAccessFS, abi, fsAccessABI)
+	abiErrors(&report, handledNetRef(), profile.HandledAccessNet, abi, netAccessABI)
+	abiErrors(&report, scopedRef(), profile.Scoped, abi, scopeABI)
 
 	for idx, rule := range profile.PathRules {
-		errs = append(errs, abiErrors(pathRuleRef(idx), rule.AccessFS, abi, fsAccessABI)...)
+		abiErrors(&report, pathRuleRef(idx), rule.AccessFS, abi, fsAccessABI)
 	}
 
 	for idx, rule := range profile.NetRules {
-		errs = append(errs, abiErrors(netRuleRef(idx), rule.AccessNet, abi, netAccessABI)...)
+		abiErrors(&report, netRuleRef(idx), rule.AccessNet, abi, netAccessABI)
 	}
 
-	return merge.JoinLimited(errs...)
+	return report.Err()
 }
 
 // DowngradeToABI returns a copy of the profile without the access rights the
@@ -657,117 +724,148 @@ func supportedRights[T ~string](rights []T, abi ABIVersion, table map[T]ABIVersi
 // abiErrors reports every right of the list that needs a newer ABI version
 // than the given one. Rights outside the table are left to Validate.
 func abiErrors[T ~string](
-	context fieldRef, rights []T, abi ABIVersion, table map[T]ABIVersion,
-) []error {
-	var errs []error
-
+	report *merge.Collector, context fieldRef, rights []T, abi ABIVersion,
+	table map[T]ABIVersion,
+) {
 	for _, right := range rights {
 		needed, known := table[right]
 		if !known || needed <= abi {
 			continue
 		}
 
-		errs = append(errs, fmt.Errorf(
-			"%s: right %s: %w (needs v%d, have v%d)",
-			context, merge.QuoteBounded(string(right)), ErrUnsupportedABIRight, needed, abi,
-		))
+		report.Report(func() error {
+			return fmt.Errorf(
+				"%s: right %s: %w (needs v%d, have v%d)",
+				context, merge.QuoteBounded(string(right)), ErrUnsupportedABIRight, needed, abi,
+			)
+		})
 	}
-
-	return errs
 }
 
 // validateLoadable reports what a kernel would refuse: a ruleset handling
 // nothing, relative paths, rules granting no right, and rules granting
 // rights outside the handled access sets.
-func validateLoadable(profile *Profile) []error {
-	var errs []error
-
+func validateLoadable(report *merge.Collector, profile *Profile) {
 	if len(profile.HandledAccessFS) == 0 &&
 		len(profile.HandledAccessNet) == 0 &&
 		len(profile.Scoped) == 0 {
-		errs = append(errs, ErrEmptyRuleset)
+		report.Add(ErrEmptyRuleset)
 	}
 
 	handledFS := toSet(profile.HandledAccessFS)
 	handledNet := toSet(profile.HandledAccessNet)
 
 	for idx, rule := range profile.PathRules {
-		if rule.Path != "" && !merge.IsAbsPath(rule.Path) {
-			errs = append(errs, fmt.Errorf(
-				"%s: %s: %w", pathRuleRef(idx), merge.QuoteBounded(rule.Path), ErrRelativePath,
-			))
-		}
+		validateLoadablePath(report, idx, rule.Path)
 
 		if len(rule.AccessFS) == 0 {
-			errs = append(errs, fmt.Errorf(
-				"%s: %s: %w", pathRuleRef(idx), merge.QuoteBounded(rule.Path), ErrEmptyRule,
-			))
+			report.Report(func() error {
+				return fmt.Errorf(
+					"%s: %s: %w", pathRuleRef(idx), merge.QuoteBounded(rule.Path), ErrEmptyRule,
+				)
+			})
 		}
 
-		errs = appendErr(errs, validateHandled(pathRuleRef(idx), rule.AccessFS, handledFS))
+		validateHandled(report, pathRuleRef(idx), rule.AccessFS, handledFS)
 	}
 
 	for idx, rule := range profile.NetRules {
 		if len(rule.AccessNet) == 0 {
-			errs = append(errs, fmt.Errorf(
-				"%s: port %d: %w", netRuleRef(idx), rule.Port, ErrEmptyRule,
-			))
+			report.Report(func() error {
+				return fmt.Errorf("%s: port %d: %w", netRuleRef(idx), rule.Port, ErrEmptyRule)
+			})
 		}
 
-		errs = appendErr(errs, validateHandled(netRuleRef(idx), rule.AccessNet, handledNet))
+		validateHandled(report, netRuleRef(idx), rule.AccessNet, handledNet)
+	}
+}
+
+// validateLoadablePath reports a rule path the kernel would refuse or that
+// would come out of the merge as another path: a relative path, one ending
+// in a slash, and one JSON cannot carry. An empty path is left to Validate.
+func validateLoadablePath(report *merge.Collector, idx int, path string) {
+	for _, problem := range [...]struct {
+		failed   bool
+		sentinel error
+	}{
+		{path != "" && !merge.IsAbsPath(path), ErrRelativePath},
+		{hasTrailingSlash(path), ErrTrailingSlash},
+		{!utf8.ValidString(path), ErrInvalidUTF8Path},
+	} {
+		if problem.failed {
+			report.Report(func() error {
+				return fmt.Errorf(
+					"%s: %s: %w", pathRuleRef(idx), merge.QuoteBounded(path), problem.sentinel,
+				)
+			})
+		}
+	}
+}
+
+// hasTrailingSlash reports whether an absolute path names its last
+// component as a directory, by ending in "/" or "/.", without being the
+// root, which is a directory anyway. A relative path is reported as
+// relative only, and a path Validate rejects for what it holds is reported
+// by Validate only, so neither is looked at here.
+func hasTrailingSlash(path string) bool {
+	if !strings.HasSuffix(path, "/") && !strings.HasSuffix(path, "/.") {
+		return false
 	}
 
-	return errs
+	cleaned, problem := validatePath(path)
+
+	return problem == pathValid && merge.IsAbsPath(path) && cleaned != rootPath
 }
 
 func validateHandled[T ~string](
-	context fieldRef, rights []T, handled map[T]struct{},
-) error {
-	var errs []error
-
+	report *merge.Collector, context fieldRef, rights []T, handled map[T]struct{},
+) {
 	for _, right := range rights {
 		if _, ok := handled[right]; !ok {
-			errs = append(errs, fmt.Errorf(
-				"%s: right %s: %w", context, merge.QuoteBounded(string(right)), ErrUnhandledRight,
-			))
+			report.Report(func() error {
+				return fmt.Errorf(
+					"%s: right %s: %w",
+					context,
+					merge.QuoteBounded(string(right)),
+					ErrUnhandledRight,
+				)
+			})
 		}
 	}
-
-	return merge.JoinLimited(errs...)
 }
 
-func validateDuplicateRights[T ~string](context fieldRef, rights []T) error {
-	seen := make(map[T]struct{}, len(rights))
-
-	var errs []error
+// validateDuplicateRights reports every right of the list that an earlier
+// one repeats. The set of rights seen starts empty rather than sized for the
+// list, since a list of repeated rights holds few distinct ones.
+func validateDuplicateRights[T ~string](report *merge.Collector, context fieldRef, rights []T) {
+	seen := make(map[T]struct{})
 
 	for _, right := range rights {
 		if _, ok := seen[right]; ok {
-			errs = append(errs, fmt.Errorf(
-				"%s: right %s: %w", context, merge.QuoteBounded(string(right)), ErrDuplicateRight,
-			))
+			report.Report(func() error {
+				return fmt.Errorf(
+					"%s: right %s: %w",
+					context,
+					merge.QuoteBounded(string(right)),
+					ErrDuplicateRight,
+				)
+			})
 		}
 
 		seen[right] = struct{}{}
 	}
-
-	return merge.JoinLimited(errs...)
 }
 
-func validateDuplicatePorts(rules []NetRule) error {
+func validateDuplicatePorts(report *merge.Collector, rules []NetRule) {
 	seen := make(map[uint16]struct{}, len(rules))
-
-	var errs []error
 
 	for idx, rule := range rules {
 		if _, ok := seen[rule.Port]; ok {
-			errs = append(errs, fmt.Errorf(
-				"%s: port %d: %w", netRuleRef(idx), rule.Port, ErrDuplicateRule,
-			))
+			report.Report(func() error {
+				return fmt.Errorf("%s: port %d: %w", netRuleRef(idx), rule.Port, ErrDuplicateRule)
+			})
 		}
 
 		seen[rule.Port] = struct{}{}
 	}
-
-	return merge.JoinLimited(errs...)
 }

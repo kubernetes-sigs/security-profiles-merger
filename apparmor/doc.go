@@ -47,17 +47,19 @@ limitations under the License.
 // choosing. [ValidateStrict] adds the checks worth making on a profile a
 // person wrote, so each rejects everything the one before it rejects.
 //
-// Validate is what the merge runs on its inputs, after folding the
-// duplicates within one list. [Intersect] and [Union] first drop exact
-// duplicates, upper-case capability names and fold two spellings of one path
-// within a list into one entry, then run Validate on each input. A merge
-// therefore fails on a nil profile, an empty or oversized path, an AppArmor
-// variable, a path listed in two filesystem categories (ErrDuplicatePath,
-// however either is spelled) and an empty capability name, but not on a
-// path or capability listed twice within one list. Everything else, such as
-// a pattern apparmor_parser rejects, the merge treats as opaque text or as a
-// pattern matching nothing. A failure is wrapped in an [InputError] naming
-// the input.
+// Validate is what the merge runs on its inputs, except for duplicates
+// within one list. [Intersect] and [Union] run the checks of Validate on
+// each input as the caller wrote it, leaving out a path or capability
+// listed twice within one list, and only then drop exact duplicates,
+// upper-case capability names and fold two spellings of one path within a
+// list into one entry. A merge therefore fails on a nil profile, an empty
+// or oversized path, an AppArmor variable, a path listed in two filesystem
+// categories (ErrDuplicatePath, however either is spelled) and an empty
+// capability name, but not on a path or capability listed twice within one
+// list. Everything else, such as a pattern apparmor_parser rejects, the
+// merge treats as opaque text or as a pattern matching nothing. A failure
+// is wrapped in an [InputError] naming the input, and names the entry at the
+// index and in the spelling the caller gave it.
 //
 // Every validator collects its failures and returns them together, up to
 // 32 of them: past that the error lists the first 32 and a count of the
@@ -214,9 +216,15 @@ limitations under the License.
 // ("{a}", "{*}", "{}"), alternations nested 50 deep, a malformed class such
 // as "[a-]", a trailing backslash, and a NUL byte. So are the class forms
 // the parser accepts but translates into something other than what they
-// say: "*" or "?" inside a class, an escaped "," inside a class, and "[]" or
-// "[^]". IsGlobPattern reports such paths as patterns. A pattern past the
-// matcher's limits is reported with [ErrGlobTooComplex].
+// say: "*" or "?" inside a class, an escaped "," inside a class, "[]" or
+// "[^]", and an escaped "^" opening a class (`[\^x]`, `[\x5ex]` or
+// `[\136x]`). The parser keeps that "^" escaped until it translates the
+// class, drops the backslash there, and reads the "^" left as negating the
+// class, so the rule says "^ or x" and grants every byte but x, "/"
+// included. The merge matches it as the negated class the parser loads,
+// where it treats the other forms as matching nothing. IsGlobPattern
+// reports such paths as patterns. A pattern past the matcher's limits is
+// reported with [ErrGlobTooComplex].
 //
 // A path is written the way apparmor_parser's lexer reads one: a run of
 // characters other than space, tab, carriage return, newline, `"`, "!" and
@@ -238,6 +246,21 @@ limitations under the License.
 // consumer renders after it. Both are reported. A class written "[!a]" is
 // unloadable for the same reason: the negation AppArmor accepts is "[^a]",
 // and a literal "!" in a class has to be escaped (`[\!a]`).
+//
+// A character that is not printable is reported with [ErrUnquotablePath] as
+// well, although the parser loads it: a C0 control or DEL, a character
+// strconv.IsPrint refuses, such as a C1 control, a bidirectional override
+// or U+2028, and one that renders as nothing or as a blank, such as U+3164
+// HANGUL FILLER or U+2800, with which "/usr/bin" reads as itself while
+// naming another file. These are the characters the package's error
+// messages escape when they quote a path. A consumer rendering or logging the profile writes it out raw,
+// where a terminal acts on an escape sequence and line-based tools end a
+// line at a vertical tab, a form feed, U+0085 or U+2028. Each has an escaped
+// form (`\x1b`, `\xc2\x85`), which is accepted. Bytes that are not valid
+// UTF-8 are accepted, since a file name may be in another encoding, and
+// Validate accepts all of these, since a trusted baseline may name such a
+// file. Where two spellings of one path reach a merge, it keeps the one
+// that can be rendered.
 //
 // A path holding a NUL byte, or an escape denoting one such as \000, \x00 or
 // \d000, loads but matches nothing, since no name the kernel hands AppArmor
@@ -340,6 +363,31 @@ limitations under the License.
 // profiles therefore costs up to three times what one list at its budget
 // costs.
 //
+// Before anything is matched, every pattern is compiled into a program,
+// which costs time and memory in proportion to the pattern's length. One
+// call compiles each pattern it reads once, and compiles at most four times
+// [MaxArtifactPatternBytes] of patterns in total, taking the inputs in the
+// order they are given, so a baseline listed first is compiled first: a
+// baseline of up to twice MaxArtifactPatternBytes of patterns and two
+// artifacts [ValidateArtifact] accepts after it are compiled in full. A
+// pattern past the bound is left uncompiled and matches no name and no other
+// pattern. An intersection keeps it only where every input lists it word
+// for word, with the permissions all of them grant, and a union keeps it as
+// it keeps every pattern, which is as safe as the fallbacks above. The call keeps every program
+// it compiled until it returns, and a program holds up to some 450 bytes per
+// byte of its pattern for the costliest shapes, such as a run of "*/"
+// components: a merge whose patterns fill the budget, which accepted
+// artifacts can, may hold on the order of a hundred megabytes while it runs
+// (two artifacts of sixteen four-kilobyte "*/" patterns intersected with
+// "/**" held some 25 megabytes). Profiles of the size KEP-6061 recommends,
+// a few patterns of a few dozen bytes, hold well under a megabyte.
+//
+// What the merge bounds on its own is therefore the matching and the
+// compiling. Reading the profiles, validating them and normalizing their
+// paths stays linear in their size, which nothing but the caller bounds: a
+// profile checked only with Validate may hold any number of paths, each up
+// to [MaxPathLen] long. Diff compiles nothing and is linear in its inputs.
+//
 // # Concurrency
 //
 // Every exported function is safe to call from several goroutines at once.
@@ -347,9 +395,12 @@ limitations under the License.
 // replaces the profile it is given when decoding succeeds. The package keeps
 // one internal cache of compiled glob patterns, guarded by its own lock,
 // which is the only state shared between calls; it changes no result, only
-// the work a repeated pattern costs. It does hold the pattern text of the
-// profiles it compiled, bounded by its own size limits and evicted as newer
-// patterns arrive, so a process merging artifacts keeps some of their paths
-// in memory after a call returns. Concurrent calls only need their profiles
-// not to be written to at the same time from elsewhere.
+// the work a repeated pattern costs, since a call past its compile budget
+// ignores what the cache holds. It does hold the patterns of the profiles it
+// compiled, with their programs, bounded by an estimate of the memory they
+// take and evicted as newer patterns arrive, so a process merging artifacts
+// keeps some of their paths in memory after a call returns. Each call also
+// keeps the patterns it read for its own duration, without a lock, since no
+// other call sees them. Concurrent calls only need their profiles not to be
+// written to at the same time from elsewhere.
 package apparmor

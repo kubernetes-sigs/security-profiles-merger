@@ -752,3 +752,130 @@ func TestValidateLandlockRepeatedPort(t *testing.T) {
 		t.Errorf("exit code = %d, stderr = %q, want 0 and the duplicate alone", code, stderr)
 	}
 }
+
+// TestArchForMergeAndValidate covers --arch on the commands besides diff. A
+// condition on a value above 32 bits is refused by the artifact check
+// wherever the node covers a 32-bit architecture, so without the flag the
+// same profile passes on one machine and fails on another.
+func TestArchForMergeAndValidate(t *testing.T) {
+	t.Parallel()
+
+	const wide = "testdata/seccomp_wide_value.json"
+
+	for _, testCase := range []struct {
+		args []string
+		want int
+	}{
+		{[]string{cmdValidate, "--artifact", flagArch, "SCMP_ARCH_X86_64", wide}, 0},
+		{[]string{cmdValidate, "--artifact", flagArch, archNone, wide}, 0},
+		{[]string{cmdValidate, "--artifact", flagArch, "SCMP_ARCH_X86", wide}, 1},
+		{[]string{cmdValidate, flagStrict, flagArch, "SCMP_ARCH_S390", wide}, 1},
+		// The default checks do not depend on the architecture, so naming
+		// one for them is a usage error, while the merge itself does.
+		{[]string{cmdValidate, flagArch, "SCMP_ARCH_X86", wide}, exitUsage},
+		{[]string{cmdValidate, flagArch, archNative, wide}, exitUsage},
+		{[]string{
+			cmdMerge, flagStrategy, strategyIntersect, "--validate", "default",
+			flagArch, "SCMP_ARCH_X86", wide, wide,
+		}, 0},
+		{[]string{
+			cmdMerge, flagStrategy, strategyIntersect, "--validate", "default,artifact",
+			flagArch, "SCMP_ARCH_X86_64", wide, wide,
+		}, 0},
+		{[]string{
+			cmdMerge, flagStrategy, strategyIntersect, "--validate", "default,artifact",
+			flagArch, "SCMP_ARCH_X86", wide, wide,
+		}, 1},
+	} {
+		args := append(
+			append([]string{}, testCase.args[0], flagType, typeSeccomp), testCase.args[1:]...,
+		)
+
+		code, _, stderr := runCapture(t, args, nil)
+		if code != testCase.want {
+			t.Errorf("%v: exit code = %d, want %d: %s", args, code, testCase.want, stderr)
+		}
+	}
+}
+
+// TestArchErrorsForMergeAndValidate covers the --arch values merge and
+// validate refuse, as diff refuses them: an unknown name, and any name for a
+// profile type that has no architectures, detected or named.
+func TestArchErrorsForMergeAndValidate(t *testing.T) {
+	t.Parallel()
+
+	const apparmorA = "testdata/apparmor_a.json"
+
+	for _, testCase := range []struct {
+		args []string
+		want string
+	}{
+		{
+			[]string{cmdValidate, flagStrict, flagArch, testBogus, testdataSeccompA},
+			"unknown architecture",
+		},
+		{
+			[]string{cmdMerge, flagStrategy, strategyUnion, flagArch, testBogus, testdataSeccompA},
+			"unknown architecture",
+		},
+		{
+			[]string{cmdValidate, flagArch, archNative, apparmorA},
+			"--arch only applies with --strict or --artifact",
+		},
+		{
+			[]string{cmdValidate, "--artifact", flagArch, archNative, apparmorA},
+			"--arch only applies to " + typeSeccomp,
+		},
+		{
+			[]string{
+				cmdMerge, flagType, typeLandlock, flagStrategy, strategyUnion,
+				flagArch, archNone, "testdata/landlock_a.json",
+			},
+			"--arch only applies to " + typeSeccomp,
+		},
+	} {
+		code, stdout, stderr := runCapture(t, testCase.args, nil)
+		if code != exitUsage || stdout != "" || !strings.Contains(stderr, testCase.want) {
+			t.Errorf("%v: exit code = %d, stdout = %q, stderr = %q, want %d and %q",
+				testCase.args, code, stdout, stderr, exitUsage, testCase.want)
+		}
+	}
+}
+
+// TestArtifactRejectsUnknownFields covers an artifact with a member the
+// profile type has no field for, such as a misspelled "syscalls": it drops
+// the rules it was meant to carry, and UnmarshalStrict, which runtimes
+// decode an artifact with, refuses it, so the artifact checks refuse it too.
+// The default checks a baseline gets still only warn.
+func TestArtifactRejectsUnknownFields(t *testing.T) {
+	t.Parallel()
+
+	misspelled := writeTemp(
+		t,
+		`{"defaultAction":"SCMP_ACT_ERRNO","syscals":[{"names":["read"],"action":"SCMP_ACT_ALLOW"}]}`,
+	)
+	baseline := writeTemp(t, seccompJSON(t, testSyscallRead))
+
+	for _, args := range [][]string{
+		{cmdValidate, "--artifact", misspelled},
+		{
+			cmdMerge, flagStrategy, strategyIntersect, "--validate", "default,artifact",
+			baseline, misspelled,
+		},
+	} {
+		code, stdout, stderr := runCapture(t, args, nil)
+		if code != 1 || stdout != "" || !strings.Contains(stderr, `error: parsing `+misspelled+
+			`: unknown field "syscals"`) {
+			t.Errorf("%v: exit code = %d, stdout = %q, stderr = %q, want 1 and the field",
+				args, code, stdout, stderr)
+		}
+	}
+
+	code, _, stderr := runCapture(t, []string{
+		cmdMerge, flagStrategy, strategyIntersect, "--validate", "default,artifact",
+		misspelled, baseline,
+	}, nil)
+	if code != 0 || !strings.Contains(stderr, `warning: `+misspelled+`: unknown field "syscals"`) {
+		t.Errorf("baseline: exit code = %d, stderr = %q, want 0 and a warning", code, stderr)
+	}
+}

@@ -119,7 +119,7 @@ func TestValidateDetectsDuplicatesAfterCleaning(t *testing.T) {
 
 	profile := readFileProfile([]landlock.PathRule{
 		{Path: "/etc", AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile}},
-		{Path: "/etc/", AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile}},
+		{Path: "//etc", AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile}},
 	})
 
 	err := landlock.ValidateStrict(profile)
@@ -673,7 +673,7 @@ func TestValidateArtifactAndStrictDiffer(t *testing.T) {
 	read := fsRights{landlock.FSAccessReadFile}
 	duplicated := fsProfile(read,
 		landlock.PathRule{Path: "/etc", AccessFS: read},
-		landlock.PathRule{Path: "/etc/", AccessFS: read},
+		landlock.PathRule{Path: "/./etc", AccessFS: read},
 	)
 
 	err := landlock.ValidateArtifact(duplicated)
@@ -773,5 +773,115 @@ func TestValidateForABIClampsNewerVersions(t *testing.T) {
 
 	if errors.Is(err, landlock.ErrUnknownABIVersion) {
 		t.Errorf("ValidateForABI(v99) reported the version: %v", err)
+	}
+}
+
+// TestValidateArtifactRejectsTrailingSlashes covers paths the kernel opens
+// only as directories. The merge and Diff clean the suffix away, so without
+// the check a rule that cannot load would pass and come out of a merge as
+// one that can.
+func TestValidateArtifactRejectsTrailingSlashes(t *testing.T) {
+	t.Parallel()
+
+	read := fsRights{landlock.FSAccessReadFile}
+
+	for path, rejected := range map[string]bool{
+		"/srv/f/":   true,
+		"/srv/f/.":  true,
+		"/srv/f//":  true,
+		"/srv/f/./": true,
+		"/.../":     true,
+		"/srv/f":    false,
+		"/srv/./f":  false,
+		"//srv/f":   false,
+		"/":         false,
+		"//":        false,
+		"/.":        false,
+	} {
+		profile := fsProfile(read, landlock.PathRule{Path: path, AccessFS: read})
+
+		err := landlock.Validate(profile)
+		if err != nil {
+			t.Errorf("Validate(%q) = %v, want nil", path, err)
+		}
+
+		for name, validate := range map[string]func(*landlock.Profile) error{
+			"ValidateArtifact": landlock.ValidateArtifact,
+			"ValidateStrict":   landlock.ValidateStrict,
+		} {
+			err := validate(profile)
+			if got := errors.Is(err, landlock.ErrTrailingSlash); got != rejected {
+				t.Errorf("%s(%q) = %v, want ErrTrailingSlash %v", name, path, err, rejected)
+			}
+		}
+	}
+
+	// A relative path is reported as relative, not also for its slash.
+	err := landlock.ValidateArtifact(
+		fsProfile(read, landlock.PathRule{Path: "srv/f/", AccessFS: read}),
+	)
+	if !errors.Is(err, landlock.ErrRelativePath) || errors.Is(err, landlock.ErrTrailingSlash) {
+		t.Errorf("ValidateArtifact(%q) = %v, want ErrRelativePath alone", "srv/f/", err)
+	}
+
+	err = landlock.ValidateArtifact(
+		fsProfile(read, landlock.PathRule{Path: "/srv/f/", AccessFS: read}),
+	)
+	if want := `PathRules[0]: "/srv/f/": path ends in "/" or "/."`; err == nil ||
+		err.Error() != want {
+		t.Errorf("ValidateArtifact = %v, want %q", err, want)
+	}
+}
+
+// TestTrailingSlashOnlyOnValidPaths covers paths Validate rejects for a
+// ".." component or a NUL byte: they are reported for that alone, not also
+// for a trailing slash.
+func TestTrailingSlashOnlyOnValidPaths(t *testing.T) {
+	t.Parallel()
+
+	read := fsRights{landlock.FSAccessReadFile}
+
+	for _, path := range []string{"/a/../", "/a\x00/"} {
+		err := landlock.ValidateArtifact(
+			fsProfile(read, landlock.PathRule{Path: path, AccessFS: read}),
+		)
+		if err == nil || errors.Is(err, landlock.ErrTrailingSlash) {
+			t.Errorf("ValidateArtifact(%q) = %v, want Validate's error alone", path, err)
+		}
+	}
+}
+
+// TestValidateArtifactRejectsInvalidUTF8Paths covers a path JSON cannot
+// carry. Validate accepts it, since the merge compares paths as bytes and a
+// profile built in Go can name such a file; the tiers for a profile that
+// travels as JSON refuse it.
+func TestValidateArtifactRejectsInvalidUTF8Paths(t *testing.T) {
+	t.Parallel()
+
+	read := fsRights{landlock.FSAccessReadFile}
+	profile := fsProfile(read, landlock.PathRule{Path: "/srv/caf\xe9", AccessFS: read})
+
+	err := landlock.Validate(profile)
+	if err != nil {
+		t.Errorf("Validate = %v, want nil", err)
+	}
+
+	for name, validate := range map[string]func(*landlock.Profile) error{
+		"ValidateArtifact": landlock.ValidateArtifact,
+		"ValidateStrict":   landlock.ValidateStrict,
+	} {
+		err := validate(profile)
+		if !errors.Is(err, landlock.ErrInvalidUTF8Path) {
+			t.Errorf("%s = %v, want ErrInvalidUTF8Path", name, err)
+		} else if want := `PathRules[0]: "/srv/caf\xe9": path is not valid UTF-8`; err.Error() != want {
+			t.Errorf("%s = %q, want %q", name, err, want)
+		}
+	}
+
+	err = landlock.ValidateArtifact(
+		fsProfile(read, landlock.PathRule{Path: "/srv/café", AccessFS: read}),
+	)
+	if err != nil {
+		t.Errorf("ValidateArtifact of a UTF-8 path = %v, want nil", err)
 	}
 }

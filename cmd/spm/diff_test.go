@@ -375,7 +375,7 @@ func TestDiffOutputFlagBadPath(t *testing.T) {
 		t.Fatalf("exit code = %d, want %d", code, exitUsage)
 	}
 
-	if !strings.Contains(stderr, "writing output file") {
+	if !strings.Contains(stderr, "writing /nonexistent/dir/out.json: ") {
 		t.Errorf("stderr = %q, missing output file error", stderr)
 	}
 }
@@ -625,9 +625,9 @@ func TestDiffArchErrors(t *testing.T) {
 	}
 }
 
-// TestParseDiffArch covers the values --arch takes, including the one that
+// TestParseArch covers the values --arch takes, including the one that
 // tells a native comparison from an explicit one.
-func TestParseDiffArch(t *testing.T) {
+func TestParseArch(t *testing.T) {
 	t.Parallel()
 
 	for _, testCase := range []struct {
@@ -648,7 +648,7 @@ func TestParseDiffArch(t *testing.T) {
 		// does rather than as the node the caller named.
 		{archPrefix + "ARM64", "", false, true},
 	} {
-		got, err := parseDiffArch(testCase.value, true)
+		got, err := parseArch(testCase.value, true)
 
 		if testCase.wantErr {
 			if !errors.Is(err, errUnknownArchName) {

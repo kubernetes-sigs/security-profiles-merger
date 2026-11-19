@@ -22,7 +22,7 @@ The same code means the same thing in every subcommand:
 | Code | Meaning |
 |------|---------|
 | `0` | Success. For `diff`, the two profiles are equal |
-| `1` | The profile is bad: it is empty, does not parse, does not validate, or its output could not be written. For `diff`, `1` means *different* and nothing else |
+| `1` | The profile is bad: it is empty, does not parse, does not validate, cannot be read (a missing or unreadable file), or its output could not be written. For `diff`, `1` means *different* and nothing else |
 | `2` | Usage error, listed below. For `diff`, every failure, since `1` is taken |
 
 Usage errors, which exit `2`:
@@ -30,8 +30,11 @@ Usage errors, which exit `2`:
 - an unknown command, flag, type, format, strategy, architecture or
   `--validate` mode;
 - a missing `--strategy`, or flags that cannot be combined;
+- an unexpected argument, such as `spm version extra` or
+  `spm help merge extra`;
 - a `--validate` list whose length does not match the inputs;
-- `--arch` for a profile type that has no architectures;
+- `--arch` for a profile type that has no architectures, or for `validate`
+  without `--artifact` or `--strict`, whose checks it does not change;
 - a flag after the file arguments;
 - no file arguments while stdin is a terminal;
 - an input past the limits: a file over 10 MiB, inputs over 64 MiB in total,
@@ -40,9 +43,9 @@ Usage errors, which exit `2`:
   so does each file beside it);
 - stdin named twice (`spm merge - -`);
 - a profile type that cannot be detected, that the inputs disagree on, or
-  that `--type` names against what an input holds: members of another type,
-  or members none of which the named type knows, such as a profile wrapped
-  in an object of another format.
+  that an input does not hold, whether `--type` names it or the other inputs
+  reveal it: members of another type, or members none of which the type
+  knows, such as a profile wrapped in an object of another format.
 
 The split is between "you invoked it wrong", which no profile can cause, and
 "the profile is wrong", which is the answer the command was asked for. An
@@ -66,7 +69,11 @@ for. One document that carries the members of two types is rejected the same
 way (`error: <input> mixes profile types (seccomp and apparmor), use --type`)
 rather than resolved by a fixed precedence, which could validate an AppArmor
 profile that carries a `defaultAction` member as an almost empty seccomp
-profile.
+profile. An input whose members reveal no type defers to the others only
+when it holds no member at all: one holding only members another format
+knows, such as a profile wrapped in an object, would decode into an empty
+profile of the type the others reveal, and is rejected as it is under
+`--type` (`error: <input> holds no member of an apparmor profile`).
 
 Input order decides the seccomp tie-breaks: `errnoRet` follows the earlier
 input where the actions tie. An intersection takes `listenerPath` and
@@ -102,20 +109,34 @@ spm merge --type seccomp --strategy intersect --validate default,artifact \
 
 The merge only runs if every input passes. The baseline gets `default`, as
 in the library flow: the seccomp defaults runtimes ship fail `strict`, which
-also rejects `SCMP_ACT_NOTIFY` and the listener settings. The check the flow
-runs once at config load, that the merge reads every rule of the baseline,
-is a merge of the baseline alone followed by a diff, which exits `0` when
-the two are equal:
+also rejects `SCMP_ACT_NOTIFY` and the listener settings. `artifact` refuses
+what `UnmarshalStrict` refuses, a member the profile type has no field for
+included. The check the flow runs once at config load, that the merge reads
+every rule of the baseline, is a merge of the baseline alone followed by a
+diff, which exits `0` when the two are equal:
 
 ```sh
 spm merge --strategy intersect baseline.json > settled.json &&
   spm diff baseline.json settled.json
 ```
 
-One difference from the library flow remains: `artifact` only warns about a
-member the profile type has no field for, where `UnmarshalStrict` refuses
-it. A runtime that must refuse such an artifact treats the warning on stderr
-as a failure or decodes with the library.
+`--arch` names the native seccomp architecture of the node that loads the
+result. It decides how the 32-bit and multiplexing architectures are
+settled, and which argument values the `artifact` and `strict` checks
+accept. It defaults to the architecture `spm` runs on (`--arch native`), so
+the same inputs can merge differently on another machine; a control plane
+merging for a node of another architecture passes its name:
+
+```sh
+spm merge --type seccomp --strategy intersect --validate default,artifact \
+  --arch SCMP_ARCH_AARCH64 baseline.json artifact.json
+```
+
+`--arch none` implies no architecture, so that only the listed ones count.
+The flag takes the values `diff --arch` takes, selects between
+`seccomp.Intersect` and `seccomp.IntersectForArch` (and their `Union` and
+validator counterparts), and is a usage error for an AppArmor or Landlock
+merge.
 
 Profiles can also be read from stdin, as a single profile or a JSON array of
 profiles, and `-` reads stdin alongside file arguments:
@@ -154,7 +175,9 @@ for an input:
   `/dev/fd/N` and a process substitution such as `>(cmd)`, which the shell
   passes as one: use `--output -`, shell redirection or a pipe for those. A
   symlinked *directory* in the path is followed; the guard is about the file
-  `--output` names, not about the route to it.
+  `--output` names, not about the route to it. The path is used as written,
+  never cleaned, so `link/../out.json` names the file beside the directory
+  `link` points to, as it does for a shell redirection.
 - Elsewhere the file keeps the permissions the platform gives it and a
   symbolic link is followed to the file it names.
 
@@ -182,13 +205,25 @@ library, and handle what `encoding/json` accepts silently as follows. The
 | Member spelled only in another case | warn | reject | reject |
 | Byte that is not valid UTF-8 | warn | reject | reject |
 | Landlock network rule without a `port` | warn | reject | reject |
-| Member the profile type has no field for | warn | warn | reject |
+| Member the profile type has no field for | warn | reject | reject |
 | Data after the profile, or a document that is not an object | reject | reject | reject |
 
 `--artifact` is for a profile a runtime did not author, `--strict` for one a
-person wrote; they cannot be combined. For seccomp, what both accept depends
-on the architecture, as for the merge: they settle for the host architecture
-unless `--arch` is given.
+person wrote; they cannot be combined. Both refuse what the library's
+`UnmarshalStrict` refuses, so a misspelled `syscals` fails `--artifact` as it
+fails a runtime that decodes the artifact with the library.
+
+`--arch` names the native seccomp architecture of the node that loads the
+profiles, as `merge --arch` does. It matters to `--artifact` and `--strict`,
+which refuse an argument value above 32 bits where the node covers a 32-bit
+architecture: without it, the same profile passes `spm validate --artifact`
+on an x86-64 machine and fails on an x86 one. The default checks do not
+depend on the architecture, so `--arch` without one of the two flags is a
+usage error rather than a flag that does nothing.
+
+```sh
+spm validate --type seccomp --artifact --arch SCMP_ARCH_X86 artifact.json
+```
 
 A field repeated within one JSON object, including one that differs only in
 capitalization, is ambiguous: spm, like other Go programs, matches field
@@ -244,7 +279,19 @@ misread: when it holds a control character or a byte that is not valid UTF-8,
 whitespace, or the punctuation the format is built from
 (`,` `"` `{` `}` `(` `)` `<` `>` `:`). An AppArmor path such as `/etc/{a,b}`
 is therefore printed as `"/etc/{a,b}"`, so that it cannot be mistaken for the
-two paths `/etc/{a` and `b}`.
+two paths `/etc/{a` and `b}`. A rune that renders as nothing, such as
+U+3164 HANGUL FILLER or a variation selector, is quoted as a control
+character is, and spelled out within the quotes, so that `/usr/bin` with one
+inside does not read as `/usr/bin`. The JSON format writes every such rune,
+and the C1 controls and format characters such as U+202E, as a `\u` escape,
+which decodes to the same profile.
+
+The human format of each profile or diff is cut at 64 KiB, ending in
+`... (output truncated)`, so that an artifact holding thousands of long
+escaped paths does not print megabytes. No real profile comes near the
+bound; the JSON format is never cut. A command whose human output was cut
+says so in a warning on stderr, suggesting `--format json`, and exits as it
+would otherwise.
 
 Validation writes the profiles on success (exit 0) and prints errors to
 stderr when a profile is invalid or cannot be read (exit 1); usage errors

@@ -600,6 +600,11 @@ func TestForArchRejectsUnknownArchitecture(t *testing.T) {
 	if !errors.Is(err, seccomp.ErrUnknownArch) {
 		t.Errorf("ValidateStrictForArch = %v, want ErrUnknownArch", err)
 	}
+
+	diff, err := seccomp.DiffForArch(bogus, profile, profile)
+	if !errors.Is(err, seccomp.ErrUnknownArch) {
+		t.Errorf("DiffForArch = %s, %v, want ErrUnknownArch", seccomp.FormatDiff(diff), err)
+	}
 }
 
 // TestForArchTakesTheEmptyArchitectureAsNone checks that the ForArch

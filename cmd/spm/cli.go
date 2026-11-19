@@ -24,9 +24,10 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
@@ -200,7 +201,7 @@ func checkFlagOrder(args []string, separated bool, stderr io.Writer) int {
 			continue
 		}
 
-		_, err := os.Stat(filepath.Clean(arg))
+		_, err := os.Stat(arg)
 		if errors.Is(err, fs.ErrNotExist) {
 			_, _ = fmt.Fprintf(
 				stderr,
@@ -252,9 +253,11 @@ func plural(count int, noun string) string {
 
 // encodeJSON writes value as indented JSON. HTML characters are written as
 // they are: the output is a profile, not markup. A seccomp profile is
-// written in its seccompOutput form.
+// written in its seccompOutput form. A rune that does not print as itself
+// is escaped (see escapeInvisible) on its way to writer, so that a large
+// output that needs no escaping is not held a second time.
 func encodeJSON(writer io.Writer, value any) error {
-	enc := json.NewEncoder(writer)
+	enc := json.NewEncoder(escapingWriter{writer: writer})
 	enc.SetIndent("", "  ")
 	enc.SetEscapeHTML(false)
 
@@ -265,3 +268,85 @@ func encodeJSON(writer io.Writer, value any) error {
 
 	return nil
 }
+
+// escapingWriter passes what is written to it through escapeInvisible. The
+// encoder writes each value it encodes in one Write, so no rune is split
+// between two of them; one that were would be passed on as it is.
+type escapingWriter struct {
+	writer io.Writer
+}
+
+func (w escapingWriter) Write(data []byte) (int, error) {
+	_, err := w.writer.Write(escapeInvisible(data))
+	if err != nil {
+		return 0, fmt.Errorf("writing output: %w", err)
+	}
+
+	return len(data), nil
+}
+
+// escapeInvisible spells out, as \u escapes, the runes of encoded JSON that
+// do not print as themselves (see merge.PrintsAsItself). encoding/json
+// escapes the C0 controls but writes the C1 controls, the format characters
+// such as U+202E and the runes that render as nothing as they are, so that a
+// path of an artifact could reach a terminal reordered, or reading as
+// another path. Outside a string JSON holds nothing but ASCII, so every such
+// rune sits in a string, where the escape decodes to the same value. data is
+// returned itself when it holds none, and any other byte is kept as it is.
+func escapeInvisible(data []byte) []byte {
+	first := invisibleAt(data)
+	if first < 0 {
+		return data
+	}
+
+	escaped := append(make([]byte, 0, len(data)+len(data)/8), data[:first]...)
+
+	for rest := data[first:]; len(rest) > 0; {
+		char, size := utf8.DecodeRune(rest)
+
+		switch {
+		case !needsEscape(char, size):
+			escaped = append(escaped, rest[:size]...)
+		case char > maxBMP:
+			first, second := utf16.EncodeRune(char)
+			escaped = fmt.Appendf(escaped, `\u%04x\u%04x`, first, second)
+		default:
+			escaped = fmt.Appendf(escaped, `\u%04x`, char)
+		}
+
+		rest = rest[size:]
+	}
+
+	return escaped
+}
+
+// invisibleAt returns the offset of the first rune of data escapeInvisible
+// escapes, or -1.
+func invisibleAt(data []byte) int {
+	for offset := 0; offset < len(data); {
+		char, size := utf8.DecodeRune(data[offset:])
+		if needsEscape(char, size) {
+			return offset
+		}
+
+		offset += size
+	}
+
+	return -1
+}
+
+// needsEscape reports whether a decoded rune of size bytes is one
+// escapeInvisible escapes: DEL, which encoding/json leaves as it is while it
+// escapes the other ASCII controls, and a multi-byte rune, not a byte that
+// failed to decode, that does not print as itself. A terminal shows nothing
+// for DEL, so "/a\x7fb" would read as "/ab".
+func needsEscape(char rune, size int) bool {
+	return char == asciiDEL || size > 1 && !merge.PrintsAsItself(char)
+}
+
+// asciiDEL is the one ASCII control encoding/json does not escape.
+const asciiDEL = 0x7f
+
+// maxBMP is the last rune a single \u escape spells; one past it takes a
+// surrogate pair.
+const maxBMP = 0xFFFF

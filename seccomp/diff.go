@@ -18,7 +18,6 @@ package seccomp
 
 import (
 	"cmp"
-	"fmt"
 	"maps"
 	"slices"
 	"strconv"
@@ -155,10 +154,17 @@ func Diff(left, right *specs.LinuxSeccomp) (*ProfileDiff, error) {
 //
 // Use this rather than Diff whenever the profiles are destined for a node
 // that may not run the same architecture as the caller, as a control plane
-// comparing profiles for a mixed-architecture cluster does.
+// comparing profiles for a mixed-architecture cluster does. An architecture
+// this package does not know is reported with ErrUnknownArch, as
+// IntersectForArch reports it.
 func DiffForArch(
 	native specs.Arch, left, right *specs.LinuxSeccomp,
 ) (*ProfileDiff, error) {
+	err := checkNative(native)
+	if err != nil {
+		return nil, err
+	}
+
 	if left == nil || right == nil {
 		return nil, ErrNilProfile
 	}
@@ -617,7 +623,9 @@ func equalSyscallEntry(first, second SyscallEntry) bool {
 	return slices.Equal(first.Args, second.Args)
 }
 
-// FormatDiff returns a human-readable representation of a seccomp profile diff.
+// FormatDiff returns a human-readable representation of a seccomp profile
+// diff, quoted and bounded as FormatProfile is, so that a runtime can log
+// the diff of an artifact it was handed.
 func FormatDiff(diff *ProfileDiff) string {
 	if diff == nil {
 		return "Diff{<nil>}"
@@ -627,122 +635,138 @@ func FormatDiff(diff *ProfileDiff) string {
 		return "Diff{equal}"
 	}
 
-	var parts []string
+	var out merge.Builder
 
-	parts = appendScalarDiffs(parts, diff)
-	parts = appendSliceDiffs(parts, diff)
-	parts = appendListenerDiffs(parts, diff)
+	out.WriteString("Diff{")
+
+	parts := merge.NewJoiner(&out, " ")
+
+	writeScalarDiffs(&out, &parts, diff)
+	writeSliceDiffs(&out, &parts, diff)
+	writeListenerDiffs(&out, &parts, diff)
 
 	if diff.Syscalls != nil {
-		parts = append(parts, formatSyscallsDiff(diff.Syscalls)...)
+		writeSyscallsDiff(&out, &parts, diff.Syscalls)
 	}
 
-	return fmt.Sprintf("Diff{%s}", strings.Join(parts, " "))
+	out.WriteString("}")
+
+	return out.String()
 }
 
-func appendScalarDiffs(parts []string, diff *ProfileDiff) []string {
+func writeScalarDiffs(out *merge.Builder, parts *merge.Joiner, diff *ProfileDiff) {
 	if diff.DefaultAction != nil {
-		parts = append(parts, fmt.Sprintf(
-			"default:%s->%s",
-			merge.SafeText(string(diff.DefaultAction.Left)),
-			merge.SafeText(string(diff.DefaultAction.Right)),
-		))
+		parts.Next()
+		out.WriteString("default:")
+		out.WriteText(string(diff.DefaultAction.Left))
+		out.WriteString("->")
+		out.WriteText(string(diff.DefaultAction.Right))
 	}
 
 	if diff.DefaultErrnoRet != nil {
-		parts = append(parts, fmt.Sprintf(
-			"defaultErrno:%s->%s",
-			formatUintPtr(diff.DefaultErrnoRet.Left),
-			formatUintPtr(diff.DefaultErrnoRet.Right),
-		))
+		parts.Next()
+		out.WriteString("defaultErrno:")
+		writeUintPtr(out, diff.DefaultErrnoRet.Left)
+		out.WriteString("->")
+		writeUintPtr(out, diff.DefaultErrnoRet.Right)
 	}
-
-	return parts
 }
 
-func appendSliceDiffs(parts []string, diff *ProfileDiff) []string {
+func writeSliceDiffs(out *merge.Builder, parts *merge.Joiner, diff *ProfileDiff) {
 	if diff.Architectures != nil {
-		parts = append(parts, formatSliceDiff("arch", diff.Architectures))
+		parts.Next()
+		merge.WriteSliceDiff(out, "arch", *diff.Architectures)
 	}
 
 	if diff.Flags != nil {
-		parts = append(parts, formatSliceDiff("flags", diff.Flags))
+		parts.Next()
+		merge.WriteSliceDiff(out, "flags", *diff.Flags)
 	}
-
-	return parts
 }
 
-func appendListenerDiffs(parts []string, diff *ProfileDiff) []string {
+func writeListenerDiffs(out *merge.Builder, parts *merge.Joiner, diff *ProfileDiff) {
 	if diff.ListenerPath != nil {
-		parts = append(parts, fmt.Sprintf(
-			"listener:%s->%s",
-			formatQuotedOrNone(diff.ListenerPath.Left),
-			formatQuotedOrNone(diff.ListenerPath.Right),
-		))
+		parts.Next()
+		out.WriteString("listener:")
+		writeTextOrNone(out, diff.ListenerPath.Left)
+		out.WriteString("->")
+		writeTextOrNone(out, diff.ListenerPath.Right)
 	}
 
 	if diff.ListenerMetadata != nil {
-		parts = append(parts, fmt.Sprintf(
-			"listenerMeta:%s->%s",
-			formatQuotedOrNone(diff.ListenerMetadata.Left),
-			formatQuotedOrNone(diff.ListenerMetadata.Right),
-		))
+		parts.Next()
+		out.WriteString("listenerMeta:")
+		writeTextOrNone(out, diff.ListenerMetadata.Left)
+		out.WriteString("->")
+		writeTextOrNone(out, diff.ListenerMetadata.Right)
 	}
-
-	return parts
 }
 
-func formatUintPtr(val *uint) string {
+func writeUintPtr(out *merge.Builder, val *uint) {
 	if val == nil {
-		return "<nil>"
+		out.WriteString("<nil>")
+
+		return
 	}
 
-	return strconv.FormatUint(uint64(*val), 10)
+	out.WriteUint(uint64(*val))
 }
 
-func formatQuotedOrNone(str string) string {
+func writeTextOrNone(out *merge.Builder, str string) {
 	if str == "" {
-		return "<none>"
+		out.WriteString("<none>")
+
+		return
 	}
 
-	return merge.SafeText(str)
+	out.WriteText(str)
 }
 
-func formatSliceDiff[T ~string](prefix string, sliceDiff *SliceDiff[T]) string {
-	return merge.FormatSliceDiff(prefix, *sliceDiff)
+func writeSyscallsDiff(out *merge.Builder, parts *merge.Joiner, syscallsDiff *SyscallsDiff) {
+	writeEntries(out, parts, "-", syscallsDiff.Removed)
+	writeEntries(out, parts, "+", syscallsDiff.Added)
+
+	for idx := range syscallsDiff.Changed {
+		if out.Full() {
+			return
+		}
+
+		change := &syscallsDiff.Changed[idx]
+
+		parts.Next()
+		out.WriteString("~")
+		out.WriteText(change.Name)
+		out.WriteString(":")
+		writeDetails(out, change.Left)
+		out.WriteString("->")
+		writeDetails(out, change.Right)
+	}
 }
 
-func formatSyscallsDiff(syscallsDiff *SyscallsDiff) []string {
-	parts := make([]string, 0,
-		len(syscallsDiff.Removed)+len(syscallsDiff.Added)+len(syscallsDiff.Changed),
-	)
+// writeEntries writes each entry as its String method renders it, after
+// sign.
+func writeEntries(out *merge.Builder, parts *merge.Joiner, sign string, entries []SyscallEntry) {
+	for idx := range entries {
+		if out.Full() {
+			return
+		}
 
-	for _, entry := range syscallsDiff.Removed {
-		parts = append(parts, "-"+entry.String())
+		parts.Next()
+		out.WriteString(sign)
+		entries[idx].writeTo(out)
 	}
-
-	for _, entry := range syscallsDiff.Added {
-		parts = append(parts, "+"+entry.String())
-	}
-
-	for _, change := range syscallsDiff.Changed {
-		parts = append(parts, fmt.Sprintf(
-			"~%s:%s->%s",
-			merge.SafeText(change.Name),
-			formatDetailActions(change.Left),
-			formatDetailActions(change.Right),
-		))
-	}
-
-	return parts
 }
 
-func formatDetailActions(details []SyscallDetail) string {
-	actions := make([]string, 0, len(details))
+func writeDetails(out *merge.Builder, details []SyscallDetail) {
+	for idx := range details {
+		if out.Full() {
+			return
+		}
 
-	for _, detail := range details {
-		actions = append(actions, detail.String())
+		if idx > 0 {
+			out.WriteString(",")
+		}
+
+		details[idx].writeTo(out)
 	}
-
-	return strings.Join(actions, ",")
 }

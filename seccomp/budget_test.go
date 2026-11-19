@@ -506,12 +506,14 @@ func TestMergeBoundsRepeatedMultiplexedName(t *testing.T) {
 // TestValidateStrictBoundsDuplicateReport covers the duplicate report of
 // ValidateStrict, which names the entries a syscall sits in: its cost stays
 // linear in the names of the profile however often an entry repeats one, and
-// its size does not grow with the entries that share a name.
+// its size does not grow with the entries that share a name. The entries
+// equal the default, so that they load no rule and the profile stays inside
+// the size limits ValidateStrict checks first, which it fills.
 //
 //nolint:paralleltest // a wall-clock bound, so it runs before the parallel tests
 func TestValidateStrictBoundsDuplicateReport(t *testing.T) {
 	const (
-		entries        = 20000
+		entries        = seccomp.MaxArtifactEntries
 		repeats        = 200
 		generousBudget = 2 * time.Second
 		generousSize   = 8 * 1024
@@ -527,7 +529,7 @@ func TestValidateStrictBoundsDuplicateReport(t *testing.T) {
 	for range entries {
 		profile.Syscalls = append(profile.Syscalls, specs.LinuxSyscall{
 			Names:  names,
-			Action: specs.ActAllow,
+			Action: specs.ActErrno,
 		})
 	}
 

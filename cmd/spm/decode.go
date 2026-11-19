@@ -18,7 +18,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"slices"
@@ -76,7 +75,7 @@ func unmarshalAll[T any](
 		policy := policies[idx]
 		profile := new(T)
 
-		err := json.Unmarshal(input.data, profile)
+		hint, err := strictjson.Decode(input.data, profile)
 		if err != nil {
 			return nil, decodeError(input.name, err)
 		}
@@ -87,7 +86,7 @@ func unmarshalAll[T any](
 			return nil, fmt.Errorf("parsing %s: %w", merge.SafeName(input.name), errNotAnObject)
 		}
 
-		checks := documentChecks(input.data, profile, policy)
+		checks := documentChecks(input.data, profile, hint, policy)
 
 		for _, check := range checks {
 			if check.err == nil {
@@ -116,9 +115,11 @@ type documentCheck struct {
 
 // documentChecks looks for what the decoder read without a word in a
 // document that decoded into profile.
-func documentChecks[T any](data []byte, profile *T, policy decodePolicy) []documentCheck {
+func documentChecks[T any](
+	data []byte, profile *T, hint strictjson.Hint, policy decodePolicy,
+) []documentCheck {
 	duplicates, moreDuplicates := strictjson.DuplicateKeys(data)
-	unknown, moreUnknown := strictjson.UnknownFieldsOf[T](data)
+	unknown, moreUnknown := strictjson.UnknownFieldsFound[T](data, hint)
 	misspelled, moreMisspelled := strictjson.MisspelledFieldsOf[T](data)
 	missing, moreMissing := strictjson.MissingFieldsOf(data, profile)
 

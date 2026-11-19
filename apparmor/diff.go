@@ -17,7 +17,6 @@ limitations under the License.
 package apparmor
 
 import (
-	"fmt"
 	"slices"
 	"strings"
 
@@ -285,7 +284,9 @@ func diffStringSlice(left, right []string) *StringSliceDiff {
 	return &StringSliceDiff{Added: added, Removed: removed}
 }
 
-// FormatDiff returns a human-readable representation of an AppArmor profile diff.
+// FormatDiff returns a human-readable representation of an AppArmor
+// profile diff, quoted and bounded as FormatProfile is, so that a runtime
+// can log the diff of an artifact it was handed.
 func FormatDiff(diff *ProfileDiff) string {
 	if diff == nil {
 		return "Diff{<nil>}"
@@ -295,96 +296,82 @@ func FormatDiff(diff *ProfileDiff) string {
 		return "Diff{equal}"
 	}
 
-	var parts []string
+	var out merge.Builder
 
-	parts = appendExecDiffs(parts, diff)
-	parts = appendFSDiffs(parts, diff)
+	out.WriteString("Diff{")
+
+	parts := merge.NewJoiner(&out, " ")
+
+	writeSliceDiff(&out, &parts, "exec", diff.Executables)
+	writeSliceDiff(&out, &parts, "lib", diff.Libraries)
+
+	if diff.Filesystem != nil {
+		writeSliceDiff(&out, &parts, "r", diff.Filesystem.ReadOnly)
+		writeSliceDiff(&out, &parts, "w", diff.Filesystem.WriteOnly)
+		writeSliceDiff(&out, &parts, "rw", diff.Filesystem.ReadWrite)
+	}
 
 	if diff.Network != nil {
-		parts = append(parts, formatNetworkDiff(diff.Network))
+		parts.Next()
+		writeNetworkDiff(&out, diff.Network)
 	}
 
-	if diff.Capabilities != nil {
-		parts = append(parts, formatStringSliceDiff("caps", diff.Capabilities))
-	}
+	writeSliceDiff(&out, &parts, "caps", diff.Capabilities)
 
-	return fmt.Sprintf("Diff{%s}", strings.Join(parts, " "))
+	out.WriteString("}")
+
+	return out.String()
 }
 
-func appendExecDiffs(parts []string, diff *ProfileDiff) []string {
-	if diff.Executables != nil {
-		parts = append(parts, formatStringSliceDiff("exec", diff.Executables))
+// writeSliceDiff writes a slice diff as a part of the diff, unless it is
+// nil.
+func writeSliceDiff(
+	out *merge.Builder,
+	parts *merge.Joiner,
+	prefix string,
+	sliceDiff *StringSliceDiff,
+) {
+	if sliceDiff == nil {
+		return
 	}
 
-	if diff.Libraries != nil {
-		parts = append(parts, formatStringSliceDiff("lib", diff.Libraries))
-	}
-
-	return parts
+	parts.Next()
+	merge.WriteSliceDiff(out, prefix, *sliceDiff)
 }
 
-func appendFSDiffs(parts []string, diff *ProfileDiff) []string {
-	if diff.Filesystem == nil {
-		return parts
-	}
+func writeNetworkDiff(out *merge.Builder, networkDiff *NetworkDiff) {
+	out.WriteString("net:")
 
-	if diff.Filesystem.ReadOnly != nil {
-		parts = append(parts, formatStringSliceDiff("r", diff.Filesystem.ReadOnly))
-	}
+	parts := merge.NewJoiner(out, ",")
 
-	if diff.Filesystem.WriteOnly != nil {
-		parts = append(parts, formatStringSliceDiff("w", diff.Filesystem.WriteOnly))
-	}
+	for _, field := range [...]struct {
+		name string
+		diff *BoolPtrDiff
+	}{
+		{name: "raw", diff: networkDiff.AllowRaw},
+		{name: "tcp", diff: networkDiff.AllowTCP},
+		{name: "udp", diff: networkDiff.AllowUDP},
+	} {
+		if field.diff == nil {
+			continue
+		}
 
-	if diff.Filesystem.ReadWrite != nil {
-		parts = append(parts, formatStringSliceDiff("rw", diff.Filesystem.ReadWrite))
+		parts.Next()
+		out.WriteString(field.name)
+		out.WriteString(":")
+		writeBoolPtr(out, field.diff.Left)
+		out.WriteString("->")
+		writeBoolPtr(out, field.diff.Right)
 	}
-
-	return parts
 }
 
-func formatStringSliceDiff(prefix string, sliceDiff *StringSliceDiff) string {
-	return merge.FormatSliceDiff(prefix, *sliceDiff)
-}
-
-func formatNetworkDiff(networkDiff *NetworkDiff) string {
-	var parts []string
-
-	if networkDiff.AllowRaw != nil {
-		parts = append(parts, fmt.Sprintf(
-			"raw:%s->%s",
-			formatBoolPtrShort(networkDiff.AllowRaw.Left),
-			formatBoolPtrShort(networkDiff.AllowRaw.Right),
-		))
+func writeBoolPtr(out *merge.Builder, boolPtr *bool) {
+	switch {
+	case boolPtr == nil:
+		out.WriteString("<nil>")
+	case *boolPtr:
+		out.WriteString("true")
+	default:
+		out.WriteString("false")
 	}
-
-	if networkDiff.AllowTCP != nil {
-		parts = append(parts, fmt.Sprintf(
-			"tcp:%s->%s",
-			formatBoolPtrShort(networkDiff.AllowTCP.Left),
-			formatBoolPtrShort(networkDiff.AllowTCP.Right),
-		))
-	}
-
-	if networkDiff.AllowUDP != nil {
-		parts = append(parts, fmt.Sprintf(
-			"udp:%s->%s",
-			formatBoolPtrShort(networkDiff.AllowUDP.Left),
-			formatBoolPtrShort(networkDiff.AllowUDP.Right),
-		))
-	}
-
-	return "net:" + strings.Join(parts, ",")
-}
-
-func formatBoolPtrShort(boolPtr *bool) string {
-	if boolPtr == nil {
-		return "<nil>"
-	}
-
-	if *boolPtr {
-		return "true"
-	}
-
-	return "false"
 }

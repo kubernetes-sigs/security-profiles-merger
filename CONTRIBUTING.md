@@ -164,6 +164,7 @@ make verify-tidy         # verify go.mod and hack/tools/go.mod are tidy
 make verify-mdtoc        # verify table of contents in markdown files
 make update-mdtoc        # regenerate table of contents in markdown files
 make verify-golden       # regenerate the CLI golden files and fail if any changed
+make verify-syscalls     # regenerate seccomp/syscalls.go and fail if it changed
 make verify-dependencies # verify external dependencies
 make report-upstream     # print the pinned tool versions behind upstream
 make verify-upstream     # fail if a pinned tool version is behind upstream
@@ -188,6 +189,8 @@ Notes on the targets:
   `LIBSECCOMP_VERSION` to require a particular version, as CI does.
 - `make verify` rewrites `go.mod`, `hack/tools/go.mod` and the goldens in
   place before checking that nothing changed.
+- `make verify-syscalls` downloads the `syscalls.csv` of each libseccomp
+  release the seccomp guard covers, so it needs network access and `curl`.
 - `make report-upstream` and `make verify-upstream` need `GITHUB_TOKEN`.
 - `make api-report` compares against the newest tag before `HEAD`, and
   gorelease refuses a working tree with uncommitted changes.
@@ -196,10 +199,10 @@ Notes on the targets:
 
 `make verify` runs `verify-coverage` (the test suite with the race detector,
 then the coverage floor), `lint`, `verify-tidy`, `verify-mdtoc`,
-`verify-golden`, `verify-dependencies`, `govulncheck` and `lint-actions` in
-one command, with the Go on your `PATH`. It does not build the binary;
-`make build` does. These CI jobs need something the Makefile does not
-install or a machine it does not have:
+`verify-golden`, `verify-syscalls`, `verify-dependencies`, `govulncheck` and
+`lint-actions` in one command, with the Go on your `PATH`. It does not build
+the binary; `make build` does. These CI jobs need something the Makefile
+does not install or a machine it does not have:
 
 | CI job | Local equivalent | Needs |
 |--------|------------------|-------|

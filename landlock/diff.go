@@ -17,10 +17,8 @@ limitations under the License.
 package landlock
 
 import (
-	"fmt"
 	"maps"
 	"slices"
-	"strings"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 	"sigs.k8s.io/security-profiles-merger/spm"
@@ -91,7 +89,10 @@ type NetRuleChange struct {
 // removed) and duplicate rules and rights are merged before comparing, so
 // "/var//data/" and "/var/data" are treated as identical. ".." components
 // are kept, since the kernel resolves them against the file system. Rights
-// are compared as sets and reported sorted.
+// are compared as sets and reported sorted. Because the paths compared are
+// the cleaned ones, a rule on "/srv/f/", which the kernel can load only
+// when f is a directory, equals one on "/srv/f"; ValidateArtifact reports
+// the first with ErrTrailingSlash.
 //
 // Diff compares rules as written, not the access they grant through the
 // hierarchy. Intersect removes from a rule the rights its ancestors in the
@@ -286,7 +287,9 @@ func canonicalProfile(profile *Profile) *Profile {
 	return result
 }
 
-// FormatDiff returns a human-readable representation of a Landlock profile diff.
+// FormatDiff returns a human-readable representation of a Landlock profile
+// diff, quoted and bounded as FormatProfile is, so that a runtime can log
+// the diff of an artifact it was handed.
 func FormatDiff(diff *ProfileDiff) string {
 	if diff == nil {
 		return "Diff{<nil>}"
@@ -296,81 +299,99 @@ func FormatDiff(diff *ProfileDiff) string {
 		return "Diff{equal}"
 	}
 
-	var parts []string
+	var out merge.Builder
 
-	if diff.HandledAccessFS != nil {
-		parts = append(parts, formatRightsDiff("fs", diff.HandledAccessFS))
-	}
+	out.WriteString("Diff{")
 
-	if diff.HandledAccessNet != nil {
-		parts = append(parts, formatRightsDiff("net", diff.HandledAccessNet))
-	}
+	parts := merge.NewJoiner(&out, " ")
 
-	if diff.Scoped != nil {
-		parts = append(parts, formatRightsDiff("scoped", diff.Scoped))
-	}
+	writeRightsDiff(&out, &parts, "fs", diff.HandledAccessFS)
+	writeRightsDiff(&out, &parts, "net", diff.HandledAccessNet)
+	writeRightsDiff(&out, &parts, "scoped", diff.Scoped)
 
 	if diff.PathRules != nil {
-		parts = append(parts, formatPathRulesDiff(diff.PathRules)...)
+		writePathRulesDiff(&out, &parts, diff.PathRules)
 	}
 
 	if diff.NetRules != nil {
-		parts = append(parts, formatNetRulesDiff(diff.NetRules)...)
+		writeNetRulesDiff(&out, &parts, diff.NetRules)
 	}
 
-	return fmt.Sprintf("Diff{%s}", strings.Join(parts, " "))
+	out.WriteString("}")
+
+	return out.String()
 }
 
-func formatRightsDiff[T ~string](prefix string, rightsDiff *RightsDiff[T]) string {
-	return merge.FormatSliceDiff(prefix, *rightsDiff)
+// writeRightsDiff writes a rights diff as a part of the diff, unless it is
+// nil.
+func writeRightsDiff[T ~string](
+	out *merge.Builder, parts *merge.Joiner, prefix string, rightsDiff *RightsDiff[T],
+) {
+	if rightsDiff == nil {
+		return
+	}
+
+	parts.Next()
+	merge.WriteSliceDiff(out, prefix, *rightsDiff)
 }
 
-func formatPathRulesDiff(pathRulesDiff *PathRulesDiff) []string {
-	parts := make([]string, 0,
-		len(pathRulesDiff.Removed)+len(pathRulesDiff.Added)+len(pathRulesDiff.Changed),
-	)
+func writePathRulesDiff(out *merge.Builder, parts *merge.Joiner, pathRulesDiff *PathRulesDiff) {
+	writeRules(out, parts, "-", pathRulesDiff.Removed)
+	writeRules(out, parts, "+", pathRulesDiff.Added)
 
-	for _, rule := range pathRulesDiff.Removed {
-		parts = append(parts, "-"+rule.String())
+	for idx := range pathRulesDiff.Changed {
+		if out.Full() {
+			return
+		}
+
+		change := &pathRulesDiff.Changed[idx]
+
+		parts.Next()
+		out.WriteString("~")
+		out.WriteText(change.Path)
+		writeRightsChange(out, change.Left, change.Right)
 	}
-
-	for _, rule := range pathRulesDiff.Added {
-		parts = append(parts, "+"+rule.String())
-	}
-
-	for _, change := range pathRulesDiff.Changed {
-		parts = append(parts, fmt.Sprintf(
-			"~%s:[%s]->[%s]",
-			merge.SafeText(change.Path),
-			joinRights(change.Left),
-			joinRights(change.Right),
-		))
-	}
-
-	return parts
 }
 
-func formatNetRulesDiff(netRulesDiff *NetRulesDiff) []string {
-	parts := make([]string, 0,
-		len(netRulesDiff.Removed)+len(netRulesDiff.Added)+len(netRulesDiff.Changed),
-	)
+func writeNetRulesDiff(out *merge.Builder, parts *merge.Joiner, netRulesDiff *NetRulesDiff) {
+	writeRules(out, parts, "-", netRulesDiff.Removed)
+	writeRules(out, parts, "+", netRulesDiff.Added)
 
-	for _, rule := range netRulesDiff.Removed {
-		parts = append(parts, "-"+rule.String())
+	for idx := range netRulesDiff.Changed {
+		if out.Full() {
+			return
+		}
+
+		change := &netRulesDiff.Changed[idx]
+
+		parts.Next()
+		out.WriteString("~:")
+		out.WriteUint(uint64(change.Port))
+		writeRightsChange(out, change.Left, change.Right)
 	}
+}
 
-	for _, rule := range netRulesDiff.Added {
-		parts = append(parts, "+"+rule.String())
+// writeRules writes each rule as its String method renders it, after sign.
+func writeRules[R interface{ writeTo(out *merge.Builder) }](
+	out *merge.Builder, parts *merge.Joiner, sign string, rules []R,
+) {
+	for idx := range rules {
+		if out.Full() {
+			return
+		}
+
+		parts.Next()
+		out.WriteString(sign)
+		rules[idx].writeTo(out)
 	}
+}
 
-	for _, change := range netRulesDiff.Changed {
-		parts = append(parts, fmt.Sprintf(
-			"~:%d:[%s]->[%s]",
-			change.Port,
-			joinRights(change.Left),
-			joinRights(change.Right),
-		))
-	}
-
-	return parts
+// writeRightsChange writes the rights a changed rule holds on each side, as
+// in ":[read_file]->[read_file,write_file]".
+func writeRightsChange[T ~string](out *merge.Builder, left, right []T) {
+	out.WriteString(":[")
+	merge.WriteTexts(out, left, ",")
+	out.WriteString("]->[")
+	merge.WriteTexts(out, right, ",")
+	out.WriteString("]")
 }

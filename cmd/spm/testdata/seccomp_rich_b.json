@@ -8,8 +8,6 @@
   "flags": [
     "SECCOMP_FILTER_FLAG_LOG"
   ],
-  "listenerPath": "/run/seccomp/other.sock",
-  "listenerMetadata": "artifact-v2",
   "syscalls": [
     {
       "names": [

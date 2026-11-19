@@ -17,65 +17,108 @@ limitations under the License.
 package landlock
 
 import (
-	"fmt"
-	"strings"
-
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
-// FormatProfile returns a human-readable representation of a Landlock profile.
+// FormatProfile returns a human-readable representation of a Landlock
+// profile, as a single line that is safe to log: a value holding a control
+// character, an invisible rune, a byte that is not valid UTF-8 or the
+// punctuation the format is built from is quoted, and the line is cut at
+// 64 KiB, ending in "... (output truncated)" where it is. No real profile
+// comes near that bound; it is there because an artifact chooses how many
+// rules it holds and how many bytes of their paths need escaping.
 func FormatProfile(profile *Profile) string {
 	return profile.String()
 }
 
 // String returns a human-readable representation of the profile, which is
-// "Profile{<nil>}" for a nil profile.
+// "Profile{<nil>}" for a nil profile, as FormatProfile does.
 func (p *Profile) String() string {
 	if p == nil {
 		return "Profile{<nil>}"
 	}
 
-	var parts []string
+	var out merge.Builder
 
-	if len(p.HandledAccessFS) > 0 {
-		parts = append(parts, "fs:"+joinRights(p.HandledAccessFS))
+	out.WriteString("Profile{")
+
+	parts := merge.NewJoiner(&out, " ")
+
+	writeRightsPart(&out, &parts, "fs:", p.HandledAccessFS)
+	writeRightsPart(&out, &parts, "net:", p.HandledAccessNet)
+	writeRightsPart(&out, &parts, "scoped:", p.Scoped)
+
+	for idx := range p.PathRules {
+		if out.Full() {
+			break
+		}
+
+		parts.Next()
+		p.PathRules[idx].writeTo(&out)
 	}
 
-	if len(p.HandledAccessNet) > 0 {
-		parts = append(parts, "net:"+joinRights(p.HandledAccessNet))
+	for idx := range p.NetRules {
+		if out.Full() {
+			break
+		}
+
+		parts.Next()
+		p.NetRules[idx].writeTo(&out)
 	}
 
-	if len(p.Scoped) > 0 {
-		parts = append(parts, "scoped:"+joinRights(p.Scoped))
-	}
+	out.WriteString("}")
 
-	for _, rule := range p.PathRules {
-		parts = append(parts, rule.String())
-	}
-
-	for _, rule := range p.NetRules {
-		parts = append(parts, rule.String())
-	}
-
-	return fmt.Sprintf("Profile{%s}", strings.Join(parts, " "))
+	return out.String()
 }
 
-// String returns a human-readable representation of the path rule.
+// String returns a human-readable representation of the path rule, quoted
+// and bounded as FormatProfile is.
 func (r PathRule) String() string {
-	return fmt.Sprintf("%s(%s)", merge.SafeText(r.Path), joinRights(r.AccessFS))
+	var out merge.Builder
+
+	r.writeTo(&out)
+
+	return out.String()
 }
 
-// String returns a human-readable representation of the network rule.
+func (r PathRule) writeTo(out *merge.Builder) {
+	out.WriteText(r.Path)
+	out.WriteString("(")
+	merge.WriteTexts(out, r.AccessFS, ",")
+	out.WriteString(")")
+}
+
+// String returns a human-readable representation of the network rule,
+// quoted and bounded as FormatProfile is.
 func (r NetRule) String() string {
-	return fmt.Sprintf(":%d(%s)", r.Port, joinRights(r.AccessNet))
+	var out merge.Builder
+
+	r.writeTo(&out)
+
+	return out.String()
 }
 
-func joinRights[T ~string](rights []T) string {
-	strs := make([]string, len(rights))
+func (r NetRule) writeTo(out *merge.Builder) {
+	out.WriteString(":")
+	out.WriteUint(uint64(r.Port))
+	out.WriteString("(")
+	merge.WriteTexts(out, r.AccessNet, ",")
+	out.WriteString(")")
+}
 
-	for idx, r := range rights {
-		strs[idx] = merge.SafeText(string(r))
+// writeRightsPart writes a set of rights after its prefix, as a part of the
+// profile, unless it is empty.
+func writeRightsPart[T ~string](
+	out *merge.Builder,
+	parts *merge.Joiner,
+	prefix string,
+	rights []T,
+) {
+	if len(rights) == 0 {
+		return
 	}
 
-	return strings.Join(strs, ",")
+	parts.Next()
+	out.WriteString(prefix)
+	merge.WriteTexts(out, rights, ",")
 }

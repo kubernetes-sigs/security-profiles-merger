@@ -644,9 +644,11 @@ func TestValidateArtifactStaysFastOnHugeEntries(t *testing.T) {
 		t.Errorf("expected ErrArgIndexOutOfRange, got: %v", err)
 	}
 
+	// The entry loads one rule per condition, which puts the profile past
+	// the size limits, so that is all ValidateArtifact reports.
 	err = seccomp.ValidateArtifact(profileOf(specs.ActErrno, repeated))
-	if !errors.Is(err, seccomp.ErrTooManyClauses) {
-		t.Errorf("expected ErrTooManyClauses, got: %v", err)
+	if !errors.Is(err, seccomp.ErrTooManyProfileClauses) {
+		t.Errorf("expected ErrTooManyProfileClauses, got: %v", err)
 	}
 
 	// Coverage counters slow these loops several times over, so the bound

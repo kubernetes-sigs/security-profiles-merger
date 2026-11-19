@@ -17,8 +17,11 @@ limitations under the License.
 package landlock_test
 
 import (
+	"strconv"
+	"strings"
 	"testing"
 
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 	"sigs.k8s.io/security-profiles-merger/landlock"
 )
 
@@ -167,5 +170,80 @@ func TestFormatProfileQuotesSeparators(t *testing.T) {
 
 	if want := `Profile{"/a(read_file) /b"(read_file)}`; got != want {
 		t.Errorf("FormatProfile() = %s, want %s", got, want)
+	}
+}
+
+// TestFormattersAreBounded covers an accepted artifact whose rendering runs
+// to megabytes: MaxArtifactRules rules on paths of MaxPathLen bytes made of
+// a control byte, which each render as a four-byte escape. Its diff was a
+// single line of 16 MB. Each output is cut at the bound with the marker and
+// never inside a quoted path, and what it costs to render is bounded with
+// it: the formatter stops at the bound rather than render the rest only to
+// drop it. The diff with every rule changed and the String methods are also
+// given values no validator passes, since Diff validates nothing.
+//
+//nolint:paralleltest // it reads the allocation counters of the whole process
+func TestFormattersAreBounded(t *testing.T) {
+	read := []landlock.FSAccessRight{landlock.FSAccessReadFile}
+
+	rules := make([]landlock.PathRule, landlock.MaxArtifactRules)
+	for idx := range rules {
+		prefix := "/" + strconv.Itoa(idx)
+		rules[idx] = landlock.PathRule{
+			Path:     prefix + strings.Repeat("\x01", landlock.MaxPathLen-len(prefix)),
+			AccessFS: read,
+		}
+	}
+
+	artifact := fsProfile(read, rules...)
+
+	err := landlock.ValidateArtifact(artifact)
+	if err != nil {
+		t.Fatalf("ValidateArtifact() = %v", err)
+	}
+
+	diff, err := landlock.Diff(fsProfile(read), artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	changed := &landlock.ProfileDiff{
+		Equal: false, HandledAccessFS: nil, HandledAccessNet: nil, Scoped: nil, NetRules: nil,
+		PathRules: &landlock.PathRulesDiff{Added: nil, Removed: nil, Changed: nil},
+	}
+	for _, rule := range rules {
+		changed.PathRules.Changed = append(changed.PathRules.Changed, landlock.PathRuleChange{
+			Path: rule.Path, Left: nil, Right: rule.AccessFS,
+		})
+	}
+
+	longRule := landlock.PathRule{Path: strings.Repeat("\x01", 1<<20), AccessFS: read}
+
+	manyRights := make([]landlock.NetAccessRight, 1<<16)
+	for idx := range manyRights {
+		manyRights[idx] = landlock.NetAccessBindTCP
+	}
+
+	for name, format := range map[string]func() string{
+		"FormatProfile":       func() string { return landlock.FormatProfile(artifact) },
+		"FormatDiff":          func() string { return landlock.FormatDiff(diff) },
+		"FormatDiff(changed)": func() string { return landlock.FormatDiff(changed) },
+		"PathRule.String":     longRule.String,
+		"NetRule.String": func() string {
+			return landlock.NetRule{Port: 80, AccessNet: manyRights}.String()
+		},
+	} {
+		testutil.CheckTruncated(t, name, format())
+
+		if allocated := testutil.AllocatedBytes(
+			func() { _ = format() },
+		); allocated > testutil.MaxFormatAllocBytes {
+			t.Errorf(
+				"%s allocated %d bytes, want at most %d",
+				name,
+				allocated,
+				testutil.MaxFormatAllocBytes,
+			)
+		}
 	}
 }

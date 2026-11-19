@@ -95,6 +95,7 @@ func TestLoweredRulePaths(t *testing.T) {
 	read := fsRights{landlock.FSAccessReadFile}
 	write := fsRights{landlock.FSAccessWriteFile}
 	readWrite := fsRights{landlock.FSAccessReadFile, landlock.FSAccessWriteFile}
+	refer := fsRights{landlock.FSAccessRefer}
 
 	tests := map[string]struct {
 		result *landlock.Profile
@@ -157,6 +158,53 @@ func TestLoweredRulePaths(t *testing.T) {
 			result: fsProfile(read, landlock.PathRule{Path: "/data/link", AccessFS: read}),
 			inputs: []*landlock.Profile{nil},
 			want:   nil,
+		},
+		"a grant of a right the input does not handle": {
+			// The merge drops the write grant of the first input, which does
+			// not handle write and so permits it everywhere already: the
+			// result's write on the deeper path is not the first input's
+			// grant lowered.
+			result: fsProfile(readWrite, landlock.PathRule{Path: "/home/x", AccessFS: write}),
+			inputs: []*landlock.Profile{
+				fsProfile(read, landlock.PathRule{Path: "/", AccessFS: readWrite}),
+				fsProfile(write, landlock.PathRule{Path: "/home/x", AccessFS: write}),
+			},
+			want: nil,
+		},
+		"a refer grant the input does not list": {
+			// Refer is denied implicitly, and a grant of it is ignored
+			// unless the handled set lists it.
+			result: fsProfile(refer, landlock.PathRule{Path: "/home/x", AccessFS: refer}),
+			inputs: []*landlock.Profile{
+				fsProfile(read, landlock.PathRule{
+					Path:     "/",
+					AccessFS: fsRights{landlock.FSAccessReadFile, landlock.FSAccessRefer},
+				}),
+				fsProfile(refer, landlock.PathRule{Path: "/home/x", AccessFS: refer}),
+			},
+			want: nil,
+		},
+		"a listed refer grant is lowered": {
+			result: fsProfile(refer, landlock.PathRule{Path: "/home/x", AccessFS: refer}),
+			inputs: []*landlock.Profile{
+				fsProfile(refer, landlock.PathRule{Path: "/", AccessFS: refer}),
+				fsProfile(refer, landlock.PathRule{Path: "/home/x", AccessFS: refer}),
+			},
+			want: []string{"/home/x"},
+		},
+		"rules for one path are folded": {
+			result: fsProfile(
+				readWrite,
+				landlock.PathRule{Path: "/data/link", AccessFS: readWrite},
+			),
+			inputs: []*landlock.Profile{
+				fsProfile(readWrite,
+					landlock.PathRule{Path: "/data", AccessFS: read},
+					landlock.PathRule{Path: "/data/link", AccessFS: read},
+					landlock.PathRule{Path: "/data/link/", AccessFS: write},
+				),
+			},
+			want: nil,
 		},
 		"a relative path has no root ancestor": {
 			result: fsProfile(read, landlock.PathRule{Path: "etc/ssl", AccessFS: read}),

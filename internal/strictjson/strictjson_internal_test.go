@@ -358,6 +358,8 @@ func foldsMemberNames(value any) bool {
 // document the type decodes strictly must yield none.
 func FuzzUnknownFields(f *testing.F) {
 	testutil.AddJSONFuzzSeeds(f)
+	f.Add(`{"":0}0`)
+	f.Add(`{"x":1e400}`)
 
 	f.Fuzz(func(t *testing.T, raw string) {
 		paths, omitted := UnknownFieldsOf[specs.LinuxSeccomp]([]byte(raw))
@@ -422,10 +424,12 @@ func TestUnknownFieldsPrefersShallowerField(t *testing.T) {
 func FuzzMisspelledFields(f *testing.F) {
 	testutil.AddJSONFuzzSeeds(f)
 	f.Add(`{"ſyscalls":[{"names":["x"],"ACTION":"y"}]}`)
+	f.Add(`{"ACtion"0`)
+	f.Add(`{"x":1e400,"Syscalls":[]}`)
 
 	f.Fuzz(func(t *testing.T, raw string) {
 		paths, omitted := MisspelledFieldsOf[specs.LinuxSeccomp]([]byte(raw))
-		walked := walkFields([]byte(raw), reflect.TypeFor[specs.LinuxSeccomp]())
+		walked, _ := walkFields([]byte(raw), reflect.TypeFor[specs.LinuxSeccomp]())
 
 		if !slices.Equal(paths, walked.misspelled.paths) || omitted != walked.misspelled.omitted {
 			t.Errorf(
@@ -567,5 +571,113 @@ func TestMissingFieldsOf(t *testing.T) {
 
 	if !requiresFields(reflect.TypeFor[requiredOuter]()) {
 		t.Error("a required field of an embedded struct is not seen")
+	}
+}
+
+// TestOutOfRangeNumberKeepsChecks covers a number past the float64 range in
+// a member the type does not know: the typed decode skips it without a word,
+// so the walks that decode the document again must not stop at it and
+// report a clean document.
+func TestOutOfRangeNumberKeepsChecks(t *testing.T) {
+	t.Parallel()
+
+	const huge = `"x":1e400,`
+
+	raw := []byte(`{` + huge + `"rules":[{"name":"a"}]}`)
+
+	var decoded requiredTarget
+
+	err := json.Unmarshal(raw, &decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, _ := MissingFieldsOf(raw, &decoded); !slices.Equal(got, []string{"rules[0].port"}) {
+		t.Errorf("MissingFieldsOf = %v, want the port", got)
+	}
+
+	got, _ := MisspelledFieldsOf[walkSpelledA]([]byte(`{` + huge + `"NAME":"y"}`))
+	if !slices.Equal(got, []string{"NAME"}) {
+		t.Errorf("MisspelledFieldsOf = %v, want NAME", got)
+	}
+
+	got, _ = UnknownFieldsOf[walkSpelledA]([]byte(`{` + huge + `"bogus":1}`))
+	if !slices.Equal(got, []string{"bogus", "x"}) {
+		t.Errorf("UnknownFieldsOf = %v, want both members", got)
+	}
+}
+
+// TestDecodeFailsAsUnmarshal covers Decode, which asks the decoder about
+// unknown members on its way: it fails as json.Unmarshal fails, also where
+// the unknown member comes before what makes the document fail, and leaves
+// the value json.Unmarshal leaves.
+func TestDecodeFailsAsUnmarshal(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		raw     string
+		unknown bool
+	}{
+		{`{"name":"a"}`, false},
+		{`{"name":"a"} x`, false},
+		{`{"name":"a"`, false},
+		{`{"bogus":1,"name":"a"}`, true},
+		{`{"bogus":1,"name":7}`, true},
+		{`{"name":7,"bogus":1}`, false},
+		{`null`, false},
+	} {
+		var got, want walkSpelledA
+
+		hint, err := Decode([]byte(test.raw), &got)
+		wantErr := json.Unmarshal([]byte(test.raw), &want)
+
+		if (err == nil) != (wantErr == nil) || err != nil && err.Error() != wantErr.Error() {
+			t.Errorf("%s: error = %v, want %v", test.raw, err, wantErr)
+		}
+
+		if got != want {
+			t.Errorf("%s: value = %+v, want %+v", test.raw, got, want)
+		}
+
+		if hint.found != test.unknown {
+			t.Errorf("%s: unknown member found = %v, want %v", test.raw, hint.found, test.unknown)
+		}
+	}
+}
+
+// TestDecodeIntoAFilledTarget covers Decode into a value that is not zero,
+// which json.Unmarshal merges the document into, also where the document
+// has an unknown member and is decoded twice.
+func TestDecodeIntoAFilledTarget(t *testing.T) {
+	t.Parallel()
+
+	filled := func() requiredTarget {
+		return requiredTarget{
+			Rules:    []requiredRule{{Port: 1, Name: "a"}, {Port: 2, Name: "b"}},
+			Embedded: nil,
+			Pointers: []*requiredRule{{Port: 3, Name: "c"}},
+			One:      &requiredRule{Port: 4, Name: "d"},
+			Plain:    []unrequiredRule{{Port: 5}},
+		}
+	}
+
+	for _, raw := range []string{
+		`{"rules":[{"port":7}],"one":{"name":"e"}}`,
+		`{"bogus":1,"rules":[{"port":7}],"one":{"name":"e"}}`,
+		`{"bogus":1,"pointers":[{"name":"f"},null],"plain":null}`,
+		`{"bogus":1,"rules":[{"port":"x"}]}`,
+	} {
+		got, want := filled(), filled()
+
+		_, err := Decode([]byte(raw), &got)
+		wantErr := json.Unmarshal([]byte(raw), &want)
+
+		if (err == nil) != (wantErr == nil) || err != nil && err.Error() != wantErr.Error() {
+			t.Errorf("%s: error = %v, want %v", raw, err, wantErr)
+		}
+
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: value = %+v, want %+v", raw, got, want)
+		}
 	}
 }

@@ -863,8 +863,10 @@ func TestMergeOutputFlagBadPath(t *testing.T) {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
 
-	if !strings.Contains(stderr, "writing output file") {
-		t.Errorf("stderr = %q, missing output file error", stderr)
+	const want = "error: writing /nonexistent/dir/out.json: " +
+		"creating temporary file in /nonexistent/dir/: "
+	if !strings.Contains(stderr, want) {
+		t.Errorf("stderr = %q, want %q", stderr, want)
 	}
 }
 
@@ -1265,6 +1267,11 @@ func TestMergeValidateModes(t *testing.T) {
 	artifact := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO",`+
 		`"listenerPath":"/run/notify.sock","syscalls":[`+
 		`{"names":["read"],"action":"SCMP_ACT_NOTIFY"}]}`)
+	// Intersect takes the listener from the baseline alone, so the plain
+	// merge of a notifying artifact needs a baseline naming the same one.
+	listening := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO",`+
+		`"listenerPath":"/run/notify.sock","syscalls":[`+
+		`{"names":["read","write"],"action":"SCMP_ACT_ALLOW"}]}`)
 
 	for _, testCase := range []struct {
 		name     string
@@ -1275,7 +1282,7 @@ func TestMergeValidateModes(t *testing.T) {
 	}{
 		{
 			name:     "default accepts what the merge accepts",
-			validate: modeNameDefault, files: []string{baseline, artifact},
+			validate: modeNameDefault, files: []string{listening, artifact},
 			wantCode: 0, wantErr: "",
 		},
 		{
@@ -1913,22 +1920,28 @@ func TestMergeOutputKeepsContentWhenItCannotReplace(t *testing.T) {
 		t.Fatalf("exit code = 0, want a failure: %s", stderr)
 	}
 
-	data, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatal(err)
+	// The file itself is writable, so the error says that it was the new
+	// file beside it that could not be created, and where.
+	want := "writing " + target + ": creating temporary file in " + dir + "/: "
+	if !strings.Contains(stderr, want) {
+		t.Errorf("stderr = %q, want %q", stderr, want)
 	}
 
-	if string(data) != keep {
-		t.Errorf("output file = %q, want %q", data, keep)
+	data, err := os.ReadFile(target)
+	if err != nil || string(data) != keep {
+		t.Errorf("output file = %q (%v), want %q", data, err, keep)
 	}
+
+	assertDirHolds(t, dir, 1)
+}
+
+// assertDirHolds checks how many entries a directory holds.
+func assertDirHolds(t *testing.T, dir string, want int) {
+	t.Helper()
 
 	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if len(entries) != 1 {
-		t.Errorf("directory holds %d entries, want the output alone", len(entries))
+	if err != nil || len(entries) != want {
+		t.Errorf("%s holds %d entries (%v), want %d", dir, len(entries), err, want)
 	}
 }
 
@@ -1956,5 +1969,28 @@ func TestMergeOutputQuotesASymlinkName(t *testing.T) {
 
 	if strings.Contains(stderr, "\x1b") {
 		t.Errorf("stderr = %q, want the name quoted", stderr)
+	}
+}
+
+// TestMergeNamesListenerConflictInputs covers a seccomp listener conflict,
+// which names the input that conflicts with the baseline by file name, as
+// every other merge failure does, rather than by its position among the
+// arguments.
+func TestMergeNamesListenerConflictInputs(t *testing.T) {
+	t.Parallel()
+
+	baseline := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO"}`)
+	artifact := writeTemp(t,
+		`{"defaultAction":"SCMP_ACT_ERRNO","listenerPath":"/run/listener.sock"}`)
+
+	code, _, stderr := runCapture(t, []string{
+		cmdMerge, flagType, typeSeccomp, flagStrategy, strategyIntersect, baseline, artifact,
+	}, nil)
+
+	want := "error: " + artifact + ": "
+	if code != 1 || !strings.HasPrefix(stderr, want) ||
+		!strings.Contains(stderr, seccomp.ErrConflictingListener.Error()) {
+		t.Errorf("exit code = %d, stderr = %q, want 1 and the conflict named after %q",
+			code, stderr, artifact)
 	}
 }

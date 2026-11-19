@@ -24,7 +24,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"strconv"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
@@ -168,7 +167,10 @@ func readStdinArgument(stdin io.Reader, others int) ([]profileInput, error) {
 // caller wrote it, and the decorations os adds would otherwise spell the
 // path a second time, cleaned into one the caller never typed.
 func readFileWithLimit(path string) ([]byte, error) {
-	file, err := os.Open(filepath.Clean(path))
+	// The path is opened as written: cleaning it would resolve
+	// "link/../x" lexically rather than through the directory link points
+	// to, and open another file than the one the caller named.
+	file, err := os.Open(path) //nolint:gosec // the caller named this path
 	if err != nil {
 		return nil, bareFileError(err)
 	}
@@ -289,6 +291,10 @@ func readStdinArray(data []byte) ([]profileInput, error) {
 // caller needs to refuse it.
 func countArrayElements(data []byte) (int, bool, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
+	// Numbers are kept as text: they only need to be skipped, and one past
+	// the float64 range would otherwise stop the count, and with it the
+	// bound, before the array is decoded whole.
+	decoder.UseNumber()
 
 	token, err := decoder.Token()
 	if err != nil {

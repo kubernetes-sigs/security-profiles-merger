@@ -1501,38 +1501,232 @@ func TestUnionThreeProfiles(t *testing.T) {
 	assertSyscallAction(t, result, syscallOpen, specs.ActAllow)
 }
 
-func TestIntersectListenerPreservation(t *testing.T) {
+// TestMergesRefuseConflictingListeners pins ErrConflictingListener. A filter
+// hands every notification to one listener, so a merge that kept the first
+// listener of two would deliver the other input's notifications to a
+// supervisor that never asked for them.
+func TestMergesRefuseConflictingListeners(t *testing.T) {
 	t.Parallel()
 
-	left := &specs.LinuxSeccomp{
-		DefaultAction:    specs.ActErrno,
-		ListenerPath:     "/run/listener.sock",
-		ListenerMetadata: "metadata-left",
+	notifying := func(listener, metadata, name string) *specs.LinuxSeccomp {
+		return &specs.LinuxSeccomp{
+			DefaultAction:    specs.ActErrno,
+			ListenerPath:     listener,
+			ListenerMetadata: metadata,
+			Syscalls: []specs.LinuxSyscall{
+				{Names: []string{name}, Action: specs.ActNotify},
+			},
+		}
 	}
 
-	right := &specs.LinuxSeccomp{
-		DefaultAction:    specs.ActErrno,
-		ListenerPath:     "/run/other.sock",
-		ListenerMetadata: "metadata-right",
+	// A permissive profile naming a listener without notifying: the
+	// intersection carries the other input's SCMP_ACT_NOTIFY into the
+	// result, which would then notify into this listener.
+	silent := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActAllow,
+		ListenerPath:  "/run/a.sock",
 	}
 
-	result, err := seccomp.Intersect(left, right)
+	bare := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
+
+	for _, testCase := range []struct {
+		name     string
+		merge    func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error)
+		profiles []*specs.LinuxSeccomp
+		// blamed is the index of the input the refusal names.
+		blamed int
+	}{
+		{
+			name:  "union of two notifying listeners",
+			merge: seccomp.Union,
+			profiles: []*specs.LinuxSeccomp{
+				notifying("/run/a.sock", "", "mkdir"),
+				notifying("/run/b.sock", "", "chmod"),
+			},
+			blamed: 1,
+		},
+		{
+			name:  "intersect of two notifying listeners",
+			merge: seccomp.Intersect,
+			profiles: []*specs.LinuxSeccomp{
+				notifying("/run/a.sock", "", "mkdir"),
+				notifying("/run/b.sock", "", "chmod"),
+			},
+			blamed: 1,
+		},
+		{
+			name:     "intersect with a listener that does not notify",
+			merge:    seccomp.Intersect,
+			profiles: []*specs.LinuxSeccomp{silent, notifying("/run/b.sock", "", "chmod")},
+			blamed:   1,
+		},
+		{
+			name:     "union with a listener that does not notify",
+			merge:    seccomp.Union,
+			profiles: []*specs.LinuxSeccomp{notifying("/run/b.sock", "", "chmod"), silent},
+			blamed:   1,
+		},
+		{
+			name:  "same path, different metadata",
+			merge: seccomp.Union,
+			profiles: []*specs.LinuxSeccomp{
+				notifying(listenerSock, "", "mkdir"),
+				notifying(listenerSock, metaA, "chmod"),
+			},
+			blamed: 1,
+		},
+		{
+			name:  "conflict behind an input without a listener",
+			merge: seccomp.Union,
+			profiles: []*specs.LinuxSeccomp{
+				bare,
+				notifying("/run/a.sock", metaA, "mkdir"),
+				bare,
+				notifying("/run/b.sock", metaA, "chmod"),
+			},
+			blamed: 3,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			result, err := testCase.merge(testCase.profiles...)
+			if !errors.Is(err, seccomp.ErrConflictingListener) {
+				t.Fatalf("err = %v, result %v, want ErrConflictingListener", err, result)
+			}
+
+			// The later input brought the conflict, so the refusal
+			// names it, as a validation failure would.
+			var inputErr *seccomp.InputError
+			if !errors.As(err, &inputErr) || inputErr.Index != testCase.blamed {
+				t.Errorf("err = %v, want an InputError for profile %d", err, testCase.blamed)
+			}
+		})
+	}
+}
+
+// TestMergesKeepAgreeingListeners covers what checkListeners lets through:
+// inputs naming the same listener, inputs naming none, and for Union
+// listenerMetadata on an input without a listenerPath, which names no
+// listener and has always been ignored.
+func TestMergesKeepAgreeingListeners(t *testing.T) {
+	t.Parallel()
+
+	same := func(name string) *specs.LinuxSeccomp {
+		return &specs.LinuxSeccomp{
+			DefaultAction:    specs.ActErrno,
+			ListenerPath:     listenerSock,
+			ListenerMetadata: metaA,
+			Syscalls: []specs.LinuxSyscall{
+				{Names: []string{name}, Action: specs.ActNotify},
+			},
+		}
+	}
+
+	bare := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
+	stray := &specs.LinuxSeccomp{
+		DefaultAction:    specs.ActErrno,
+		ListenerMetadata: "stray",
+	}
+
+	for _, merge := range []struct {
+		name     string
+		merge    func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error)
+		profiles []*specs.LinuxSeccomp
+	}{
+		{"intersect", seccomp.Intersect, []*specs.LinuxSeccomp{same("mkdir"), bare, same("chmod")}},
+		{"union", seccomp.Union, []*specs.LinuxSeccomp{stray, same("mkdir"), same("chmod")}},
+	} {
+		result, err := merge.merge(merge.profiles...)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", merge.name, err)
+		}
+
+		if result.ListenerPath != listenerSock || result.ListenerMetadata != metaA {
+			t.Errorf(
+				"%s: listener = %q, %q, want %q, %q", merge.name,
+				result.ListenerPath, result.ListenerMetadata, listenerSock, metaA,
+			)
+		}
+	}
+}
+
+// TestIntersectTakesTheListenerFromTheBaselineOnly covers the listener of an
+// untrusted input. Intersect's first input is the baseline, and a listener
+// is a socket on the node that receives the notification fd: an artifact
+// that named one and notified on syscalls the baseline allows would choose
+// who answers the workload's calls, although only Validate, which accepts
+// listener settings, was run on it.
+func TestIntersectTakesTheListenerFromTheBaselineOnly(t *testing.T) {
+	t.Parallel()
+
+	permissive := &specs.LinuxSeccomp{DefaultAction: specs.ActAllow}
+	artifact := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActAllow,
+		ListenerPath:  "/run/attacker.sock",
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{"openat", "connect"}, Action: specs.ActNotify},
+		},
+	}
+	listening := &specs.LinuxSeccomp{DefaultAction: specs.ActAllow, ListenerPath: listenerSock}
+
+	for _, testCase := range []struct {
+		name     string
+		profiles []*specs.LinuxSeccomp
+		blamed   int
+	}{
+		{
+			name:     "baseline without a listener",
+			profiles: []*specs.LinuxSeccomp{permissive, artifact}, blamed: 1,
+		},
+		{
+			name:     "baseline with another listener",
+			profiles: []*specs.LinuxSeccomp{listening, artifact}, blamed: 1,
+		},
+		{
+			name: "metadata alone",
+			profiles: []*specs.LinuxSeccomp{listening, {
+				DefaultAction: specs.ActAllow, ListenerMetadata: metaA,
+			}},
+			blamed: 1,
+		},
+		{
+			// Repeating the baseline's path says the listener has no
+			// metadata, which differs from the baseline's.
+			name: "the baseline's path without its metadata",
+			profiles: []*specs.LinuxSeccomp{
+				{DefaultAction: specs.ActAllow, ListenerPath: listenerSock, ListenerMetadata: metaA},
+				listening,
+			},
+			blamed: 1,
+		},
+		{
+			name:     "behind a later input",
+			profiles: []*specs.LinuxSeccomp{permissive, permissive, artifact}, blamed: 2,
+		},
+	} {
+		result, err := seccomp.Intersect(testCase.profiles...)
+		if !errors.Is(err, seccomp.ErrConflictingListener) {
+			t.Errorf("%s: err = %v, result %v, want ErrConflictingListener",
+				testCase.name, err, result)
+		}
+
+		var inputErr *seccomp.InputError
+		if !errors.As(err, &inputErr) || inputErr.Index != testCase.blamed {
+			t.Errorf("%s: err = %v, want an InputError for profile %d",
+				testCase.name, err, testCase.blamed)
+		}
+	}
+
+	// Union inputs are peers, so Union keeps taking the listener from
+	// whichever input names it.
+	result, err := seccomp.Union(permissive, artifact)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("Union: unexpected error: %v", err)
 	}
 
-	if result.ListenerPath != "/run/listener.sock" {
-		t.Errorf(
-			"ListenerPath = %q, want %q (from first profile)",
-			result.ListenerPath, "/run/listener.sock",
-		)
-	}
-
-	if result.ListenerMetadata != "metadata-left" {
-		t.Errorf(
-			"ListenerMetadata = %q, want %q (from first profile)",
-			result.ListenerMetadata, "metadata-left",
-		)
+	if result.ListenerPath != artifact.ListenerPath {
+		t.Errorf("Union: ListenerPath = %q, want %q", result.ListenerPath, artifact.ListenerPath)
 	}
 }
 
@@ -3209,12 +3403,22 @@ func TestListenerComesFromTheProfileThatSetsIt(t *testing.T) {
 		name        string
 		left, right *specs.LinuxSeccomp
 		want        string
+		// unionOnly marks a listener only Union takes: Intersect refuses
+		// one from any input but the first (see
+		// TestIntersectTakesTheListenerFromTheBaselineOnly).
+		unionOnly bool
 	}{
-		{name: "left only", left: notifying(listenerSock), right: bare, want: listenerSock},
-		{name: "right only", left: bare, right: notifying(listenerSock), want: listenerSock},
 		{
-			name: "both set one", left: notifying(listenerSock),
-			right: notifying("/run/other.sock"), want: listenerSock,
+			name: "left only", left: notifying(listenerSock), right: bare,
+			want: listenerSock, unionOnly: false,
+		},
+		{
+			name: "right only", left: bare, right: notifying(listenerSock),
+			want: listenerSock, unionOnly: true,
+		},
+		{
+			name: "both set the same one", left: notifying(listenerSock),
+			right: notifying(listenerSock), want: listenerSock, unionOnly: false,
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -3227,6 +3431,10 @@ func TestListenerComesFromTheProfileThatSetsIt(t *testing.T) {
 				{"intersect", seccomp.Intersect},
 				{"union", seccomp.Union},
 			} {
+				if testCase.unionOnly && merge.name == "intersect" {
+					continue
+				}
+
 				result, err := merge.merge(testCase.left, testCase.right)
 				if err != nil {
 					t.Fatalf("%s: unexpected error: %v", merge.name, err)
@@ -3374,7 +3582,8 @@ func TestIntersectOfANotifyingProfileIsAClone(t *testing.T) {
 // TestListenerFlagFollowsTheListener pins
 // SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV to the profile the listener comes
 // from: the flag only changes how a notification is received, so it is
-// meaningless without the listener it belongs to.
+// meaningless without the listener it belongs to. It merges with Union,
+// since Intersect refuses a listener from any input but the first.
 func TestListenerFlagFollowsTheListener(t *testing.T) {
 	t.Parallel()
 
@@ -3388,7 +3597,7 @@ func TestListenerFlagFollowsTheListener(t *testing.T) {
 
 	// The left profile carries the flag but no listener, the right one the
 	// listener, so the flag does not survive.
-	result, err := seccomp.Intersect(withFlag(""), &specs.LinuxSeccomp{
+	result, err := seccomp.Union(withFlag(""), &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
 		ListenerPath:  listenerSock,
 	})
@@ -3401,7 +3610,7 @@ func TestListenerFlagFollowsTheListener(t *testing.T) {
 	}
 
 	// The profile that provides the listener provides the flag as well.
-	result, err = seccomp.Intersect(
+	result, err = seccomp.Union(
 		&specs.LinuxSeccomp{DefaultAction: specs.ActErrno}, withFlag(listenerSock),
 	)
 	if err != nil {

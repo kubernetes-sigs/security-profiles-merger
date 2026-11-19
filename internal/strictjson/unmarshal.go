@@ -59,11 +59,11 @@ func Unmarshal[T any](data []byte, target *T) error {
 		return err
 	}
 
-	decoder := json.NewDecoder(bytes.NewReader(data))
-
+	// The decoder is asked about unknown members on its way through, which
+	// spares UnknownFieldsFound a second decode of the whole document.
 	var decoded T
 
-	err = decoder.Decode(&decoded)
+	hint, decoder, err := decodeFirst(data, &decoded)
 	if err != nil {
 		return fmt.Errorf("decode profile: %w", merge.BoundedError(err))
 	}
@@ -87,7 +87,7 @@ func Unmarshal[T any](data []byte, target *T) error {
 		return err
 	}
 
-	paths, omitted = UnknownFieldsOf[T](data)
+	paths, omitted = UnknownFieldsFound[T](data, hint)
 
 	err = PathsError(spm.ErrUnknownField, paths, omitted)
 	if err != nil {
@@ -111,4 +111,60 @@ func Unmarshal[T any](data []byte, target *T) error {
 	*target = decoded
 
 	return nil
+}
+
+// Hint carries what the decoder found on its way through a document besides
+// the value: the first member the target type has no field for.
+type Hint struct {
+	// unknown is the member the decoder named as unknown.
+	unknown string
+	// found reports whether the decoder named one.
+	found bool
+}
+
+// Decode decodes data into target as json.Unmarshal does, failing the same
+// way and leaving target as it leaves it, also where target is not zero,
+// and returns a Hint saying whether the decoder met a member the type of
+// target has no field for. Asking the decoder that on the way costs
+// nothing for a document that has none, where asking afterwards costs a
+// second decode of the whole document, which for a profile of millions of
+// entries is hundreds of megabytes more at its peak.
+func Decode[T any](data []byte, target *T) (Hint, error) {
+	// A document json.Unmarshal refuses before decoding anything, such as
+	// one with data behind it, is refused with its error.
+	if !json.Valid(data) {
+		//nolint:wrapcheck // fails as json.Unmarshal fails
+		return Hint{unknown: "", found: false}, json.Unmarshal(data, target)
+	}
+
+	hint, _, err := decodeFirst(data, target)
+
+	return hint, err
+}
+
+// decodeFirst decodes the first JSON value of data into target, asking the
+// decoder about unknown members on its way, and returns the decoder, which
+// is past that value.
+func decodeFirst[T any](data []byte, target *T) (Hint, *json.Decoder, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+
+	err := decoder.Decode(target)
+
+	name, unknown := decoderFieldName(err)
+	if unknown {
+		// The decoder notes an unknown member and goes on decoding, so the
+		// value is complete, but it reports the first error it noted, which
+		// may hide one json.Unmarshal would report. That error comes from
+		// decoding again, which only a document with an unknown member pays
+		// for. It decodes into the value the first pass filled: decoding a
+		// document into a value it already filled leaves the value as it
+		// was, reusing its slices, so the second pass holds no second copy
+		// and leaves what json.Unmarshal leaves.
+		decoder = json.NewDecoder(bytes.NewReader(data))
+		err = decoder.Decode(target)
+	}
+
+	//nolint:wrapcheck // the callers wrap it, or fail as json.Unmarshal fails
+	return Hint{unknown: name, found: unknown}, decoder, err
 }

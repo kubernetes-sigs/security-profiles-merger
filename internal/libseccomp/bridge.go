@@ -343,6 +343,32 @@ func Compile(profile *specs.LinuxSeccomp, scratch string) ([]Instruction, error)
 	return decodeBPF(raw)
 }
 
+// CompileListedOnly is Compile for a filter of the listed architectures
+// alone, as a runtime on a node of one of them builds it: the architecture
+// of this program is left out unless the profile lists it. It stands in for
+// a runtime on a node of an architecture no host here runs natively, such
+// as x32. Rules are still resolved by the numbers of this program's
+// architecture, which libseccomp translates by name as it would from any
+// other.
+func CompileListedOnly(profile *specs.LinuxSeccomp, scratch string) ([]Instruction, error) {
+	var raw []byte
+
+	err := withFilterFor(profile, true, func(ctx C.scmp_filter_ctx) error {
+		var err error
+
+		raw, err = export(scratch, func(fd C.int) C.int {
+			return C.seccomp_export_bpf(ctx, fd)
+		})
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return decodeBPF(raw)
+}
+
 // ExportPFC builds a filter from the profile the way Compile does and returns
 // libseccomp's pseudo filter code for it, which shows the order in which the
 // compiled program evaluates the rules.
@@ -410,9 +436,49 @@ func prepareFilter(ctx C.scmp_filter_ctx, archs []specs.Arch) error {
 	return nil
 }
 
+// removeUnlistedNative removes the architecture of this program from the
+// filter unless the architectures include it. A filter without any listed
+// architecture keeps it, as it would have none left otherwise.
+func removeUnlistedNative(ctx C.scmp_filter_ctx, archs []specs.Arch) error {
+	if len(archs) == 0 || listsNative(archs) || C.seccomp_arch_exist(ctx, C.SCMP_ARCH_NATIVE) != 0 {
+		return nil
+	}
+
+	code := C.seccomp_arch_remove(ctx, C.SCMP_ARCH_NATIVE)
+	if code != 0 {
+		return fmt.Errorf("%w: removing the native architecture: %d", ErrRuleRejected, int(code))
+	}
+
+	return nil
+}
+
+// listsNative reports whether the architectures include the one of this
+// program.
+func listsNative(archs []specs.Arch) bool {
+	native := C.seccomp_arch_native()
+
+	for _, arch := range archs {
+		token, err := archToken(arch)
+		if err == nil && uint32(token) == uint32(native) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // withFilter builds a filter from the profile the way runc does and hands it
 // to use before releasing it.
 func withFilter(profile *specs.LinuxSeccomp, use func(ctx C.scmp_filter_ctx) error) error {
+	return withFilterFor(profile, false, use)
+}
+
+// withFilterFor is withFilter, leaving the architecture of this program
+// out of the filter where listedOnly is set and the profile does not list
+// it (see CompileListedOnly).
+func withFilterFor(
+	profile *specs.LinuxSeccomp, listedOnly bool, use func(ctx C.scmp_filter_ctx) error,
+) error {
 	ctx := C.seccomp_init(actionValue(profile.DefaultAction, profile.DefaultErrnoRet))
 	if ctx == nil {
 		return ErrFilterInit
@@ -423,6 +489,13 @@ func withFilter(profile *specs.LinuxSeccomp, use func(ctx C.scmp_filter_ctx) err
 	err := prepareFilter(ctx, profile.Architectures)
 	if err != nil {
 		return err
+	}
+
+	if listedOnly {
+		err = removeUnlistedNative(ctx, profile.Architectures)
+		if err != nil {
+			return err
+		}
 	}
 
 	for _, entry := range profile.Syscalls {

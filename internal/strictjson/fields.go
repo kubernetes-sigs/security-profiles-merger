@@ -19,6 +19,7 @@ package strictjson
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"reflect"
@@ -128,15 +129,22 @@ func unicodeEscape(raw []byte) (rune, bool) {
 //
 // Enumerating them needs the document decoded into interface values, which
 // costs more memory than the profile itself, so a strict decode runs first
-// to learn whether there is anything to report. The caller has already
-// decoded raw into a T, so the only thing a strict decode can still object
-// to is an unknown member.
+// to learn whether there is anything to report. A caller that decodes raw
+// with Decode has that answer already, and passes it to UnknownFieldsFound
+// instead of paying for a second decode of the whole document.
 func UnknownFieldsOf[T any](raw []byte) ([]string, int) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 
-	err := decoder.Decode(new(T))
-	if err == nil {
+	name, unknown := decoderFieldName(decoder.Decode(new(T)))
+
+	return UnknownFieldsFound[T](raw, Hint{unknown: name, found: unknown})
+}
+
+// UnknownFieldsFound is UnknownFieldsOf for a document the caller decoded
+// with Decode, which returned hint.
+func UnknownFieldsFound[T any](raw []byte, hint Hint) ([]string, int) {
+	if !hint.found {
 		return nil, 0
 	}
 
@@ -146,9 +154,8 @@ func UnknownFieldsOf[T any](raw []byte) ([]string, int) {
 	// the two ever disagree, the decoder's own finding is reported rather
 	// than dropped, so that the check fails closed. A document that is not
 	// valid JSON is the decoder's to refuse, and says nothing here.
-	name, unknown := decoderFieldName(err)
-	if len(paths) == 0 && unknown && json.Valid(raw) {
-		return []string{name}, 0
+	if len(paths) == 0 && json.Valid(raw) {
+		return []string{hint.unknown}, 0
 	}
 
 	return paths, omitted
@@ -157,6 +164,10 @@ func UnknownFieldsOf[T any](raw []byte) ([]string, int) {
 // decoderFieldName returns the member name out of encoding/json's unknown
 // field error, and whether err is one.
 func decoderFieldName(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+
 	quoted, found := strings.CutPrefix(err.Error(), "json: unknown field ")
 	if !found {
 		return "", false
@@ -177,7 +188,7 @@ func decoderFieldName(err error) (string, bool) {
 // report every one. Members are matched to fields the way encoding/json
 // does: by the exact JSON name first, case-insensitively otherwise.
 func UnknownFields(raw []byte, target reflect.Type) ([]string, int) {
-	found := walkFields(raw, target)
+	found, _ := walkFields(raw, target)
 
 	return found.unknown.paths, found.unknown.omitted
 }
@@ -194,11 +205,20 @@ func UnknownFields(raw []byte, target reflect.Type) ([]string, int) {
 // misspelling of some field of T.
 func MisspelledFieldsOf[T any](raw []byte) ([]string, int) {
 	target := reflect.TypeFor[T]()
-	if !mayMisspell(raw, fieldSpellings(target)) {
+
+	candidate, may := mayMisspell(raw, fieldSpellings(target))
+	if !may {
 		return nil, 0
 	}
 
-	found := walkFields(raw, target)
+	found, ok := walkFields(raw, target)
+
+	// A walk that cannot read a valid document must not read as a clean
+	// one: the name that made the scan suspicious is reported instead. An
+	// invalid one is the decoder's to refuse, and says nothing here.
+	if !ok && json.Valid(raw) {
+		return []string{candidate}, 0
+	}
 
 	return found.misspelled.paths, found.misspelled.omitted
 }
@@ -230,13 +250,17 @@ func MissingFieldsOf[T any](raw []byte, decoded *T) ([]string, int) {
 		return nil, 0
 	}
 
-	var (
-		document any
-		found    pathCollector
-	)
+	var found pathCollector
 
-	err := json.Unmarshal(raw, &document)
+	// A failure to read a valid document must not read as a document that
+	// names every required field. An invalid one is the decoder's to
+	// refuse, and says nothing here.
+	document, err := decodeGeneric(raw)
 	if err != nil {
+		if json.Valid(raw) {
+			return []string{unreadableDocument}, 0
+		}
+
 		return nil, 0
 	}
 
@@ -490,22 +514,54 @@ type fieldFindings struct {
 	misspelled pathCollector
 }
 
-// walkFields walks a document against the target type. A document that is
-// not valid JSON yields no findings; it is the decoder's to refuse.
-func walkFields(raw []byte, target reflect.Type) *fieldFindings {
-	var (
-		document any
-		found    fieldFindings
-	)
+// unreadableDocument is the path reported when a walk cannot read a
+// document the decoder read, so that the check fails closed. Numbers are
+// kept as text, so this takes a document past what encoding/json reads at
+// all, which the decoder refuses first.
+const unreadableDocument = "(document)"
 
-	err := json.Unmarshal(raw, &document)
+// errInvalidJSON reports a document that is not valid JSON.
+var errInvalidJSON = errors.New("invalid JSON")
+
+// decodeGeneric decodes a document into interface values. Numbers are kept
+// as text: they are never inspected, and one past the float64 range, which
+// a member the type does not know may carry without the typed decode
+// objecting, must not stop the walk and leave its findings unreported.
+func decodeGeneric(raw []byte) (any, error) {
+	// A decoder stops at the end of the first value, where json.Unmarshal
+	// refuses a document with anything but whitespace behind it.
+	if !json.Valid(raw) {
+		return nil, errInvalidJSON
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+
+	var document any
+
+	err := decoder.Decode(&document)
 	if err != nil {
-		return &found
+		return nil, err //nolint:wrapcheck // the callers only test for it
+	}
+
+	return document, nil
+}
+
+// walkFields walks a document against the target type. It reports false
+// when the document cannot be read, which for a document that is not
+// valid JSON is the decoder's to refuse, and which a caller must not take
+// for a document without findings.
+func walkFields(raw []byte, target reflect.Type) (*fieldFindings, bool) {
+	var found fieldFindings
+
+	document, err := decodeGeneric(raw)
+	if err != nil {
+		return &found, false
 	}
 
 	walkUnknownFields(document, target, "", &found)
 
-	return &found
+	return &found, true
 }
 
 func walkUnknownFields(value any, typ reflect.Type, prefix string, found *fieldFindings) {
@@ -645,15 +701,16 @@ func addSpelling(spellings map[string]fieldSpelling, name string) {
 // a field but is not spelled the way every such field spells it. A member
 // the walk would report as misspelled is such a string, so a document
 // without one needs no walk. String values are scanned as well as member
-// names, which only costs a walk the document did not need.
-func mayMisspell(raw []byte, spellings map[string]fieldSpelling) bool {
+// names, which only costs a walk the document did not need. The string that
+// may be a misspelling is returned too.
+func mayMisspell(raw []byte, spellings map[string]fieldSpelling) (string, bool) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 
 	for {
 		token, err := decoder.Token()
 		if err != nil {
-			return false
+			return "", false
 		}
 
 		text, isString := token.(string)
@@ -663,7 +720,7 @@ func mayMisspell(raw []byte, spellings map[string]fieldSpelling) bool {
 
 		spelling, exists := spellings[foldName(text)]
 		if exists && (spelling.several || spelling.name != text) {
-			return true
+			return text, true
 		}
 	}
 }

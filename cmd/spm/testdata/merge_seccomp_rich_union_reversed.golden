@@ -11,8 +11,8 @@
     "SECCOMP_FILTER_FLAG_LOG",
     "SECCOMP_FILTER_FLAG_SPEC_ALLOW"
   ],
-  "listenerPath": "/run/seccomp/other.sock",
-  "listenerMetadata": "artifact-v2",
+  "listenerPath": "/run/seccomp/notify.sock",
+  "listenerMetadata": "baseline-v1",
   "syscalls": [
     {
       "names": [

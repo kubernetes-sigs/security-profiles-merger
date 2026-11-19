@@ -299,20 +299,18 @@ what it is given at face value.
   that node, `IntersectForArch`, `UnionForArch`, `ValidateArtifactForArch`
   and `ValidateStrictForArch` take its architecture instead. See
   [Architectures](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Architectures).
-- **seccomp: a libseccomp defect.** libseccomp 2.5.5 and 2.6.1 lose every
-  rule of an architecture when the syscall they test first does not exist
-  there, and every call then gets the default action. That takes a profile
-  whose rules with the fewest conditions all name syscalls the architecture
-  lacks, such as one unconditional rule on `socketcall` next to a
-  conditional one on `socket`, loaded for x86_64 and x32 together or for an
-  architecture without `socketcall` multiplexing (arm, aarch64, riscv64,
-  loongarch64, parisc, parisc64, 64-bit and n32 MIPS), by crun or by runc
-  with up to 32 syscall names; x86 and the other multiplexing architectures
-  drop a rule on a syscall they lack when it is added and are not affected,
-  nor is a filter of x86_64 or x32 alone. An input can have that form, and
-  a merge can produce it from inputs that do not, so both merges check
-  their result against where libseccomp 2.6.1 places each syscall: a rule
-  on a syscall no covered architecture has is dropped, `Intersect`
+- **seccomp: a libseccomp defect.** libseccomp 2.5.5 and 2.6.1, sorting
+  syscalls by priority (crun always, runc up to 32 syscall names), lose
+  every rule of an architecture when the syscall a block tests first does
+  not exist there, and every call then gets the default action. That takes
+  a profile in which every rule on a syscall the architecture has is
+  conditional and a rule on one it lacks is cheaper, such as an
+  unconditional rule on `socketcall` next to a conditional one on `socket`;
+  x86_64 and x32 are affected only together, where a block of either can
+  lose the other's rules. An input can have that form, and a merge can
+  produce it from inputs that do not, so both merges check their result
+  against a table of where libseccomp 2.5.5 and 2.6.1 place each syscall: a
+  rule on a syscall no covered architecture has is dropped, `Intersect`
   otherwise drops an architecture, and `Union`, which cannot drop one,
   refuses with `ErrLostRules`. An allowlist is not affected, since it names
   syscalls every architecture has in unconditional rules. See

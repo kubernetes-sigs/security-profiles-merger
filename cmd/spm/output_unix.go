@@ -30,6 +30,10 @@ import (
 // where the platform has it.
 const oNoFollow = syscall.O_NOFOLLOW
 
+// oNonBlock makes opening an output file that should be a regular file
+// return at once where it has turned into a FIFO meanwhile.
+const oNonBlock = syscall.O_NONBLOCK
+
 // refuseSymlinks is true where a symlink at the --output path is refused.
 const refuseSymlinks = true
 
@@ -56,9 +60,23 @@ func isMountPoint(err error) bool {
 }
 
 // isSymlinkRefusal reports whether an open failed because O_NOFOLLOW
-// refused a symlink, whose errno on its own reads as a link loop. Linux
-// reports ELOOP and the BSDs report EMLINK, so both mean the same thing
+// refused a symlink, whose errno on its own reads as a link loop or as
+// something else entirely. Which errno that is differs between the
+// platforms (see noFollowErrnos), so each of them means the same thing
 // here.
 func isSymlinkRefusal(err error) bool {
-	return errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EMLINK)
+	for _, errno := range noFollowErrnos {
+		if errors.Is(err, errno) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isNoDevice reports whether an open failed with ENXIO, which opening a
+// FIFO without a reader for writing without blocking does, and opening a
+// device whose hardware is absent.
+func isNoDevice(err error) bool {
+	return errors.Is(err, syscall.ENXIO)
 }

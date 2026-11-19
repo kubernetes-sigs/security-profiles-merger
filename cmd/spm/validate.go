@@ -29,16 +29,28 @@ const validateUsage = `Usage: spm validate [options] [files...]
 
 Validate one or more security profiles.
 Reads from stdin when no files are provided: a single profile, or a JSON
-array of profiles.
+array of profiles. A file argument of - reads stdin beside the files.
+Flags must precede file arguments, and -- ends them.
+Exit status: 0 when every profile is valid, 1 when one is invalid or cannot
+be read or the output cannot be written, 2 on a usage error.
 Writes the validated profiles on success; --quiet writes no profile and
 notes no auto-detected profile type, and --no-detect-note drops that note
 while still writing the profiles. Errors and warnings always go to stderr.
 --quiet cannot be combined with --output or --format, nor --strict with
 --artifact.
 
+--arch names the native seccomp architecture of the node that loads the
+profiles, which decides what --artifact and --strict accept: a value above
+32 bits is refused where that node covers a 32-bit architecture. It
+defaults to the architecture this program runs on, so the same profile can
+pass here and fail on another machine; pass a name such as SCMP_ARCH_X86_64
+for the target node, or --arch none to imply no architecture. The default
+checks do not depend on it, so it needs --artifact or --strict.
+
 Options:
 `
 
+//nolint:funlen // declares its flags one by one, unlike merge and diff
 func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := newFlagSet(cmdValidate)
 
@@ -53,7 +65,7 @@ func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	artifact := flags.Bool(
 		"artifact", false,
 		"validate as an artifact, the untrusted profile a container runtime "+
-			"pulls, rejecting repeated and misspelled fields and invalid UTF-8",
+			"pulls, rejecting unknown, repeated and misspelled fields and invalid UTF-8",
 	)
 	format := flags.String("format", formatJSON, "output format: json, human")
 	output := flags.String(
@@ -68,6 +80,12 @@ func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		"no-detect-note", false,
 		"do not note an auto-detected profile type on stderr; the validated "+
 			"profiles, errors and warnings still go to their usual streams",
+	)
+
+	var archValue string
+
+	bindArchFlag(
+		flags, &archValue, "of the node that loads the profiles, for --artifact or --strict",
 	)
 
 	if done, code := parseFlags(flags, validateUsage, args, stdout, stderr); done {
@@ -86,7 +104,13 @@ func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		artifact:    *artifact,
 		quiet:       *quiet,
 		formatSet:   flagNamed(flags, "format"),
+		archSet:     flagNamed(flags, flagNameArch),
 	}, stderr)
+	if code != 0 {
+		return code
+	}
+
+	arch, code := parseArchFlag(flags, archValue, stderr)
 	if code != 0 {
 		return code
 	}
@@ -96,7 +120,7 @@ func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	return validateInputs(
-		flags.Args(), *profileType, modeFromFlags(*strict, *artifact),
+		flags.Args(), *profileType, modeFromFlags(*strict, *artifact), arch,
 		*format, *output, *quiet, *noDetectNote, stdin, stdout, stderr,
 	)
 }
@@ -104,7 +128,7 @@ func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // validateInputs reads, validates, and writes back the profiles named by
 // args, which may be empty to read from stdin.
 func validateInputs(
-	args []string, profileType string, mode validateMode,
+	args []string, profileType string, mode validateMode, arch archOption,
 	format, output string, quiet, noDetectNote bool,
 	stdin io.Reader, stdout, stderr io.Writer,
 ) int {
@@ -124,7 +148,7 @@ func validateInputs(
 
 	var out bytes.Buffer
 
-	code = kind.validate(inputs, mode, format, &out, stderr)
+	code = kind.validate(inputs, mode, arch, format, &out, stderr)
 	if code != 0 {
 		return code
 	}
@@ -160,6 +184,8 @@ type validateFlags struct {
 	// formatSet reports whether --format was named, which a default value
 	// cannot tell apart from the flag being left out.
 	formatSet bool
+	// archSet reports whether --arch was named, for the same reason.
+	archSet bool
 }
 
 func validateValidateFlags(opts validateFlags, stderr io.Writer) int {
@@ -171,12 +197,8 @@ func validateValidateFlags(opts validateFlags, stderr io.Writer) int {
 		return code
 	}
 
-	if opts.strict && opts.artifact {
-		_, _ = fmt.Fprintln(
-			stderr, "error: --strict cannot be combined with --artifact",
-		)
-
-		return exitUsage
+	if code := checkModeFlags(opts, stderr); code != 0 {
+		return code
 	}
 
 	if opts.quiet && opts.output != "" {
@@ -192,6 +214,31 @@ func validateValidateFlags(opts validateFlags, stderr io.Writer) int {
 	if opts.quiet && opts.formatSet {
 		_, _ = fmt.Fprintln(
 			stderr, "error: --quiet cannot be combined with --format",
+		)
+
+		return exitUsage
+	}
+
+	return 0
+}
+
+// checkModeFlags checks the flags that choose the validation mode and what
+// it depends on.
+func checkModeFlags(opts validateFlags, stderr io.Writer) int {
+	if opts.strict && opts.artifact {
+		_, _ = fmt.Fprintln(
+			stderr, "error: --strict cannot be combined with --artifact",
+		)
+
+		return exitUsage
+	}
+
+	// The default checks do not depend on the architecture, so --arch
+	// without the checks that do would be a flag that quietly does nothing,
+	// as it would be for a profile type without architectures.
+	if opts.archSet && !opts.strict && !opts.artifact {
+		_, _ = fmt.Fprintln(
+			stderr, "error: --arch only applies with --strict or --artifact",
 		)
 
 		return exitUsage
@@ -254,6 +301,8 @@ func writeValidated[T any](
 
 			_, _ = fmt.Fprintln(stdout, str)
 		}
+
+		warnTruncated(stderr, humanStrs...)
 	default:
 		err := encodeJSON(stdout, profiles)
 		if err != nil {

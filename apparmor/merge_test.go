@@ -20,6 +20,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
@@ -2007,5 +2008,69 @@ func TestUnionFoldIsDeterministic(t *testing.T) {
 			t.Fatalf("Union = %s, then %s",
 				apparmor.FormatProfile(first), apparmor.FormatProfile(again))
 		}
+	}
+}
+
+// TestMergeErrorsNameTheCallersEntry pins where a merge failure points: at
+// the entry the caller wrote, at its index in the caller's list, although the
+// merge goes on to work with a copy whose duplicates are folded and whose
+// paths are normalized.
+func TestMergeErrorsNameTheCallersEntry(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		name    string
+		profile *apparmor.Profile
+		want    string
+	}{
+		{
+			name:    "after a folded duplicate path",
+			profile: readOnly("/a", "/a", "/b", "@{HOME}/x"),
+			want:    `ReadOnlyPaths[3]: "@{HOME}/x"`,
+		},
+		{
+			name:    "after folded aliases",
+			profile: readOnly(`/\x61`, "/a", "/b//c", `/b//@{x}`),
+			want:    `ReadOnlyPaths[3]: "/b//@{x}"`,
+		},
+		{
+			name: "after a folded duplicate capability",
+			profile: &apparmor.Profile{
+				Executable: nil, Filesystem: nil, Network: nil,
+				Capabilities: &apparmor.CapabilityRules{
+					AllowedCapabilities: []string{"chown", "CHOWN", ""},
+				},
+			},
+			want: "AllowedCapabilities[2]",
+		},
+		{
+			name: "a path in two categories as written",
+			profile: fsProfile(&apparmor.FilesystemRules{
+				ReadOnlyPaths:  []string{"/etc//passwd"},
+				WriteOnlyPaths: nil,
+				ReadWritePaths: []string{`/etc/\passwd`},
+			}),
+			want: `path "/etc/\\passwd" in both`,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			for name, mergeFn := range map[string]mergeFunc{
+				"Intersect": apparmor.Intersect,
+				"Union":     apparmor.Union,
+			} {
+				_, err := mergeFn(readOnly("/x"), testCase.profile)
+
+				var inputErr *apparmor.InputError
+				if !errors.As(err, &inputErr) || inputErr.Index != 1 {
+					t.Fatalf("%s = %v, want an InputError for input 1", name, err)
+				}
+
+				if !strings.Contains(err.Error(), testCase.want) {
+					t.Errorf("%s = %q, want it to name %s", name, err, testCase.want)
+				}
+			}
+		})
 	}
 }

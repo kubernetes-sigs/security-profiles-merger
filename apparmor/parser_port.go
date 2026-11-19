@@ -264,29 +264,32 @@ func filterRawSlashes(path string) string {
 		return filterSlashes(path)
 	}
 
-	units := rawUnits(path)
-
 	var builder strings.Builder
 
 	builder.Grow(len(path))
 
-	start := 0
+	pos := 0
 
-	if len(units) >= 2 && units[0].slash && units[1].slash &&
-		(len(units) == 2 || !units[2].slash) {
-		builder.WriteString(path[:units[1].end])
+	if first := nextRawUnit(path, 0); first.slash && first.end < len(path) {
+		if second := nextRawUnit(path, first.end); second.slash &&
+			(second.end == len(path) || !nextRawUnit(path, second.end).slash) {
+			builder.WriteString(path[:second.end])
 
-		start = 2
+			pos = second.end
+		}
 	}
 
 	seenSlash := false
 
-	for _, current := range units[start:] {
+	for pos < len(path) {
+		current := nextRawUnit(path, pos)
+
 		if !current.slash || !seenSlash {
 			builder.WriteString(path[current.start:current.end])
 		}
 
 		seenSlash = current.slash
+		pos = current.end
 	}
 
 	return builder.String()
@@ -300,25 +303,19 @@ type rawUnit struct {
 	slash bool
 }
 
-// rawUnits splits a path into the units decodeEscapes reads it as.
-func rawUnits(path string) []rawUnit {
-	units := make([]rawUnit, 0, len(path))
-
-	for pos := 0; pos < len(path); {
-		if path[pos] == '\\' && pos+1 < len(path) {
-			if val, end, ok := escapeSequence(path, pos+1, ""); ok {
-				units = append(units, rawUnit{start: pos, end: end, slash: val == '/'})
-				pos = end
-
-				continue
-			}
+// nextRawUnit returns the unit decodeEscapes reads at pos, which is inside
+// the path. filterRawSlashes reads the units one at a time rather than
+// splitting the path into a slice of them first, which would cost several
+// times the length of a path a profile chooses, and Diff normalizes paths
+// of any length.
+func nextRawUnit(path string, pos int) rawUnit {
+	if path[pos] == '\\' && pos+1 < len(path) {
+		if val, end, ok := escapeSequence(path, pos+1, ""); ok {
+			return rawUnit{start: pos, end: end, slash: val == '/'}
 		}
-
-		units = append(units, rawUnit{start: pos, end: pos + 1, slash: path[pos] == '/'})
-		pos++
 	}
 
-	return units
+	return rawUnit{start: pos, end: pos + 1, slash: path[pos] == '/'}
 }
 
 // conversion is the result of convertPattern.
@@ -337,6 +334,14 @@ type conversion struct {
 	// directly after a "/", which makes the pattern the expansion of its
 	// literal prefix.
 	starStarOnly bool
+	// escapedNegation reports a class whose first member is an escaped
+	// "^", as in `[\^x]`, `[\x5ex]` or `[\136x]`. processunquoted keeps
+	// the escape, convert_aaregex_to_pcre drops the backslash inside a
+	// class, and libapparmor_re reads the "^" that is left as negating the
+	// class: the pattern says "^ or x" and loads as any byte but x,
+	// including "/". The port models the negation, so the pattern matches
+	// what it loads as, and the validators report it.
+	escapedNegation bool
 }
 
 // converter holds the state of convert_aaregex_to_pcre.
@@ -394,6 +399,8 @@ func convertPattern(pattern string) conversion {
 			literalEnd:   0,
 			alternatives: 0,
 			starStarOnly: false,
+
+			escapedNegation: false,
 		},
 	}
 	conv.regex.Grow(len(pattern))
@@ -476,6 +483,8 @@ func (conv *converter) literal(pos int, escaped bool) int {
 	case char == '^' || char == '$':
 		if !conv.inClass {
 			conv.regex.WriteByte('\\')
+		} else if escaped && char == '^' && conv.regex.Len() == conv.classOpen+1 {
+			conv.result.escapedNegation = true
 		}
 
 		conv.regex.WriteByte(char)

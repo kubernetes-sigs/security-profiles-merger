@@ -68,7 +68,9 @@ type InputError = spm.InputError
 // documentation describes, and a failure is returned as an InputError
 // naming the input.
 func Intersect(profiles ...*Profile) (*Profile, error) {
-	return foldProfiles(profiles, intersectStrategy{})
+	matchers := newMatcherCache()
+
+	return foldProfiles(profiles, matchers, intersectStrategy{matchers: matchers})
 }
 
 // Union merges multiple AppArmor profiles via union: the resulting profile
@@ -91,7 +93,9 @@ func Intersect(profiles ...*Profile) (*Profile, error) {
 // own side grants it, which permits exactly what the reduced union permits
 // (see the Cost bounds section). Inputs are validated as for Intersect.
 func Union(profiles ...*Profile) (*Profile, error) {
-	return foldProfiles(profiles, unionStrategy{})
+	matchers := newMatcherCache()
+
+	return foldProfiles(profiles, matchers, unionStrategy{matchers: matchers})
 }
 
 type strategy interface {
@@ -103,9 +107,19 @@ type strategy interface {
 	prepare(profile *Profile)
 }
 
-func foldProfiles(profiles []*Profile, mergeOp strategy) (*Profile, error) {
+// foldProfiles validates and merges the profiles. matchers is the call's
+// cache of pattern analyses, which mergeOp reads too. Validation analyzes
+// every path of one input, its filesystem rules first, before it reads the
+// next input, so which patterns fit the call's compile budget depends on the
+// inputs and their order alone, not on the order a merge visits them in.
+func foldProfiles(
+	profiles []*Profile, matchers *matcherCache, mergeOp strategy,
+) (*Profile, error) {
+	// The caller's profiles are validated as written, before any of them
+	// is normalized, so that a failure names the caller's index and
+	// spelling, and no normalization work is spent on an oversized path.
 	for idx, profile := range profiles {
-		err := validateRawPaths(profile)
+		err := validateMergeInput(profile, matchers)
 		if err != nil {
 			return nil, &spm.InputError{Index: idx, Err: err}
 		}
@@ -115,17 +129,12 @@ func foldProfiles(profiles []*Profile, mergeOp strategy) (*Profile, error) {
 	for idx, profile := range profiles {
 		normalized[idx] = normalizeProfile(profile)
 		deduplicateProfile(normalized[idx])
-		canonicalizeAliases(normalized[idx])
-
-		err := Validate(normalized[idx])
-		if err != nil {
-			return nil, &spm.InputError{Index: idx, Err: err}
-		}
+		canonicalizeAliases(normalized[idx], matchers)
 	}
 
 	// Each profile now holds one spelling per rule, but two profiles may
 	// hold different ones, and the merge compares paths as text.
-	unifyAliasSpellings(normalized)
+	unifyAliasSpellings(normalized, matchers)
 
 	// Preparing may drop paths, so it runs after validation, which must see
 	// every path the caller passed.
@@ -158,8 +167,10 @@ func foldProfiles(profiles []*Profile, mergeOp strategy) (*Profile, error) {
 // exact duplicate. The result needs no folding of its own, since
 // unifyAliasSpellings has given every input the same spelling for a rule and
 // the merge introduces no new one.
-func canonicalizeAliases(profile *Profile) {
-	mapPathLists(profile, foldAliasList)
+func canonicalizeAliases(profile *Profile, matchers *matcherCache) {
+	mapPathLists(profile, func(paths []string) []string {
+		return foldAliasList(paths, matchers)
+	})
 }
 
 // unifyAliasSpellings gives every profile the same spelling for a rule any
@@ -181,15 +192,15 @@ func canonicalizeAliases(profile *Profile) {
 // It cannot make a profile hold one rule twice. Within a list, each profile
 // holds one path per key already, and rewriting maps equal keys to one
 // spelling, so the rewritten list has one path per key as well. Across the
-// categories of one profile, Validate has just rejected two paths sharing a
+// categories of one profile, validation has rejected two paths sharing a
 // key, so no two categories can collapse onto one spelling here.
-func unifyAliasSpellings(profiles []*Profile) {
+func unifyAliasSpellings(profiles []*Profile, matchers *matcherCache) {
 	simplest := make(map[pathKey]string)
 
 	for _, profile := range profiles {
 		eachPathList(profile, func(paths []string) {
 			for _, path := range paths {
-				key := keyForPath(path)
+				key := matchers.key(path)
 
 				kept, ok := simplest[key]
 				if !ok || simplestSpelling(path, kept) < 0 {
@@ -202,7 +213,7 @@ func unifyAliasSpellings(profiles []*Profile) {
 	for _, profile := range profiles {
 		eachPathList(profile, func(paths []string) {
 			for idx, path := range paths {
-				paths[idx] = simplest[keyForPath(path)]
+				paths[idx] = simplest[matchers.key(path)]
 			}
 		})
 	}
@@ -234,11 +245,11 @@ func mapPathLists(profile *Profile, apply func(paths []string) []string) {
 }
 
 // hasAliases reports whether two different paths of a list spell one rule.
-func hasAliases(paths []string) bool {
+func hasAliases(paths []string, matchers *matcherCache) bool {
 	seen := make(map[pathKey]string, len(paths))
 
 	for _, path := range paths {
-		key := keyForPath(path)
+		key := matchers.key(path)
 
 		if earlier, ok := seen[key]; ok && earlier != path {
 			return true
@@ -251,8 +262,8 @@ func hasAliases(paths []string) bool {
 }
 
 // foldAliasList returns the list with one spelling per rule.
-func foldAliasList(paths []string) []string {
-	if !hasAliases(paths) {
+func foldAliasList(paths []string, matchers *matcherCache) []string {
+	if !hasAliases(paths, matchers) {
 		return paths
 	}
 
@@ -263,7 +274,7 @@ func foldAliasList(paths []string) []string {
 	folded := make([]string, 0, len(sorted))
 
 	for _, path := range sorted {
-		key := keyForPath(path)
+		key := matchers.key(path)
 
 		if _, ok := seen[key]; ok {
 			continue
@@ -406,8 +417,11 @@ func mergeCapabilities(left, right *CapabilityRules, mergeStrategy strategy) *Ca
 	)
 }
 
-// intersectStrategy implements intersection (AND) semantics.
-type intersectStrategy struct{}
+// intersectStrategy implements intersection (AND) semantics. matchers is
+// the call's cache of pattern analyses, nil to read the shared cache only.
+type intersectStrategy struct {
+	matchers *matcherCache
+}
 
 // prepare makes omitted sections explicit, since to AppArmor an absent
 // section denies everything it covers and the intersection must not permit
@@ -415,10 +429,14 @@ type intersectStrategy struct{}
 //
 // It also drops the glob patterns that match nothing, as a pairwise
 // intersection does, so that intersecting a single profile gives what
-// intersecting it with itself gives.
-func (intersectStrategy) prepare(profile *Profile) {
+// intersecting it with itself gives. A pattern past the call's compile
+// budget is kept, as a pairwise intersection keeps it where both sides list
+// it.
+func (op intersectStrategy) prepare(profile *Profile) {
 	populateEmpty(profile)
-	mapPathLists(profile, dropUnusableGlobs)
+	mapPathLists(profile, func(paths []string) []string {
+		return dropUnusableGlobs(paths, op.matchers)
+	})
 }
 
 // populateEmpty replaces every nil section of the profile with an explicit
@@ -468,8 +486,8 @@ func (intersectStrategy) mergeStrings(left, right []string) []string {
 // reading every path as granting one permission, so that the executable
 // lists and the filesystem rules are narrowed, budgeted and fallen back by
 // one implementation.
-func (intersectStrategy) mergePaths(left, right []string) []string {
-	return permittedPaths(intersectPerms(readPerms(left), readPerms(right)))
+func (op intersectStrategy) mergePaths(left, right []string) []string {
+	return permittedPaths(intersectPerms(readPerms(left), readPerms(right), op.matchers))
 }
 
 // mergeBool never sees nil, since prepare populated every boolean.
@@ -493,17 +511,19 @@ func mergeBoolPtr(left, right *bool, combine func(lhs, rhs bool) bool) *bool {
 	return &val
 }
 
-func (intersectStrategy) mergeFilesystem(left, right *FilesystemRules) *FilesystemRules {
-	return collapseFsPerms(intersectPerms(expandFsPerms(left), expandFsPerms(right)))
+func (op intersectStrategy) mergeFilesystem(left, right *FilesystemRules) *FilesystemRules {
+	return collapseFsPerms(intersectPerms(expandFsPerms(left), expandFsPerms(right), op.matchers))
 }
 
 // intersectPerms returns the permissions both sides grant, per path.
-func intersectPerms(leftPerms, rightPerms map[string]fsPermission) map[string]fsPermission {
+func intersectPerms(
+	leftPerms, rightPerms map[string]fsPermission, matchers *matcherCache,
+) map[string]fsPermission {
 	merged := make(map[string]fsPermission)
 
 	// Literal-vs-literal intersection via map lookup: O(n+m).
 	for path, leftPerm := range leftPerms {
-		if IsGlobPattern(path) {
+		if matchers.isGlob(path) {
 			continue
 		}
 
@@ -522,18 +542,18 @@ func intersectPerms(leftPerms, rightPerms map[string]fsPermission) map[string]fs
 	// the work is bounded as well: past the budget only the patterns both
 	// sides list alike are kept, next to the literals both sides list, which
 	// permits no more than matching them would.
-	leftSide := buildFsSide(leftPerms)
-	rightSide := buildFsSide(rightPerms)
+	leftSide := buildFsSide(leftPerms, matchers)
+	rightSide := buildFsSide(rightPerms, matchers)
 
 	if exceedsPairBudget(leftSide.size(), rightSide.size()) {
-		addVerbatimGlobs(leftSide, rightSide, merged)
+		addVerbatimGlobs(&leftSide, &rightSide, merged)
 
 		return merged
 	}
 
-	matchFsLiterals(leftSide.literals, rightSide, merged)
-	matchFsLiterals(rightSide.literals, leftSide, merged)
-	matchFsGlobs(leftSide, rightSide, merged)
+	matchFsLiterals(leftSide.literals, &rightSide, merged)
+	matchFsLiterals(rightSide.literals, &leftSide, merged)
+	matchFsGlobs(&leftSide, &rightSide, merged)
 
 	return merged
 }
@@ -557,14 +577,12 @@ func addFsMatch(merged map[string]fsPermission, key string, perm fsPermission) {
 // matchFsLiterals intersects every literal path with the globs of the other
 // side that match it, keyed by the literal, which is the narrower path.
 func matchFsLiterals(
-	literals []fsPathEntry, other fsSide, merged map[string]fsPermission,
+	literals []fsPathEntry, other *fsSide, merged map[string]fsPermission,
 ) {
 	for _, literal := range literals {
-		name := literal.matcher.literal
-
-		other.byPrefix.candidates(name, func(pattern string) bool {
+		other.byPrefix.candidates(literal.matcher.literal, func(pattern string) bool {
 			entry := other.globs[pattern]
-			if entry.matcher.matches(name) {
+			if entry.matcher.matchesMapped(literal.mapped) {
 				addFsMatch(merged, literal.path, literal.perm.intersect(entry.perm))
 			}
 
@@ -576,7 +594,7 @@ func matchFsLiterals(
 // matchFsGlobs intersects globs present on both sides, and globs one side
 // covers with the "**" expansion of a containing prefix. The narrower of the
 // two patterns keys the result, as it is the one both sides permit.
-func matchFsGlobs(left, right fsSide, merged map[string]fsPermission) {
+func matchFsGlobs(left, right *fsSide, merged map[string]fsPermission) {
 	addVerbatimGlobs(left, right, merged)
 
 	for _, entry := range left.globs {
@@ -593,11 +611,18 @@ func matchFsGlobs(left, right fsSide, merged map[string]fsPermission) {
 
 // addVerbatimGlobs intersects the patterns both sides list alike, which
 // needs no matching: a pattern both sides list is permitted by both whatever
-// it matches.
-func addVerbatimGlobs(left, right fsSide, merged map[string]fsPermission) {
-	for pattern, entry := range left.globs {
-		if other, both := right.globs[pattern]; both {
-			addFsMatch(merged, pattern, entry.perm.intersect(other.perm))
+// it matches. That holds for a pattern the call did not compile too, so the
+// patterns kept only for this are intersected as well. One call analyzes a
+// pattern once, so a pattern is compiled on both sides or on neither.
+func addVerbatimGlobs(left, right *fsSide, merged map[string]fsPermission) {
+	for _, globs := range []struct{ left, right map[string]fsPathEntry }{
+		{left.globs, right.globs},
+		{left.verbatim, right.verbatim},
+	} {
+		for pattern, entry := range globs.left {
+			if other, both := globs.right[pattern]; both {
+				addFsMatch(merged, pattern, entry.perm.intersect(other.perm))
+			}
 		}
 	}
 }
@@ -605,7 +630,7 @@ func addVerbatimGlobs(left, right fsSide, merged map[string]fsPermission) {
 // narrowFsGlob intersects a glob with every "<prefix>**" pattern of the
 // other side that expands over it (see globMatcher.expandedBy), keyed by the
 // glob, which is the narrower of the two.
-func narrowFsGlob(entry fsPathEntry, other fsSide, merged map[string]fsPermission) {
+func narrowFsGlob(entry fsPathEntry, other *fsSide, merged map[string]fsPermission) {
 	other.starStar.candidates(entry.matcher.prefix, func(pattern string) bool {
 		base := other.globs[pattern]
 		if entry.matcher.expandedBy(base.matcher) {
@@ -616,8 +641,11 @@ func narrowFsGlob(entry fsPathEntry, other fsSide, merged map[string]fsPermissio
 	})
 }
 
-// unionStrategy implements union (OR) semantics.
-type unionStrategy struct{}
+// unionStrategy implements union (OR) semantics. matchers is as for
+// intersectStrategy.
+type unionStrategy struct {
+	matchers *matcherCache
+}
 
 // prepare leaves omitted sections alone: for a union, a nil section and an
 // empty one both yield the other side's grants.
@@ -627,16 +655,16 @@ func (unionStrategy) mergeStrings(left, right []string) []string {
 	return merge.UnionSlice(left, right)
 }
 
-func (unionStrategy) mergePaths(left, right []string) []string {
-	return permittedPaths(unionPerms(readPerms(left), readPerms(right)))
+func (op unionStrategy) mergePaths(left, right []string) []string {
+	return permittedPaths(unionPerms(readPerms(left), readPerms(right), op.matchers))
 }
 
 func (unionStrategy) mergeBool(left, right *bool) *bool {
 	return mergeBoolPtr(left, right, func(lhs, rhs bool) bool { return lhs || rhs })
 }
 
-func (unionStrategy) mergeFilesystem(left, right *FilesystemRules) *FilesystemRules {
-	return collapseFsPerms(unionPerms(expandFsPerms(left), expandFsPerms(right)))
+func (op unionStrategy) mergeFilesystem(left, right *FilesystemRules) *FilesystemRules {
+	return collapseFsPerms(unionPerms(expandFsPerms(left), expandFsPerms(right), op.matchers))
 }
 
 // readPerms maps every path of a list to the read permission, so that a
@@ -676,22 +704,24 @@ func permittedPaths(perms map[string]fsPermission) []string {
 // write-only glob becomes read-write. A profile's own globs never prune its
 // own literals. Each path's result depends only on the two profiles, not on
 // their order or on the order of the paths within them.
-func unionPerms(left, right map[string]fsPermission) map[string]fsPermission {
+func unionPerms(
+	left, right map[string]fsPermission, matchers *matcherCache,
+) map[string]fsPermission {
 	merged := make(map[string]fsPermission, len(left)+len(right))
 
-	leftSide := buildFsSide(left)
-	rightSide := buildFsSide(right)
+	leftSide := buildFsSide(left, matchers)
+	rightSide := buildFsSide(right, matchers)
 
 	if exceedsPairBudget(leftSide.size(), rightSide.size()) {
 		return unionVerbatim(left, right)
 	}
 
-	addUnionLiterals(leftSide.literals, right, rightSide, merged)
-	addUnionLiterals(rightSide.literals, left, leftSide, merged)
+	addUnionLiterals(leftSide.literals, right, &rightSide, merged)
+	addUnionLiterals(rightSide.literals, left, &leftSide, merged)
 
 	for _, perms := range []map[string]fsPermission{left, right} {
 		for path, perm := range perms {
-			if IsGlobPattern(path) {
+			if matchers.isGlob(path) {
 				merged[path] = merged[path].union(perm)
 			}
 		}
@@ -721,14 +751,14 @@ func unionVerbatim(left, right map[string]fsPermission) map[string]fsPermission 
 // addUnionLiterals records the literals of one profile as unionPerms
 // describes, given the other profile's paths and globs.
 func addUnionLiterals(
-	literals []fsPathEntry, otherPerms map[string]fsPermission, other fsSide,
+	literals []fsPathEntry, otherPerms map[string]fsPermission, other *fsSide,
 	merged map[string]fsPermission,
 ) {
 	for _, literal := range literals {
 		perm := literal.perm
 
 		if _, listed := otherPerms[literal.path]; !listed {
-			granted := other.grants(literal.matcher.literal)
+			granted := other.grants(literal)
 			if granted.union(perm) == granted {
 				continue
 			}

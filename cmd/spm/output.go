@@ -23,6 +23,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
@@ -33,6 +34,8 @@ func writeOutput(
 	switch format {
 	case formatHuman:
 		_, _ = fmt.Fprintln(stdout, humanStr)
+
+		warnTruncated(stderr, humanStr)
 	default:
 		err := encodeJSON(stdout, result)
 		if err != nil {
@@ -60,13 +63,19 @@ func flushOutput(path string, content []byte, stdout, stderr io.Writer) int {
 		return 0
 	}
 
+	// The path is used as written, never cleaned: cleaning "link/../x"
+	// lexically drops the symlinked directory the kernel would follow, and
+	// with it the directory the caller meant.
 	err := checkOutputPath(path)
 	if err == nil {
-		err = writeOutputFile(filepath.Clean(path), content)
+		err = writeOutputFile(path, content)
 	}
 
+	// The failure names the path, which the errors below leave out: it is
+	// spelled here once, as the caller wrote it, rather than by os in a
+	// cleaned form or as the temporary file's name.
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "error: writing output file: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "error: writing %s: %v\n", merge.SafeName(path), err)
 
 		return 1
 	}
@@ -78,13 +87,16 @@ func flushOutput(path string, content []byte, stdout, stderr io.Writer) int {
 // is refused rather than followed.
 var errSymlinkOutput = errors.New("refusing to write through a symbolic link")
 
-// errDirectoryOutput reports an --output path that names a directory.
-var errDirectoryOutput = errors.New("is a directory")
+// errDirectoryOutput reports an --output path whose last element names a
+// directory, whatever the path leads to.
+var errDirectoryOutput = errors.New("ends in /, . or .., which names a directory, not a file")
 
 // checkOutputPath refuses an --output path whose last element is empty, "."
 // or "..", as in "dir/", "dir/." and "dir/..". Such a path names a
-// directory, and cleaning it would drop that element and create a file
-// named "dir" where no directory of that name exists.
+// directory whether or not one exists, so it is refused up front rather
+// than left to whatever the file system says about replacing a directory:
+// renaming over "dir/." fails with EBUSY on Linux, which would read as a
+// mount point to be written in place.
 func checkOutputPath(path string) error {
 	start := len(path)
 	for start > 0 && !os.IsPathSeparator(path[start-1]) {
@@ -97,6 +109,27 @@ func checkOutputPath(path string) error {
 	default:
 		return nil
 	}
+}
+
+// parentDir returns the directory that holds the file path names, spelled
+// as the path spells it: the text up to and including the last separator,
+// or "." for a name without one. Unlike filepath.Dir it does not clean the
+// path, which would resolve "link/.." lexically to "." where the kernel
+// resolves it to the parent of the directory link points to. The volume of
+// a Windows path stays in front, so that "C:x.json" stays on drive C.
+func parentDir(path string) string {
+	volume := filepath.VolumeName(path)
+
+	end := len(path)
+	for end > len(volume) && !os.IsPathSeparator(path[end-1]) {
+		end--
+	}
+
+	if end == len(volume) {
+		return volume + "."
+	}
+
+	return path[:end]
 }
 
 // writeOutputFile writes content to path. A symlink at path is refused
@@ -129,7 +162,7 @@ func writeOutputFile(path string, content []byte) error {
 	case err != nil:
 		return bareFileError(err)
 	case info.Mode()&fs.ModeSymlink != 0 && refuseSymlinks:
-		return symlinkError(path)
+		return errSymlinkRefused
 	case info.Mode()&fs.ModeSymlink != 0:
 		// Followed where symlinks are not refused: what is replaced or
 		// written is the file the link leads to, not the link.
@@ -142,7 +175,7 @@ func writeOutputFile(path string, content []byte) error {
 	case info.Mode().IsRegular():
 		return writeRegularFile(path, content)
 	default:
-		return writeInPlace(path, content, 0)
+		return writeInPlace(path, content, false)
 	}
 }
 
@@ -159,7 +192,7 @@ func writeRegularFile(path string, content []byte) error {
 	// read-only root file system, or of one running as another user than
 	// root.
 	if isMountedFile(path) {
-		return writeInPlace(path, content, os.O_TRUNC)
+		return writeInPlace(path, content, true)
 	}
 
 	return replaceOutputFile(path, content)
@@ -171,28 +204,69 @@ func writeRegularFile(path string, content []byte) error {
 // made read-only to keep it, is refused as it was when it was written in
 // place.
 func checkWritable(path string) error {
-	file, err := os.OpenFile( //nolint:gosec // the caller named this path
-		path, os.O_WRONLY|oNoFollow, 0,
-	)
+	file, err := openRegular(path, 0)
 	if err != nil {
-		if isSymlinkRefusal(err) {
-			return symlinkError(path)
-		}
-
-		return bareFileError(err)
+		return err
 	}
 
 	return bareFileError(file.Close())
 }
 
-// symlinkError reports an --output path that is a symbolic link.
-func symlinkError(path string) error {
-	return fmt.Errorf(
-		"%w: %s is a symbolic link; write to its target, to stdout with -, "+
-			"or redirect stdout",
-		errSymlinkOutput, merge.SafeName(path),
+// errNotRegular reports an output file that was a regular file when it was
+// checked and is something else by the time it is opened.
+var errNotRegular = errors.New("is no longer a regular file")
+
+// openRegular opens for writing, with the given extra flags, an output file
+// that was found to be a regular file, and refuses it if it no longer is
+// one. It is opened without blocking and without following a symlink: a
+// FIFO put at path since it was checked would otherwise hold the open until
+// something reads from it, which a run that meant to replace a file must not
+// wait for, and a device would be written to.
+//
+// The type is only known once the file is open, so a device or a FIFO put
+// at path in the window between the check and the open is opened, though
+// never written to, before it is refused; Unix has no way to open a path
+// only if it is a regular file. Such a FIFO without a reader fails the open
+// with ENXIO, and so does a device without its hardware, neither of which
+// a regular file ever does, so that failure is reported as the file no
+// longer being a regular one rather than as "no such device or address".
+func openRegular(path string, flags int) (*os.File, error) {
+	// The path is the --output value, which is the caller's own choice;
+	// what needs guarding is what it names by now.
+	file, err := os.OpenFile( //nolint:gosec // the caller named this path
+		path, os.O_WRONLY|oNoFollow|oNonBlock|flags, 0,
 	)
+	if err != nil {
+		if isSymlinkRefusal(err) {
+			return nil, errSymlinkRefused
+		}
+
+		if isNoDevice(err) {
+			return nil, errNotRegular
+		}
+
+		return nil, bareFileError(err)
+	}
+
+	info, err := file.Stat()
+	if err == nil && !info.Mode().IsRegular() {
+		err = errNotRegular
+	}
+
+	if err != nil {
+		_ = file.Close()
+
+		return nil, bareFileError(err)
+	}
+
+	return file, nil
 }
+
+// errSymlinkRefused reports an --output path that is a symbolic link, with
+// what to do instead. The caller names the path.
+var errSymlinkRefused = fmt.Errorf(
+	"%w; write to its target, to stdout with -, or redirect stdout", errSymlinkOutput,
+)
 
 // tempPattern names the new file an output file is replaced through. It
 // does not carry the name of the output file: a name close to the longest
@@ -218,9 +292,17 @@ func replaceOutputFile(path string, content []byte) error {
 func replaceOutputFileWith(
 	path string, content []byte, rename func(oldPath, newPath string) error,
 ) error {
-	temp, err := os.CreateTemp(filepath.Dir(path), tempPattern)
+	dir := parentDir(path)
+
+	// A directory that takes no new file fails here, before the output file
+	// itself is touched, so the error says which step and directory it was:
+	// a bare "permission denied" for a file the caller can write would
+	// point at the wrong thing.
+	temp, err := os.CreateTemp(dir, tempPattern)
 	if err != nil {
-		return bareFileError(err)
+		return fmt.Errorf(
+			"creating temporary file in %s: %w", merge.SafeName(dir), bareFileError(err),
+		)
 	}
 
 	tempPath := temp.Name()
@@ -240,7 +322,7 @@ func replaceOutputFileWith(
 	_ = os.Remove(tempPath)
 
 	if isMountPoint(err) {
-		return writeInPlace(path, content, os.O_TRUNC)
+		return writeInPlace(path, content, true)
 	}
 
 	var linkErr *os.LinkError
@@ -286,20 +368,31 @@ func writeTempFile(temp *os.File, content []byte) error {
 
 // writeInPlace writes content to a file that cannot be replaced, such as a
 // device, a FIFO or a mount point, without changing its mode. It is opened
-// with the given flags, which truncate a regular file, and without
-// following a symlink, so that one put at path since it was checked is
-// refused too.
-func writeInPlace(path string, content []byte, flags int) error {
-	// The path is the --output value, which is the caller's own choice;
-	// what needs guarding is that it is not followed through a symlink.
-	file, err := os.OpenFile( //nolint:gosec // the caller named this path
-		path, os.O_WRONLY|oNoFollow|flags, 0,
+// without following a symlink, so that one put at path since it was checked
+// is refused too. A regular file, which is truncated, is opened as
+// openRegular opens it. A device or a FIFO the caller named is opened as a
+// shell redirection opens it, so a FIFO waits for its reader.
+func writeInPlace(path string, content []byte, regular bool) error {
+	var (
+		file *os.File
+		err  error
 	)
-	if err != nil {
-		if isSymlinkRefusal(err) {
-			return symlinkError(path)
-		}
 
+	if regular {
+		file, err = openRegular(path, os.O_TRUNC)
+	} else {
+		// The path is the --output value, which is the caller's own
+		// choice; what needs guarding is that it is not followed through
+		// a symlink.
+		file, err = os.OpenFile( //nolint:gosec // the caller named this path
+			path, os.O_WRONLY|oNoFollow, 0,
+		)
+		if err != nil && isSymlinkRefusal(err) {
+			err = errSymlinkRefused
+		}
+	}
+
+	if err != nil {
 		return bareFileError(err)
 	}
 
@@ -316,4 +409,20 @@ func writeInPlace(path string, content []byte, flags int) error {
 	}
 
 	return nil
+}
+
+// warnTruncated warns on stderr when one of the human outputs was cut at
+// merge.MaxFormattedBytes. The command still succeeds, since what it was
+// asked to check passed, but the output on stdout is not all of it, which
+// a reader of a cut line cannot otherwise tell from a short profile.
+func warnTruncated(stderr io.Writer, outputs ...string) {
+	if !slices.ContainsFunc(outputs, merge.Truncated) {
+		return
+	}
+
+	_, _ = fmt.Fprintf(
+		stderr,
+		"warning: human output cut at %d bytes; use --format json for the full output\n",
+		merge.MaxFormattedBytes,
+	)
 }

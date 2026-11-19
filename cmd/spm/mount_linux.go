@@ -19,7 +19,6 @@ package main
 import (
 	"bytes"
 	"os"
-	"path/filepath"
 	"strconv"
 )
 
@@ -29,19 +28,20 @@ import (
 // cannot be read, the answer is no, and the file is replaced like any other,
 // which a mount point then refuses.
 //
-// The file is opened for writing and without following a symlink, as the
-// write that follows opens it, so asking needs no access the write does not.
+// The file is opened as the write that follows opens it (see openRegular),
+// so asking needs no access the write does not, and a FIFO put at path does
+// not hold the question up.
 func isMountedFile(path string) bool {
-	file, err := os.OpenFile( //nolint:gosec // the caller named this path
-		path, os.O_WRONLY|oNoFollow, 0,
-	)
+	file, err := openRegular(path, 0)
 	if err != nil {
 		return false
 	}
 
 	defer func() { _ = file.Close() }()
 
-	dir, err := os.Open(filepath.Dir(path))
+	// The directory is the one the kernel resolved path through, which
+	// filepath.Dir would get wrong for "link/../file" (see parentDir).
+	dir, err := os.Open(parentDir(path))
 	if err != nil {
 		return false
 	}
