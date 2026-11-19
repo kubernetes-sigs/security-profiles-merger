@@ -277,10 +277,12 @@ func normalizeProfile(profile *specs.LinuxSeccomp, rules ruleMerger) *specs.Linu
 		Flags:            normalizeFlags(profile.Flags),
 		ListenerPath:     profile.ListenerPath,
 		ListenerMetadata: profile.ListenerMetadata,
-		Syscalls:         settledSyscalls(&rules, profile.Syscalls, def),
+		Syscalls:         nil,
 	}
 
-	rules.settleArchitectures(normalized, def, profile)
+	rules.settleWithArchitectures(normalized, def, func(rules ruleMerger) []specs.LinuxSyscall {
+		return settledSyscalls(&rules, profile.Syscalls, def)
+	}, profile)
 
 	return normalized
 }
@@ -331,11 +333,39 @@ func mergeTwo(
 		}
 	}
 
-	merged.Syscalls = rules.mergeProfileSyscalls(left, right, &mergedDefault)
-
-	rules.settleArchitectures(merged, &mergedDefault, left, right)
+	rules.settleWithArchitectures(
+		merged,
+		&mergedDefault,
+		func(rules ruleMerger) []specs.LinuxSyscall {
+			return rules.mergeProfileSyscalls(left, right, &mergedDefault)
+		},
+		left,
+		right,
+	)
 
 	return merged
+}
+
+// settleWithArchitectures builds the syscalls of a result with build and
+// settles its architectures (see settleArchitectures). Whether the result
+// covers a 32-bit architecture decides how build reads some syscalls (see
+// ruleMerger.narrowCovered), and settling the architectures may drop the
+// 32-bit ones, so where it does, the syscalls are built again as a filter
+// without them loads them, and the architectures settled again. The list
+// only shrinks, so the second pass covers no 32-bit architecture either.
+func (m ruleMerger) settleWithArchitectures(
+	result *specs.LinuxSeccomp, def *clause,
+	build func(rules ruleMerger) []specs.LinuxSyscall, inputs ...*specs.LinuxSeccomp,
+) {
+	m.narrowCovered = coversAny(result.Architectures, narrowArchitectures, m.native)
+	result.Syscalls = build(m)
+	m.settleArchitectures(result, def, inputs...)
+
+	if m.narrowCovered && !coversAny(result.Architectures, narrowArchitectures, m.native) {
+		m.narrowCovered = false
+		result.Syscalls = build(m)
+		m.settleArchitectures(result, def, inputs...)
+	}
 }
 
 // settleArchitectures makes a result safe on the multiplexer path of the

@@ -29,6 +29,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -44,6 +45,10 @@ import (
 
 const (
 	compileWorkerEnv = "SPM_LIBSECCOMP_COMPILE_WORKER"
+	// compileScratchEnv names the directory a worker keeps its scratch
+	// files in. The parent creates it and removes it when the pool closes,
+	// since a worker it kills never gets to remove its own.
+	compileScratchEnv = "SPM_LIBSECCOMP_COMPILE_SCRATCH"
 	// compileTimeout is far above what any compile in these tests takes, so
 	// only a compile that does not return at all hits it.
 	compileTimeout = 5 * time.Second
@@ -82,7 +87,7 @@ func TestMain(m *testing.M) {
 	}
 
 	if os.Getenv(compileWorkerEnv) != "" {
-		os.Exit(serveCompiles(os.Stdin, os.Stdout))
+		os.Exit(serveCompiles(os.Getenv(compileScratchEnv), os.Stdin, os.Stdout))
 	}
 
 	code := m.Run()
@@ -98,9 +103,14 @@ type compileResponse struct {
 }
 
 // serveCompiles is the worker loop: it reads profiles and answers with the
-// compiled program or the failure.
-func serveCompiles(requests io.Reader, responses io.Writer) int {
-	scratch, err := os.MkdirTemp("", "spm-libseccomp")
+// compiled program or the failure. It keeps its scratch files in a
+// directory of its own below root, which the parent removes.
+func serveCompiles(root string, requests io.Reader, responses io.Writer) int {
+	if root == "" {
+		return 1
+	}
+
+	scratch, err := os.MkdirTemp(root, "worker")
 	if err != nil {
 		return 1
 	}
@@ -145,7 +155,7 @@ type compileWorker struct {
 	decoder *json.Decoder
 }
 
-func startCompileWorker() (*compileWorker, error) {
+func startCompileWorker(scratch string) (*compileWorker, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("find test binary: %w", err)
@@ -153,7 +163,11 @@ func startCompileWorker() (*compileWorker, error) {
 
 	cmd := exec.CommandContext(context.Background(), executable, "-test.run=^$")
 
-	cmd.Env = append(os.Environ(), compileWorkerEnv+"=1")
+	cmd.Env = append(os.Environ(), compileWorkerEnv+"=1", compileScratchEnv+"="+scratch)
+	// A worker dies with the test binary, so that one stuck in a compile
+	// does not outlive a run that times out.
+	cmd.SysProcAttr = new(syscall.SysProcAttr)
+	cmd.SysProcAttr.Pdeathsig = syscall.SIGKILL
 	cmd.Stderr = os.Stderr
 
 	stdin, err := cmd.StdinPipe()
@@ -209,12 +223,19 @@ type compilerPool struct {
 	mu    sync.Mutex
 	idle  []*compileWorker
 	slots chan struct{}
+	// scratch is the directory the workers keep their scratch files in,
+	// created with the first worker and removed by close. A run killed
+	// before close, as by -test.timeout, leaves it behind; its workers die
+	// with the run, and the directory holds at most their empty
+	// subdirectories.
+	scratch string
 }
 
 var compilers = &compilerPool{
-	mu:    sync.Mutex{},
-	idle:  nil,
-	slots: make(chan struct{}, runtime.GOMAXPROCS(0)),
+	mu:      sync.Mutex{},
+	idle:    nil,
+	slots:   make(chan struct{}, runtime.GOMAXPROCS(0)),
+	scratch: "",
 }
 
 func (p *compilerPool) acquire() (*compileWorker, error) {
@@ -230,7 +251,18 @@ func (p *compilerPool) acquire() (*compileWorker, error) {
 		return worker, nil
 	}
 
-	worker, err := startCompileWorker()
+	if p.scratch == "" {
+		scratch, err := os.MkdirTemp("", "spm-libseccomp")
+		if err != nil {
+			<-p.slots
+
+			return nil, fmt.Errorf("worker scratch: %w", err)
+		}
+
+		p.scratch = scratch
+	}
+
+	worker, err := startCompileWorker(p.scratch)
 	if err != nil {
 		<-p.slots
 
@@ -260,6 +292,11 @@ func (p *compilerPool) close() {
 	}
 
 	p.idle = nil
+
+	if p.scratch != "" {
+		_ = os.RemoveAll(p.scratch)
+		p.scratch = ""
+	}
 }
 
 // compile builds the profile with libseccomp in a worker. It returns

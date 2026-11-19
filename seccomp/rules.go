@@ -87,6 +87,16 @@ type syscallRules struct {
 	unconditional *clause
 	conditional   []clause
 	summary       *clauseSummary
+	// narrowFirst is the first clause, in the order a runtime adds them,
+	// that holds for every call where libseccomp compares 32 bits: an
+	// unconditional one, or one whose every condition is a
+	// SCMP_CMP_MASKED_EQ with a mask that sets only upper bits, which
+	// libseccomp drops there (see truncatedClause). Any other condition
+	// keeps a lower half to test: SCMP_CMP_EQ against 1<<32 tests for 0.
+	// libseccomp keeps the first unconditional rule of a syscall, so on a
+	// 32-bit architecture this decides every call where unconditional
+	// decides them elsewhere.
+	narrowFirst *clause
 }
 
 // forEachClause expands syscall entries into clauses the way a runtime loads
@@ -161,7 +171,9 @@ func collectRules(syscalls []specs.LinuxSyscall, def *clause) map[string]*syscal
 	forEachClause(syscalls, def, skip, func(_ int, name string, next clause) {
 		current, ok := rules[name]
 		if !ok {
-			current = &syscallRules{unconditional: nil, conditional: nil, summary: nil}
+			current = &syscallRules{
+				unconditional: nil, conditional: nil, summary: nil, narrowFirst: nil,
+			}
 			rules[name] = current
 		}
 
@@ -366,7 +378,9 @@ func summarizeRules(
 
 			current, ok := rules[name]
 			if !ok {
-				current = &syscallRules{unconditional: nil, conditional: nil, summary: nil}
+				current = &syscallRules{
+					unconditional: nil, conditional: nil, summary: nil, narrowFirst: nil,
+				}
 				rules[name] = current
 			}
 
@@ -428,6 +442,12 @@ func loadedArgs(args []specs.LinuxSeccompArg) []specs.LinuxSeccompArg {
 // clauses accumulate.
 func (r *syscallRules) add(next clause) {
 	next.errnoRet = merge.ClonePtr(next.errnoRet)
+
+	if r.narrowFirst == nil && truncatedClause(next).unconditional() {
+		first := next
+		first.args = nil
+		r.narrowFirst = &first
+	}
 
 	if !next.unconditional() {
 		r.conditional = append(r.conditional, next)
@@ -502,6 +522,13 @@ type ruleMerger struct {
 	// carrying such a condition the way it reads one outside the safe
 	// shapes.
 	narrow bool
+	// narrowCovered reports that the filter the result is loaded into
+	// covers an architecture libseccomp compiles 32-bit comparisons for,
+	// whatever the conditions of the inputs, and the input being read
+	// covers one too (see forInput). settleInputs then collapses a syscall
+	// whose rule deciding every call there differs from the one deciding
+	// every call elsewhere (see syscallRules.narrowFirst).
+	narrowCovered bool
 	// native is the architecture a runtime always adds to the filter of the
 	// result, which the merge cannot drop from it: the one of the running
 	// program.
@@ -519,11 +546,19 @@ func unionRules() ruleMerger {
 // intersectRulesFor and unionRulesFor return the merger of a node whose
 // native architecture is the given one.
 func intersectRulesFor(native specs.Arch) ruleMerger {
-	return ruleMerger{pick: moreRestrictive, intersect: true, narrow: false, native: native}
+	return ruleMerger{
+		pick: moreRestrictive, intersect: true, narrow: false, narrowCovered: false, native: native,
+	}
 }
 
 func unionRulesFor(native specs.Arch) ruleMerger {
-	return ruleMerger{pick: lessRestrictive, intersect: false, narrow: false, native: native}
+	return ruleMerger{
+		pick:          lessRestrictive,
+		intersect:     false,
+		narrow:        false,
+		narrowCovered: false,
+		native:        native,
+	}
 }
 
 func (m ruleMerger) pickClause(left, right clause) clause {
@@ -563,6 +598,14 @@ func (m ruleMerger) collapse(def *clause, conditional []clause) *clause {
 // compares only the lower 32 bits of it on a 32-bit architecture, where the
 // syscall's rules then mean something the model does not read, while a call
 // still gets the default or the action of one of them.
+//
+// With m.narrowCovered, a syscall with an unconditional clause collapses
+// too where a clause before it holds for every call on a 32-bit
+// architecture and gives another result: libseccomp keeps that clause
+// there and the unconditional one elsewhere, and one result cannot say
+// both. The collapse picks between the two in the merge direction, so the
+// syscall is read no more permissively (intersection) or no less
+// (union) than either architecture loads it.
 func (m ruleMerger) settleInputs(rules map[string]*syscallRules, def *clause) {
 	for name, current := range rules {
 		if current.summary != nil {
@@ -577,6 +620,10 @@ func (m ruleMerger) settleInputs(rules map[string]*syscallRules, def *clause) {
 		}
 
 		if current.unconditional != nil {
+			if !m.settleNarrowFirst(current, def) {
+				delete(rules, name)
+			}
+
 			continue
 		}
 
@@ -597,6 +644,42 @@ func (m ruleMerger) settleInputs(rules map[string]*syscallRules, def *clause) {
 		current.unconditional = collapsed
 		current.conditional = nil
 	}
+}
+
+// forInput returns the merger that reads one input: a rule that holds for
+// every call on a 32-bit architecture matters only where that input covers
+// one, since on an architecture it does not cover its calls are killed
+// whatever its rules say. Intersection results cover only what every input
+// covers, so this narrows nothing there; a union covers what any input
+// covers, and an input covering no 32-bit architecture is read as its
+// 64-bit filter loads it.
+func (m ruleMerger) forInput(input *specs.LinuxSeccomp) ruleMerger {
+	m.narrowCovered = m.narrowCovered &&
+		coversAny(input.Architectures, narrowArchitectures, m.native)
+
+	return m
+}
+
+// settleNarrowFirst collapses the rules of a syscall with an unconditional
+// clause where a 32-bit architecture the filter covers applies another
+// clause to every call (see settleInputs). The default applies to no call
+// of such a syscall on any architecture, so the collapse picks between the
+// two clauses alone. It reports false when the pick equals the default,
+// which then decides the syscall as the pick would.
+func (m ruleMerger) settleNarrowFirst(current *syscallRules, def *clause) bool {
+	first := current.narrowFirst
+	if !m.narrowCovered || first == nil || first.sameResult(*current.unconditional) {
+		return true
+	}
+
+	picked := m.pickClause(*current.unconditional, *first)
+	if def != nil && picked.sameResult(*def) {
+		return false
+	}
+
+	current.unconditional = &picked
+
+	return true
 }
 
 // settleOutput makes the merged rules of one syscall safe to emit: they
@@ -1259,8 +1342,8 @@ func (m ruleMerger) mergeProfileSyscalls(
 	leftRules := collectRules(left.Syscalls, leftDef)
 	rightRules := collectRules(right.Syscalls, rightDef)
 
-	m.settleInputs(leftRules, leftDef)
-	m.settleInputs(rightRules, rightDef)
+	m.forInput(left).settleInputs(leftRules, leftDef)
+	m.forInput(right).settleInputs(rightRules, rightDef)
 
 	names := mergedNames(leftRules, rightRules)
 
