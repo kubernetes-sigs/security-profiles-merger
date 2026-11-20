@@ -71,7 +71,9 @@ The codebase is organized in layers:
   through `Fold`, which returns a single profile as it is and stops at the
   first error a merge returns: apparmor and landlock fold copies they own,
   apparmor ends the fold past its budget, and seccomp normalizes a single
-  profile rather than merging it. It also holds the
+  profile rather than merging it. The apparmor package takes a `Union` of
+  literal paths in one pass instead, and ends an `Intersect` of two or
+  more profiles with a pass over their literal paths. It also holds the
   bounds on what an error reports (`Collector`, whose `Report` and
   `Reportf` build a failure only while the report has room, `BoundedError`,
   `QuoteBounded`), the limit sentinels (`LimitError`) and the quoting of

@@ -85,8 +85,8 @@ var load func(*specs.LinuxSeccomp)
 -->
 ```go
 // 0. At config load, check that the baseline loads, then that the merge
-//    reads every rule of it: its intersection with itself is equal to it
-//    exactly then.
+//    reads every rule of it: the intersection of the baseline alone is
+//    equal to it exactly then.
 if err := seccomp.ValidateBaseline(baseline); err != nil {
     return nodeMisconfigured(err)
 }
@@ -145,9 +145,9 @@ it, since the kernel denies `refer` there anyway, so a baseline listing
 0. **Check the baseline once, at config load, with `ValidateBaseline`**
    (seccomp and AppArmor): `Validate`, then
    `Diff(baseline, Intersect(baseline))`. The intersection of the baseline
-   with itself is equal to it exactly when the merge reads every rule of
-   it, so an unequal diff, `ErrInexactBaseline`, names what every merge
-   with that baseline takes away, whatever the artifact says. It shows more
+   alone is equal to it exactly when the merge reads every rule of it, so
+   an unequal diff, `ErrInexactBaseline`, names what every merge with that
+   baseline takes away, whatever the artifact says. It shows more
    than `ValidateArtifact` reports (see the seccomp
    [Diff](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Diff)
    section). Run it on the node, or through `seccomp.ForArch` naming the
@@ -246,6 +246,11 @@ it, since the kernel denies `refer` there anyway, so a baseline listing
    not the other. Expect such noise in the log. A landlock diff also shows
    the merge's own cleanup, such as a rule trimmed of rights a rule on an
    ancestor grants, so it can differ where the baseline constrained nothing.
+   An apparmor diff can show a literal moving to another category, such as
+   `r:-/x rw:+/x`, where the artifact's own pattern grants the literal more
+   than it lists and the merge drops that pattern: the result then lists
+   the literal with what both inputs grant it, the artifact through the
+   dropped pattern, so it permits nothing the artifact did not.
 
 ## Extra steps after Intersect
 
@@ -339,9 +344,13 @@ bounds the cost of the merge.
   The budgets apply to each list of each step of the fold (the
   executables, the libraries, and the filesystem paths together), so a
   merge of N inputs can cost up to 3(N-1) times what one list at its budget
-  costs, which matters for a `Union` of many recordings. `ValidateArtifact` is
-  still what keeps every pattern inside the compilation budget, besides
-  refusing what would not load.
+  costs. The pass over the literal paths that ends an `Intersect` of two
+  or more inputs adds up to three times what one list at its budget costs.
+  A `Union` of recordings holding only literal paths is merged in one pass,
+  at a cost linear in their size apart from sorting the result; one holding
+  patterns is folded, which matters for a `Union` of many recordings.
+  `ValidateArtifact` is still what keeps every pattern inside the
+  compilation budget, besides refusing what would not load.
 - The landlock merge takes memory linear in its inputs and time in the
   number of inputs times the number of rules of all inputs times the depth
   and length of their paths, so its cost grows with the square of the number
@@ -363,6 +372,25 @@ apparmor merge at its budgets shows, so bound how many merges run at once,
 and stop waiting for one past a deadline where a container start has one
 (the merge then finishes its bounded work on its own), rather than let a
 burst of artifacts occupy every worker.
+
+For an idea of the cost, the `RuntimePath` benchmarks of each package run
+what a runtime does per artifact: `DecodeArtifact`, then `Intersect` with a
+baseline checked once. Against an apparmor baseline of some thirty
+patterns, the example artifact allocates about 70 KB, an artifact of a few
+dozen paths about 140 KB, and one at `MaxArtifactPaths` with paths of some
+64 bytes about 2.6 MB in some 4 ms of one processor (measured on a mostly idle
+16-thread desktop); the seccomp and landlock examples allocate under 30 KB.
+Running on every processor at once allocates about the same per artifact.
+The costly cases are the adversarial ones: a 1 MiB apparmor artifact of
+4 KiB paths and sixteen 4 KiB `*/` patterns allocates some 145 MB in some
+110 ms, half of it to decode and validate and half to intersect with that
+baseline, within what the compile and work budgets admit. None of this
+calls for another limit. The work a runtime cannot bound itself is in the
+merges, so that is where a cancellable variant would check its context:
+between the steps of a fold, while compiling patterns, and where the
+merges charge their budgets, which is where matching stops past them
+today. Decoding is bounded by the cap on the document and validation is
+linear in the profile, so a check before and after each covers them.
 
 The API reference lists each package's limits, their values and the errors
 they raise: [seccomp](api.md#limits), [apparmor](api.md#limits-1) and

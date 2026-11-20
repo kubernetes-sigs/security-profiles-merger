@@ -409,3 +409,78 @@ func BenchmarkAppArmorUnionGlob(b *testing.B) {
 		})
 	}
 }
+
+// benchBatchSizes are the numbers of recordings BenchmarkAppArmorUnionBatch
+// combines, the way the Security Profiles Operator combines many recordings
+// of one workload in one call.
+var benchBatchSizes = []int{100, 200, 400}
+
+// buildAppArmorRecording builds one recording of a batch: 20 literal paths
+// no other recording of the batch names, and a few every recording names,
+// so that the union grows with every input.
+func buildAppArmorRecording(idx int) *apparmor.Profile {
+	const distinct = 20
+
+	readOnly := []string{"/etc/hosts", "/etc/resolv.conf"}
+	writeOnly := []string{"/dev/null"}
+	readWrite := []string{"/tmp/shared"}
+
+	for path := range distinct {
+		name := fmt.Sprintf("/data/rec%d/f%d", idx, path)
+
+		switch path % 4 {
+		case 0, 1:
+			readOnly = append(readOnly, name)
+		case 2:
+			writeOnly = append(writeOnly, name)
+		default:
+			readWrite = append(readWrite, name)
+		}
+	}
+
+	return &apparmor.Profile{
+		Executable: &apparmor.ExecutableRules{
+			AllowedExecutables: []string{"/usr/bin/app", fmt.Sprintf("/usr/bin/tool%d", idx)},
+			AllowedLibraries:   []string{pathLibC},
+		},
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths:  readOnly,
+			WriteOnlyPaths: writeOnly,
+			ReadWritePaths: readWrite,
+		},
+		Network: &apparmor.NetworkRules{
+			AllowRaw: boolPtr(idx%7 == 0),
+			Protocols: &apparmor.AllowedProtocols{
+				AllowTCP: boolPtr(true),
+				AllowUDP: boolPtr(idx%3 == 0),
+			},
+		},
+		Capabilities: &apparmor.CapabilityRules{
+			AllowedCapabilities: []string{"CHOWN", allKnownTestCaps()[idx%len(allKnownTestCaps())]},
+		},
+	}
+}
+
+// BenchmarkAppArmorUnionBatch measures Union of many recordings of literal
+// paths, the batch the Security Profiles Operator merges. Allocations are the
+// figure to watch: a merge that rebuilt its growing result at every input
+// allocated in the square of the number of inputs.
+func BenchmarkAppArmorUnionBatch(b *testing.B) {
+	for _, numInputs := range benchBatchSizes {
+		inputs := make([]*apparmor.Profile, 0, numInputs)
+		for idx := range numInputs {
+			inputs = append(inputs, buildAppArmorRecording(idx))
+		}
+
+		b.Run(fmt.Sprintf("inputs=%d", numInputs), func(b *testing.B) {
+			b.ReportAllocs()
+
+			for range b.N {
+				_, err := apparmor.Union(inputs...)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}

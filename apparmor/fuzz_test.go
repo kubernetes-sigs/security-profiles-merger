@@ -202,6 +202,13 @@ func addAppArmorFuzzSeeds(f *testing.F) {
 		uint64(4096), "/tmp/x r,\n  /etc/shadow rw", "/abc def", false, true, true,
 	)
 
+	// A literal its own profile's pattern grants more than it lists, and
+	// one both profiles write only through patterns.
+	f.Add(
+		uint64(4096), "/data/x.txt", "/data/*.txt", true, true, false,
+		uint64(4096), "/data/y", "/data/x.*", false, true, true,
+	)
+
 	// Runs of slashes, some of them escaped.
 	f.Add(
 		uint64(4096), "///\\x2fetc/passwd", "////\\057**", true, true, false,
