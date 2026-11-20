@@ -960,14 +960,21 @@ func TestOptionsDowngrade(t *testing.T) {
 }
 
 // TestOptionsDowngradeKeepsWhatValidateReports covers what the copy leaves
-// alone: a right this package does not know and a rule that granted nothing
-// to begin with are the validators' to report, not the downgrade's to hide.
+// alone: a right this package does not know is the validators' to report,
+// not the downgrade's to hide. A rule without a right is dropped, whether
+// the downgrade emptied it or it granted none to begin with: it grants
+// nothing either way, and kept, it would fail ValidateArtifact with
+// ErrEmptyRule.
 func TestOptionsDowngradeKeepsWhatValidateReports(t *testing.T) {
 	t.Parallel()
 
 	profile := &landlock.Profile{
 		HandledAccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile, "bogus"},
-		PathRules:       []landlock.PathRule{{Path: "/etc", AccessFS: nil}},
+		PathRules: []landlock.PathRule{
+			{Path: "/etc", AccessFS: nil},
+			{Path: "/usr", AccessFS: []landlock.FSAccessRight{}},
+			{Path: "/var", AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile}},
+		},
 	}
 
 	downgraded, err := landlock.Options{ABI: landlock.ABIV1}.Downgrade(profile)
@@ -976,8 +983,31 @@ func TestOptionsDowngradeKeepsWhatValidateReports(t *testing.T) {
 	}
 
 	err = landlock.ValidateArtifact(downgraded)
-	if !errors.Is(err, landlock.ErrUnknownRight) || !errors.Is(err, landlock.ErrEmptyRule) {
-		t.Errorf("ValidateArtifact = %v, want ErrUnknownRight and ErrEmptyRule", err)
+	if !errors.Is(err, landlock.ErrUnknownRight) || errors.Is(err, landlock.ErrEmptyRule) {
+		t.Errorf("ValidateArtifact = %v, want ErrUnknownRight and no ErrEmptyRule", err)
+	}
+
+	if got := downgraded.String(); got != "Profile{fs:read_file,bogus /var(read_file)}" {
+		t.Errorf("Downgrade = %s, want the rule on /var alone", got)
+	}
+
+	// The same for network rules, and at a version that drops no right.
+	netRules := &landlock.Profile{
+		HandledAccessNet: []landlock.NetAccessRight{landlock.NetAccessBindTCP},
+		NetRules: []landlock.NetRule{
+			{Port: 80, AccessNet: nil},
+			{Port: 443, AccessNet: []landlock.NetAccessRight{landlock.NetAccessBindTCP}},
+		},
+	}
+
+	downgraded, err = landlock.Options{ABI: landlock.LatestABIVersion}.Downgrade(netRules)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	err = landlock.ValidateArtifact(downgraded)
+	if err != nil {
+		t.Errorf("ValidateArtifact = %v, want nil", err)
 	}
 }
 

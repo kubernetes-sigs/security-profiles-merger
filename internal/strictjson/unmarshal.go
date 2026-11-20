@@ -73,7 +73,7 @@ func Unmarshal[T any](data []byte, target *T, required *Required) error {
 			return fmt.Errorf("decode profile: %w", spm.ErrNotAnObject)
 		}
 
-		return fmt.Errorf("decode profile: %w", merge.BoundedError(err))
+		return fmt.Errorf("decode profile: %w", merge.BoundedError(endError(data, err)))
 	}
 
 	// A value that decoded but is not an object, which only null does, is
@@ -129,11 +129,49 @@ func Decode[T any](data []byte, target *T) (Hint, error) {
 	return hint, err
 }
 
+// errUnexpectedEnd words a document that ends too early as encoding/json
+// does.
+var errUnexpectedEnd = errors.New("unexpected end of JSON input")
+
+// endError returns the syntax error json.Unmarshal reports for a document
+// that ends before its first value does, such as an empty one or "{", in
+// place of the io.EOF or io.ErrUnexpectedEOF a json.Decoder reports for it.
+// Those name the end of a stream, which a caller testing for them would
+// take for a reader that ran dry rather than for a document that is not
+// valid JSON. Any other error is returned as it is.
+func endError(data []byte, err error) error {
+	if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return err
+	}
+
+	var raw json.RawMessage
+
+	syntaxErr := json.Unmarshal(data, &raw)
+	if syntaxErr == nil {
+		// Not reached: the decoder reads the whole first value, so a
+		// document it ran out of is one json.Unmarshal refuses too.
+		return errUnexpectedEnd
+	}
+
+	//nolint:wrapcheck // fails as json.Unmarshal fails
+	return syntaxErr
+}
+
 // decodeFirst decodes the first JSON value of data into target, asking the
 // decoder about unknown members on its way, and returns the decoder, which
 // is past that value.
+//
+// The decoder is given the document without its leading whitespace, and
+// the offsets of the errors it returns are moved by the length of what was
+// left out, so that they count bytes of data. A decoder of Go 1.27 leaves
+// leading whitespace out of the offset of a json.UnmarshalTypeError, where
+// json.Unmarshal and earlier releases count it, and PathAt reads the offset
+// as a position in data.
 func decodeFirst[T any](data []byte, target *T) (Hint, *json.Decoder, error) {
-	decoder := json.NewDecoder(bytes.NewReader(data))
+	trimmed := bytes.TrimLeft(data, jsonSpace)
+	lead := int64(len(data) - len(trimmed))
+
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
 	decoder.DisallowUnknownFields()
 
 	err := decoder.Decode(target)
@@ -148,11 +186,30 @@ func decodeFirst[T any](data []byte, target *T) (Hint, *json.Decoder, error) {
 		// document into a value it already filled leaves the value as it
 		// was, reusing its slices, so the second pass holds no second copy
 		// and leaves what json.Unmarshal leaves.
-		decoder = json.NewDecoder(bytes.NewReader(data))
+		decoder = json.NewDecoder(bytes.NewReader(trimmed))
 		err = decoder.Decode(target)
 	}
 
-	return Hint{unknown: name, found: unknown}, decoder, err
+	return Hint{unknown: name, found: unknown}, decoder, shiftOffset(err, lead)
+}
+
+// shiftOffset moves the offset of a json.UnmarshalTypeError or
+// json.SyntaxError err holds by lead bytes, and returns err.
+func shiftOffset(err error, lead int64) error {
+	var (
+		typeErr   *json.UnmarshalTypeError
+		syntaxErr *json.SyntaxError
+	)
+
+	switch {
+	case lead == 0:
+	case errors.As(err, &typeErr):
+		typeErr.Offset += lead
+	case errors.As(err, &syntaxErr):
+		syntaxErr.Offset += lead
+	}
+
+	return err
 }
 
 // RequireObject reports a document that is not a JSON object with

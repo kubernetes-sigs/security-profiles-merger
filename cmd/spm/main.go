@@ -118,10 +118,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runDiff(args[1:], stdin, stdout, stderr)
 	case cmdVersion, "--version", "-v":
 		return runVersion(args[1:], stdout, stderr)
-	case cmdHelp:
+	case cmdHelp, flagHelp, "-h":
+		// "spm --help merge" asks for the help of merge, as "spm help
+		// merge" does.
 		return runHelp(args[1:], stdin, stdout, stderr)
-	case flagHelp, "-h":
-		return printHelp(usage, stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(
 			stderr,

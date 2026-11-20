@@ -175,15 +175,7 @@ var (
 	// ErrNotifyUnsupported is returned by Validate when SCMP_ACT_NOTIFY
 	// appears where runc refuses it outright: as the default action, or on
 	// the write syscall. libseccomp accepts both, so this is a runtime
-	// constraint rather than a kernel one. ValidateStrict also returns it,
-	// as a portability rule, for the listener flags some runtime cannot
-	// load: SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV in a profile in which no
-	// entry notifies, where runc passes the flag without creating the
-	// listener the kernel requires for it, and SECCOMP_FILTER_FLAG_TSYNC
-	// next to a listenerPath, where crun creates the listener and the
-	// kernel refuses the flag next to it. Validate and the merges accept
-	// both, and the merges drop either flag from a result where it cannot
-	// load.
+	// constraint rather than a kernel one.
 	ErrNotifyUnsupported = errors.New("SCMP_ACT_NOTIFY is not supported here")
 )
 
@@ -308,42 +300,6 @@ func Validate(profile *specs.LinuxSeccomp) error {
 	// so naming every entry that notifies would repeat one problem.
 	if notifies && profile.ListenerPath == "" {
 		errs.Reportf("listenerPath: %w", ErrNotifyWithoutListener)
-	}
-
-	return errs.Err()
-}
-
-// validateListenerFlags reports the flags a runtime may refuse next to the
-// listener settings, which ValidateStrict checks as a portability rule:
-// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV where no entry notifies, since runc
-// creates the listener only for a filter that notifies but passes the flag
-// regardless and the kernel refuses it without the listener, and
-// SECCOMP_FILTER_FLAG_TSYNC next to a listenerPath, since crun creates the
-// listener for a listenerPath and the kernel refuses TSYNC next to it. runc
-// loads the latter, so Validate, and with it the merges, accept both; the
-// merges drop either flag from a result where it cannot load (see
-// flagsForListener).
-func validateListenerFlags(profile *specs.LinuxSeccomp) error {
-	var errs merge.Collector
-
-	notifies := slices.ContainsFunc(profile.Syscalls, func(entry specs.LinuxSyscall) bool {
-		return entry.Action == specs.ActNotify
-	})
-
-	if idx := slices.Index(profile.Flags, specs.LinuxSeccompFlagWaitKillableRecv); idx >= 0 &&
-		!notifies {
-		errs.Reportf(
-			"flags[%d]: %s: %w (no entry applies SCMP_ACT_NOTIFY)",
-			idx, merge.QuoteBounded(string(specs.LinuxSeccompFlagWaitKillableRecv)),
-			ErrNotifyUnsupported,
-		)
-	}
-
-	if idx := slices.Index(profile.Flags, flagTsync); idx >= 0 && profile.ListenerPath != "" {
-		errs.Reportf(
-			"flags[%d]: %s: %w (with a listenerPath)",
-			idx, merge.QuoteBounded(string(flagTsync)), ErrNotifyUnsupported,
-		)
 	}
 
 	return errs.Err()
@@ -487,13 +443,14 @@ func invalidNameError(idx, nameIdx int, name string) error {
 // ValidateArtifact rejects and, on top of that, duplicate syscall names,
 // reported once per name that several entries use and once per entry that
 // repeats a name within itself (ErrDuplicateSyscallName), and valueTwo set
-// on an operator that ignores it (ErrUnusedValueTwo). As a portability
-// rule it also names the listener flags some runtime refuses
-// (ErrNotifyUnsupported): SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV in a
-// profile in which no entry notifies, and SECCOMP_FILTER_FLAG_TSYNC next to
-// a listenerPath, which crun refuses although runc loads it. A profile that
+// on an operator that ignores it (ErrUnusedValueTwo). A profile that
 // passes here therefore passes ValidateArtifact and Validate, the same
-// lattice the apparmor and landlock packages use.
+// lattice the apparmor and landlock packages use. The listener flags some
+// runtime refuses, SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV in a profile in
+// which no entry notifies and SECCOMP_FILTER_FLAG_TSYNC next to a
+// listenerPath, need no check of their own: the first is a listener
+// setting and the second comes with one, which ValidateArtifact refuses
+// (ErrListenerNotAllowed).
 //
 // The OCI runtime-spec allows the same syscall to appear in several entries
 // (for example with different argument filters), and Validate permits it.
@@ -516,8 +473,7 @@ func ValidateStrict(profile *specs.LinuxSeccomp) error {
 // a node with the given native architecture: those of ValidateArtifact and
 // its own.
 func strictChecks(native specs.Arch) []profileCheck {
-	return append(artifactChecks(native),
-		validateDuplicateNames, validateUnusedValueTwo, validateListenerFlags)
+	return append(artifactChecks(native), validateDuplicateNames, validateUnusedValueTwo)
 }
 
 // ValidateArtifact checks an artifact, a profile from an untrusted source

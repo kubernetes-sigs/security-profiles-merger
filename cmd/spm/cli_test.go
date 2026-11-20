@@ -43,6 +43,10 @@ func TestSubcommandHelpGoesToStdout(t *testing.T) {
 		{cmdHelp, cmdMerge},
 		{cmdHelp, cmdValidate},
 		{cmdHelp, cmdDiff},
+		// The help flags in place of the help command name a command too.
+		{flagHelp, cmdMerge},
+		{"-h", cmdValidate},
+		{flagHelp, cmdDiff},
 	} {
 		code, stdout, stderr := runCapture(t, args, nil)
 
@@ -55,7 +59,7 @@ func TestSubcommandHelpGoesToStdout(t *testing.T) {
 		}
 
 		want := "Usage: spm " + args[0]
-		if args[0] == cmdHelp {
+		if args[0] == cmdHelp || args[0] == flagHelp || args[0] == "-h" {
 			want = "Usage: spm " + args[1]
 		}
 
@@ -76,6 +80,38 @@ func TestHelpVersionAndUnknown(t *testing.T) {
 	code, _, stderr := runCapture(t, []string{cmdHelp, testBogus}, nil)
 	if code != exitUsage || !strings.Contains(stderr, "unknown command: bogus") {
 		t.Errorf("help bogus: code = %d, stderr = %q", code, stderr)
+	}
+}
+
+// TestHelpFlagsNameACommand covers the help flags in place of the help
+// command: they print the help of the command they name, refuse an unknown
+// one as "spm help" does, and refuse an argument after it.
+func TestHelpFlagsNameACommand(t *testing.T) {
+	t.Parallel()
+
+	for _, args := range [][]string{
+		{"-h", cmdVersion}, {flagHelp, cmdVersion},
+	} {
+		code, stdout, _ := runCapture(t, args, nil)
+		if code != 0 || !strings.HasPrefix(stdout, "Usage: spm version") {
+			t.Errorf("%v: code = %d, stdout = %q", args, code, stdout)
+		}
+	}
+
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{flagHelp, testBogus}, "unknown command: bogus"},
+		{[]string{"-h", testBogus}, "unknown command: bogus"},
+		{[]string{flagHelp, cmdMerge, testBogus}, "unexpected argument: bogus"},
+		{[]string{"-h", cmdMerge, testBogus}, "unexpected argument: bogus"},
+	} {
+		code, stdout, stderr := runCapture(t, test.args, nil)
+		if code != exitUsage || stdout != "" || !strings.Contains(stderr, test.want) {
+			t.Errorf("%v: code = %d, stdout = %q, stderr = %q, want %d and %q",
+				test.args, code, stdout, stderr, exitUsage, test.want)
+		}
 	}
 }
 
@@ -352,6 +388,36 @@ func TestFlagAfterFileArguments(t *testing.T) {
 		if !strings.Contains(stderr, "is not a file (flags must precede file arguments)") {
 			t.Errorf("%v: stderr = %q, want the flag order hint", args, stderr)
 		}
+	}
+}
+
+// TestSeparatorAfterFileArguments covers a "--" among the file arguments,
+// where it no longer ends the flags: the error says where it belongs rather
+// than calling it a misplaced flag.
+func TestSeparatorAfterFileArguments(t *testing.T) {
+	t.Parallel()
+
+	file := writeTemp(t, seccompJSON(t, testSyscallRead))
+
+	for _, args := range [][]string{
+		{cmdValidate, file, "--", file},
+		{cmdDiff, file, "--", file},
+		{cmdMerge, flagStrategy, strategyUnion, file, "--", file},
+	} {
+		code, stdout, stderr := runCapture(t, args, nil)
+
+		want := "error: -- must come before the file arguments, not among them\n"
+		if code != exitUsage || stdout != "" || stderr != want {
+			t.Errorf("%v: exit code = %d, stdout = %q, stderr = %q, want %d and %q",
+				args, code, stdout, stderr, exitUsage, want)
+		}
+	}
+
+	// Before the files it ends the flags, and one after it is a file name.
+	code, _, stderr := runCapture(t, []string{cmdValidate, "--", file, "--"}, nil)
+	if code != 1 || !strings.Contains(stderr, "error: --: ") {
+		t.Errorf("exit code = %d, stderr = %q, want 1 and -- reported as a missing file",
+			code, stderr)
 	}
 }
 

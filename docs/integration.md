@@ -136,7 +136,11 @@ The same calls exist in `apparmor` and `landlock`, which need the
 `ValidateStrict` for one a person wrote: `Intersect` of one Landlock
 profile drops the rights a rule on an ancestor already grants, so a valid
 baseline granting `read_file` on `/` and `read_file` and `execute` on
-`/usr` diffs unequal against it without the merge taking anything away.
+`/usr` diffs unequal against it without the merge taking anything away. It
+also drops a `refer` the baseline lists in `handledAccessFs` without a rule
+granting it, where a filesystem right ABI version 1 knows is handled beside
+it, since the kernel denies `refer` there anyway, so a baseline listing
+`read_file` and `refer` diffs unequal for that too.
 
 0. **Check the baseline once, at config load, with `ValidateBaseline`**
    (seccomp and AppArmor): `Validate`, then
@@ -150,9 +154,9 @@ baseline granting `read_file` on `/` and `read_file` and `execute` on
    node's architecture, and treat any
    error as a misconfigured node rather than as something to fix at merge
    time. For AppArmor it also refuses every path `apparmor.QuotePath`
-   cannot render (`ErrUnquotablePath`, `ErrRelativePath`), which would
-   otherwise reach every merge result and fail each workload instead of the
-   node.
+   cannot render (`ErrUnquotablePath`; a relative path `Validate` refuses
+   first, with `ErrRelativePath`), which would otherwise reach every merge
+   result and fail each workload instead of the node.
 
    Moby, containerd and CRI-O list one syscall in several entries in their
    defaults, which `ValidateStrict` reports. The Moby and containerd defaults
@@ -529,7 +533,10 @@ require up to the highest ABI any input needs, and a runtime that treats
 "the ruleset failed to load" as "run without Landlock" would fail open.
 `Options.Downgrade` drops the rights an older kernel does not know, which
 stops restricting them, so it is a decision to make per node, not a
-default.
+default. An intersection leaves `refer` out of the handled set only beside
+a filesystem right ABI version 1 knows, which every downgrade keeps, so a
+downgraded result still denies the moves and links an input's `refer`
+denial covers.
 
 ## seccomp: the listener
 

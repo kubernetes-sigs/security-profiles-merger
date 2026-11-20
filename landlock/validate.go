@@ -712,13 +712,15 @@ func (o Options) DecodeArtifact(data []byte) (*Profile, error) {
 //     still handles one, it denies the moves the profile granted, and where
 //     refer was the only filesystem right handled, it restricts none.
 //
-// Rules lose the dropped rights, and a rule left without any is dropped. A
-// copy that handles and scopes nothing restricts nothing: the kernel refuses
-// to load it, and ValidateArtifact reports it with ErrEmptyRuleset. Rights
-// this package does not know are kept for Validate to report.
+// Rules lose the dropped rights, and every rule without a right is dropped,
+// whether the downgrade emptied it or it granted none to begin with, since
+// ValidateArtifact reports such a rule with ErrEmptyRule. A copy that
+// handles and scopes nothing restricts nothing: the kernel refuses to load
+// it, and ValidateArtifact reports it with ErrEmptyRuleset. Rights this
+// package does not know are kept for Validate to report.
 //
-// A version newer than LatestABIVersion drops nothing, as Validate rejects
-// nothing for it, and one below ABIV1, 0 included, is reported with
+// A version newer than LatestABIVersion drops no right, as Validate rejects
+// none for it, and one below ABIV1, 0 included, is reported with
 // ErrUnknownABIVersion, as the validators of Options report it. A nil
 // profile is reported with ErrNilProfile. The profile is not validated
 // otherwise and not modified, and the copy shares no memory with it, so the
@@ -745,14 +747,14 @@ func (o Options) Downgrade(profile *Profile) (*Profile, error) {
 
 	for _, rule := range profile.PathRules {
 		kept := supportedRights(rule.AccessFS, abi, fsAccessABI)
-		if len(kept) > 0 || len(rule.AccessFS) == 0 {
+		if len(kept) > 0 {
 			downgraded.PathRules = append(downgraded.PathRules, newPathRule(rule.Path, kept))
 		}
 	}
 
 	for _, rule := range profile.NetRules {
 		kept := supportedRights(rule.AccessNet, abi, netAccessABI)
-		if len(kept) > 0 || len(rule.AccessNet) == 0 {
+		if len(kept) > 0 {
 			downgraded.NetRules = append(downgraded.NetRules, newNetRule(rule.Port, kept))
 		}
 	}

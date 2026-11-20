@@ -44,7 +44,7 @@ import (
 // that are not valid UTF-8 are kept, as ValidateArtifact keeps them.
 //
 // It returns ErrEmptyPath for an empty path, and ErrRelativePath for a path
-// that does not start with "/", as ValidateArtifact does: rendered as the
+// that does not start with "/", as every validator does: rendered as the
 // start of a rule, such a path can read as another rule, as "ptrace",
 // "signal" and "deny" do, or as a comment, as "#x" does. It returns
 // ErrUnquotablePath where no spelling it can write means what the path

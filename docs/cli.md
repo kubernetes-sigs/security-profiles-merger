@@ -23,7 +23,7 @@ The same code means the same thing in every subcommand:
 | Code | Meaning |
 |------|---------|
 | `0` | Success. For `diff`, the two profiles are equal |
-| `1` | The profile is bad: it is empty, does not parse, is not of the type `--type` names or the other inputs reveal, has no type that can be detected, does not validate, cannot be read (a missing or unreadable file), or its output could not be written. For `diff`, `1` means *different* and nothing else |
+| `1` | The profile is bad: it is empty, does not parse, is not of the type `--type` names or the other inputs reveal, has no type that can be detected, does not validate, cannot be read (a missing or unreadable file, or a directory, device or socket), or its output could not be written. For `diff`, `1` means *different* and nothing else |
 | `2` | Usage error, listed below. For `diff`, every failure, since `1` is taken |
 
 Usage errors, which exit `2`:
@@ -39,7 +39,7 @@ Usage errors, which exit `2`:
   read counts as one profile at least, so only too many are refused then;
 - `--arch` for a profile type that has no architectures, or for `validate`
   without `--artifact` or `--strict`, whose checks it does not change;
-- a flag after the file arguments;
+- a flag or a `--` after the file arguments;
 - no file arguments while stdin is a terminal, or outside Windows another
   character device but the null device, such as `/dev/zero`;
 - an input past the limits: a file over 10 MiB, inputs over 64 MiB in total,
@@ -85,6 +85,20 @@ seccomp profile with an unknown action beside an AppArmor one fails as
 itself, and the run exits `1`, while a mix of profiles that are each fine
 exits `2`. An input that shows no type, or several, is not checked further.
 `diff` exits `2` for both.
+
+A file argument may be a regular file or a pipe once a symbolic link is
+followed, so a process substitution such as `spm diff <(cmd a) <(cmd b)` and a
+pipe into `/dev/stdin` work. A directory, a device or a socket is refused before
+anything is read from it, since a device such as `/dev/zero` never ends and a
+terminal waits for input; `/dev/null` is refused with them rather than read as
+an empty file. A file argument is opened without blocking, so that a FIFO
+planted among untrusted profiles does not hold the run. A FIFO is therefore read
+only if a writer already has it open when spm opens it, as with `<(cmd)`, a pipe
+into `/dev/stdin`, or a writer started before spm. Without one, it fails at once
+with "FIFO has no writer", so `spm validate f & cmd > f` fails and can leave
+`cmd` blocked in its open: start the writer first. A writer that opens the FIFO
+but never closes it still holds the run. On FreeBSD, and possibly the other
+BSDs, a FIFO without a writer may still wait for one.
 
 ## Merge profiles
 
@@ -232,9 +246,11 @@ means stdout, as `-` means stdin for an input:
   `/dev/fd/N` and a process substitution such as `>(cmd)`, which the shell
   passes as one: use `--output -`, shell redirection or a pipe for those. A
   symlinked *directory* in the path is followed; the guard is about the file
-  `--output` names, not about the route to it. The path is used as written,
-  never cleaned, so `link/../out.json` names the file beside the directory
-  `link` points to, as it does for a shell redirection.
+  `--output` names, not about the route to it, and a loop of symbolic links
+  on that route is reported as a loop rather than as a refused link. The
+  path is used as written, never cleaned, so `link/../out.json` names the
+  file beside the directory `link` points to, as it does for a shell
+  redirection.
 - Elsewhere the file keeps the permissions the platform gives it and a
   symbolic link is followed to the file it names.
 
@@ -332,8 +348,12 @@ Problems are named by the field path of the member they are about, as the
 JSON document spells it. A field path names each member as `object.member`
 and each element of a list as `list[i]`. A member name that cannot be a
 plain path segment, which no profile has, is bracketed and quoted instead,
-as in `["a.b"]`, so that one path always names one member. The rest of a
-validation failure follows the shape the library gives it (see
+as in `["a.b"]`, so that one path always names one member. A message
+quotes every other path whole, and the plain runs of such a path apart
+from its bracketed names, which are quoted already, as in
+`unknown fields ["a.b"], "syscalls[0]"["x.y"]`, so that no quote is
+escaped twice and a list of paths reads one way. The rest of a validation
+failure follows the shape the library gives it (see
 [Validation levels](api.md#validation-levels)).
 
 Profiles can also be read from stdin, as a single profile or a JSON array of

@@ -43,8 +43,9 @@ limitations under the License.
 //
 // # Validation
 //
-// [Validate] reports what makes a profile ill-formed: empty or oversized
-// paths, AppArmor variables, and paths or capabilities listed twice.
+// [Validate] reports what makes a profile ill-formed: empty, oversized or
+// relative paths, AppArmor variables, and paths or capabilities listed
+// twice.
 // [ValidateArtifact] adds the checks a runtime applies to an artifact: the
 // size limits, the patterns apparmor_parser rejects, and the paths a
 // consumer rendering the profile would turn into rules of the author's
@@ -56,14 +57,14 @@ limitations under the License.
 // each input as the caller wrote it, leaving out a path or capability
 // listed twice within one list, and only then drop exact duplicates,
 // lower-case capability names and fold two spellings of one path within a
-// list into one entry. A merge therefore fails on a nil profile, an empty
-// or oversized path, an AppArmor variable, a path listed in two filesystem
-// categories (ErrDuplicatePath, however either is spelled) and an empty
-// capability name, but not on a path or capability listed twice within one
-// list. Everything else, such as a pattern apparmor_parser rejects, the
-// merge treats as opaque text or as a pattern matching nothing. A failure
-// is wrapped in an [InputError] naming the input, and names the entry at the
-// index and in the spelling the caller gave it.
+// list into one entry. A merge therefore fails on a nil profile, an empty,
+// oversized or relative path, an AppArmor variable, a path listed in two
+// filesystem categories (ErrDuplicatePath, however either is spelled) and
+// an empty capability name, but not on a path or capability listed twice
+// within one list. Everything else, such as a pattern apparmor_parser
+// rejects, the merge treats as opaque text or as a pattern matching
+// nothing. A failure is wrapped in an [InputError] naming the input, and
+// names the entry at the index and in the spelling the caller gave it.
 //
 // Every validator collects its failures into one bounded report, which
 // matches [ErrMoreProblems] when it left some out (see Reading a validation
@@ -214,13 +215,22 @@ limitations under the License.
 // # Paths the validators reject
 //
 // Validate reports a path longer than [MaxPathLen] ([ErrPathTooLong]), an
-// empty path ([ErrEmptyPath]) and an AppArmor variable such as @{HOME}
+// empty path ([ErrEmptyPath]), a path that does not start with "/"
+// ([ErrRelativePath]) and an AppArmor variable such as @{HOME}
 // ([ErrUnsupportedVariable]), whose expansion this package does not know.
 // The variable check applies also where the "@" is spelled as an escape
 // (`\x40{HOME}`), since the parser resolves escapes before it expands
-// variables. Validate accepts everything below, and the merge treats it as
-// opaque text or as a pattern matching nothing; ValidateArtifact and
-// ValidateStrict report it.
+// variables. The relative check reads the path as written: file rules must
+// use absolute paths, and apparmor_parser's lexer takes a path to start
+// with a raw "/", so `\x2fetc/passwd`, `\57etc/passwd` and `\/etc/passwd`
+// are relative, whatever their escapes decode to. Validate rejects them,
+// and so do the merges, so that a merge never returns one beside the
+// absolute spelling of the same name, a result ValidateArtifact would
+// reject. [Diff] reads such a path as naming no file, so it is not
+// "/etc/passwd" there either. A path referencing a variable is reported as
+// that alone, not as relative too. Validate accepts everything below, and
+// the merge treats it as opaque text or as a pattern matching nothing;
+// ValidateArtifact and ValidateStrict report it.
 //
 // A pattern apparmor_parser rejects is reported with [ErrInvalidGlob]: an
 // unclosed "{" or "[", a "}" or "]" without its opening counterpart (in
@@ -281,13 +291,7 @@ limitations under the License.
 // In a glob, the components of the literal text before the first glob token
 // count, and so do later components that are exactly "." or ".." outside
 // every alternation and class: "/a/*/../b" is reported, while "/{a,b/./c}"
-// is not, as its "/a" alternative can match. A path that does not start
-// with "/" is reported with [ErrRelativePath], since file rules must use
-// absolute paths, and the merges and [Diff] read it as naming no file,
-// whether it is a pattern or not: it matches nothing and is not the
-// absolute path its escapes may decode to, so `\x2fetc/passwd` and
-// `\/etc/passwd`, which the parser rejects as relative, are not
-// "/etc/passwd", and an intersection drops them.
+// is not, as its "/a" alternative can match.
 //
 // # Filesystem merge
 //

@@ -348,6 +348,47 @@ func assertEntries(t *testing.T, dir string, want ...string) {
 	}
 }
 
+// TestOutputUnderASymlinkLoop covers an --output path whose directory is a
+// loop of symlinks. Opening it with O_NOFOLLOW fails with ELOOP on Linux,
+// the errno that flag also reports for a symlink at the path itself, so the
+// loop must be reported as a loop rather than as a refused symlink, both by
+// the whole write and by the opens that run after the type check.
+func TestOutputUnderASymlinkLoop(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	for _, link := range [][2]string{{"a", "b"}, {"b", "a"}} {
+		err := os.Symlink(link[0], filepath.Join(dir, link[1]))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	path := filepath.Join(dir, "a", "out.json")
+
+	_, err := openRegular(path, 0)
+	if !errors.Is(err, syscall.ELOOP) || errors.Is(err, errSymlinkOutput) {
+		t.Errorf("openRegular = %v, want %v and no symlink refusal", err, syscall.ELOOP)
+	}
+
+	_, err = openSpecial(path)
+	if !errors.Is(err, syscall.ELOOP) || errors.Is(err, errSymlinkOutput) {
+		t.Errorf("openSpecial = %v, want %v and no symlink refusal", err, syscall.ELOOP)
+	}
+
+	err = writeOutputFile(path, []byte("{}"))
+	if !errors.Is(err, syscall.ELOOP) || errors.Is(err, errSymlinkOutput) {
+		t.Errorf("writeOutputFile = %v, want %v and no symlink refusal", err, syscall.ELOOP)
+	}
+
+	// A symlink as the last element is still refused as one.
+	_, err = openRegular(filepath.Join(dir, "a"), 0)
+	if !errors.Is(err, errSymlinkOutput) {
+		t.Errorf("openRegular of the symlink itself = %v, want %v", err, errSymlinkOutput)
+	}
+}
+
 func TestParentDir(t *testing.T) {
 	t.Parallel()
 

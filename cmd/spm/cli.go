@@ -302,6 +302,16 @@ func checkFlagOrder(args []string, separated bool, stderr io.Writer) int {
 		}
 
 		_, err := os.Stat(arg)
+		if errors.Is(err, fs.ErrNotExist) && arg == "--" {
+			// The separator itself, given among the files rather than
+			// before them, where it ends the flags.
+			_, _ = fmt.Fprintln(
+				stderr, "error: -- must come before the file arguments, not among them",
+			)
+
+			return exitUsage
+		}
+
 		if errors.Is(err, fs.ErrNotExist) {
 			_, _ = fmt.Fprintf(
 				stderr,

@@ -26,9 +26,10 @@ import (
 
 // ProfileDiff describes the differences between two Landlock profiles.
 type ProfileDiff struct {
-	// Equal is true when the two profiles are equivalent after
+	// Equal is true when the two profiles are the same as written after
 	// normalization: paths cleaned, duplicate rules and rights merged, and
-	// rights compared as sets (see Diff).
+	// rights compared as sets (see Diff). Two profiles the kernel enforces
+	// alike can still differ, as Diff says.
 	Equal bool `json:"equal"`
 
 	// HandledAccessFS is set when the handled filesystem access sets differ.
@@ -122,6 +123,12 @@ type NetRuleChange struct {
 // a right of a deeper rule. To tell whether a baseline constrained an
 // artifact, compare the access each grants on the paths of interest rather
 // than Diff equality.
+//
+// The handled sets are compared as written too. A profile handling a
+// filesystem right denies FSAccessRefer whether or not it lists it, so one
+// listing refer where no rule grants it is enforced like one leaving it
+// out, and Diff still reports refer as added or removed: listing it is what
+// makes the profile need ABIV2.
 //
 // Unlike Intersect and Union, Diff does not validate profiles before
 // comparing. A nil profile is reported as an InputError naming it, with

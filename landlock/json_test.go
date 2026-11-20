@@ -184,8 +184,6 @@ func TestUnmarshalStrict(t *testing.T) {
 			nil, "", false,
 		},
 		"a wrongly typed member": {`{"handledAccessFs":"read_file"}`, nil, "", true},
-		"a truncated document":   {`{"handledAccessFs":[`, io.ErrUnexpectedEOF, "", false},
-		"no document":            {``, io.EOF, "", false},
 		"a second document":      {`{}{}`, landlock.ErrUnexpectedData, "", false},
 		"trailing whitespace":    {"{}\n", nil, "", false},
 	}
@@ -215,6 +213,23 @@ func TestUnmarshalStrict(t *testing.T) {
 	err := landlock.UnmarshalStrict([]byte(`{}`), nil)
 	if !errors.Is(err, landlock.ErrNilProfile) {
 		t.Errorf("UnmarshalStrict(nil) = %v, want ErrNilProfile", err)
+	}
+}
+
+// TestUnmarshalStrictEndOfDocument covers a document that ends before its
+// value does, which is a syntax error, as json.Unmarshal reports it, rather
+// than the end of a stream.
+func TestUnmarshalStrictEndOfDocument(t *testing.T) {
+	t.Parallel()
+
+	for _, data := range []string{`{"handledAccessFs":[`, ``, " \n"} {
+		var syntaxError *json.SyntaxError
+
+		err := landlock.UnmarshalStrict([]byte(data), new(landlock.Profile))
+		if !errors.As(err, &syntaxError) || errors.Is(err, io.EOF) ||
+			errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Errorf("%q: UnmarshalStrict = %v, want a syntax error", data, err)
+		}
 	}
 }
 

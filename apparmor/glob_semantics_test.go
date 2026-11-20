@@ -223,7 +223,6 @@ func TestDoubleStarNarrowsOnlyGlobsBelowItsPrefix(t *testing.T) {
 		{"/etc/**", "/etc/{**,}", false},
 		{"/etc/**", "/etc/{a,*}", false},
 		{"/**", "/{,etc}", false},
-		{"**", "/etc/*", false},
 		{"/etc/**", "/etc/{a,b}", true},
 		{"/etc/**", "/etc/**foo", true},
 		{"/etc/**", "/etc/*.conf", true},

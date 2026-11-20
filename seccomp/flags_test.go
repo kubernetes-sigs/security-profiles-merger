@@ -394,16 +394,18 @@ func TestMergeDropsTsyncNextToListener(t *testing.T) {
 		}
 	}
 
-	// runc loads a profile setting both, crun does not, so only the
-	// portability rule of ValidateStrict names it.
+	// runc loads a profile setting both, crun does not. Validate accepts
+	// it, and ValidateStrict refuses the listenerPath, as ValidateArtifact
+	// does, with no second line for the flag.
 	err := seccomp.Validate(withBoth)
 	if err != nil {
 		t.Errorf("Validate(TSYNC and a listener) = %v, want nil", err)
 	}
 
 	err = seccomp.ValidateStrict(withBoth)
-	if !errors.Is(err, seccomp.ErrNotifyUnsupported) {
-		t.Errorf("ValidateStrict(TSYNC and a listener) = %v, want ErrNotifyUnsupported", err)
+	if !errors.Is(err, seccomp.ErrListenerNotAllowed) ||
+		errors.Is(err, seccomp.ErrNotifyUnsupported) {
+		t.Errorf("ValidateStrict(TSYNC and a listener) = %v, want ErrListenerNotAllowed alone", err)
 	}
 }
 
@@ -460,8 +462,9 @@ func TestMergeDropsListenerFlagWithoutNotify(t *testing.T) {
 	}
 
 	// An input setting the flag without a notify rule merges, into a
-	// result without the flag, and only the portability rule of
-	// ValidateStrict names it.
+	// result without the flag. ValidateStrict refuses it as a listener
+	// setting, as ValidateArtifact does (TestValidators pins that it adds
+	// no second line for the missing notify rule).
 	withoutNotify := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
 		ListenerPath:  "/run/l.sock",
@@ -475,8 +478,8 @@ func TestMergeDropsListenerFlagWithoutNotify(t *testing.T) {
 	}
 
 	err = seccomp.ValidateStrict(withoutNotify)
-	if !errors.Is(err, seccomp.ErrNotifyUnsupported) {
-		t.Errorf("ValidateStrict(flag without notify) = %v, want ErrNotifyUnsupported", err)
+	if !errors.Is(err, seccomp.ErrListenerNotAllowed) {
+		t.Errorf("ValidateStrict(flag without notify) = %v, want ErrListenerNotAllowed", err)
 	}
 }
 
