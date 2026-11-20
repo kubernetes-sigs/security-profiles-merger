@@ -638,7 +638,7 @@ func requireEqualProfiles(t *testing.T, got, want *specs.LinuxSeccomp) {
 
 	if !diff.Equal {
 		t.Fatalf("got %s, want %s: %s",
-			seccomp.FormatProfile(got), seccomp.FormatProfile(want), seccomp.FormatDiff(diff))
+			seccomp.FormatProfile(got), seccomp.FormatProfile(want), diff.String())
 	}
 }
 
@@ -733,7 +733,7 @@ func TestOptionsRejectUnknownArchitecture(t *testing.T) {
 
 	diff, err := seccomp.Options{Arch: bogus}.Diff(profile, profile)
 	if !errors.Is(err, seccomp.ErrUnknownArch) {
-		t.Errorf("Options.Diff = %s, %v, want ErrUnknownArch", seccomp.FormatDiff(diff), err)
+		t.Errorf("Options.Diff = %s, %v, want ErrUnknownArch", diff.String(), err)
 	}
 }
 

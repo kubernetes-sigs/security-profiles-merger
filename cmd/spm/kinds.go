@@ -244,8 +244,8 @@ func seccompOps(opts seccomp.Options) kindOps[specs.LinuxSeccomp, seccomp.Profil
 		inputCheck:       seccomp.Validate,
 		format:           seccomp.FormatProfile,
 		diff:             opts.Diff,
-		formatDiff:       seccomp.FormatDiff,
-		equal:            (*seccomp.ProfileDiff).IsEqual,
+		formatDiff:       (*seccomp.ProfileDiff).String,
+		equal:            func(diff *seccomp.ProfileDiff) bool { return diff.Equal },
 		forArch: func(native specs.Arch) kindOps[specs.LinuxSeccomp, seccomp.ProfileDiff] {
 			return seccompOps(seccomp.Options{Arch: native})
 		},
@@ -337,10 +337,10 @@ func (inv *invocation) useKind(name string) bool {
 			validateStrict:   apparmor.ValidateStrict,
 			validateArtifact: apparmor.ValidateArtifact,
 			inputCheck:       nil,
-			format:           apparmor.FormatProfile,
+			format:           (*apparmor.Profile).String,
 			diff:             apparmor.Diff,
-			formatDiff:       apparmor.FormatDiff,
-			equal:            (*apparmor.ProfileDiff).IsEqual,
+			formatDiff:       (*apparmor.ProfileDiff).String,
+			equal:            func(diff *apparmor.ProfileDiff) bool { return diff.Equal },
 			forArch:          nil,
 		}
 	case typeLandlock:
@@ -351,10 +351,10 @@ func (inv *invocation) useKind(name string) bool {
 			validateStrict:   landlock.ValidateStrict,
 			validateArtifact: landlock.ValidateArtifact,
 			inputCheck:       landlock.Validate,
-			format:           landlock.FormatProfile,
+			format:           (*landlock.Profile).String,
 			diff:             landlock.Diff,
-			formatDiff:       landlock.FormatDiff,
-			equal:            (*landlock.ProfileDiff).IsEqual,
+			formatDiff:       (*landlock.ProfileDiff).String,
+			equal:            func(diff *landlock.ProfileDiff) bool { return diff.Equal },
 			forArch:          nil,
 		}
 	default:
@@ -666,8 +666,6 @@ func parseObject(input *profileInput) error {
 
 // detectTypes lists the profile types in the order they are reported, each
 // with the Go type its documents decode into.
-//
-//nolint:gochecknoglobals // immutable lookup table
 var detectTypes = []struct {
 	profileType string
 	target      reflect.Type

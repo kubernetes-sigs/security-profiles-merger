@@ -24,20 +24,14 @@ import (
 
 func fsProfile(handled []landlock.FSAccessRight, rules ...landlock.PathRule) *landlock.Profile {
 	return &landlock.Profile{
-		HandledAccessFS:  handled,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        rules,
-		NetRules:         nil,
+		HandledAccessFS: handled,
+		PathRules:       rules,
 	}
 }
 
 func netProfile(handled []landlock.NetAccessRight, rules ...landlock.NetRule) *landlock.Profile {
 	return &landlock.Profile{
-		HandledAccessFS:  nil,
 		HandledAccessNet: handled,
-		Scoped:           nil,
-		PathRules:        nil,
 		NetRules:         rules,
 	}
 }
@@ -50,7 +44,7 @@ func assertIntersectFormat(t *testing.T, want string, profiles ...*landlock.Prof
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if got := landlock.FormatProfile(result); got != want {
+	if got := result.String(); got != want {
 		t.Errorf("got %s, want %s", got, want)
 	}
 }

@@ -9,11 +9,11 @@ on:
   workflow_call:
 
 # A newer push to a pull request makes the run before it pointless. A run on
-# main is not: it uploads the coverage and saves the benchmark baseline and
-# the fuzz corpus of its commit, so every merge must finish its own. A group
-# holds one running and one pending run and drops the pending one for a
-# newer, whether or not it cancels the running one, so the runs outside pull
-# requests are grouped by commit and never share one.
+# main is not: it uploads the coverage and saves the fuzz corpus of its
+# commit, so every merge must finish its own. A group holds one running and
+# one pending run and drops the pending one for a newer, whether or not it
+# cancels the running one, so the runs outside pull requests are grouped by
+# commit and never share one.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -29,33 +29,17 @@ defaults:
     shell: bash
 
 # go.mod's go line is the oldest Go the library supports, and the jobs that
-# use go-version-file test that floor. The release binaries are built with
-# this one instead, a current stable release, so that they do not ship a
-# standard library with known vulnerabilities; the jobs that build, test or
-# scan what ships use it. release.yml carries the same pin and
-# dependencies.yaml tracks both.
-env:
-  GO_VERSION: "1.27.4"
+# set go-version-file to go.mod test that floor. The release binaries are
+# built with the Go in .go-version instead, a current stable release, so
+# that they do not ship a standard library with known vulnerabilities; the
+# jobs that build, test or scan what ships use it, as release.yml and
+# dependency-updates.yml do, and dependencies.yaml tracks it.
+#
+# The module has one dependency, so the cache setup-go keys on go.sum would
+# hold little and, keyed on a go.sum that rarely changes, never refresh. The
+# jobs that build no tool go without it.
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      # The module has one dependency, so the cache setup-go keys on go.sum
-      # would hold little and, keyed on a go.sum that rarely changes, never
-      # refresh. This job and the others that build no tool (vet-arch,
-      # test-arch, test-emulated, apparmor-parser, golden and syscalls) go
-      # without it.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
-      - run: make build
-
   # .golangci.yml enables the libseccomp build tag, so this job also
   # analyzes the cgo bridge and the tests that check the model against
   # libseccomp. Loading those packages needs the headers, and the
@@ -115,27 +99,16 @@ jobs:
 
   # The algorithmic bounds in the suite only assert wall-clock limits when
   # neither coverage nor the race detector is instrumenting the code, so the
-  # job above measures nothing. This one runs the same tests plain on the
-  # floor Go and amd64; test / release go, test / linux-386,
+  # job above measures nothing. test / release go, test / linux-386,
   # test / linux-arm64 and the test jobs on macOS and Windows run
-  # uninstrumented as well, so the bounds are a real assertion there too.
-  # The emulated test / linux-<arch> (qemu) jobs run with -short, which
-  # turns the bounds off.
-  test-bounds:
-    name: test / bounds
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-      - run: go test -count=1 ./...
-
-  # The same plain run on the Go the release binaries are built with, which
-  # is not the floor the jobs above test.
+  # uninstrumented, so the bounds are a real assertion there. The emulated
+  # test / linux-<arch> (qemu) jobs run with -short, which turns the bounds
+  # off.
+  #
+  # A plain run on the Go the release binaries are built with, which is not
+  # the floor the job above tests. The benchmarks run once each, so that one
+  # that no longer builds or panics fails here; their timings are for make
+  # bench to measure.
   test-release-go:
     name: test / release go
     runs-on: ubuntu-latest
@@ -146,8 +119,9 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
       - run: go test -count=1 ./...
+      - run: go test -run='^$' -bench=. -benchtime=1x ./...
 
   # The seccomp merges settle rules by the native architecture: a 32-bit one
   # compares half of each value, and one that multiplexes socket and IPC
@@ -214,13 +188,11 @@ jobs:
           CGO_ENABLED: "0"
         run: go test -short -count=1 -timeout=30m ./...
 
-  # The runners are all 64-bit, so a word-size mistake compiles here and
-  # breaks for whoever vendors the library into a 32-bit build. Nothing is
-  # executed, so no emulation is needed; these are the architectures
-  # Kubernetes ships and seccomp/arch.go maps. NetBSD compiles
-  # cmd/spm/nofollow_netbsd.go, which no other job builds. FreeBSD adds no
-  # file of its own; it keeps a BSD in the set the Unix files are checked
-  # on besides macOS, which a change aimed at NetBSD could break.
+  # The Linux architectures are compiled by test-arch and test-emulated.
+  # NetBSD compiles cmd/spm/nofollow_netbsd.go, which no other job builds.
+  # FreeBSD adds no file of its own; it keeps a BSD in the set the Unix
+  # files are checked on besides macOS, which a change aimed at NetBSD could
+  # break. Nothing is executed, so no emulation is needed.
   vet-arch:
     name: vet / ${{ matrix.goos }}-${{ matrix.goarch }}
     runs-on: ubuntu-latest
@@ -228,13 +200,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        goos: [linux]
-        goarch: ["386", "arm", "arm64", "s390x", "ppc64le"]
-        include:
-          - goos: netbsd
-            goarch: amd64
-          - goos: freebsd
-            goarch: amd64
+        goos: [netbsd, freebsd]
+        goarch: [amd64]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -358,15 +325,15 @@ jobs:
       # libseccomp sorts the syscalls of a filter by priority unless asked
       # for a binary tree, which is what runc asks for above 32 syscall
       # names, and so for every profile of a realistic size. The model has
-      # to hold for the programs of both. Only the tests that compile with
-      # the library depend on the level, so only they run again.
+      # to hold for the programs of both. make test-libseccomp runs only the
+      # tests the libseccomp tag adds, so the same selection runs again.
       - name: Run the model against libseccomp ${{ matrix.version }}, binary tree
         env:
           LIBSECCOMP_VERSION: ${{ matrix.version }}
           SPM_LIBSECCOMP_OPTIMIZE: "2"
           PKG_CONFIG_PATH: ${{ env.LIBSECCOMP_PREFIX }}/lib/pkgconfig
           LD_LIBRARY_PATH: ${{ env.LIBSECCOMP_PREFIX }}/lib
-        run: make test-libseccomp TESTFLAGS='-run Libseccomp'
+        run: make test-libseccomp
 
   # The apparmor package ports the stages apparmor_parser runs a path
   # through (apparmor/parser_port.go). This checks the port against the
@@ -411,8 +378,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ matrix.go == 'release' && env.GO_VERSION || '' }}
-          go-version-file: ${{ matrix.go == 'floor' && 'go.mod' || '' }}
+          go-version-file: ${{ matrix.go == 'floor' && 'go.mod' || '.go-version' }}
       - run: go test -count=1 ./...
 
   fuzz-prepare:
@@ -443,15 +409,11 @@ jobs:
               done > "$tmp"
           matrix=$(jq -s -c '.' < "$tmp")
           rm -f "$tmp"
-          # A target dropped anywhere above would only shrink the matrix,
-          # and a shorter matrix still runs green. So the matrix is counted
-          # back against the declarations it was derived from.
-          want=$(grep -rc '^func Fuzz' --include='*_test.go' . \
-            | awk -F: '{ sum += $2 } END { print sum + 0 }')
+          # Two targets under one name would share a job and a cache key.
           got=$(jq -r 'length' <<<"$matrix")
           names=$(jq -r '[.[].name] | unique | length' <<<"$matrix")
-          if [ "$want" -eq 0 ] || [ "$got" -ne "$want" ] || [ "$names" -ne "$want" ]; then
-            echo "::error::fuzz matrix has $got entries under $names names for $want targets"
+          if [ "$got" -eq 0 ] || [ "$names" -ne "$got" ]; then
+            echo "::error::fuzz matrix has $got entries under $names names"
             jq -r '.[].name' <<<"$matrix" | sort | uniq -d
             exit 1
           fi
@@ -491,11 +453,10 @@ jobs:
           restore-keys: fuzz-${{ matrix.fuzz.name }}-
       # go test exits 0 when the pattern matches no target, so a target
       # renamed, deleted or hidden behind a build tag would fuzz nothing for
-      # thirty seconds and pass. The matrix completeness check counts the
-      # declarations; this checks that the run did something. The matrix
-      # values reach the script through the environment rather than being
-      # written into it. -run limits the plain tests to the target's seed
-      # corpus, rather than running the whole package under the fuzzing
+      # thirty seconds and pass; this checks that the run did something. The
+      # matrix values reach the script through the environment rather than
+      # being written into it. -run limits the plain tests to the target's
+      # seed corpus, rather than running the whole package under the fuzzing
       # instrumentation first.
       - env:
           FUZZ_TARGET: ${{ matrix.fuzz.target }}
@@ -532,178 +493,70 @@ jobs:
           path: ${{ env.GOFUZZCACHE }}
           key: fuzz-${{ matrix.fuzz.name }}-${{ github.sha }}
 
-  # The benchmark matrix is written out, so a package that gains its first
-  # benchmark would never run it. This counts the packages declaring one
-  # against the matrix, as fuzz-prepare does for the fuzz targets.
-  benchmark-check:
-    name: benchmark / matrix
+  # The checks that need a checkout and one step each: typos, and a make
+  # target on the Go set up here. They run as steps of one job rather than
+  # as jobs of their own, each step whatever the steps before it found, so
+  # that one run reports them all, but none on a Go setup-go failed to set
+  # up, which would be the runner's.
+  # They use the Go the release is built with: govulncheck reports standard
+  # library vulnerabilities for the Go it runs under, and the tools of
+  # hack/tools/go.mod need a Go at least as new as that module's go line,
+  # which the go command does not switch to by itself, since it picks its
+  # toolchain from go.mod even under -modfile. The cache is keyed on both
+  # go.sum files: hack/tools/go.sum holds the modules the tools build.
+  verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # yq comes with the runner image.
-      - run: |
-          set -euo pipefail
-          want=$(grep -rl '^func Benchmark' --include='*_test.go' . \
-            | xargs -n1 dirname | sed 's|^\./||; s|^|./|; s|$|/|' | sort -u)
-          got=$(yq '.jobs.benchmark.strategy.matrix.include[].package' \
-            .github/workflows/ci.yml | sort -u)
-          if [ -z "$want" ] || [ "$want" != "$got" ]; then
-            echo "::error::the benchmark matrix does not list the packages that declare benchmarks"
-            diff <(echo "$want") <(echo "$got") || true
-            exit 1
-          fi
+      - uses: crate-ci/typos@276087d9a4f06398b3e04825487805e2d7375888 # v1.52.2
+      - id: go
+        if: success() || failure()
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: .go-version
+          cache-dependency-path: |
+            go.sum
+            hack/tools/go.sum
+      - if: (success() || failure()) && steps.go.outcome == 'success'
+        run: make verify-tidy
+      - if: (success() || failure()) && steps.go.outcome == 'success'
+        run: make verify-mdtoc
+      # actionlint runs shellcheck on every run step, which the runner image
+      # provides.
+      - if: (success() || failure()) && steps.go.outcome == 'success'
+        run: make lint-actions
+      - if: (success() || failure()) && steps.go.outcome == 'success'
+        run: make verify-dependencies
+      # local keeps go tool from switching to another toolchain, and so to
+      # another standard library, should hack/tools/go.mod ever require a
+      # newer one.
+      - if: (success() || failure()) && steps.go.outcome == 'success'
+        run: make govulncheck
+        env:
+          GOTOOLCHAIN: local
 
-  benchmark:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    name: benchmark / ${{ matrix.name }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: seccomp
-            package: ./seccomp/
-          - name: apparmor
-            package: ./apparmor/
-          - name: landlock
-            package: ./landlock/
-          - name: internal-merge
-            package: ./internal/merge/
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-      # pipefail, which the workflow's default shell sets, keeps a failing
-      # or panicking benchmark from hiding behind the exit code of tee, which
-      # would leave the job green on partial output.
-      - env:
-          BENCH_PACKAGE: ${{ matrix.package }}
-        run: go test -bench=. -benchmem -count=5 -run='^$' "$BENCH_PACKAGE" | tee benchmark.txt
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: benchmark-${{ matrix.name }}
-          path: benchmark.txt
-      # As for the fuzz corpus, a pull request reads the baseline main saved
-      # and saves none of its own, which nothing else could restore.
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ./cache
-          key: benchmark-${{ matrix.name }}-${{ github.sha }}
-          restore-keys: benchmark-${{ matrix.name }}-
-      # Recorded, not enforced. A doubling looked like a safe threshold
-      # until it was tried: the baseline is a cached measurement from
-      # another run on another shared runner, so the comparison carries
-      # that machine's contention as well as this one's. A run that
-      # changed no benchmark measurably against main still alerted on
-      # every landlock benchmark at 2.06x and on 60 seccomp benchmarks at
-      # 3.4x to 5.8x, including one that takes 45ns. Gating on that trains
-      # people to ignore a red run.
-      #
-      # What actually guards the cost is deterministic and lives
-      # elsewhere: the bound assertions the test / bounds job runs
-      # uninstrumented, and the budgets the merge enforces. This job
-      # tracks the trend and puts it in the job summary.
-      #
-      # comment-on-alert is left off on purpose: it writes to the pull
-      # request, which needs a token a fork does not get.
-      - uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # v1.22.2
-        with:
-          tool: go
-          output-file-path: benchmark.txt
-          external-data-json-path: ./cache/benchmark-data.json
-          alert-threshold: "200%"
-          summary-always: true
-          fail-on-alert: false
-      - if: github.ref == 'refs/heads/main'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ./cache
-          key: benchmark-${{ matrix.name }}-${{ github.sha }}
-
-  govulncheck:
+  # The checks on the floor Go that regenerate a tracked file and ask git
+  # whether it moved: the CLI golden files, and seccomp/syscalls.go from the
+  # syscalls.csv of every libseccomp release the guard covers.
+  verify-floor:
+    name: verify / floor go
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - id: go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ env.GO_VERSION }}
-          cache-dependency-path: hack/tools/go.sum
-      # govulncheck reports standard library vulnerabilities for the Go it
-      # runs under, so it runs under the Go the release is built with. local
-      # keeps go tool from switching to another toolchain, and so to another
-      # standard library, should hack/tools/go.mod ever require a newer one.
-      - run: make govulncheck
-        env:
-          GOTOOLCHAIN: local
-
-  typos:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: crate-ci/typos@276087d9a4f06398b3e04825487805e2d7375888 # v1.52.2
-
-  tidy:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache-dependency-path: |
-            go.sum
-            hack/tools/go.sum
-      - run: make verify-tidy
-
-  # The jobs that touch hack/tools/go.mod (govulncheck, tidy, mdtoc,
-  # actionlint, api and dependencies) use the Go the release is built with:
-  # that module's go line is newer than the floor in go.mod, setup-go sets
-  # GOTOOLCHAIN=local, and the go command picks its toolchain from go.mod
-  # even under -modfile, so it would not switch by itself. They key their
-  # cache on hack/tools/go.sum, which holds the modules they build, rather
-  # than on the root go.sum, which holds one module and so never changes
-  # the key when a tool is updated.
-  mdtoc:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache-dependency-path: hack/tools/go.sum
-      - run: make verify-mdtoc
-
-  # actionlint runs shellcheck on every run step, which the runner image
-  # provides.
-  actionlint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache-dependency-path: hack/tools/go.sum
-      - run: make lint-actions
+          go-version-file: go.mod
+          cache: false
+      - run: make verify-golden
+      - if: (success() || failure()) && steps.go.outcome == 'success'
+        run: make verify-syscalls
 
   # The module's API against the latest release, as gorelease reports it,
   # with the version it suggests for the next one. It is a report, not a
@@ -723,7 +576,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
           cache-dependency-path: hack/tools/go.sum
       # The report is captured before it goes to the summary, so that the
       # code fence around it closes even when gorelease fails. It is kept
@@ -741,48 +594,6 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
 
-  golden:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
-      - run: make verify-golden
-
-  # seccomp/syscalls.go is generated from the syscalls.csv of every
-  # libseccomp release the guard covers; regenerating it and asking git
-  # whether it moved keeps the table from drifting from its sources.
-  syscalls:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
-      - run: make verify-syscalls
-
-  dependencies:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache-dependency-path: hack/tools/go.sum
-      - run: make verify-dependencies
-
   snapshot:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -795,7 +606,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
       - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           syft-version: v1.57.2

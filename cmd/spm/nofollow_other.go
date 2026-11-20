@@ -24,6 +24,4 @@ import "syscall"
 // symlink. Linux, OpenBSD and macOS report ELOOP, FreeBSD and DragonFly
 // report EMLINK; NetBSD has a file of its own, since its EFTYPE does not
 // exist everywhere.
-//
-//nolint:gochecknoglobals // immutable lookup table
 var noFollowErrnos = []syscall.Errno{syscall.ELOOP, syscall.EMLINK}

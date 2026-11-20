@@ -277,7 +277,7 @@ func TestDiffReportsCollapsedSyscalls(t *testing.T) {
 
 			if diff.Equal != testCase.equal {
 				t.Errorf("Diff(p, Intersect(p)).Equal = %t, want %t: %s",
-					diff.Equal, testCase.equal, seccomp.FormatDiff(diff))
+					diff.Equal, testCase.equal, diff.String())
 			}
 
 			// Diff keeps the loaded rules as they are, so a profile always
@@ -288,7 +288,7 @@ func TestDiffReportsCollapsedSyscalls(t *testing.T) {
 			}
 
 			if !self.Equal {
-				t.Errorf("Diff(p, p) is not equal: %s", seccomp.FormatDiff(self))
+				t.Errorf("Diff(p, p) is not equal: %s", self.String())
 			}
 		})
 	}
@@ -519,7 +519,6 @@ func TestValidateArtifactRulesLibseccompRefuses(t *testing.T) {
 				filtered(syscallRead, specs.ActAllow, argOne, argTwo),
 				filtered(syscallRead, specs.ActAllow, argOne),
 			},
-			conflict: false,
 		},
 		{
 			name: "overlapping ranges with different results",
@@ -544,7 +543,6 @@ func TestValidateArtifactRulesLibseccompRefuses(t *testing.T) {
 				filtered(syscallRead, specs.ActAllow, arg(0, specs.OpLessThan, 5)),
 				filtered(syscallRead, specs.ActAllow, arg(0, specs.OpGreaterThan, 2)),
 			},
-			conflict: false,
 		},
 		{
 			name: "distinct equalities with different results",
@@ -553,7 +551,6 @@ func TestValidateArtifactRulesLibseccompRefuses(t *testing.T) {
 				filtered(syscallRead, specs.ActLog, arg(0, specs.OpEqualTo, 2)),
 				filtered(syscallRead, specs.ActTrap, arg(0, specs.OpEqualTo, wide+1)),
 			},
-			conflict: false,
 		},
 		{
 			name: "complementary conditions with different results",
@@ -561,7 +558,6 @@ func TestValidateArtifactRulesLibseccompRefuses(t *testing.T) {
 				filtered(syscallRead, specs.ActAllow, arg(0, specs.OpLessThan, wide)),
 				filtered(syscallRead, specs.ActLog, arg(0, specs.OpGreaterEqual, wide)),
 			},
-			conflict: false,
 		},
 		{
 			// On a 32-bit architecture both compare against 2.

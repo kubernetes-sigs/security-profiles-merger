@@ -266,10 +266,8 @@ func TestSyscallEntryString(t *testing.T) {
 	t.Parallel()
 
 	entry := seccomp.SyscallEntry{
-		Name:     syscallRead,
-		Action:   specs.ActAllow,
-		ErrnoRet: nil,
-		Args:     nil,
+		Name:   syscallRead,
+		Action: specs.ActAllow,
 	}
 
 	const want = "read->SCMP_ACT_ALLOW"
@@ -283,10 +281,9 @@ func TestSyscallEntryStringWithArgs(t *testing.T) {
 	t.Parallel()
 
 	entry := seccomp.SyscallEntry{
-		Name:     syscallClone,
-		Action:   specs.ActAllow,
-		ErrnoRet: nil,
-		Args:     []specs.LinuxSeccompArg{{Index: 0, Value: 0x10000, Op: specs.OpEqualTo}},
+		Name:   syscallClone,
+		Action: specs.ActAllow,
+		Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 0x10000, Op: specs.OpEqualTo}},
 	}
 
 	const want = "clone([0]SCMP_CMP_EQ:65536)->SCMP_ACT_ALLOW"
@@ -304,7 +301,6 @@ func TestSyscallEntryStringWithErrnoRet(t *testing.T) {
 		Name:     syscallRead,
 		Action:   specs.ActErrno,
 		ErrnoRet: &errnoRet,
-		Args:     nil,
 	}
 
 	const want = "read->SCMP_ACT_ERRNO(errno:1)"
@@ -318,9 +314,7 @@ func TestSyscallDetailString(t *testing.T) {
 	t.Parallel()
 
 	detail := seccomp.SyscallDetail{
-		Action:   specs.ActAllow,
-		ErrnoRet: nil,
-		Args:     nil,
+		Action: specs.ActAllow,
 	}
 
 	const want = "SCMP_ACT_ALLOW"
@@ -337,7 +331,6 @@ func TestSyscallDetailStringWithErrnoRet(t *testing.T) {
 	detail := seccomp.SyscallDetail{
 		Action:   specs.ActErrno,
 		ErrnoRet: &errnoRet,
-		Args:     nil,
 	}
 
 	const want = "SCMP_ACT_ERRNO(errno:22)"
@@ -351,9 +344,8 @@ func TestSyscallDetailStringWithArgs(t *testing.T) {
 	t.Parallel()
 
 	detail := seccomp.SyscallDetail{
-		Action:   specs.ActAllow,
-		ErrnoRet: nil,
-		Args:     []specs.LinuxSeccompArg{{Index: 0, Value: 1, Op: specs.OpEqualTo}},
+		Action: specs.ActAllow,
+		Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 1, Op: specs.OpEqualTo}},
 	}
 
 	const want = "([0]SCMP_CMP_EQ:1)->SCMP_ACT_ALLOW"
@@ -436,9 +428,9 @@ func TestFormattersAreBounded(t *testing.T) {
 	manyArgs := make([]specs.LinuxSeccompArg, 1<<16)
 
 	for name, format := range map[string]func() string{
-		"FormatProfile(ignored)": func() string { return seccomp.FormatProfile(ignored) },
-		"FormatProfile(loaded)":  func() string { return seccomp.FormatProfile(loaded) },
-		"FormatDiff(loaded)":     func() string { return seccomp.FormatDiff(diff) },
+		"FormatProfile(ignored)":     func() string { return seccomp.FormatProfile(ignored) },
+		"FormatProfile(loaded)":      func() string { return seccomp.FormatProfile(loaded) },
+		"ProfileDiff.String(loaded)": func() string { return diff.String() },
 		"SyscallEntry.String": func() string {
 			return seccomp.SyscallEntry{Name: "read", Action: specs.ActAllow, ErrnoRet: nil, Args: manyArgs}.String()
 		},
@@ -478,8 +470,8 @@ func TestFormatDefaultsUntruncated(t *testing.T) {
 	}
 
 	for name, output := range map[string]string{
-		"FormatProfile": seccomp.FormatProfile(profile),
-		"FormatDiff":    seccomp.FormatDiff(diff),
+		"FormatProfile":      seccomp.FormatProfile(profile),
+		"ProfileDiff.String": diff.String(),
 	} {
 		if strings.HasSuffix(output, merge.TruncationMarker) ||
 			len(output) > merge.MaxFormattedBytes/4 {

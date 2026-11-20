@@ -34,8 +34,8 @@ We have full documentation on how to get started contributing here:
   through `go tool` from their own module, `hack/tools/go.mod`. The targets
   that run those tools need a Go at least as new as that module's `go`
   line, since the go command picks its toolchain from `go.mod` alone. CI
-  runs them with the Go pinned as `GO_VERSION` in the workflows, so a tools
-  update that raises that `go` line has to raise `GO_VERSION` too.
+  runs them with the Go in `.go-version`, so a tools update that raises
+  that `go` line has to raise `.go-version` too.
 
 Fill in the `release-note` block of the pull request template in every pull
 request, with `NONE` if a consumer sees no change. The release notes are
@@ -84,8 +84,9 @@ The codebase is organized in layers:
   of the documentation (see [Documentation](#documentation)).
 - `seccomp/`, `apparmor/`, `landlock/` each expose the same public API surface:
   `Intersect`, `Union`, `Validate`, `ValidateStrict`, `ValidateArtifact`,
-  `UnmarshalStrict`, `Diff`, `FormatDiff`, and `FormatProfile`. `seccomp`
-  adds an `Options` type naming a node's native architecture, whose methods
+  `UnmarshalStrict` and `Diff`, and `String` methods on the profile and
+  diff types (`seccomp.FormatProfile` for `specs.LinuxSeccomp`, which is not
+  its own). `seccomp` adds an `Options` type naming a node's native architecture, whose methods
   are the merges, `Diff` and the two stricter validators for that node, and
   `landlock` one naming a kernel ABI version, whose methods are the three
   validators with that version's check added, and `Downgrade`. Each package
@@ -166,7 +167,8 @@ binary would take the name of the `spm` package directory.
 What `make help` does not say:
 
 - `make lint` loads the cgo bridge behind the `libseccomp` build tag, which
-  `.golangci.yml` sets, so any libseccomp headers do. The default `make`
+  `.golangci.yml` sets along with `apparmor_parser`, so any libseccomp
+  headers do. The default `make`
   target and `make verify` run `lint`, so they need the headers too.
 - `make lint` builds golangci-lint from source with `go run`, and its
   `go.mod` requires Go 1.26: it needs that Go or a newer one on `PATH`, or a
@@ -174,8 +176,8 @@ What `make help` does not say:
   binary of the same version instead.
 - `make verify-coverage` fails below 95% coverage by default; set
   `COVERAGE_THRESHOLD` to change it.
-- `make test-libseccomp` takes `LIBSECCOMP_VERSION` to require a particular
-  version, as CI does.
+- `make test-libseccomp` runs only the tests the `libseccomp` tag adds, and
+  takes `LIBSECCOMP_VERSION` to require a particular version, as CI does.
 - `make verify` runs its steps one at a time even under `make -j`, since it
   rewrites files in place before checking that nothing changed.
 - `make verify-syscalls` downloads with `curl`.
@@ -192,20 +194,17 @@ does not install or a machine it does not have:
 
 | CI job | Local equivalent | Needs |
 |--------|------------------|-------|
-| `typos` | `typos` | [crate-ci/typos](https://github.com/crate-ci/typos) |
+| `verify` (typos step) | `typos` | [crate-ci/typos](https://github.com/crate-ci/typos) |
 | `snapshot` | `goreleaser release --snapshot --skip=sign --clean` | goreleaser and syft |
 | `lint` (second run) | `GOOS=windows golangci-lint run ./cmd/...` | nothing more; it lints the files of `cmd/spm` for hosts that are not Unix |
-| `test / macos-latest / floor go`, `test / macos-latest / release go`, `test / windows-latest / floor go`, `test / windows-latest / release go` | `go test -count=1 ./...` | a macOS or Windows machine, and for `release go` the Go pinned as `GO_VERSION` in the workflows |
+| `test / macos-latest / floor go`, `test / macos-latest / release go`, `test / windows-latest / floor go`, `test / windows-latest / release go` | `go test -count=1 ./...` | a macOS or Windows machine, and for `release go` the Go in `.go-version` |
 | `test / linux-386` | `GOARCH=386 CGO_ENABLED=0 go test -count=1 ./...` | nothing more on amd64 |
 | `test / linux-arm64` | `CGO_ENABLED=0 go test -count=1 ./...` | an arm64 machine |
 | `test / linux-<arch> (qemu)` | `GOARCH=<arch> CGO_ENABLED=0 go test -short -count=1 ./...` | qemu-user with binfmt_misc for s390x, ppc64le or arm |
 | `vet / <os>-<arch>` | `GOOS=<os> GOARCH=<arch> go vet ./...` | nothing more |
-| `test / bounds` | `go test -count=1 ./...` | nothing more; it runs without the race detector and coverage |
-| `test / release go` | `go test -count=1 ./...` | the Go pinned as `GO_VERSION` in the workflows |
+| `test / release go` | `go test -count=1 ./...` | the Go in `.go-version` |
 | `fuzz / <target>` | `make fuzz` | time |
-| `benchmark / <package>` | `make bench` | time |
-| `test-libseccomp / <version>`, `test-libseccomp / 2.6.1 / <arch>` | `make test-libseccomp`, then `SPM_LIBSECCOMP_OPTIMIZE=2 make test-libseccomp TESTFLAGS='-run Libseccomp'` | cgo and that libseccomp version, built for arm64 or for 386 (`GOARCH=386 CC="gcc -m32"`) |
-| `benchmark / matrix` | nothing | the packages declaring benchmarks match the benchmark matrix in `ci.yml` |
+| `test-libseccomp / <version>`, `test-libseccomp / 2.6.1 / <arch>` | `make test-libseccomp`, then `SPM_LIBSECCOMP_OPTIMIZE=2 make test-libseccomp` | cgo and that libseccomp version, built for arm64 or for 386 (`GOARCH=386 CC="gcc -m32"`) |
 | `api / gorelease` | `make api-report` | a clean working tree; the job only reports |
 | `apparmor-parser` | `go test -count=1 -tags apparmor_parser -run TestTranslationAgreesWithApparmorParser ./apparmor/` | `apparmor_parser` on `PATH` or named by `SPM_APPARMOR_PARSER` |
 

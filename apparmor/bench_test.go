@@ -183,7 +183,7 @@ func BenchmarkAppArmorDiff(b *testing.B) {
 	}
 }
 
-func BenchmarkAppArmorFormatDiff(b *testing.B) {
+func BenchmarkAppArmorDiffString(b *testing.B) {
 	for _, numPaths := range benchPathCounts {
 		left := buildAppArmorProfile(numPaths)
 		right := buildAppArmorDisjointProfile(numPaths, "right")
@@ -197,13 +197,13 @@ func BenchmarkAppArmorFormatDiff(b *testing.B) {
 			b.ReportAllocs()
 
 			for range b.N {
-				_ = apparmor.FormatDiff(diff)
+				_ = diff.String()
 			}
 		})
 	}
 }
 
-func BenchmarkAppArmorFormatProfile(b *testing.B) {
+func BenchmarkAppArmorProfileString(b *testing.B) {
 	for _, numPaths := range benchPathCounts {
 		profile := buildAppArmorProfile(numPaths)
 
@@ -211,7 +211,7 @@ func BenchmarkAppArmorFormatProfile(b *testing.B) {
 			b.ReportAllocs()
 
 			for range b.N {
-				_ = apparmor.FormatProfile(profile)
+				_ = profile.String()
 			}
 		})
 	}
@@ -262,12 +262,10 @@ func buildAppArmorDisjointProfile(numPaths int, prefix string) *apparmor.Profile
 	return &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
 			AllowedExecutables: executables,
-			AllowedLibraries:   nil,
 		},
 		Filesystem: &apparmor.FilesystemRules{
 			ReadOnlyPaths:  readOnly,
 			WriteOnlyPaths: writeOnly,
-			ReadWritePaths: nil,
 		},
 		Network: &apparmor.NetworkRules{
 			AllowRaw: boolPtr(false),
@@ -301,10 +299,7 @@ func buildAppArmorGlobProfile(numPaths int) *apparmor.Profile {
 		Filesystem: &apparmor.FilesystemRules{
 			ReadOnlyPaths:  readOnly,
 			WriteOnlyPaths: writeOnly,
-			ReadWritePaths: nil,
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 }
 
@@ -345,14 +340,9 @@ func buildAppArmorSharedPrefixProfile(numPaths int, literals bool) *apparmor.Pro
 	}
 
 	return &apparmor.Profile{
-		Executable: nil,
 		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  paths,
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
+			ReadOnlyPaths: paths,
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 }
 

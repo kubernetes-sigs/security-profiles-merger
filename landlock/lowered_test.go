@@ -153,7 +153,6 @@ func TestLoweredRulePaths(t *testing.T) {
 		},
 		"no inputs": {
 			result: fsProfile(read, landlock.PathRule{Path: "/data/link", AccessFS: read}),
-			inputs: nil,
 			want:   nil,
 		},
 		"a grant of a right the input does not handle": {

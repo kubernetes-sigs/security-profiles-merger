@@ -27,6 +27,30 @@ import (
 	"testing"
 )
 
+// The fixtures several golden cases share.
+const (
+	testdataAppArmorA = "testdata/apparmor_a.json"
+	testdataAppArmorB = "testdata/apparmor_b.json"
+	testdataLandlockA = "testdata/landlock_a.json"
+	testdataLandlockB = "testdata/landlock_b.json"
+
+	testdataSeccompRichA  = "testdata/seccomp_rich_a.json"
+	testdataSeccompRichB  = "testdata/seccomp_rich_b.json"
+	testdataAppArmorRichA = "testdata/apparmor_rich_a.json"
+	testdataAppArmorRichB = "testdata/apparmor_rich_b.json"
+	testdataLandlockRichA = "testdata/landlock_rich_a.json"
+	testdataLandlockRichB = "testdata/landlock_rich_b.json"
+
+	testdataAppArmorInvalid = "testdata/apparmor_invalid.json"
+	testdataLandlockInvalid = "testdata/landlock_invalid.json"
+	testdataSeccompInvalid  = "testdata/seccomp_invalid.json"
+
+	testdataSeccompTruncated = "testdata/seccomp_truncated.json"
+	testdataSeccompTypeError = "testdata/seccomp_type_error.json"
+	testdataInvalidAction    = "testdata/invalid_action.json"
+	testdataSeccompWideValue = "testdata/seccomp_wide_value.json"
+)
+
 // update rewrites the golden files from what the CLI produces now, rather
 // than comparing against what it produced before:
 //
@@ -42,17 +66,6 @@ import (
 // no absolute paths, no output that depends on the machine. The diff cases
 // pass --arch so that a seccomp comparison does not depend on the
 // architecture the test runs on.
-// The fixtures several failure cases share.
-const (
-	testdataAppArmorInvalid = "testdata/apparmor_invalid.json"
-	testdataLandlockInvalid = "testdata/landlock_invalid.json"
-	testdataSeccompInvalid  = "testdata/seccomp_invalid.json"
-
-	testdataSeccompTruncated = "testdata/seccomp_truncated.json"
-	testdataSeccompTypeError = "testdata/seccomp_type_error.json"
-	testdataInvalidAction    = "testdata/invalid_action.json"
-)
-
 var update = flag.Bool(
 	"update",
 	false,
@@ -64,275 +77,70 @@ var update = flag.Bool(
 // carries the auto-detect note and any warning, and which of them a line
 // lands on is part of the contract a pipeline depends on.
 type goldenCase struct {
-	name      string
+	// stem names the case and its goldens: testdata/<stem>.golden holds
+	// stdout and testdata/<stem>.stderr.golden stderr.
+	stem      string
 	args      []string
 	stdinFile string
 	wantCode  int
-	golden    string
 	// wantStderr says the case has a stderr golden beside its stdout one.
 	// Without it stderr must be empty, which pins that a plain run with
 	// --type says nothing.
 	wantStderr bool
 }
 
-// stderrGoldenPath returns the path of a case's stderr golden, derived from
-// its stdout one so the two cannot drift apart.
-func stderrGoldenPath(golden string) string {
-	return strings.TrimSuffix(golden, ".golden") + ".stderr.golden"
+// goldenCmd returns the case that runs line, split on spaces, followed by
+// args as they are, and pins its stdout to the golden named by stem.
+func goldenCmd(stem string, wantCode int, line string, args ...string) goldenCase {
+	return goldenCase{
+		stem:     stem,
+		args:     append(strings.Fields(line), args...),
+		wantCode: wantCode,
+	}
+}
+
+// withStdin returns the case reading the file at path on stdin.
+func (c goldenCase) withStdin(path string) goldenCase {
+	c.stdinFile = path
+
+	return c
+}
+
+func (c goldenCase) goldenPath() string {
+	return "testdata/" + c.stem + ".golden"
+}
+
+func (c goldenCase) stderrGoldenPath() string {
+	return "testdata/" + c.stem + ".stderr.golden"
 }
 
 // basicGoldenCases pins the everyday invocations against the small
-// fixtures.
+// fixtures. They all pass --type, so their stderr stays empty.
 func basicGoldenCases() []goldenCase {
 	return []goldenCase{
-		{
-			name: "diff seccomp human",
-			args: []string{
-				cmdDiff,
-				flagType,
-				typeSeccomp,
-				flagArch,
-				archNone,
-				flagFormat,
-				formatHuman,
-				testdataSeccompA,
-				testdataSeccompB,
-			},
-			stdinFile:  "",
-			wantCode:   exitDiff,
-			golden:     "testdata/diff_seccomp_human.golden",
-			wantStderr: false,
-		},
-		{
-			name: "diff apparmor human",
-			args: []string{
-				cmdDiff,
-				flagType,
-				typeAppArmor,
-				flagFormat,
-				formatHuman,
-				"testdata/apparmor_a.json",
-				"testdata/apparmor_b.json",
-			},
-			stdinFile:  "",
-			wantCode:   exitDiff,
-			golden:     "testdata/diff_apparmor_human.golden",
-			wantStderr: false,
-		},
-		{
-			name: "diff landlock human",
-			args: []string{
-				cmdDiff,
-				flagType,
-				typeLandlock,
-				flagFormat,
-				formatHuman,
-				"testdata/landlock_a.json",
-				"testdata/landlock_b.json",
-			},
-			stdinFile:  "",
-			wantCode:   exitDiff,
-			golden:     "testdata/diff_landlock_human.golden",
-			wantStderr: false,
-		},
-		{
-			name: "diff seccomp json",
-			args: []string{
-				cmdDiff,
-				flagType,
-				typeSeccomp,
-				flagArch,
-				archNone,
-				testdataSeccompA,
-				testdataSeccompB,
-			},
-			stdinFile:  "",
-			wantCode:   exitDiff,
-			golden:     "testdata/diff_seccomp_json.golden",
-			wantStderr: false,
-		},
-		{
-			name: "diff seccomp equal",
-			args: []string{
-				cmdDiff,
-				flagType,
-				typeSeccomp,
-				flagArch,
-				archNone,
-				flagFormat,
-				formatHuman,
-				testdataSeccompA,
-				testdataSeccompA,
-			},
-			stdinFile:  "",
-			wantCode:   0,
-			golden:     "testdata/diff_seccomp_equal.golden",
-			wantStderr: false,
-		},
-		{
-			name: "merge seccomp intersect",
-			args: []string{
-				cmdMerge,
-				flagType,
-				typeSeccomp,
-				flagStrategy,
-				strategyIntersect,
-				testdataSeccompA,
-				testdataSeccompB,
-			},
-			stdinFile:  "",
-			wantCode:   0,
-			golden:     "testdata/merge_seccomp_intersect.golden",
-			wantStderr: false,
-		},
-		{
-			name: "merge apparmor union",
-			args: []string{
-				cmdMerge,
-				flagType,
-				typeAppArmor,
-				flagStrategy,
-				strategyUnion,
-				"testdata/apparmor_a.json",
-				"testdata/apparmor_b.json",
-			},
-			stdinFile:  "",
-			wantCode:   0,
-			golden:     "testdata/merge_apparmor_union.golden",
-			wantStderr: false,
-		},
-		{
-			name: "merge landlock intersect human",
-			args: []string{
-				cmdMerge,
-				flagType,
-				typeLandlock,
-				flagStrategy,
-				strategyIntersect,
-				flagFormat,
-				formatHuman,
-				"testdata/landlock_a.json",
-				"testdata/landlock_b.json",
-			},
-			stdinFile:  "",
-			wantCode:   0,
-			golden:     "testdata/merge_landlock_intersect_human.golden",
-			wantStderr: false,
-		},
-		{
-			name: "merge seccomp union stdin",
-			args: []string{
-				cmdMerge,
-				flagType,
-				typeSeccomp,
-				flagStrategy,
-				strategyUnion,
-			},
-			stdinFile:  "testdata/seccomp_stdin.json",
-			wantCode:   0,
-			golden:     "testdata/merge_seccomp_union_stdin.golden",
-			wantStderr: false,
-		},
-		{
-			name: "validate seccomp",
-			args: []string{
-				cmdValidate,
-				flagType,
-				typeSeccomp,
-				testdataSeccompA,
-			},
-			stdinFile:  "",
-			wantCode:   0,
-			golden:     "testdata/validate_seccomp.golden",
-			wantStderr: false,
-		},
-		{
-			name: "validate apparmor human",
-			args: []string{
-				cmdValidate,
-				flagType,
-				typeAppArmor,
-				flagFormat,
-				formatHuman,
-				"testdata/apparmor_a.json",
-			},
-			stdinFile:  "",
-			wantCode:   0,
-			golden:     "testdata/validate_apparmor_human.golden",
-			wantStderr: false,
-		},
-		{
-			name: "validate landlock",
-			args: []string{
-				cmdValidate,
-				flagType,
-				typeLandlock,
-				"testdata/landlock_a.json",
-			},
-			stdinFile:  "",
-			wantCode:   0,
-			golden:     "testdata/validate_landlock.golden",
-			wantStderr: false,
-		},
-
-		// The cases above all pass --type, so none of them exercises
-		// detection or the note it writes to stderr. The ones below leave it
-		// out, one per profile type.
-		{
-			name: "merge seccomp detected",
-			args: []string{
-				cmdMerge,
-				flagStrategy,
-				strategyUnion,
-				testdataSeccompA,
-				testdataSeccompB,
-			},
-			stdinFile:  "",
-			wantCode:   0,
-			golden:     "testdata/merge_seccomp_detected.golden",
-			wantStderr: true,
-		},
-		{
-			name: "validate apparmor detected",
-			args: []string{
-				cmdValidate,
-				"testdata/apparmor_a.json",
-			},
-			stdinFile:  "",
-			wantCode:   0,
-			golden:     "testdata/validate_apparmor_detected.golden",
-			wantStderr: true,
-		},
-		{
-			name: "diff landlock detected",
-			args: []string{
-				cmdDiff,
-				flagFormat,
-				formatHuman,
-				"testdata/landlock_a.json",
-				"testdata/landlock_b.json",
-			},
-			stdinFile:  "",
-			wantCode:   exitDiff,
-			golden:     "testdata/diff_landlock_detected.golden",
-			wantStderr: true,
-		},
-		{
-			// An unknown member is a warning on stderr while the profile
-			// still goes to stdout, which is the one case where both streams
-			// carry something at once.
-			name: "merge seccomp with an unknown field",
-			args: []string{
-				cmdMerge,
-				flagStrategy,
-				strategyUnion,
-				"testdata/seccomp_unknown_field.json",
-			},
-			stdinFile:  "",
-			wantCode:   0,
-			golden:     "testdata/merge_seccomp_unknown_field.golden",
-			wantStderr: true,
-		},
+		goldenCmd("diff_seccomp_human", exitDiff, "diff --type seccomp --arch none --format human",
+			testdataSeccompA, testdataSeccompB),
+		goldenCmd("diff_apparmor_human", exitDiff, "diff --type apparmor --format human",
+			testdataAppArmorA, testdataAppArmorB),
+		goldenCmd("diff_landlock_human", exitDiff, "diff --type landlock --format human",
+			testdataLandlockA, testdataLandlockB),
+		goldenCmd("diff_seccomp_json", exitDiff, "diff --type seccomp --arch none",
+			testdataSeccompA, testdataSeccompB),
+		goldenCmd("diff_seccomp_equal", 0, "diff --type seccomp --arch none --format human",
+			testdataSeccompA, testdataSeccompA),
+		goldenCmd("merge_seccomp_intersect", 0, "merge --type seccomp --strategy intersect",
+			testdataSeccompA, testdataSeccompB),
+		goldenCmd("merge_apparmor_union", 0, "merge --type apparmor --strategy union",
+			testdataAppArmorA, testdataAppArmorB),
+		goldenCmd("merge_landlock_intersect_human", 0,
+			"merge --type landlock --strategy intersect --format human",
+			testdataLandlockA, testdataLandlockB),
+		goldenCmd("merge_seccomp_union_stdin", 0, "merge --type seccomp --strategy union").
+			withStdin("testdata/seccomp_stdin.json"),
+		goldenCmd("validate_seccomp", 0, "validate --type seccomp", testdataSeccompA),
+		goldenCmd("validate_apparmor_human", 0, "validate --type apparmor --format human",
+			testdataAppArmorA),
+		goldenCmd("validate_landlock", 0, "validate --type landlock", testdataLandlockA),
 	}
 }
 
@@ -341,260 +149,68 @@ func basicGoldenCases() []goldenCase {
 // architectures, flags, errnoRet, listener settings and argument filters,
 // the AppArmor network section, and the landlock network and scope sections.
 // With two-element sets an unstable sort or a comparator that ignores a
-// field is invisible.
+// field is invisible. Their stderr stays empty too.
 func richGoldenCases() []goldenCase {
 	return []goldenCase{
-		{
-			name: "diff seccomp rich json",
-			args: []string{
-				cmdDiff,
-				flagType,
-				typeSeccomp,
-				flagArch,
-				archNone,
-				"testdata/seccomp_rich_a.json",
-				"testdata/seccomp_rich_b.json",
-			},
-			stdinFile:  "",
-			wantCode:   exitDiff,
-			golden:     "testdata/diff_seccomp_rich_json.golden",
-			wantStderr: false,
-		},
-		{
-			name: "diff seccomp rich for one architecture",
-			args: []string{
-				cmdDiff,
-				flagType,
-				typeSeccomp,
-				flagArch,
-				"SCMP_ARCH_X86_64",
-				flagFormat,
-				formatHuman,
-				"testdata/seccomp_rich_a.json",
-				"testdata/seccomp_rich_b.json",
-			},
-			stdinFile:  "",
-			wantCode:   exitDiff,
-			golden:     "testdata/diff_seccomp_rich_x86_64.golden",
-			wantStderr: false,
-		},
-		{
-			name: "merge seccomp rich union",
-			args: []string{
-				cmdMerge,
-				flagType,
-				typeSeccomp,
-				flagStrategy,
-				strategyUnion,
-				"testdata/seccomp_rich_a.json",
-				"testdata/seccomp_rich_b.json",
-			},
-			stdinFile:  "",
-			wantCode:   0,
-			golden:     "testdata/merge_seccomp_rich_union.golden",
-			wantStderr: false,
-		},
-		{
-			// Reversing the inputs shows which values follow the first one:
-			// errnoRet, listenerPath and listenerMetadata do, and this
-			// golden is what says so.
-			name: "merge seccomp rich union reversed",
-			args: []string{
-				cmdMerge,
-				flagType,
-				typeSeccomp,
-				flagStrategy,
-				strategyUnion,
-				"testdata/seccomp_rich_b.json",
-				"testdata/seccomp_rich_a.json",
-			},
-			stdinFile:  "",
-			wantCode:   0,
-			golden:     "testdata/merge_seccomp_rich_union_reversed.golden",
-			wantStderr: false,
-		},
-		{
-			// Intersect refuses an input listing an architecture of
-			// another byte order than the node's, and the inputs list
-			// little-endian ones, so the node is named for the golden to
-			// hold on a big-endian host too.
-			name: "merge seccomp rich intersect",
-			args: []string{
-				cmdMerge,
-				flagType,
-				typeSeccomp,
-				flagStrategy,
-				strategyIntersect,
-				flagArch,
-				"SCMP_ARCH_X86_64",
-				"testdata/seccomp_rich_a.json",
-				"testdata/seccomp_rich_b.json",
-			},
-			stdinFile:  "",
-			wantCode:   0,
-			golden:     "testdata/merge_seccomp_rich_intersect.golden",
-			wantStderr: false,
-		},
-		{
-			// A 32-bit node never matches a condition on a value above
-			// 32 bits, so the merge settles the rule away there and keeps
-			// it on a 64-bit host; --arch makes the answer the same
-			// wherever the merge runs.
-			name: "merge seccomp intersect for a 32-bit architecture",
-			args: []string{
-				cmdMerge,
-				flagType,
-				typeSeccomp,
-				flagStrategy,
-				strategyIntersect,
-				flagArch,
-				"SCMP_ARCH_X86",
-				"testdata/seccomp_wide_value.json",
-				"testdata/seccomp_wide_value.json",
-			},
-			stdinFile:  "",
-			wantCode:   0,
-			golden:     "testdata/merge_seccomp_intersect_x86.golden",
-			wantStderr: false,
-		},
-		{
-			// A value above 32 bits passes on a 64-bit host and fails on a
-			// 32-bit one; --arch makes the answer the same everywhere.
-			name: "validate seccomp artifact for a 32-bit architecture",
-			args: []string{
-				cmdValidate,
-				flagType,
-				typeSeccomp,
-				"--artifact",
-				flagArch,
-				"SCMP_ARCH_X86",
-				"testdata/seccomp_wide_value.json",
-			},
-			stdinFile:  "",
-			wantCode:   1,
-			golden:     "testdata/validate_seccomp_wide_value_x86.golden",
-			wantStderr: true,
-		},
-		{
-			name: "diff apparmor rich json",
-			args: []string{
-				cmdDiff,
-				flagType,
-				typeAppArmor,
-				"testdata/apparmor_rich_a.json",
-				"testdata/apparmor_rich_b.json",
-			},
-			stdinFile:  "",
-			wantCode:   exitDiff,
-			golden:     "testdata/diff_apparmor_rich_json.golden",
-			wantStderr: false,
-		},
-		{
-			name: "merge apparmor rich union",
-			args: []string{
-				cmdMerge,
-				flagType,
-				typeAppArmor,
-				flagStrategy,
-				strategyUnion,
-				"testdata/apparmor_rich_a.json",
-				"testdata/apparmor_rich_b.json",
-			},
-			stdinFile:  "",
-			wantCode:   0,
-			golden:     "testdata/merge_apparmor_rich_union.golden",
-			wantStderr: false,
-		},
-		{
-			name: "merge apparmor rich intersect",
-			args: []string{
-				cmdMerge,
-				flagType,
-				typeAppArmor,
-				flagStrategy,
-				strategyIntersect,
-				"testdata/apparmor_rich_a.json",
-				"testdata/apparmor_rich_b.json",
-			},
-			stdinFile:  "",
-			wantCode:   0,
-			golden:     "testdata/merge_apparmor_rich_intersect.golden",
-			wantStderr: false,
-		},
-		{
-			name: "diff landlock rich json",
-			args: []string{
-				cmdDiff,
-				flagType,
-				typeLandlock,
-				"testdata/landlock_rich_a.json",
-				"testdata/landlock_rich_b.json",
-			},
-			stdinFile:  "",
-			wantCode:   exitDiff,
-			golden:     "testdata/diff_landlock_rich_json.golden",
-			wantStderr: false,
-		},
-		{
-			name: "merge landlock rich union",
-			args: []string{
-				cmdMerge,
-				flagType,
-				typeLandlock,
-				flagStrategy,
-				strategyUnion,
-				"testdata/landlock_rich_a.json",
-				"testdata/landlock_rich_b.json",
-			},
-			stdinFile:  "",
-			wantCode:   0,
-			golden:     "testdata/merge_landlock_rich_union.golden",
-			wantStderr: false,
-		},
-		{
-			name: "merge landlock rich intersect",
-			args: []string{
-				cmdMerge,
-				flagType,
-				typeLandlock,
-				flagStrategy,
-				strategyIntersect,
-				"testdata/landlock_rich_a.json",
-				"testdata/landlock_rich_b.json",
-			},
-			stdinFile:  "",
-			wantCode:   0,
-			golden:     "testdata/merge_landlock_rich_intersect.golden",
-			wantStderr: false,
-		},
-		{
-			name: "validate seccomp rich human",
-			args: []string{
-				cmdValidate,
-				flagType,
-				typeSeccomp,
-				flagFormat,
-				formatHuman,
-				"testdata/seccomp_rich_a.json",
-			},
-			stdinFile:  "",
-			wantCode:   0,
-			golden:     "testdata/validate_seccomp_rich_human.golden",
-			wantStderr: false,
-		},
-		{
-			name: "validate landlock rich",
-			args: []string{
-				cmdValidate,
-				flagType,
-				typeLandlock,
-				"testdata/landlock_rich_a.json",
-			},
-			stdinFile:  "",
-			wantCode:   0,
-			golden:     "testdata/validate_landlock_rich.golden",
-			wantStderr: false,
-		},
+		goldenCmd("diff_seccomp_rich_json", exitDiff, "diff --type seccomp --arch none",
+			testdataSeccompRichA, testdataSeccompRichB),
+		goldenCmd("diff_seccomp_rich_x86_64", exitDiff,
+			"diff --type seccomp --arch SCMP_ARCH_X86_64 --format human",
+			testdataSeccompRichA, testdataSeccompRichB),
+		goldenCmd("merge_seccomp_rich_union", 0, "merge --type seccomp --strategy union",
+			testdataSeccompRichA, testdataSeccompRichB),
+		// Reversing the inputs shows which values follow the first one:
+		// errnoRet, listenerPath and listenerMetadata do, and this golden is
+		// what says so.
+		goldenCmd("merge_seccomp_rich_union_reversed", 0, "merge --type seccomp --strategy union",
+			testdataSeccompRichB, testdataSeccompRichA),
+		// Intersect refuses an input listing an architecture of another
+		// byte order than the node's, and the inputs list little-endian
+		// ones, so the node is named for the golden to hold on a big-endian
+		// host too.
+		goldenCmd("merge_seccomp_rich_intersect", 0,
+			"merge --type seccomp --strategy intersect --arch SCMP_ARCH_X86_64",
+			testdataSeccompRichA, testdataSeccompRichB),
+		// A 32-bit node never matches a condition on a value above 32 bits,
+		// so the merge settles the rule away there and keeps it on a 64-bit
+		// host; --arch makes the answer the same wherever the merge runs.
+		goldenCmd("merge_seccomp_intersect_x86", 0,
+			"merge --type seccomp --strategy intersect --arch SCMP_ARCH_X86",
+			testdataSeccompWideValue, testdataSeccompWideValue),
+		goldenCmd("diff_apparmor_rich_json", exitDiff, "diff --type apparmor",
+			testdataAppArmorRichA, testdataAppArmorRichB),
+		goldenCmd("merge_apparmor_rich_union", 0, "merge --type apparmor --strategy union",
+			testdataAppArmorRichA, testdataAppArmorRichB),
+		goldenCmd("merge_apparmor_rich_intersect", 0, "merge --type apparmor --strategy intersect",
+			testdataAppArmorRichA, testdataAppArmorRichB),
+		goldenCmd("diff_landlock_rich_json", exitDiff, "diff --type landlock",
+			testdataLandlockRichA, testdataLandlockRichB),
+		goldenCmd("merge_landlock_rich_union", 0, "merge --type landlock --strategy union",
+			testdataLandlockRichA, testdataLandlockRichB),
+		goldenCmd("merge_landlock_rich_intersect", 0, "merge --type landlock --strategy intersect",
+			testdataLandlockRichA, testdataLandlockRichB),
+		goldenCmd("validate_seccomp_rich_human", 0, "validate --type seccomp --format human",
+			testdataSeccompRichA),
+		goldenCmd("validate_landlock_rich", 0, "validate --type landlock", testdataLandlockRichA),
+	}
+}
+
+// detectionGoldenCases pins the runs that write to stderr while they
+// succeed. The cases above all pass --type, so none of them exercises
+// detection or the note it writes to stderr; the ones below leave it out,
+// one per profile type.
+func detectionGoldenCases() []goldenCase {
+	return []goldenCase{
+		goldenCmd("merge_seccomp_detected", 0, "merge --strategy union",
+			testdataSeccompA, testdataSeccompB),
+		goldenCmd("validate_apparmor_detected", 0, "validate", testdataAppArmorA),
+		goldenCmd("diff_landlock_detected", exitDiff, "diff --format human",
+			testdataLandlockA, testdataLandlockB),
+		// An unknown member is a warning on stderr while the profile still
+		// goes to stdout, which is the one case where both streams carry
+		// something at once.
+		goldenCmd("merge_seccomp_unknown_field", 0, "merge --strategy union",
+			"testdata/seccomp_unknown_field.json"),
 	}
 }
 
@@ -604,154 +220,56 @@ func richGoldenCases() []goldenCase {
 // they are about.
 func failureGoldenCases() []goldenCase {
 	return []goldenCase{
-		{
-			name:       "validate apparmor invalid",
-			args:       []string{cmdValidate, flagType, typeAppArmor, testdataAppArmorInvalid},
-			stdinFile:  "",
-			wantCode:   1,
-			golden:     "testdata/validate_apparmor_invalid.golden",
-			wantStderr: true,
-		},
-		{
-			name: "validate apparmor invalid strict",
-			args: []string{
-				cmdValidate, flagType, typeAppArmor, flagStrict, testdataAppArmorInvalid,
-			},
-			stdinFile:  "",
-			wantCode:   1,
-			golden:     "testdata/validate_apparmor_invalid_strict.golden",
-			wantStderr: true,
-		},
-		{
-			// The misspelled member is a warning in the default mode, and
-			// names the field its JSON spelling stands for.
-			name:       "validate landlock invalid",
-			args:       []string{cmdValidate, flagType, typeLandlock, testdataLandlockInvalid},
-			stdinFile:  "",
-			wantCode:   1,
-			golden:     "testdata/validate_landlock_invalid.golden",
-			wantStderr: true,
-		},
-		{
-			name: "validate landlock invalid strict",
-			args: []string{
-				cmdValidate, flagType, typeLandlock, flagStrict,
-				"testdata/landlock_invalid_strict.json",
-			},
-			stdinFile:  "",
-			wantCode:   1,
-			golden:     "testdata/validate_landlock_invalid_strict.golden",
-			wantStderr: true,
-		},
-		{
-			name:       "validate seccomp invalid",
-			args:       []string{cmdValidate, flagType, typeSeccomp, testdataSeccompInvalid},
-			stdinFile:  "",
-			wantCode:   1,
-			golden:     "testdata/validate_seccomp_invalid.golden",
-			wantStderr: true,
-		},
-		{
-			// Every bad input is named, not only the first.
-			name: "merge seccomp several invalid inputs",
-			args: []string{
-				cmdMerge, flagType, typeSeccomp, flagStrategy, strategyUnion,
-				testdataSeccompInvalid, testdataSeccompA, testdataInvalidAction,
-			},
-			stdinFile:  "",
-			wantCode:   1,
-			golden:     "testdata/merge_seccomp_invalid.golden",
-			wantStderr: true,
-		},
-		{
-			// An input that does not parse, one that does not decode and
-			// one that does not validate are all named, in input order.
-			name: "validate seccomp inputs failing at every stage",
-			args: []string{
-				cmdValidate, flagType, typeSeccomp, testdataSeccompTruncated,
-				testdataSeccompTypeError, testdataInvalidAction,
-			},
-			stdinFile:  "",
-			wantCode:   1,
-			golden:     "testdata/validate_seccomp_every_stage.golden",
-			wantStderr: true,
-		},
-		{
-			// An input of another type fails as an input, and the others
-			// are still validated.
-			name: "validate seccomp beside a landlock input",
-			args: []string{
-				cmdValidate, flagType, typeSeccomp, testdataSeccompInvalid,
-				"testdata/landlock_a.json",
-			},
-			stdinFile:  "",
-			wantCode:   1,
-			golden:     "testdata/validate_seccomp_other_type.golden",
-			wantStderr: true,
-		},
-		{
-			name: "merge seccomp inputs failing at every stage",
-			args: []string{
-				cmdMerge, flagStrategy, strategyUnion, testdataSeccompTruncated,
-				testdataSeccompTypeError, testdataSeccompA, testdataInvalidAction,
-			},
-			stdinFile:  "",
-			wantCode:   1,
-			golden:     "testdata/merge_seccomp_every_stage.golden",
-			wantStderr: true,
-		},
-		{
-			name: "validate seccomp type error",
-			args: []string{
-				cmdValidate, flagType, typeSeccomp, testdataSeccompTypeError,
-			},
-			stdinFile:  "",
-			wantCode:   1,
-			golden:     "testdata/validate_seccomp_type_error.golden",
-			wantStderr: true,
-		},
-		{
-			name:       "validate syntax error",
-			args:       []string{cmdValidate, "testdata/seccomp_syntax_error.json"},
-			stdinFile:  "",
-			wantCode:   1,
-			golden:     "testdata/validate_syntax_error.golden",
-			wantStderr: true,
-		},
-		{
-			name:       "unknown command",
-			args:       []string{testBogus},
-			stdinFile:  "",
-			wantCode:   exitUsage,
-			golden:     "testdata/usage_unknown_command.golden",
-			wantStderr: true,
-		},
-		{
-			name:       "unknown flag",
-			args:       []string{cmdValidate, "-real.json"},
-			stdinFile:  "",
-			wantCode:   exitUsage,
-			golden:     "testdata/usage_unknown_flag.golden",
-			wantStderr: true,
-		},
-		{
-			name:       "empty file argument",
-			args:       []string{cmdValidate, ""},
-			stdinFile:  "",
-			wantCode:   exitUsage,
-			golden:     "testdata/usage_empty_argument.golden",
-			wantStderr: true,
-		},
+		goldenCmd("validate_apparmor_invalid", 1, "validate --type apparmor",
+			testdataAppArmorInvalid),
+		goldenCmd("validate_apparmor_invalid_strict", 1, "validate --type apparmor --strict",
+			testdataAppArmorInvalid),
+		// The misspelled member is a warning in the default mode, and names
+		// the field its JSON spelling stands for.
+		goldenCmd("validate_landlock_invalid", 1, "validate --type landlock",
+			testdataLandlockInvalid),
+		goldenCmd("validate_landlock_invalid_strict", 1, "validate --type landlock --strict",
+			"testdata/landlock_invalid_strict.json"),
+		goldenCmd("validate_seccomp_invalid", 1, "validate --type seccomp", testdataSeccompInvalid),
+		// A value above 32 bits passes on a 64-bit host and fails on a
+		// 32-bit one; --arch makes the answer the same everywhere.
+		goldenCmd("validate_seccomp_wide_value_x86", 1,
+			"validate --type seccomp --artifact --arch SCMP_ARCH_X86", testdataSeccompWideValue),
+		// Every bad input is named, not only the first.
+		goldenCmd("merge_seccomp_invalid", 1, "merge --type seccomp --strategy union",
+			testdataSeccompInvalid, testdataSeccompA, testdataInvalidAction),
+		// An input that does not parse, one that does not decode and one
+		// that does not validate are all named, in input order.
+		goldenCmd("validate_seccomp_every_stage", 1, "validate --type seccomp",
+			testdataSeccompTruncated, testdataSeccompTypeError, testdataInvalidAction),
+		// An input of another type fails as an input, and the others are
+		// still validated.
+		goldenCmd("validate_seccomp_other_type", 1, "validate --type seccomp",
+			testdataSeccompInvalid, testdataLandlockA),
+		goldenCmd("merge_seccomp_every_stage", 1, "merge --strategy union",
+			testdataSeccompTruncated, testdataSeccompTypeError, testdataSeccompA,
+			testdataInvalidAction),
+		goldenCmd("validate_seccomp_type_error", 1, "validate --type seccomp",
+			testdataSeccompTypeError),
+		goldenCmd("validate_syntax_error", 1, "validate", "testdata/seccomp_syntax_error.json"),
+		goldenCmd("usage_unknown_command", exitUsage, testBogus),
+		goldenCmd("usage_unknown_flag", exitUsage, "validate -real.json"),
+		goldenCmd("usage_empty_argument", exitUsage, "validate", ""),
 	}
 }
 
 func TestGolden(t *testing.T) {
 	t.Parallel()
 
-	cases := slices.Concat(basicGoldenCases(), richGoldenCases(), failureGoldenCases())
+	cases := slices.Concat(basicGoldenCases(), richGoldenCases())
+
+	for _, testCase := range slices.Concat(detectionGoldenCases(), failureGoldenCases()) {
+		testCase.wantStderr = true
+		cases = append(cases, testCase)
+	}
 
 	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
+		t.Run(testCase.stem, func(t *testing.T) {
 			t.Parallel()
 
 			var stdin io.Reader
@@ -770,7 +288,7 @@ func TestGolden(t *testing.T) {
 				t.Fatalf("exit code = %d, want %d (stderr: %s)", code, testCase.wantCode, stderr)
 			}
 
-			compareGolden(t, testCase.golden, stdout)
+			compareGolden(t, testCase.goldenPath(), stdout)
 
 			if !testCase.wantStderr {
 				if stderr != "" {
@@ -780,7 +298,7 @@ func TestGolden(t *testing.T) {
 				return
 			}
 
-			compareGolden(t, stderrGoldenPath(testCase.golden), stderr)
+			compareGolden(t, testCase.stderrGoldenPath(), stderr)
 		})
 	}
 }
@@ -823,23 +341,23 @@ func TestGoldenIsReproducible(t *testing.T) {
 	args := [][]string{
 		{
 			cmdMerge, flagType, typeSeccomp, flagStrategy, strategyUnion,
-			"testdata/seccomp_rich_a.json", "testdata/seccomp_rich_b.json",
+			testdataSeccompRichA, testdataSeccompRichB,
 		},
 		{
 			cmdDiff, flagType, typeSeccomp, flagArch, archNone,
-			"testdata/seccomp_rich_a.json", "testdata/seccomp_rich_b.json",
+			testdataSeccompRichA, testdataSeccompRichB,
 		},
 		{
 			cmdMerge, flagType, typeAppArmor, flagStrategy, strategyUnion,
-			"testdata/apparmor_rich_a.json", "testdata/apparmor_rich_b.json",
+			testdataAppArmorRichA, testdataAppArmorRichB,
 		},
 		{
 			cmdMerge, flagType, typeLandlock, flagStrategy, strategyUnion,
-			"testdata/landlock_rich_a.json", "testdata/landlock_rich_b.json",
+			testdataLandlockRichA, testdataLandlockRichB,
 		},
 		{
 			cmdDiff, flagType, typeLandlock,
-			"testdata/landlock_rich_a.json", "testdata/landlock_rich_b.json",
+			testdataLandlockRichA, testdataLandlockRichB,
 		},
 	}
 

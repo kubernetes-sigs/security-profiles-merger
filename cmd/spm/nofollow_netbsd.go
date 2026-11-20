@@ -24,6 +24,4 @@ import "syscall"
 // symlink. NetBSD reports EFTYPE, which its open(2) documents for this case
 // alone. ELOOP is left out: there it only means a loop among the
 // directories on the way, which is not the refusal the error would report.
-//
-//nolint:gochecknoglobals // immutable lookup table
 var noFollowErrnos = []syscall.Errno{syscall.EFTYPE}

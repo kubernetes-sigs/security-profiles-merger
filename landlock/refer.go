@@ -55,7 +55,7 @@ func dropUnsafeRefer(rules []PathRule, inputs []*Profile) []PathRule {
 
 	for _, path := range inputRulePaths(inputs) {
 		access := ancestorMask(ancestors(path), resultMasks)
-		if access&fsBits[FSAccessRefer] != 0 {
+		if access&fsBits.of(FSAccessRefer) != 0 {
 			referAt[path] = access
 		}
 	}
@@ -224,14 +224,14 @@ func unhandleMoveConflicts(result *Profile, inputs []*Profile) {
 		conflicting |= moveConflicts(input, resultMasks, paths, rootRule)
 	}
 
-	conflicting &= fsBits.mask(result.HandledAccessFS) &^ fsBits[FSAccessRefer]
+	conflicting &= fsBits.mask(result.HandledAccessFS) &^ fsBits.of(FSAccessRefer)
 	if conflicting == 0 {
 		return
 	}
 
 	result.HandledAccessFS = slices.DeleteFunc(
 		result.HandledAccessFS,
-		func(right FSAccessRight) bool { return fsBits[right]&conflicting != 0 },
+		func(right FSAccessRight) bool { return fsBits.of(right)&conflicting != 0 },
 	)
 	pruneUnhandledRights(result)
 }
@@ -372,7 +372,7 @@ func moveSides(
 
 	add := func(path string, destination bool) {
 		inputBelow, inputRoot := maskAt(path, inputMasks)
-		if (inputBelow|inputRoot)&fsBits[FSAccessRefer] == 0 {
+		if (inputBelow|inputRoot)&fsBits.of(FSAccessRefer) == 0 {
 			return
 		}
 

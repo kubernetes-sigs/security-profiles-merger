@@ -18,7 +18,6 @@ package landlock
 
 import (
 	"cmp"
-	"maps"
 	"slices"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
@@ -47,18 +46,6 @@ type ProfileDiff struct {
 	// NetRules is set when the network rules differ.
 	NetRules *NetRulesDiff `json:"netRules,omitempty"`
 }
-
-// IsEqual reports whether the two compared profiles are equivalent after
-// normalization, as Equal does.
-//
-// IsEqual and String have value receivers, so a ProfileDiff and a pointer to
-// one both implement fmt.Stringer. Diff returns a non-nil diff whenever its
-// error is nil; called through a nil pointer, either method panics.
-func (d ProfileDiff) IsEqual() bool { return d.Equal }
-
-// String returns FormatDiff of the diff, so that fmt prints a diff the way
-// it prints a Profile.
-func (d ProfileDiff) String() string { return FormatDiff(&d) }
 
 // SliceDiff represents added and removed items in a set-like slice, such as
 // a handled access set. It is spm.SliceDiff, which seccomp.SliceDiff and
@@ -219,56 +206,35 @@ func (c ruleChanges[Rule, Change]) empty() bool {
 }
 
 // diffRules compares two lists of canonical rules, which hold one rule per
-// key with sorted rights. A key only the left holds is removed, one only the
-// right holds is added, and one both hold with different rights is changed;
-// each is reported in key order.
+// key with sorted rights, in key order (see canonicalProfile). A key only
+// the left holds is removed, one only the right holds is added, and one both
+// hold with different rights is changed; each is reported in key order.
 func diffRules[Rule any, Key cmp.Ordered, Right comparable, Change any](
 	kind ruleKind[Rule, Key, Right], left, right []Rule,
 	change func(key Key, left, right []Right) Change,
 ) ruleChanges[Rule, Change] {
-	leftMap := ruleByKey(kind, left)
-	rightMap := ruleByKey(kind, right)
+	leftMap, rightMap := kind.ruleMap(left), kind.ruleMap(right)
 
 	var changes ruleChanges[Rule, Change]
 
-	leftKeys := slices.Sorted(maps.Keys(leftMap))
+	for _, rule := range left {
+		ruleKey, leftAccess := kind.key(rule), kind.access(rule)
 
-	for _, ruleKey := range leftKeys {
-		if _, ok := rightMap[ruleKey]; !ok {
-			changes.removed = append(changes.removed, leftMap[ruleKey])
-		}
-	}
-
-	for _, ruleKey := range slices.Sorted(maps.Keys(rightMap)) {
-		if _, ok := leftMap[ruleKey]; !ok {
-			changes.added = append(changes.added, rightMap[ruleKey])
-		}
-	}
-
-	for _, ruleKey := range leftKeys {
-		rightRule, ok := rightMap[ruleKey]
+		rightAccess, ok := rightMap[ruleKey]
 		if !ok {
-			continue
-		}
-
-		leftAccess, rightAccess := kind.access(leftMap[ruleKey]), kind.access(rightRule)
-		if !slices.Equal(leftAccess, rightAccess) {
+			changes.removed = append(changes.removed, rule)
+		} else if !slices.Equal(leftAccess, rightAccess) {
 			changes.changed = append(changes.changed, change(ruleKey, leftAccess, rightAccess))
 		}
 	}
 
-	return changes
-}
-
-func ruleByKey[Rule any, Key cmp.Ordered, Right comparable](
-	kind ruleKind[Rule, Key, Right], rules []Rule,
-) map[Key]Rule {
-	result := make(map[Key]Rule, len(rules))
-	for _, rule := range rules {
-		result[kind.key(rule)] = rule
+	for _, rule := range right {
+		if _, ok := leftMap[kind.key(rule)]; !ok {
+			changes.added = append(changes.added, rule)
+		}
 	}
 
-	return result
+	return changes
 }
 
 // canonicalProfile returns a normalized, sorted copy of the profile, so two
@@ -280,13 +246,15 @@ func canonicalProfile(profile *Profile) *Profile {
 	return result
 }
 
-// FormatDiff returns a human-readable representation of a Landlock profile
-// diff, quoted and bounded as FormatProfile is, so that a runtime can log
+// String returns a human-readable representation of the diff, as a single
+// line quoted and bounded as Profile.String is, so that a runtime can log
 // the diff of an artifact it was handed.
-func FormatDiff(diff *ProfileDiff) string {
-	if diff == nil {
-		return "Diff{<nil>}"
-	}
+//
+// String has a value receiver, so a ProfileDiff and a pointer to one both
+// implement fmt.Stringer. Diff returns a non-nil diff whenever its error is
+// nil; called through a nil pointer, String panics.
+func (d ProfileDiff) String() string {
+	diff := &d
 
 	if diff.Equal {
 		return "Diff{equal}"

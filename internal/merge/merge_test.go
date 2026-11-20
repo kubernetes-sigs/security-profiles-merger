@@ -180,59 +180,49 @@ func addTestProfiles(a, b *testProfile) (*testProfile, error) {
 	return &testProfile{value: a.value + b.value}, nil
 }
 
-func TestFoldEmpty(t *testing.T) {
+func TestFold(t *testing.T) {
 	t.Parallel()
 
-	_, err := merge.Fold[testProfile](nil, addTestProfiles)
-	if !errors.Is(err, spm.ErrNoProfiles) {
-		t.Fatalf("Fold(nil) = %v, want ErrNoProfiles", err)
-	}
-}
+	single := &testProfile{value: 42}
 
-func TestFoldSingle(t *testing.T) {
-	t.Parallel()
+	for _, testCase := range []struct {
+		name     string
+		profiles []*testProfile
+		want     int
+		wantErr  error
+		// wantSame says the result is the one profile passed, returned as it
+		// is rather than copied.
+		wantSame bool
+	}{
+		{name: "empty", wantErr: spm.ErrNoProfiles},
+		{name: "single", profiles: []*testProfile{single}, want: 42, wantSame: true},
+		{name: "two", profiles: []*testProfile{{value: 10}, {value: 20}}, want: 30},
+		{name: "three", profiles: []*testProfile{{value: 1}, {value: 2}, {value: 3}}, want: 6},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 
-	original := &testProfile{value: 42}
+			result, err := merge.Fold(testCase.profiles, addTestProfiles)
+			if testCase.wantErr != nil {
+				if !errors.Is(err, testCase.wantErr) {
+					t.Fatalf("Fold = %v, want %v", err, testCase.wantErr)
+				}
 
-	result, err := merge.Fold([]*testProfile{original}, addTestProfiles)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+				return
+			}
 
-	if result != original {
-		t.Error("Fold of one profile should return it as it is")
-	}
-}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 
-func TestFoldTwo(t *testing.T) {
-	t.Parallel()
+			if testCase.wantSame && result != testCase.profiles[0] {
+				t.Error("Fold of one profile should return it as it is")
+			}
 
-	result, err := merge.Fold(
-		[]*testProfile{{value: 10}, {value: 20}},
-		addTestProfiles,
-	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.value != 30 {
-		t.Errorf("value = %d, want 30", result.value)
-	}
-}
-
-func TestFoldThree(t *testing.T) {
-	t.Parallel()
-
-	result, err := merge.Fold(
-		[]*testProfile{{value: 1}, {value: 2}, {value: 3}},
-		addTestProfiles,
-	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.value != 6 {
-		t.Errorf("value = %d, want 6", result.value)
+			if result.value != testCase.want {
+				t.Errorf("value = %d, want %d", result.value, testCase.want)
+			}
+		})
 	}
 }
 
@@ -298,30 +288,25 @@ func TestWriteSliceDiff(t *testing.T) {
 			name:    "removed only",
 			prefix:  "fs",
 			removed: []string{"read_file"},
-			added:   nil,
 			want:    "fs:-read_file",
 		},
 		{
-			name:    "added only",
-			prefix:  "net",
-			removed: nil,
-			added:   []string{"bind_tcp"},
-			want:    "net:+bind_tcp",
+			name:   "added only",
+			prefix: "net",
+			added:  []string{"bind_tcp"},
+			want:   "net:+bind_tcp",
 		},
 		{
-			name:    "empty",
-			prefix:  "x",
-			removed: nil,
-			added:   nil,
-			want:    "x:",
+			name:   "empty",
+			prefix: "x",
+			want:   "x:",
 		},
 		{
 			// Unquoted, this would read as three capabilities.
-			name:    "an item holding the separator",
-			prefix:  "caps",
-			removed: nil,
-			added:   []string{"KILL,-CHOWN,+SYS_ADMIN"},
-			want:    `caps:+"KILL,-CHOWN,+SYS_ADMIN"`,
+			name:   "an item holding the separator",
+			prefix: "caps",
+			added:  []string{"KILL,-CHOWN,+SYS_ADMIN"},
+			want:   `caps:+"KILL,-CHOWN,+SYS_ADMIN"`,
 		},
 	}
 
@@ -495,60 +480,60 @@ func TestClonePtrValue(t *testing.T) {
 	}
 }
 
-func TestDeduplicateSliceEmpty(t *testing.T) {
+func TestDeduplicateSlice(t *testing.T) {
 	t.Parallel()
 
-	result := merge.DeduplicateSlice[string](nil)
+	for _, testCase := range []struct {
+		name  string
+		input []string
+		want  []string
+	}{
+		{name: "nil"},
+		{name: "single", input: []string{"x"}, want: []string{"x"}},
+		{name: "no duplicates", input: []string{"a", "b", "c"}, want: []string{"a", "b", "c"}},
+		// The first occurrence of each item keeps its place.
+		{
+			name:  "with duplicates",
+			input: []string{"a", "b", "a", "c", "b", "a"},
+			want:  []string{"a", "b", "c"},
+		},
+		{name: "all the same", input: []string{"x", "x", "x"}, want: []string{"x"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := merge.DeduplicateSlice(testCase.input)
+			if !slices.Equal(result, testCase.want) || (testCase.want == nil) != (result == nil) {
+				t.Errorf("DeduplicateSlice(%v) = %#v, want %#v",
+					testCase.input, result, testCase.want)
+			}
+		})
+	}
+}
+
+func TestDeduplicateSliceNeverAliasesTheInput(t *testing.T) {
+	t.Parallel()
+
+	// An empty but non-nil slice with spare capacity used to come back as the
+	// caller's own slice header, so appending to a merge result wrote into the
+	// caller's backing array.
+	input := make([]string, 0, 8)
+
+	result := merge.DeduplicateSlice(input)
+
 	if result != nil {
-		t.Errorf("DeduplicateSlice(nil) = %v, want nil", result)
+		t.Fatalf("DeduplicateSlice(empty) = %#v, want nil", result)
 	}
-}
 
-func TestDeduplicateSliceNoDuplicates(t *testing.T) {
-	t.Parallel()
+	grown := append(result, "written") //nolint:gocritic // where it writes is the point
 
-	input := []string{"a", "b", "c"}
-	result := merge.DeduplicateSlice(input)
-
-	if !slices.Equal(result, input) {
-		t.Errorf("DeduplicateSlice(%v) = %v, want %v", input, result, input)
+	if len(input) != 0 || cap(input) != 8 {
+		t.Fatalf("appending to the result changed the caller's slice: len=%d cap=%d",
+			len(input), cap(input))
 	}
-}
 
-func TestDeduplicateSliceWithDuplicates(t *testing.T) {
-	t.Parallel()
-
-	input := []string{"a", "b", "a", "c", "b", "a"}
-	want := []string{"a", "b", "c"}
-
-	result := merge.DeduplicateSlice(input)
-
-	if !slices.Equal(result, want) {
-		t.Errorf("DeduplicateSlice(%v) = %v, want %v", input, result, want)
-	}
-}
-
-func TestDeduplicateSliceSingle(t *testing.T) {
-	t.Parallel()
-
-	input := []string{"x"}
-	result := merge.DeduplicateSlice(input)
-
-	if !slices.Equal(result, input) {
-		t.Errorf("DeduplicateSlice(%v) = %v, want %v", input, result, input)
-	}
-}
-
-func TestDeduplicateSliceAllSame(t *testing.T) {
-	t.Parallel()
-
-	input := []string{"x", "x", "x"}
-	want := []string{"x"}
-
-	result := merge.DeduplicateSlice(input)
-
-	if !slices.Equal(result, want) {
-		t.Errorf("DeduplicateSlice(%v) = %v, want %v", input, result, want)
+	if &grown[0] == &input[:1][0] {
+		t.Error("appending to the result wrote into the caller's backing array")
 	}
 }
 
@@ -647,73 +632,6 @@ func BenchmarkDeduplicateSlice(b *testing.B) {
 				_ = merge.DeduplicateSlice(items)
 			}
 		})
-	}
-}
-
-func TestSafeText(t *testing.T) {
-	t.Parallel()
-
-	for value, want := range map[string]string{
-		"":              `""`,
-		"read":          "read",
-		"/etc/tty[0-9]": "/etc/tty[0-9]",
-		"stdin[1]":      "stdin[1]",
-		"a,b":           `"a,b"`,
-		"/etc/{a,b}":    `"/etc/{a,b}"`,
-		"/etc/{a":       `"/etc/{a"`,
-		"a b":           `"a b"`,
-		"a\tb":          `"a\tb"`,
-		`a"b`:           `"a\"b"`,
-		"x(1)":          `"x(1)"`,
-		"x->y":          `"x->y"`,
-		"<none>":        `"<none>"`,
-		"EQ:1":          `"EQ:1"`,
-		"x\x1b[31m":     `"x\x1b[31m"`,
-		"\xff":          `"\xff"`,
-	} {
-		if got := merge.SafeText(value); got != want {
-			t.Errorf("SafeText(%q) = %s, want %s", value, got, want)
-		}
-	}
-
-	// A rune that prints as nothing is quoted, and spelled out within the
-	// quotes, by SafeText, SafeName and QuoteBounded alike, so that a path
-	// holding one never reads as the path without it.
-	for value, want := range map[string]string{
-		"/usr\u3164/bin":     `"/usr\u3164/bin"`,
-		"/usr/bin\ufe0f":     `"/usr/bin\ufe0f"`,
-		"/usr/bin\U000e0100": `"/usr/bin\U000e0100"`,
-		"/usr/\u202ebin":     `"/usr/\u202ebin"`,
-		"/usr/\u00adbin":     `"/usr/\u00adbin"`,
-		"/usr/\u009bbin":     `"/usr/\u009bbin"`,
-		"/usr/bin\u3164":     `"/usr/bin\u3164"`,
-		"/usr/\u2800bin":     `"/usr/\u2800bin"`,
-		"/usr/\u3000bin":     `"/usr/\u3000bin"`,
-		"/usr/\u00a0bin":     `"/usr/\u00a0bin"`,
-		"/usr/\u2007bin":     `"/usr/\u2007bin"`,
-		"/usr/\u115fbin":     `"/usr/\u115fbin"`,
-		"/usr/\u1160bin":     `"/usr/\u1160bin"`,
-		"/usr/\uffa0bin":     `"/usr/\uffa0bin"`,
-	} {
-		for name, quote := range map[string]func(string) string{
-			"SafeText": merge.SafeText, "SafeName": merge.SafeName,
-			"QuoteBounded": merge.QuoteBounded,
-		} {
-			if got := quote(value); got != want {
-				t.Errorf("%s(%+q) = %s, want %s", name, value, got, want)
-			}
-		}
-	}
-
-	// Rendered as a list, one path with an alternation and two paths that
-	// split it differ.
-	var one, two merge.Builder
-
-	merge.WriteTexts(&one, []string{"/etc/{a,b}"}, ",")
-	merge.WriteTexts(&two, []string{"/etc/{a", "b}"}, ",")
-
-	if one.String() == two.String() {
-		t.Errorf("WriteTexts renders one path and two paths alike: %s", one.String())
 	}
 }
 

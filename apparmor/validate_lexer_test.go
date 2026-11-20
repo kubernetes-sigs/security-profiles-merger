@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -52,7 +53,7 @@ func TestValidateArtifactRejectsUnquotablePaths(t *testing.T) {
 		// the path, so the token runs on into the permissions.
 		`/a\\`, `/a\`, `/a/\\\\`,
 	} {
-		t.Run(path, func(t *testing.T) {
+		t.Run(strconv.Quote(path), func(t *testing.T) {
 			t.Parallel()
 
 			profile := readOnly(path)
@@ -152,7 +153,7 @@ func TestValidateArtifactAcceptsEscapedPaths(t *testing.T) {
 		// goes on after it.
 		`/tmp/a\\b`, `/a,\\b`, `/a,\,b`,
 	} {
-		t.Run(path, func(t *testing.T) {
+		t.Run(strconv.Quote(path), func(t *testing.T) {
 			t.Parallel()
 
 			for name, validate := range loadableValidators {
@@ -176,7 +177,7 @@ func TestValidateArtifactRejectsNulInPath(t *testing.T) {
 		`/foo\000bar`, `/foo\x00bar`, `/foo\d000bar`, `/foo\0`, "/foo\x00bar",
 		`/foo\000*`,
 	} {
-		t.Run(path, func(t *testing.T) {
+		t.Run(strconv.Quote(path), func(t *testing.T) {
 			t.Parallel()
 
 			for name, validate := range loadableValidators {
@@ -222,9 +223,6 @@ func TestValidateArtifactRejectsCapabilityNames(t *testing.T) {
 		"../../x", "net-raw", "net_raw\n", `"net_raw"`,
 	} {
 		profile := &apparmor.Profile{
-			Executable:   nil,
-			Filesystem:   nil,
-			Network:      nil,
 			Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{name}},
 		}
 
@@ -262,9 +260,6 @@ func TestValidateArtifactAcceptsUnknownCapabilityNames(t *testing.T) {
 
 	for _, name := range []string{"SYS_FUTURE", "bpf2", "NET_ADMIN", "x"} {
 		profile := &apparmor.Profile{
-			Executable:   nil,
-			Filesystem:   nil,
-			Network:      nil,
 			Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{name}},
 		}
 
@@ -294,15 +289,10 @@ func TestValidateArtifactRejectsTooManyPaths(t *testing.T) {
 	split := &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
 			AllowedExecutables: paths[:len(paths)/2],
-			AllowedLibraries:   nil,
 		},
 		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  paths[len(paths)/2:],
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
+			ReadOnlyPaths: paths[len(paths)/2:],
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	err = apparmor.ValidateArtifact(split)
@@ -402,14 +392,10 @@ func TestValidateReportsEscapeAliases(t *testing.T) {
 	t.Parallel()
 
 	crossCategory := &apparmor.Profile{
-		Executable: nil,
 		Filesystem: &apparmor.FilesystemRules{
 			ReadOnlyPaths:  []string{"/a/b"},
 			WriteOnlyPaths: []string{`/a/\b`},
-			ReadWritePaths: nil,
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	for name, validate := range map[string]validateFunc{
@@ -431,11 +417,7 @@ func TestValidateReportsEscapeAliases(t *testing.T) {
 	execs := &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
 			AllowedExecutables: []string{"/bin/sh", `/bin/\x73h`},
-			AllowedLibraries:   nil,
 		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	err := apparmor.ValidateStrict(execs)
@@ -483,14 +465,10 @@ func TestMergeFoldsEscapeAliases(t *testing.T) {
 		// Two categories, two spellings: the duplicate Validate reports, as
 		// it would be for one spelling listed twice.
 		crossCategory := &apparmor.Profile{
-			Executable: nil,
 			Filesystem: &apparmor.FilesystemRules{
 				ReadOnlyPaths:  []string{"/a/b"},
 				WriteOnlyPaths: []string{`/a/\b`},
-				ReadWritePaths: nil,
 			},
-			Network:      nil,
-			Capabilities: nil,
 		}
 
 		_, err = mergeFn(crossCategory, crossCategory)
@@ -507,7 +485,7 @@ func TestMergeFoldsEscapeAliases(t *testing.T) {
 	}
 
 	if got := merged.Filesystem.ReadWritePaths; !slices.Equal(got, []string{"/a/b"}) {
-		t.Errorf("Union = %s, want one read-write rule", apparmor.FormatProfile(merged))
+		t.Errorf("Union = %s, want one read-write rule", merged.String())
 	}
 
 	err = apparmor.Validate(merged)
@@ -530,9 +508,6 @@ func TestMergeMatchesAliasesAcrossProfiles(t *testing.T) {
 			Executable: &apparmor.ExecutableRules{
 				AllowedExecutables: paths, AllowedLibraries: nil,
 			},
-			Filesystem:   nil,
-			Network:      nil,
-			Capabilities: nil,
 		}
 	}
 
@@ -541,9 +516,6 @@ func TestMergeMatchesAliasesAcrossProfiles(t *testing.T) {
 			Executable: &apparmor.ExecutableRules{
 				AllowedExecutables: nil, AllowedLibraries: paths,
 			},
-			Filesystem:   nil,
-			Network:      nil,
-			Capabilities: nil,
 		}
 	}
 
@@ -614,7 +586,7 @@ func TestUnquotablePathsSurviveTheMerge(t *testing.T) {
 		t.Errorf("Intersect = %q, want the path as written", got)
 	}
 
-	if strings.Contains(apparmor.FormatProfile(readOnly(path)), "shadow rw,") {
-		t.Error("FormatProfile renders the path as a rule")
+	if strings.Contains(readOnly(path).String(), "shadow rw,") {
+		t.Error("String renders the path as a rule")
 	}
 }

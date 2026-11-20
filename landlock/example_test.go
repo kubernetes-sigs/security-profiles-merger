@@ -30,8 +30,6 @@ func ExampleIntersect() {
 			landlock.FSAccessReadFile,
 			landlock.FSAccessWriteFile,
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
 		PathRules: []landlock.PathRule{{
 			Path: pathEtc,
 			AccessFS: []landlock.FSAccessRight{
@@ -39,7 +37,6 @@ func ExampleIntersect() {
 				landlock.FSAccessWriteFile,
 			},
 		}},
-		NetRules: nil,
 	}
 
 	profile := &landlock.Profile{
@@ -47,15 +44,12 @@ func ExampleIntersect() {
 			landlock.FSAccessReadFile,
 			landlock.FSAccessWriteFile,
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
 		PathRules: []landlock.PathRule{{
 			Path: pathEtc,
 			AccessFS: []landlock.FSAccessRight{
 				landlock.FSAccessReadFile,
 			},
 		}},
-		NetRules: nil,
 	}
 
 	result, err := landlock.Intersect(baseline, profile)
@@ -76,11 +70,7 @@ func ExampleIntersect() {
 
 func ExampleValidate() {
 	profile := &landlock.Profile{
-		HandledAccessFS:  []landlock.FSAccessRight{"bogus_right"},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
+		HandledAccessFS: []landlock.FSAccessRight{"bogus_right"},
 	}
 
 	err := landlock.Validate(profile)
@@ -95,8 +85,6 @@ func ExampleValidateStrict() {
 		HandledAccessFS: []landlock.FSAccessRight{
 			landlock.FSAccessReadFile,
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
 		PathRules: []landlock.PathRule{{
 			Path: pathEtc,
 			AccessFS: []landlock.FSAccessRight{
@@ -104,7 +92,6 @@ func ExampleValidateStrict() {
 				landlock.FSAccessWriteFile,
 			},
 		}},
-		NetRules: nil,
 	}
 
 	err := landlock.ValidateStrict(profile)
@@ -114,23 +101,20 @@ func ExampleValidateStrict() {
 	// pathRules[0].accessFs[1]: "write_file": rule grants unhandled access right
 }
 
-func ExampleFormatProfile() {
+func ExampleProfile_String() {
 	profile := &landlock.Profile{
 		HandledAccessFS: []landlock.FSAccessRight{
 			landlock.FSAccessReadFile,
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
 		PathRules: []landlock.PathRule{{
 			Path: pathEtc,
 			AccessFS: []landlock.FSAccessRight{
 				landlock.FSAccessReadFile,
 			},
 		}},
-		NetRules: nil,
 	}
 
-	fmt.Println(landlock.FormatProfile(profile))
+	fmt.Println(profile.String())
 
 	// Output:
 	// Profile{fs:read_file /etc(read_file)}
@@ -142,15 +126,12 @@ func ExampleDiff() {
 			landlock.FSAccessReadFile,
 			landlock.FSAccessWriteFile,
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
 		PathRules: []landlock.PathRule{{
 			Path: pathEtc,
 			AccessFS: []landlock.FSAccessRight{
 				landlock.FSAccessReadFile,
 			},
 		}},
-		NetRules: nil,
 	}
 
 	right := &landlock.Profile{
@@ -158,15 +139,12 @@ func ExampleDiff() {
 			landlock.FSAccessReadFile,
 			landlock.FSAccessExecute,
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
 		PathRules: []landlock.PathRule{{
 			Path: pathTmp,
 			AccessFS: []landlock.FSAccessRight{
 				landlock.FSAccessWriteFile,
 			},
 		}},
-		NetRules: nil,
 	}
 
 	diff, err := landlock.Diff(left, right)
@@ -175,42 +153,36 @@ func ExampleDiff() {
 	}
 
 	fmt.Println("Equal:", diff.Equal)
-	fmt.Println(landlock.FormatDiff(diff))
+	fmt.Println(diff.String())
 
 	// Output:
 	// Equal: false
 	// Diff{fs:-write_file,+execute -/etc(read_file) +/tmp(write_file)}
 }
 
-func ExampleFormatDiff() {
+func ExampleProfileDiff_String() {
 	left := &landlock.Profile{
 		HandledAccessFS: []landlock.FSAccessRight{
 			landlock.FSAccessReadFile,
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
 		PathRules: []landlock.PathRule{{
 			Path: pathEtc,
 			AccessFS: []landlock.FSAccessRight{
 				landlock.FSAccessReadFile,
 			},
 		}},
-		NetRules: nil,
 	}
 
 	right := &landlock.Profile{
 		HandledAccessFS: []landlock.FSAccessRight{
 			landlock.FSAccessReadFile,
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
 		PathRules: []landlock.PathRule{{
 			Path: pathEtc,
 			AccessFS: []landlock.FSAccessRight{
 				landlock.FSAccessReadFile,
 			},
 		}},
-		NetRules: nil,
 	}
 
 	diff, err := landlock.Diff(left, right)
@@ -218,7 +190,7 @@ func ExampleFormatDiff() {
 		panic(err)
 	}
 
-	fmt.Println(landlock.FormatDiff(diff))
+	fmt.Println(diff.String())
 
 	// Output:
 	// Diff{equal}
@@ -230,15 +202,12 @@ func ExampleUnion() {
 			landlock.FSAccessReadFile,
 			landlock.FSAccessWriteFile,
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
 		PathRules: []landlock.PathRule{{
 			Path: pathEtc,
 			AccessFS: []landlock.FSAccessRight{
 				landlock.FSAccessReadFile,
 			},
 		}},
-		NetRules: nil,
 	}
 
 	recording2 := &landlock.Profile{
@@ -246,15 +215,12 @@ func ExampleUnion() {
 			landlock.FSAccessReadFile,
 			landlock.FSAccessWriteFile,
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
 		PathRules: []landlock.PathRule{{
 			Path: pathHome,
 			AccessFS: []landlock.FSAccessRight{
 				landlock.FSAccessWriteFile,
 			},
 		}},
-		NetRules: nil,
 	}
 
 	result, err := landlock.Union(recording1, recording2)
@@ -298,13 +264,9 @@ func ExampleValidateArtifact() {
 		HandledAccessFS: []landlock.FSAccessRight{
 			landlock.FSAccessReadFile,
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
 		PathRules: []landlock.PathRule{{
-			Path:     "etc",
-			AccessFS: nil,
+			Path: "etc",
 		}},
-		NetRules: nil,
 	}
 
 	// The merge accepts the profile, but a kernel would not load it.
@@ -326,8 +288,6 @@ func ExampleLoweredRulePaths() {
 			landlock.FSAccessReadFile,
 			landlock.FSAccessWriteFile,
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
 		PathRules: []landlock.PathRule{{
 			Path: "/srv",
 			AccessFS: []landlock.FSAccessRight{
@@ -335,7 +295,6 @@ func ExampleLoweredRulePaths() {
 				landlock.FSAccessWriteFile,
 			},
 		}},
-		NetRules: nil,
 	}
 
 	// The artifact names a deeper path, which the container may control.
@@ -344,8 +303,6 @@ func ExampleLoweredRulePaths() {
 			landlock.FSAccessReadFile,
 			landlock.FSAccessWriteFile,
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
 		PathRules: []landlock.PathRule{{
 			Path: "/srv/data/link",
 			AccessFS: []landlock.FSAccessRight{
@@ -353,7 +310,6 @@ func ExampleLoweredRulePaths() {
 				landlock.FSAccessWriteFile,
 			},
 		}},
-		NetRules: nil,
 	}
 
 	result, err := landlock.Intersect(baseline, artifact)
@@ -384,9 +340,6 @@ func ExampleRequiredABIVersion() {
 		HandledAccessNet: []landlock.NetAccessRight{
 			landlock.NetAccessBindTCP,
 		},
-		Scoped:    nil,
-		PathRules: nil,
-		NetRules:  nil,
 	}
 
 	abi, err := landlock.RequiredABIVersion(profile)
@@ -408,10 +361,6 @@ func ExampleOptions() {
 			landlock.FSAccessReadFile,
 			landlock.FSAccessTruncate,
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
 	}
 
 	// truncate needs ABI version 3, so a node reporting version 2 would
@@ -436,8 +385,6 @@ func ExampleOptions_Downgrade() {
 			landlock.FSAccessReadFile,
 			landlock.FSAccessTruncate,
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
 		PathRules: []landlock.PathRule{
 			{
 				Path: pathEtc,
@@ -447,7 +394,6 @@ func ExampleOptions_Downgrade() {
 				},
 			},
 		},
-		NetRules: nil,
 	}
 
 	downgraded, err := landlock.Options{ABI: landlock.ABIV2}.Downgrade(profile)
@@ -465,13 +411,10 @@ func ExampleOptions_Downgrade() {
 
 func ExampleProfile_Clone() {
 	profile := &landlock.Profile{
-		HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessReadFile},
-		HandledAccessNet: nil,
-		Scoped:           nil,
+		HandledAccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
 		PathRules: []landlock.PathRule{{
 			Path: pathEtc, AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
 		}},
-		NetRules: nil,
 	}
 
 	clone := profile.Clone()
@@ -493,13 +436,10 @@ func Example() {
 			landlock.FSAccessReadFile,
 			landlock.FSAccessWriteFile,
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
 		PathRules: []landlock.PathRule{{
 			Path:     "/srv",
 			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
 		}},
-		NetRules: nil,
 	}
 
 	data := []byte(`{
@@ -539,7 +479,7 @@ func Example() {
 		panic(err)
 	}
 
-	fmt.Println(landlock.FormatProfile(effective))
+	fmt.Println(effective.String())
 	fmt.Println("open beneath /srv:", lowered)
 
 	// Output:

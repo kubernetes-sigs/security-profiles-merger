@@ -1,29 +1,25 @@
 # Dependabot tracks pinned action SHAs, go.mod and hack/tools/go.mod, which
-# pins mdtoc, govulncheck, zeitgeist, actionlint and gorelease. The tool
-# versions below live in a Makefile variable or a workflow env, where it
+# pins mdtoc, govulncheck, zeitgeist, actionlint and gorelease. The versions
+# below live in .go-version, a Makefile variable or a workflow env, where it
 # cannot see them: refPaths keep those copies in sync with each other, and
 # the upstream stanzas let the scheduled dependencies workflow ask each
 # project whether the pin is still the current release.
 dependencies:
-  # The Go the release binaries are built with, which CI also tests, scans
-  # with govulncheck and runs the tools of hack/tools/go.mod with, so it
-  # must not be older than that module's go line. It is not go.mod's go
-  # line: that is the oldest Go the library supports, which raising would
-  # raise for every consumer. golang/go publishes tags but no GitHub
-  # releases, and its tags are not semver, so the official image's tags are
-  # what upstream is read from.
+  # The Go the release binaries are built with, in .go-version, which every
+  # workflow reads. CI also tests, scans with govulncheck and runs the tools
+  # of hack/tools/go.mod with it, so it must not be older than that module's
+  # go line. It is not go.mod's go line: that is the oldest Go the library
+  # supports, which raising would raise for every consumer. golang/go
+  # publishes tags but no GitHub releases, and its tags are not semver, so
+  # the official image's tags are what upstream is read from.
   - name: go
     version: 1.27.4
     upstream:
       flavour: container
       registry: golang
     refPaths:
-      - path: .github/workflows/ci.yml
-        match: "GO_VERSION: \""
-      - path: .github/workflows/release.yml
-        match: "GO_VERSION: \""
-      - path: .github/workflows/dependency-updates.yml
-        match: "GO_VERSION: \""
+      - path: .go-version
+        match: "^[0-9]"
 
   - name: golangci-lint
     version: 2.15.0
@@ -70,8 +66,9 @@ dependencies:
   # The libseccomp versions the seccomp model is checked against, 2.5.4,
   # 2.5.5, 2.6.0 and 2.6.1, are a matrix in ci.yml, and SYSCALL_CSVS in the
   # Makefile also lists 2.5.2 for the syscall placement table, not one pin,
-  # so there is no single line for a refPath to match. Carrying the newest one here is what turns "add a version here
-  # when libseccomp releases one" into something a job can notice.
+  # so there is no single line for a refPath to match. Carrying the newest
+  # one here is what turns "add a version here when libseccomp releases one"
+  # into something a job can notice.
   - name: libseccomp
     version: 2.6.1
     upstream:

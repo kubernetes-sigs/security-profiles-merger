@@ -17,7 +17,6 @@ limitations under the License.
 package strictjson
 
 import (
-	"encoding/json"
 	"reflect"
 	"slices"
 	"strings"
@@ -53,8 +52,6 @@ func NewRequired(fields map[reflect.Type][]string) *Required {
 
 // tagsOnly is the table a nil *Required stands for, which marks only the
 // fields the tag marks and keeps the caches for them.
-//
-//nolint:gochecknoglobals // a table without fields, holding caches by type
 var tagsOnly = NewRequired(nil)
 
 // orTags returns the table, or tagsOnly for a nil one.
@@ -73,70 +70,13 @@ func (required *Required) has(owner reflect.Type, field *reflect.StructField) bo
 		slices.Contains(required.orTags().fields[owner], field.Name)
 }
 
-// missingFieldsOf reports the required fields of T that raw names no value
-// for: the member is left out or null, or the object that would hold it is.
-// encoding/json decodes the zero value in each case. decoded is what raw
-// decoded into, and required marks fields besides the tags. The members
-// are found by reading the document's tokens (see scanDocument), which
-// Unmarshal does once for the repeated members and this check together.
-//
-// A document that repeats a member is read otherwise (see missingIn).
-//
-// It only reads the document for a type that has required fields at all
-// and a decoded value that left one of them zero.
-func missingFieldsOf[T any](raw []byte, decoded *T, required *Required) ([]string, int) {
-	target := missingTarget(decoded, required)
-	if target == nil || !json.Valid(raw) {
-		return nil, 0
-	}
-
-	return missingIn(scanDocument(raw, target, required), raw, decoded, required)
-}
-
-// missingIn returns the required members the scan of raw found missing.
-// Where raw repeats a member, the scan, which reads each occurrence on its
-// own, is not what encoding/json reads: it decodes every occurrence in turn
-// into the same value, reusing the elements of a list, so a member an
-// earlier occurrence names fills the profile where a later one leaves it
-// out. The document is then read with every occurrence at once instead,
-// as the decoder reads it (see Required.walkMissing); a document without a
-// repeated member, the common case, costs no second read.
-func missingIn[T any](
-	scan *documentScan,
-	raw []byte,
-	decoded *T,
-	required *Required,
-) ([]string, int) {
-	if len(scan.duplicates.paths) == 0 || missingTarget(decoded, required) == nil {
-		return scan.missing.result()
-	}
-
-	document, err := decodeDocument(raw)
-	if err != nil {
-		if json.Valid(raw) {
-			return []string{unreadableDocument}, 0
-		}
-
-		return nil, 0
-	}
-
-	var found pathCollector
-
-	required.orTags().walkMissing([]any{document}, reflect.ValueOf(decoded), "", &found)
-
-	return found.result()
-}
-
-// missingTarget returns the type a document is checked against for missing
-// members, or nil where it need not be: the type has no required field, or
-// the value decoded from the document holds none of them zero.
-func missingTarget[T any](decoded *T, required *Required) reflect.Type {
-	target := reflect.TypeFor[T]()
-	if !required.requiresFields(target) || !required.holdsZeroRequired(reflect.ValueOf(decoded)) {
-		return nil
-	}
-
-	return target
+// checksMissing reports whether a document is read for missing members
+// (see scanDocument): a required member left out or null decodes as the
+// zero value, so only a type with a required field, and a value decoded
+// from the document that holds one of them zero, need it.
+func checksMissing[T any](decoded *T, required *Required) bool {
+	return required.requiresFields(reflect.TypeFor[T]()) &&
+		required.holdsZeroRequired(reflect.ValueOf(decoded))
 }
 
 // requiresFields reports whether a struct type reachable from target has a

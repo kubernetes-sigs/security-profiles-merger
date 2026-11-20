@@ -393,15 +393,14 @@ limitations under the License.
 // same. An intersection could keep it only where every input lists it word
 // for word, and would drop what it covers on another input, so where an
 // input holds such a pattern [Intersect] fails with [ErrBudgetExceeded] when
-// the result may lose access, read as above as neither input of a merge step
-// being kept whole. The call keeps every program it compiled until it
-// returns, and a program holds up to some 450 bytes per byte of its pattern
-// for the costliest shapes, such as a run of "*/" components: a merge whose
-// patterns fill the budget, which accepted artifacts can, may hold on the
-// order of a hundred megabytes while it runs (two artifacts of sixteen
-// four-kilobyte "*/" patterns intersected with "/**" held some 25
-// megabytes). Profiles of the size KEP-6061 recommends, a few patterns of a
-// few dozen bytes, hold well under a megabyte.
+// the result may lose access, read as above. The call keeps every program it
+// compiled until it returns, and a program holds up to some 450 bytes per
+// byte of its pattern for the costliest shapes, such as a run of "*/"
+// components: a merge whose patterns fill the budget, which accepted
+// artifacts can, may hold on the order of a hundred megabytes while it runs
+// (two artifacts of sixteen four-kilobyte "*/" patterns intersected with
+// "/**" held some 25 megabytes). Profiles of the size KEP-6061 recommends, a
+// few patterns of a few dozen bytes, hold well under a megabyte.
 //
 // What the merge bounds on its own is therefore the matching and the
 // compiling. Reading the profiles, validating them and normalizing their

@@ -731,8 +731,6 @@ func TestMergesIgnoreTheSharedCache(t *testing.T) {
 			WriteOnlyPaths: []string{"/var/log/*.log"},
 			ReadWritePaths: []string{"/tmp/**"},
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 	right := &Profile{
 		Executable: &ExecutableRules{
@@ -744,8 +742,6 @@ func TestMergesIgnoreTheSharedCache(t *testing.T) {
 			WriteOnlyPaths: []string{"/var/log/app.log"},
 			ReadWritePaths: []string{"/tmp/x/**"},
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	for name, mergeFn := range map[string]func(...*Profile) (*Profile, error){
@@ -786,11 +782,8 @@ func TestLoadablePathsWithoutAPairedCopy(t *testing.T) {
 		},
 		Filesystem: &FilesystemRules{
 			ReadOnlyPaths:  []string{"relative", "/etc//{a"},
-			WriteOnlyPaths: nil,
 			ReadWritePaths: []string{"/srv/../x"},
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	report := func(normalized *Profile) string {
@@ -1026,14 +1019,10 @@ func TestSyntacticChecksCompileNothing(t *testing.T) {
 	}
 
 	profile := &Profile{
-		Executable: nil,
 		Filesystem: &FilesystemRules{
 			ReadOnlyPaths:  []string{pattern},
 			WriteOnlyPaths: []string{"/etc//*.conf", "/etc/{a"},
-			ReadWritePaths: nil,
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	err := Validate(profile)
@@ -1161,9 +1150,6 @@ func TestBudgetGoesToInputsInOrder(t *testing.T) {
 		Executable: &ExecutableRules{
 			AllowedExecutables: []string{"/bin/*"}, AllowedLibraries: nil,
 		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	artifact := budgetProfile(budgetFiller()...)

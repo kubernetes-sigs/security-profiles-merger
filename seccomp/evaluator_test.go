@@ -155,7 +155,6 @@ func loadRules(profile *specs.LinuxSeccomp, name string) []rule {
 	defaultRule := rule{
 		action: profile.DefaultAction,
 		errno:  loadedErrno(profile.DefaultAction, profile.DefaultErrnoRet),
-		conds:  nil,
 	}
 
 	var rules []rule
@@ -168,7 +167,6 @@ func loadRules(profile *specs.LinuxSeccomp, name string) []rule {
 		base := rule{
 			action: entry.Action,
 			errno:  loadedErrno(entry.Action, entry.ErrnoRet),
-			conds:  nil,
 		}
 		if base.sameResult(defaultRule) {
 			continue
@@ -405,14 +403,11 @@ type syscallJudge struct {
 func newSyscallJudge(profile *specs.LinuxSeccomp, name string) syscallJudge {
 	rules := loadRules(profile, name)
 	judge := syscallJudge{
-		unconditional: nil,
-		rules:         nil,
-		exact:         true,
-		actionExact:   true,
+		exact:       true,
+		actionExact: true,
 		def: rule{
 			action: profile.DefaultAction,
 			errno:  loadedErrno(profile.DefaultAction, profile.DefaultErrnoRet),
-			conds:  nil,
 		},
 	}
 
@@ -454,8 +449,6 @@ func (j *syscallJudge) judge(call []uint64) verdict {
 	result := verdict{
 		strictest: j.def.action,
 		loosest:   j.def.action,
-		errno:     0,
-		exact:     false,
 		possible:  []specs.LinuxSeccompAction{j.def.action},
 	}
 
@@ -486,7 +479,6 @@ func (j *syscallJudge) actionVerdict(call []uint64) verdict {
 		strictest: action,
 		loosest:   action,
 		errno:     errno,
-		exact:     false,
 		possible:  []specs.LinuxSeccompAction{action},
 	}
 }
@@ -549,10 +541,9 @@ func entryMatches(entry specs.LinuxSyscall, call []uint64) bool {
 	probe := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActLog,
 		Syscalls: []specs.LinuxSyscall{{
-			Names:    []string{"probe"},
-			Action:   specs.ActAllow,
-			ErrnoRet: nil,
-			Args:     entry.Args,
+			Names:  []string{"probe"},
+			Action: specs.ActAllow,
+			Args:   entry.Args,
 		}},
 	}
 

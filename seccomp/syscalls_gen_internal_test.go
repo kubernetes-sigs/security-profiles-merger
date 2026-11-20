@@ -291,6 +291,4 @@ package seccomp
 // 2.6.0 or 2.6.1 knows to where those releases place a rule on it, per
 // architecture (see syscallPlacement). Regenerate it with make
 // verify-syscalls.
-//
-//nolint:gochecknoglobals // immutable lookup table
 `

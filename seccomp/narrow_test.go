@@ -230,6 +230,6 @@ func TestDiffShowsTheSettledRuleOn32Bit(t *testing.T) {
 
 	if diff.Equal || diff.Syscalls == nil || len(diff.Syscalls.Changed) != 1 ||
 		diff.Syscalls.Changed[0].Name != "personality" {
-		t.Errorf("Diff = %s, want personality changed", seccomp.FormatDiff(diff))
+		t.Errorf("Diff = %s, want personality changed", diff.String())
 	}
 }

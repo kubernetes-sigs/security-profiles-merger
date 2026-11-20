@@ -261,8 +261,6 @@ const LatestABIVersion = ABIV11
 // exactly the rights listed here, RequiredABIVersion and Options read the
 // versions, FSAccessRights, NetAccessRights and ScopeRights list them, and
 // tests enumerate them from here.
-//
-//nolint:gochecknoglobals // immutable lookup tables
 var (
 	fsAccessABI = map[FSAccessRight]ABIVersion{
 		FSAccessExecute:     ABIV1,

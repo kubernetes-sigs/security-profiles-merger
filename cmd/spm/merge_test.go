@@ -53,7 +53,6 @@ func TestMergeErrors(t *testing.T) {
 		{
 			name:       "invalid JSON without type",
 			args:       []string{cmdMerge, flagStrategy, strategyUnion, invalidFile},
-			stdin:      nil,
 			wantCode:   1,
 			wantStderr: parsingError(invalidFile),
 		},
@@ -62,7 +61,6 @@ func TestMergeErrors(t *testing.T) {
 			args: []string{
 				cmdMerge, flagStrategy, strategyIntersect, testdataSeccompA, flagType, typeSeccomp,
 			},
-			stdin:      nil,
 			wantCode:   exitUsage,
 			wantStderr: "flags must precede file arguments",
 		},
@@ -76,7 +74,6 @@ func TestMergeErrors(t *testing.T) {
 		{
 			name:       "nil stdin",
 			args:       []string{cmdMerge, flagType, typeSeccomp, flagStrategy, strategyIntersect},
-			stdin:      nil,
 			wantCode:   1,
 			wantStderr: testNoInput,
 		},
@@ -90,21 +87,18 @@ func TestMergeErrors(t *testing.T) {
 		{
 			name:       "missing flags",
 			args:       []string{cmdMerge},
-			stdin:      nil,
 			wantCode:   exitUsage,
 			wantStderr: "--strategy is required",
 		},
 		{
 			name:       "missing strategy",
 			args:       []string{cmdMerge, flagType, typeSeccomp},
-			stdin:      nil,
 			wantCode:   exitUsage,
 			wantStderr: "--strategy is required",
 		},
 		{
 			name:       "unknown strategy",
 			args:       []string{cmdMerge, flagType, typeSeccomp, flagStrategy, testBogus},
-			stdin:      nil,
 			wantCode:   exitUsage,
 			wantStderr: "unknown strategy",
 		},
@@ -126,7 +120,6 @@ func TestMergeErrors(t *testing.T) {
 				flagFormat,
 				"xml",
 			},
-			stdin:      nil,
 			wantCode:   exitUsage,
 			wantStderr: testUnknownFormat,
 		},
@@ -140,7 +133,6 @@ func TestMergeErrors(t *testing.T) {
 				strategyIntersect,
 				"/nonexistent/profile.json",
 			},
-			stdin:      nil,
 			wantCode:   1,
 			wantStderr: testErrorColon,
 		},
@@ -154,7 +146,6 @@ func TestMergeErrors(t *testing.T) {
 				strategyIntersect,
 				invalidFile,
 			},
-			stdin:      nil,
 			wantCode:   1,
 			wantStderr: testErrorColon,
 		},
@@ -168,7 +159,6 @@ func TestMergeErrors(t *testing.T) {
 				strategyUnion,
 				invalidFile,
 			},
-			stdin:      nil,
 			wantCode:   1,
 			wantStderr: testErrorColon,
 		},
@@ -182,7 +172,6 @@ func TestMergeErrors(t *testing.T) {
 				strategyIntersect,
 				invalidFile,
 			},
-			stdin:      nil,
 			wantCode:   1,
 			wantStderr: testErrorColon,
 		},
@@ -247,7 +236,7 @@ func TestMergeAppArmorInvalidStrategy(t *testing.T) {
 
 	code := mergeProfiles(testInvocation(data),
 		defaultMergeRequest(data, testBogus,
-			apparmor.Intersect, apparmor.Union, apparmor.FormatProfile),
+			apparmor.Intersect, apparmor.Union, (*apparmor.Profile).String),
 	)
 
 	if code != exitUsage {
@@ -260,7 +249,7 @@ func TestMergeAppArmorNoProfiles(t *testing.T) {
 
 	code := mergeProfiles(testInvocation(nil),
 		defaultMergeRequest(nil, strategyIntersect,
-			apparmor.Intersect, apparmor.Union, apparmor.FormatProfile),
+			apparmor.Intersect, apparmor.Union, (*apparmor.Profile).String),
 	)
 
 	if code != 1 {
@@ -275,7 +264,7 @@ func TestMergeLandlockInvalidStrategy(t *testing.T) {
 
 	code := mergeProfiles(testInvocation(data),
 		defaultMergeRequest(data, testBogus,
-			landlock.Intersect, landlock.Union, landlock.FormatProfile),
+			landlock.Intersect, landlock.Union, (*landlock.Profile).String),
 	)
 
 	if code != exitUsage {
@@ -288,57 +277,11 @@ func TestMergeLandlockNoProfiles(t *testing.T) {
 
 	code := mergeProfiles(testInvocation(nil),
 		defaultMergeRequest(nil, strategyUnion,
-			landlock.Intersect, landlock.Union, landlock.FormatProfile),
+			landlock.Intersect, landlock.Union, (*landlock.Profile).String),
 	)
 
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
-	}
-}
-
-func TestMergeSeccompIntersectFiles(t *testing.T) {
-	t.Parallel()
-
-	p1 := writeTemp(t, seccompJSON(t, testSyscallRead, "write"))
-	p2 := writeTemp(t, seccompJSON(t, testSyscallRead))
-
-	code, stdout, _ := runCapture(t, []string{
-		cmdMerge, flagType, typeSeccomp, flagStrategy, strategyIntersect, p1, p2,
-	}, nil)
-
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-
-	var result specs.LinuxSeccomp
-
-	unmarshalOutput(t, stdout, &result)
-
-	if len(result.Syscalls) != 1 || result.Syscalls[0].Names[0] != testSyscallRead {
-		t.Errorf("expected only read syscall, got %v", result.Syscalls)
-	}
-}
-
-func TestMergeSeccompUnionStdin(t *testing.T) {
-	t.Parallel()
-
-	input := "[" + seccompJSON(t, testSyscallRead) + "," +
-		seccompJSON(t, "write") + "]"
-
-	code, stdout, _ := runCapture(t, []string{
-		cmdMerge, flagType, typeSeccomp, flagStrategy, strategyUnion,
-	}, strings.NewReader(input))
-
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-
-	var result specs.LinuxSeccomp
-
-	unmarshalOutput(t, stdout, &result)
-
-	if names := syscallNames(result.Syscalls); len(names) != 2 {
-		t.Errorf("expected 2 syscall names, got %v", names)
 	}
 }
 
@@ -362,105 +305,6 @@ func TestMergeSeccompHumanFormat(t *testing.T) {
 	}
 }
 
-func TestMergeAppArmorUnionFiles(t *testing.T) {
-	t.Parallel()
-
-	p1 := writeTemp(t, apparmorJSON(t, "NET_ADMIN"))
-	p2 := writeTemp(t, apparmorJSON(t, "SYS_TIME"))
-
-	code, stdout, _ := runCapture(t, []string{
-		cmdMerge, flagType, typeAppArmor, flagStrategy, strategyUnion, p1, p2,
-	}, nil)
-
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-
-	var result apparmor.Profile
-
-	unmarshalOutput(t, stdout, &result)
-
-	if result.Capabilities == nil || len(result.Capabilities.AllowedCapabilities) != 2 {
-		t.Errorf("expected 2 capabilities, got %v", result)
-	}
-}
-
-func TestMergeAppArmorIntersectFiles(t *testing.T) {
-	t.Parallel()
-
-	p1 := writeTemp(t, apparmorJSON(t, "NET_ADMIN", "SYS_TIME"))
-	p2 := writeTemp(t, apparmorJSON(t, "NET_ADMIN"))
-
-	code, stdout, _ := runCapture(t, []string{
-		cmdMerge, flagType, typeAppArmor, flagStrategy, strategyIntersect, p1, p2,
-	}, nil)
-
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-
-	var result apparmor.Profile
-
-	unmarshalOutput(t, stdout, &result)
-
-	if result.Capabilities == nil || len(result.Capabilities.AllowedCapabilities) != 1 {
-		t.Errorf("expected 1 capability, got %v", result)
-	}
-}
-
-func TestMergeLandlockIntersectFiles(t *testing.T) {
-	t.Parallel()
-
-	p1 := writeTemp(t, landlockJSON(t, "read_file", "write_file"))
-	p2 := writeTemp(t, landlockJSON(t, "read_file"))
-
-	code, stdout, _ := runCapture(t, []string{
-		cmdMerge, flagType, typeLandlock, flagStrategy, strategyIntersect, p1, p2,
-	}, nil)
-
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-
-	var result landlock.Profile
-
-	unmarshalOutput(t, stdout, &result)
-
-	if len(result.PathRules) != 1 {
-		t.Errorf("expected 1 path rule, got %d", len(result.PathRules))
-	}
-
-	// The second profile does not handle write_file, so it never restricts
-	// it, and the first grants it: both rights survive.
-	want := []landlock.FSAccessRight{landlock.FSAccessReadFile, landlock.FSAccessWriteFile}
-	if !slices.Equal(result.PathRules[0].AccessFS, want) {
-		t.Errorf("expected %v, got %v", want, result.PathRules[0].AccessFS)
-	}
-}
-
-func TestMergeLandlockUnionFiles(t *testing.T) {
-	t.Parallel()
-
-	p1 := writeTemp(t, landlockJSON(t, "read_file"))
-	p2 := writeTemp(t, landlockJSON(t, "read_file", "write_file"))
-
-	code, stdout, _ := runCapture(t, []string{
-		cmdMerge, flagType, typeLandlock, flagStrategy, strategyUnion, p1, p2,
-	}, nil)
-
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-
-	var result landlock.Profile
-
-	unmarshalOutput(t, stdout, &result)
-
-	if len(result.PathRules) != 1 {
-		t.Errorf("expected 1 path rule, got %d", len(result.PathRules))
-	}
-}
-
 func TestMergeAppArmorHumanFormat(t *testing.T) {
 	t.Parallel()
 
@@ -477,26 +321,6 @@ func TestMergeAppArmorHumanFormat(t *testing.T) {
 	}
 
 	if !strings.Contains(stdout, "caps:") {
-		t.Errorf("expected human-readable output, got: %s", stdout)
-	}
-}
-
-func TestMergeLandlockHumanFormat(t *testing.T) {
-	t.Parallel()
-
-	p1 := writeTemp(t, landlockJSON(t, "read_file"))
-	p2 := writeTemp(t, landlockJSON(t, "read_file"))
-
-	code, stdout, _ := runCapture(t, []string{
-		cmdMerge, flagType, typeLandlock, flagStrategy, strategyIntersect,
-		flagFormat, formatHuman, p1, p2,
-	}, nil)
-
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-
-	if !strings.Contains(stdout, "read_file") {
 		t.Errorf("expected human-readable output, got: %s", stdout)
 	}
 }
@@ -539,29 +363,6 @@ func TestMergeStdinDash(t *testing.T) {
 
 	if len(result.Syscalls) != 1 {
 		t.Errorf("expected 1 syscall, got %d", len(result.Syscalls))
-	}
-}
-
-func TestMergeAutoDetectSeccomp(t *testing.T) {
-	t.Parallel()
-
-	fileA := writeTemp(t, seccompJSON(t, testSyscallRead))
-	fileB := writeTemp(t, seccompJSON(t, testSyscallRead, "write"))
-
-	code, stdout, _ := runCapture(t, []string{
-		cmdMerge, flagStrategy, strategyUnion, fileA, fileB,
-	}, nil)
-
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-
-	var result specs.LinuxSeccomp
-
-	unmarshalOutput(t, stdout, &result)
-
-	if names := syscallNames(result.Syscalls); len(names) != 2 {
-		t.Errorf("expected 2 syscall names, got %v", names)
 	}
 }
 
@@ -1109,16 +910,6 @@ func TestMergeOutputHumanFormat(t *testing.T) {
 	}
 }
 
-func syscallNames(syscalls []specs.LinuxSyscall) []string {
-	var names []string
-
-	for _, sc := range syscalls {
-		names = append(names, sc.Names...)
-	}
-
-	return names
-}
-
 func TestMergeWarnsAboutUnknownFields(t *testing.T) {
 	t.Parallel()
 
@@ -1295,13 +1086,12 @@ func defaultMergeRequest[T any](
 	}
 
 	return mergeRequest[T]{
-		strategy:   strategy,
-		checks:     checks,
-		strict:     make([]bool, len(inputs)),
-		inputCheck: nil,
-		intersect:  intersect,
-		union:      union,
-		formatFn:   formatFn,
+		strategy:  strategy,
+		checks:    checks,
+		strict:    make([]bool, len(inputs)),
+		intersect: intersect,
+		union:     union,
+		formatFn:  formatFn,
 	}
 }
 

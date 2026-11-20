@@ -62,7 +62,7 @@ if err != nil {
     return nodeMisconfigured(err)
 }
 if !diff.Equal {
-    return nodeMisconfigured(fmt.Errorf("baseline has rules the merge cannot apply: %s", seccomp.FormatDiff(diff)))
+    return nodeMisconfigured(fmt.Errorf("baseline has rules the merge cannot apply: %s", diff))
 }
 
 // 1. At pull time, decode strictly. encoding/json accepts what two readers
@@ -99,7 +99,7 @@ load(effective)
 // 5. Log what the merge took away from the artifact, and the architectures
 //    the artifact took away from the baseline (see step 3).
 if diff, err := seccomp.Diff(&artifact, effective); err == nil && !diff.Equal {
-    log.Printf("artifact constrained by baseline: %s", seccomp.FormatDiff(diff))
+    log.Printf("artifact constrained by baseline: %s", diff)
 }
 if diff, err := seccomp.Diff(baseline, effective); err == nil && diff.Architectures != nil {
     log.Printf("architectures narrowed by artifact: %v",
@@ -205,7 +205,7 @@ the merge taking anything away.
 4. **Load the result of the merge, never the artifact.** An accepted artifact
    may still hold rules a runtime evaluates in an order of its own; the merge
    reads those conservatively and never emits them.
-5. **Diff for the log.** `Diff` validates nothing, and `FormatDiff` quotes
+5. **Diff for the log.** `Diff` validates nothing, and a diff's `String` quotes
    any value holding a control character and cuts its output at 64 KiB, so
    both are safe on the artifact. A seccomp diff is equal when the merge
    kept the artifact's rules. It compares rules, not the filter they compile
@@ -219,7 +219,7 @@ the merge taking anything away.
 
 | Package | Before loading the result |
 |---------|---------------------------|
-| `apparmor` | Render the profile text yourself, as the [checklist](#rendering-the-result) below says: `FormatProfile` is for people, not for apparmor_parser |
+| `apparmor` | Render the profile text yourself, as the [checklist](#rendering-the-result) below says: `Profile.String` is for people, not for apparmor_parser |
 | `landlock` | Check the result with `landlock.Options{ABI: nodeABI}.Validate`. Check each of `LoweredRulePaths` (see [below](#landlock-lowered-rule-paths)). Map the rights to the kernel's bits as the [checklist](#rendering-the-result) below says. A result that handles and scopes nothing restricts nothing and the kernel refuses to load it: apply no ruleset. After `Intersect` that happens only when no input handles or scopes anything, which `ValidateArtifact` refuses in an artifact |
 | `seccomp` | Run the merge on the node that loads the result, or name that node's architecture with `seccomp.Options` (see [What the models leave out](#what-the-models-leave-out)). Keep an empty `Flags` list of the result as `"flags": []`: `json.Marshal` leaves it out of a `specs.LinuxSeccomp`, and runc and crun then set `SECCOMP_FILTER_FLAG_SPEC_ALLOW` (see [Flags](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Flags)). `seccomp.Marshal` writes the profile alone that way. A runtime that sets the result as `spec.Linux.Seccomp` and marshals the whole `specs.Spec` loses the empty list all the same, so where the result's `Flags` is empty but not nil it writes the `linux.seccomp` member of `config.json` from `seccomp.Marshal` itself, for example by replacing that member of the marshaled spec with the bytes `Marshal` returns |
 
@@ -582,8 +582,8 @@ held up.
   [Limits](#limits)).
 - **Bounded errors and output.** A validation report lists at most 32
   failures, a value it quotes is cut at 64 bytes, a decoder message at 512
-  bytes, and control characters are escaped; `FormatProfile`, `FormatDiff`
-  and the `String` methods are escaped the same way and cut at 64 KiB with
+  bytes, and control characters are escaped; `seccomp.FormatProfile` and
+  the `String` methods are escaped the same way and cut at 64 KiB with
   `... (output truncated)`, so an error, a formatted profile or a formatted
   diff is safe to log.
 - **What each model excludes.** See

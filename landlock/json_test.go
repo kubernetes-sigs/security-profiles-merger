@@ -41,7 +41,6 @@ func TestJSONRoundTripFull(t *testing.T) {
 			landlock.NetAccessBindTCP,
 			landlock.NetAccessConnectTCP,
 		},
-		Scoped: nil,
 		PathRules: []landlock.PathRule{
 			{
 				Path:     pathEtc,
@@ -74,14 +73,10 @@ func TestJSONRoundTripScoped(t *testing.T) {
 	t.Parallel()
 
 	profile := landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
 		Scoped: []landlock.ScopeRight{
 			landlock.ScopeAbstractUnixSocket,
 			landlock.ScopeSignal,
 		},
-		PathRules: nil,
-		NetRules:  nil,
 	}
 
 	testutil.AssertJSONRoundTrip(t, &profile)
@@ -90,13 +85,7 @@ func TestJSONRoundTripScoped(t *testing.T) {
 func TestJSONRoundTripEmpty(t *testing.T) {
 	t.Parallel()
 
-	profile := landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
-	}
+	profile := landlock.Profile{}
 
 	testutil.AssertJSONRoundTrip(t, &profile)
 }
@@ -108,15 +97,12 @@ func TestJSONRoundTripFSOnly(t *testing.T) {
 		HandledAccessFS: []landlock.FSAccessRight{
 			landlock.FSAccessReadFile,
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
 		PathRules: []landlock.PathRule{
 			{
 				Path:     pathHome,
 				AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
 			},
 		},
-		NetRules: nil,
 	}
 
 	testutil.AssertJSONRoundTrip(t, &profile)
@@ -128,7 +114,6 @@ func TestJSONRoundTripEmptyAccessLists(t *testing.T) {
 	profile := landlock.Profile{
 		HandledAccessFS:  []landlock.FSAccessRight{},
 		HandledAccessNet: []landlock.NetAccessRight{},
-		Scoped:           nil,
 		PathRules:        []landlock.PathRule{},
 		NetRules:         []landlock.NetRule{},
 	}

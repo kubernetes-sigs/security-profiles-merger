@@ -459,7 +459,7 @@ func (inv *invocation) stop(failedExit int) int {
 }
 
 // write writes a command's result to out in the format --format names:
-// humanStr, the result as FormatProfile or FormatDiff writes it, for the
+// humanStr, the result as its String or FormatProfile writes it, for the
 // human one.
 func (inv *invocation) write(result any, humanStr string) int {
 	switch inv.format {

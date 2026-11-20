@@ -188,18 +188,11 @@ func hostileUnionInputs(count int) (*Profile, *Profile) {
 
 	handled := append(slices.Clone(rights), FSAccessRefer)
 	left := &Profile{
-		HandledAccessFS:  handled,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        []PathRule{{Path: rootPath, AccessFS: []FSAccessRight{FSAccessRefer}}},
-		NetRules:         nil,
+		HandledAccessFS: handled,
+		PathRules:       []PathRule{{Path: rootPath, AccessFS: []FSAccessRight{FSAccessRefer}}},
 	}
 	right := &Profile{
-		HandledAccessFS:  handled,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
+		HandledAccessFS: handled,
 	}
 
 	for idx := 1; idx <= count; idx++ {

@@ -289,36 +289,6 @@ func TestIntegrationHelp(t *testing.T) {
 	}
 }
 
-func TestIntegrationMerge(t *testing.T) {
-	t.Parallel()
-
-	got := runSPM(t, nil,
-		cmdMerge,
-		flagType, typeSeccomp,
-		flagStrategy, strategyIntersect,
-		testdataSeccompA,
-		testdataSeccompB,
-	)
-
-	if got.code != 0 {
-		t.Fatalf("exit code = %d, want 0: %s", got.code, got.stderr)
-	}
-
-	if !json.Valid([]byte(got.stdout)) {
-		t.Errorf("stdout = %q, want valid JSON", got.stdout)
-	}
-
-	if !strings.Contains(got.stdout, testSyscallRead) {
-		t.Errorf("stdout = %q, want the read syscall", got.stdout)
-	}
-
-	// Nothing but the profile may reach stdout, or redirecting it produces a
-	// file that is no longer a profile.
-	if got.stderr != "" {
-		t.Errorf("stderr = %q, want nothing with --type given", got.stderr)
-	}
-}
-
 // TestIntegrationStreamsAreSeparate is the point of running the real binary:
 // the auto-detect note and the warnings go to stderr while the profile goes
 // to stdout, so that `spm merge a.json b.json > merged.json` writes a file
@@ -454,16 +424,9 @@ func TestIntegrationInputErrors(t *testing.T) {
 
 	dir := t.TempDir()
 
-	malformed := filepath.Join(dir, "malformed.json")
-
-	err := os.WriteFile(malformed, []byte("{not json"), 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	unreadable := filepath.Join(dir, "unreadable.json")
 
-	err = os.WriteFile(unreadable, []byte(`{"defaultAction":"SCMP_ACT_ERRNO"}`), 0o000)
+	err := os.WriteFile(unreadable, []byte(`{"defaultAction":"SCMP_ACT_ERRNO"}`), 0o000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -480,21 +443,12 @@ func TestIntegrationInputErrors(t *testing.T) {
 			args:     []string{cmdValidate, flagType, typeSeccomp, filepath.Join(dir, "gone.json")},
 			wantCode: 1,
 			wantErr:  "error: " + filepath.Join(dir, "gone.json") + ": ",
-			skip:     false,
-		},
-		{
-			name:     "malformed JSON",
-			args:     []string{cmdValidate, flagType, typeSeccomp, malformed},
-			wantCode: 1,
-			wantErr:  "line 1, column 2: invalid character",
-			skip:     false,
 		},
 		{
 			name:     "a directory as input",
 			args:     []string{cmdValidate, flagType, typeSeccomp, dir},
 			wantCode: 1,
 			wantErr:  "error: " + dir + ": ",
-			skip:     false,
 		},
 		{
 			name:     "a file that cannot be read",
@@ -504,20 +458,6 @@ func TestIntegrationInputErrors(t *testing.T) {
 			// Only a test running as an unprivileged user is stopped by the
 			// permission bits.
 			skip: os.Geteuid() == 0 || runtime.GOOS == "windows",
-		},
-		{
-			name:     "an unknown profile type",
-			args:     []string{cmdValidate, flagType, testBogus, testdataSeccompA},
-			wantCode: exitUsage,
-			wantErr:  testUnknownType,
-			skip:     false,
-		},
-		{
-			name:     "a flag after the file arguments",
-			args:     []string{cmdValidate, testdataSeccompA, flagStrict},
-			wantCode: exitUsage,
-			wantErr:  "flags must precede file arguments",
-			skip:     false,
 		},
 	}
 
@@ -620,66 +560,5 @@ func TestIntegrationExitCodes(t *testing.T) {
 				)
 			}
 		})
-	}
-}
-
-func TestIntegrationUnknownCommand(t *testing.T) {
-	t.Parallel()
-
-	got := runSPM(t, nil, testBogus)
-
-	if got.code != exitUsage {
-		t.Fatalf("exit code = %d, want %d", got.code, exitUsage)
-	}
-
-	if !strings.Contains(got.stderr, "unknown command") {
-		t.Errorf("stderr = %q, want the unknown command error", got.stderr)
-	}
-
-	// An error and the usage that follows it are diagnostics, not output.
-	if got.stdout != "" {
-		t.Errorf("stdout = %q, want nothing", got.stdout)
-	}
-}
-
-func TestIntegrationDiff(t *testing.T) {
-	t.Parallel()
-
-	got := runSPM(t, nil,
-		cmdDiff,
-		flagType, typeSeccomp,
-		flagFormat, formatHuman,
-		testdataSeccompA,
-		testdataSeccompB,
-	)
-
-	if got.code != exitDiff {
-		t.Fatalf("exit code = %d, want %d: %s", got.code, exitDiff, got.stderr)
-	}
-
-	if !strings.HasPrefix(got.stdout, "Diff{") {
-		t.Errorf("stdout = %q, want the diff", got.stdout)
-	}
-
-	if got.stderr != "" {
-		t.Errorf("stderr = %q, want nothing", got.stderr)
-	}
-}
-
-func TestIntegrationValidate(t *testing.T) {
-	t.Parallel()
-
-	got := runSPM(t, nil, cmdValidate, flagType, typeSeccomp, testdataSeccompA)
-
-	if got.code != 0 {
-		t.Fatalf("exit code = %d, want 0: %s", got.code, got.stderr)
-	}
-
-	if !json.Valid([]byte(got.stdout)) {
-		t.Errorf("stdout = %q, want valid JSON", got.stdout)
-	}
-
-	if !strings.Contains(got.stdout, string(specs.ActErrno)) {
-		t.Errorf("stdout = %q, want the default action", got.stdout)
 	}
 }

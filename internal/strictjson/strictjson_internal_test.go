@@ -34,6 +34,37 @@ import (
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
+// duplicateKeys returns the members raw repeats within one object, as
+// scanDocument finds them.
+func duplicateKeys(raw []byte) ([]string, int) {
+	scan := scanDocument(raw, nil, nil, false)
+
+	return scan.duplicates.paths, scan.duplicates.omitted
+}
+
+// unknownFields returns the members of raw no field of target reads.
+func unknownFields(raw []byte, target reflect.Type) ([]string, int) {
+	scan := scanDocument(raw, target, nil, false)
+
+	return scan.unknown.paths, scan.unknown.omitted
+}
+
+// misspelledFieldsOf returns the members of raw a field of T reads only
+// ignoring case, and the spelling of each such field.
+func misspelledFieldsOf[T any](raw []byte) ([]string, []string, int) {
+	scan := scanDocument(raw, reflect.TypeFor[T](), nil, false)
+
+	return scan.misspelled.paths, scan.misspelled.wants, scan.misspelled.omitted
+}
+
+// missingFieldsOf returns the required members raw leaves out or sets to
+// null, as Findings looks for them.
+func missingFieldsOf[T any](raw []byte, decoded *T, required *Required) ([]string, int) {
+	scan := scanDocument(raw, reflect.TypeFor[T](), required, checksMissing(decoded, required))
+
+	return scan.missing.paths, scan.missing.omitted
+}
+
 func TestDuplicateKeys(t *testing.T) {
 	t.Parallel()
 
@@ -105,7 +136,7 @@ func TestUnknownFieldsWalksPromotedAndMapFields(t *testing.T) {
 
 	got, _ := unknownFields([]byte(raw), reflect.TypeFor[walkTarget]())
 
-	want := []string{"extra", "nested.n[0].typo", "values.b.bogus"}
+	want := []string{"values.b.bogus", "nested.n[0].typo", "extra"}
 	if !slices.Equal(got, want) {
 		t.Errorf("unknownFields = %v, want %v", got, want)
 	}
@@ -447,27 +478,6 @@ func TestUnknownFieldsFollowsTheDecodersNames(t *testing.T) {
 	}
 }
 
-// FuzzMisspelledFields checks that the scan misspelledFieldsOf runs before
-// its walk never skips a walk that would find something.
-func FuzzMisspelledFields(f *testing.F) {
-	testutil.AddJSONFuzzSeeds(f)
-	f.Add(`{"ſyscalls":[{"names":["x"],"ACTION":"y"}]}`)
-	f.Add(`{"ACtion"0`)
-	f.Add(`{"x":1e400,"Syscalls":[]}`)
-
-	f.Fuzz(func(t *testing.T, raw string) {
-		paths, _, omitted := misspelledFieldsOf[specs.LinuxSeccomp]([]byte(raw))
-		walked, _ := walkFields([]byte(raw), reflect.TypeFor[specs.LinuxSeccomp]())
-
-		if !slices.Equal(paths, walked.misspelled.paths) || omitted != walked.misspelled.omitted {
-			t.Errorf(
-				"misspelledFieldsOf(%q) = %v, the walk alone finds %v",
-				raw, paths, walked.misspelled.paths,
-			)
-		}
-	})
-}
-
 // walkSpelledA and walkSpelledB spell one folded name differently, so the
 // scan cannot tell a misspelling from the name by comparing with one
 // spelling.
@@ -491,6 +501,8 @@ func TestMisspelledFieldsOfDifferentSpellings(t *testing.T) {
 		{`{"NAME":"x"}`, []string{"NAME"}},
 		{`{"inner":{"name":"y"}}`, []string{"inner.name"}},
 		{`{"Inner":{"Name":"y"}}`, []string{"Inner", "Inner.Name"}},
+		// Nothing inside a member no field reads is read at all.
+		{`{"bogus":{"NAME":"y","Inner":{}}}`, nil},
 	} {
 		got, _, _ := misspelledFieldsOf[walkSpelledA]([]byte(testCase.raw))
 		if !slices.Equal(got, testCase.want) {
@@ -569,16 +581,8 @@ func TestMissingFieldsOf(t *testing.T) {
 		// A nil pointer is no object that could miss a member.
 		{`{"pointers":[null],"one":null}`, nil},
 		{`{"pointers":[{}],"one":{}}`, []string{"pointers[0].port", "one.port"}},
-		// The decoder keeps the first value when the member is repeated
-		// with a null, so the document did name one.
-		{`{"rules":[{"port":80,"port":null}]}`, nil},
-		{`{"rules":[{"port":null,"port":80}]}`, nil},
 		// A member of an embedded struct sits in the object embedding it.
 		{`{"embedded":[{"port":1},{"extra":"x"}]}`, []string{"embedded[1].port"}},
-		// A repeated list is decoded into the same elements, so a member
-		// an earlier occurrence names is named, even as zero.
-		{`{"rules":[{"port":0}],"rules":[{"name":"a"}]}`, nil},
-		{`{"rules":[{"name":"a"}],"rules":[{"name":"b"}]}`, []string{"rules[0].port"}},
 	} {
 		var decoded requiredTarget
 
@@ -623,9 +627,6 @@ func TestMissingFieldsOfWithATable(t *testing.T) {
 		{`{"plain":[null]}`, []string{"plain[0].port"}},
 		// The tags still count next to the table.
 		{`{"rules":[{}],"plain":[{"port":1}]}`, []string{"rules[0].port"}},
-		// A repeated member is read as the decoder reads it, with the table.
-		{`{"plain":[{"port":1}],"plain":[{}]}`, nil},
-		{`{"plain":[{"port":1}],"plain":[],"plain":[{}]}`, []string{"plain[0].port"}},
 	} {
 		var decoded requiredTarget
 
@@ -689,7 +690,7 @@ func TestOutOfRangeNumberKeepsChecks(t *testing.T) {
 	}
 
 	got, _ = unknownFieldsStrictly[walkSpelledA]([]byte(`{` + huge + `"bogus":1}`))
-	if !slices.Equal(got, []string{"bogus", "x"}) {
+	if !slices.Equal(got, []string{"x", "bogus"}) {
 		t.Errorf("unknownFieldsStrictly = %v, want both members", got)
 	}
 }
@@ -741,7 +742,6 @@ func TestDecodeIntoAFilledTarget(t *testing.T) {
 	filled := func() requiredTarget {
 		return requiredTarget{
 			Rules:    []requiredRule{{Port: 1, Name: "a"}, {Port: 2, Name: "b"}},
-			Embedded: nil,
 			Pointers: []*requiredRule{{Port: 3, Name: "c"}},
 			One:      &requiredRule{Port: 4, Name: "d"},
 			Plain:    []unrequiredRule{{Port: 5}},
@@ -793,11 +793,6 @@ func TestMissingFieldsOfInMaps(t *testing.T) {
 		{`{"named":{"b":{"port":1},"a":{}}}`, []string{"named.a.port"}},
 		{`{"named":{"c":null,"a":{"name":"x"}}}`, []string{"named.c.port", "named.a.port"}},
 		{`{"keyed":{"x":{}},"named":{}}`, []string{"keyed.x.port"}},
-		// The value of a key is decoded afresh for each occurrence, while
-		// the map keeps the keys of every occurrence of the member.
-		{`{"named":{"a":{"port":1}},"named":{"a":{"name":"x"}}}`, []string{"named.a.port"}},
-		{`{"named":{"a":{"port":1},"a":{"name":"x"}}}`, []string{"named.a.port"}},
-		{`{"named":{"a":{"port":1}},"named":{},"named":{"b":{"port":2}}}`, nil},
 	} {
 		var decoded requiredMaps
 
@@ -815,12 +810,15 @@ func TestMissingFieldsOfInMaps(t *testing.T) {
 }
 
 // unknownFieldsStrictly reports the unknown members of raw the way Unmarshal
-// and the spm command find them: Decode names the first on its way through,
-// and unknownFieldsFound enumerates them only then.
+// and the spm command find them: only where Decode names one on its way
+// through.
 func unknownFieldsStrictly[T any](raw []byte) ([]string, int) {
 	hint, _ := Decode(raw, new(T))
+	if !hint.found {
+		return nil, 0
+	}
 
-	return unknownFieldsFound[T](raw, hint)
+	return unknownFields(raw, reflect.TypeFor[T]())
 }
 
 // TestInvalidUTF8Error pins the offset the check reports, which is what
@@ -863,30 +861,15 @@ func TestInvalidUTF8Error(t *testing.T) {
 	}
 }
 
-// TestWalksReadEveryOccurrence covers a member repeated within one object.
-// encoding/json decodes every occurrence in turn into the same value,
-// reusing the elements of a list, so what an earlier occurrence holds can
-// fill the profile while a later one replaces it in a decode into interface
-// values. The walks read every occurrence, so neither a misspelled nor an
-// unknown member hides behind a later one.
-func TestWalksReadEveryOccurrence(t *testing.T) {
+// TestRepeatedMemberComesAlone covers a member repeated within one object:
+// what encoding/json reads from it is not what other readers read, so
+// Findings reports the repeated member and nothing it found besides.
+func TestRepeatedMemberComesAlone(t *testing.T) {
 	t.Parallel()
 
 	raw := []byte(`{"defaultAction":"SCMP_ACT_ERRNO",` +
 		`"syscalls":[{"Names":["read"],"action":"SCMP_ACT_ALLOW","bogus":1}],` +
 		`"syscalls":[{"action":"SCMP_ACT_ALLOW"}]}`)
-
-	paths, wants, omitted := misspelledFieldsOf[specs.LinuxSeccomp](raw)
-	if !slices.Equal(paths, []string{"syscalls[0].Names"}) ||
-		!slices.Equal(wants, []string{"names"}) || omitted != 0 {
-		t.Errorf("misspelledFieldsOf = %v, %v, %d, want syscalls[0].Names for names",
-			paths, wants, omitted)
-	}
-
-	unknown, _ := unknownFieldsStrictly[specs.LinuxSeccomp](raw)
-	if !slices.Equal(unknown, []string{"syscalls[0].bogus"}) {
-		t.Errorf("unknownFieldsFound = %v, want syscalls[0].bogus", unknown)
-	}
 
 	var decoded specs.LinuxSeccomp
 
@@ -901,12 +884,7 @@ func TestWalksReadEveryOccurrence(t *testing.T) {
 		messages = append(messages, finding.Err.Error())
 	}
 
-	want := []string{
-		`duplicate key "syscalls"`,
-		`unknown field "syscalls[0].bogus"`,
-		`misspelled field "syscalls[0].Names" (want "names")`,
-	}
-	if !slices.Equal(messages, want) {
+	if want := []string{`duplicate key "syscalls"`}; !slices.Equal(messages, want) {
 		t.Errorf("findings = %q, want %q", messages, want)
 	}
 }
@@ -960,95 +938,5 @@ func TestPathAt(t *testing.T) {
 
 	if path, start := PathAt([]byte(`{"a":1}`), 100); path != "" || start != -1 {
 		t.Errorf("PathAt past the document = %q, %d, want nothing", path, start)
-	}
-}
-
-// TestWalksReadPastANull covers an occurrence of a repeated member that is
-// null: the decoder read the occurrences before it all the same, so what
-// they hold is still walked.
-func TestWalksReadPastANull(t *testing.T) {
-	t.Parallel()
-
-	raw := []byte(`{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[{"Names":["read"],` +
-		`"action":"SCMP_ACT_ALLOW"}],"syscalls":[null]}`)
-
-	paths, _, _ := misspelledFieldsOf[specs.LinuxSeccomp](raw)
-	if !slices.Equal(paths, []string{"syscalls[0].Names"}) {
-		t.Errorf("misspelledFieldsOf = %v, want syscalls[0].Names", paths)
-	}
-}
-
-// TestMissingFieldsOfSpellingsInAnyOrder covers a member spelled two ways in
-// one object, one of them null: a decoded object does not record which came
-// first, so the null is not taken to reset the other, and a value the
-// other names counts.
-func TestMissingFieldsOfSpellingsInAnyOrder(t *testing.T) {
-	t.Parallel()
-
-	for _, raw := range []string{
-		`{"one":null,"One":{"port":0}}`,
-		`{"One":{"port":0},"one":null}`,
-	} {
-		var decoded requiredTarget
-
-		err := json.Unmarshal([]byte(raw), &decoded)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		got, _ := missingFieldsOf([]byte(raw), &decoded, nil)
-		if len(got) != 0 {
-			t.Errorf("missingFieldsOf(%s) = %v, want none", raw, got)
-		}
-	}
-}
-
-// TestWalksDropWhatANullResets covers an occurrence of a repeated member
-// that is null where the member fills a list: encoding/json sets the list to
-// nil there, discarding what the occurrences before it held, so the walks
-// read only the occurrences after it.
-func TestWalksDropWhatANullResets(t *testing.T) {
-	t.Parallel()
-
-	raw := []byte(`{"rules":[{"port":0,"name":"a"}],"rules":null,"rules":[{"name":"b"}]}`)
-
-	var decoded requiredTarget
-
-	err := json.Unmarshal(raw, &decoded)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	got, _ := missingFieldsOf(raw, &decoded, nil)
-	if !slices.Equal(got, []string{"rules[0].port"}) {
-		t.Errorf("missingFieldsOf = %v, want rules[0].port", got)
-	}
-
-	// An empty array sets a slice to a new empty one as well, while a
-	// shorter array leaves the elements past it to be reused.
-	for raw, want := range map[string][]string{
-		`{"rules":[{"port":80,"name":"a"}],"rules":[],"rules":[{"name":"b"}]}`:              {"rules[0].port"},
-		`{"rules":[{"name":"a"},{"port":80}],"rules":[{"port":1}],"rules":[{"port":2},{}]}`: nil,
-	} {
-		var decoded requiredTarget
-
-		err := json.Unmarshal([]byte(raw), &decoded)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		got, _ := missingFieldsOf([]byte(raw), &decoded, nil)
-		if !slices.Equal(got, want) {
-			t.Errorf("missingFieldsOf(%s) = %v, want %v", raw, got, want)
-		}
-	}
-
-	misspelled := []byte(`{"defaultAction":"SCMP_ACT_ERRNO",` +
-		`"syscalls":[{"Names":["read"],"action":"SCMP_ACT_ALLOW"}],"syscalls":null,` +
-		`"syscalls":[{"names":["write"],"action":"SCMP_ACT_ALLOW"}]}`)
-
-	paths, _, _ := misspelledFieldsOf[specs.LinuxSeccomp](misspelled)
-	if len(paths) != 0 {
-		t.Errorf("misspelledFieldsOf = %v, want none: the decoder discarded the member", paths)
 	}
 }

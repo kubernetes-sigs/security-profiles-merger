@@ -17,6 +17,7 @@ limitations under the License.
 package apparmor_test
 
 import (
+	"errors"
 	"path"
 	"reflect"
 	"slices"
@@ -66,7 +67,6 @@ func fuzzAppArmorProfile(
 		Filesystem: &apparmor.FilesystemRules{
 			ReadOnlyPaths:  []string{path1},
 			WriteOnlyPaths: []string{path2},
-			ReadWritePaths: nil,
 		},
 		Network: &apparmor.NetworkRules{
 			AllowRaw: &allowRaw,
@@ -166,6 +166,36 @@ func addAppArmorFuzzSeeds(f *testing.F) {
 	f.Add(
 		uint64(0x1000), "/foo/./bar", "/baz/../qux", false, false, false,
 		uint64(0x1000), "/foo/bar", "/qux", false, false, false,
+	)
+
+	// Spellings of one rule that differ only in escapes.
+	f.Add(
+		uint64(4096), "/a/b", "/a/c", true, true, false,
+		uint64(4096), "/a/\\b", "/a/\\c", false, true, true,
+	)
+
+	// A NUL escape against a pattern covering everything.
+	f.Add(
+		uint64(4096), "/foo\\000bar", "/tmp/a", true, true, false,
+		uint64(4096), "/**", "/tmp/a", false, true, true,
+	)
+
+	// Patterns sharing one prefix against literals under it.
+	f.Add(
+		uint64(4096), "/shared/*1", "/shared/*2", true, true, false,
+		uint64(4096), "/shared/f1", "/shared/f2", false, true, true,
+	)
+
+	// Paths a rule cannot quote.
+	f.Add(
+		uint64(4096), "/tmp/x r,\n  /etc/shadow rw", "/abc def", true, true, false,
+		uint64(4096), "/tmp/x r,\n  /etc/shadow rw", "/abc def", false, true, true,
+	)
+
+	// Runs of slashes, some of them escaped.
+	f.Add(
+		uint64(4096), "///\\x2fetc/passwd", "////\\057**", true, true, false,
+		uint64(4096), "/etc/passwd", "///\\d047etc/*x", false, true, true,
 	)
 }
 
@@ -539,7 +569,7 @@ func FuzzAppArmorDiff(f *testing.F) {
 			t.Fatal(err)
 		}
 
-		apparmor.FormatDiff(diff)
+		_ = diff.String()
 
 		reverse, err := apparmor.Diff(right, left)
 		if err != nil {
@@ -562,49 +592,7 @@ func FuzzAppArmorDiff(f *testing.F) {
 		}
 
 		if !selfDiff.Equal {
-			t.Errorf("Diff of equal profiles reports %s", apparmor.FormatDiff(selfDiff))
-		}
-	})
-}
-
-// FuzzAppArmorValidateStrict fuzzes the check made on a profile a person
-// wrote. Beyond crashes it pins the ordering of the three: strict rejects
-// everything Validate rejects, since it runs those checks too, and everything
-// ValidateArtifact rejects, since the artifact checks are the loadability
-// ones plus a cap on the number of paths, which the five paths of a fuzzed
-// profile never reach.
-func FuzzAppArmorValidateStrict(f *testing.F) {
-	f.Add(uint64(0x2001000), "/etc/config", "/var/log", true, true, false)
-	f.Add(uint64(0x80001), "/etc/config", "/var/log", false, false, true)
-	f.Add(uint64(0x1001), "/etc/config", "/tmp", true, true, true)
-	f.Add(uint64(0x80), "/x", "/y", true, false, true)
-	f.Add(uint64(0x80), "/tmp/a b", "/tmp/c,", false, false, false)
-	f.Add(uint64(0x80), `/tmp/\000`, "/tmp/[!a]", false, false, false)
-
-	f.Fuzz(func(
-		t *testing.T,
-		capMask uint64, path1, path2 string,
-		allowRaw, allowTCP, allowUDP bool,
-	) {
-		profile := fuzzAppArmorProfile(
-			capMask, path1, path2,
-			allowRaw, allowTCP, allowUDP,
-		)
-
-		if apparmor.ValidateStrict(profile) != nil {
-			return
-		}
-
-		err := apparmor.Validate(profile)
-		if err != nil {
-			t.Fatalf("ValidateStrict accepted a profile Validate rejects: %v", err)
-		}
-
-		err = apparmor.ValidateArtifact(profile)
-		if err != nil {
-			t.Fatalf(
-				"ValidateStrict accepted a profile ValidateArtifact rejects: %v", err,
-			)
+			t.Errorf("Diff of equal profiles reports %s", selfDiff.String())
 		}
 	})
 }
@@ -680,16 +668,43 @@ func assertStringDiffSwapped(
 	}
 }
 
+// assertStrictOrdering checks ValidateStrict against what ValidateArtifact
+// returned for the profile: it accepts nothing ValidateArtifact rejects,
+// and where ValidateArtifact accepts, which is the only way to reach the
+// checks ValidateStrict adds, it rejects only for one of those.
+func assertStrictOrdering(t *testing.T, profile *apparmor.Profile, artifactErr error) {
+	t.Helper()
+
+	strictErr := apparmor.ValidateStrict(profile)
+
+	switch {
+	case artifactErr != nil && strictErr == nil:
+		t.Fatalf("ValidateStrict accepted a profile ValidateArtifact rejects: %v", artifactErr)
+	case artifactErr == nil && strictErr != nil &&
+		!errors.Is(strictErr, apparmor.ErrUnknownCapability) &&
+		!errors.Is(strictErr, apparmor.ErrDuplicateExecutablePath):
+		t.Fatalf("ValidateStrict rejected an accepted artifact for a check of "+
+			"ValidateArtifact's: %v", strictErr)
+	}
+}
+
 // FuzzAppArmorValidateArtifact fuzzes the check a runtime applies to a
 // profile it did not author. Beyond crashes and hangs it pins the contract:
 // a profile ValidateArtifact accepts is one Validate accepts, holds only
 // absolute paths and patterns the matcher can use, and merges into a result
-// the runtime can load.
+// the runtime can load; and a profile ValidateStrict accepts is one
+// ValidateArtifact accepts, since the strict checks add to the artifact
+// checks and the five paths of a fuzzed profile never reach their cap.
 func FuzzAppArmorValidateArtifact(f *testing.F) {
 	f.Add(uint64(0x2001000), "/etc/config", "/var/log", true, true, false)
 	f.Add(uint64(0x80001), "/etc/**", "/var/log/*.log", false, false, true)
 	f.Add(uint64(0x1001), "/etc/{a,b}/c", "/tmp/../x", true, true, true)
 	f.Add(uint64(0x80), "relative/path", "/y", true, false, true)
+	f.Add(uint64(0x80001), "/etc/config", "/var/log", false, false, true)
+	f.Add(uint64(0x1001), "/etc/config", "/tmp", true, true, true)
+	f.Add(uint64(0x80), "/x", "/y", true, false, true)
+	f.Add(uint64(0x80), "/tmp/a b", "/tmp/c,", false, false, false)
+	f.Add(uint64(0x80), `/tmp/\000`, "/tmp/[!a]", false, false, false)
 
 	f.Fuzz(func(
 		t *testing.T,
@@ -701,11 +716,14 @@ func FuzzAppArmorValidateArtifact(f *testing.F) {
 			allowRaw, allowTCP, allowUDP,
 		)
 
-		if apparmor.ValidateArtifact(profile) != nil {
+		err := apparmor.ValidateArtifact(profile)
+		assertStrictOrdering(t, profile, err)
+
+		if err != nil {
 			return
 		}
 
-		err := apparmor.Validate(profile)
+		err = apparmor.Validate(profile)
 		if err != nil {
 			t.Fatalf("ValidateArtifact accepted a profile Validate rejects: %v", err)
 		}

@@ -39,13 +39,12 @@ fork carries the tags it forked, and pushing one there must not start a release
 under someone else's name, so the job is skipped outside this repository; the
 gate still runs, which is what makes a fork useful for testing the flow.
 
-The binaries are built with the Go pinned as `GO_VERSION` in the workflows, a
-current stable release that CI also tests and scans with govulncheck, rather
-than with the `go` line of `go.mod`, which is the oldest Go the library
-supports. `dependencies.yaml` tracks the pin, and the scheduled
-dependency-updates workflow reports a newer Go release; bump the pin before
-cutting a release when it does, so that the binaries do not ship a standard
-library with fixed vulnerabilities.
+The binaries are built with the Go in `.go-version`, a current stable release
+that CI also tests and scans with govulncheck, rather than with the `go` line
+of `go.mod`, which is the oldest Go the library supports. `dependencies.yaml`
+tracks the pin, and the scheduled dependency-updates workflow reports a newer
+Go release; bump the pin before cutting a release when it does, so that the
+binaries do not ship a standard library with fixed vulnerabilities.
 
 Releases cover Linux on `amd64`, `arm64`, `ppc64le` and `s390x`, and macOS and
 Windows on `amd64` and `arm64`. Kubernetes ships `ppc64le` and `s390x` and

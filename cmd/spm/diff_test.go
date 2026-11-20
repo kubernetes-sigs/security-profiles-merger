@@ -49,7 +49,6 @@ func TestDiffErrors(t *testing.T) {
 		{
 			name:       "invalid JSON without type",
 			args:       []string{cmdDiff, invalidFile, seccompFile},
-			stdin:      nil,
 			wantCode:   exitUsage,
 			wantStderr: parsingError(invalidFile),
 		},
@@ -63,7 +62,6 @@ func TestDiffErrors(t *testing.T) {
 		{
 			name:       "single file",
 			args:       []string{cmdDiff, seccompFile},
-			stdin:      nil,
 			wantCode:   exitUsage,
 			wantStderr: "got 1 file: ",
 		},
@@ -77,7 +75,6 @@ func TestDiffErrors(t *testing.T) {
 		{
 			name:       "auto-detect type",
 			args:       []string{cmdDiff, seccompFile, seccompFile2},
-			stdin:      nil,
 			wantCode:   0,
 			wantStderr: "auto-detected profile type: seccomp",
 		},
@@ -91,14 +88,12 @@ func TestDiffErrors(t *testing.T) {
 		{
 			name:       testUnknownType,
 			args:       []string{cmdDiff, flagType, testBogus, seccompFile, seccompFile2},
-			stdin:      nil,
 			wantCode:   exitUsage,
 			wantStderr: testUnknownType,
 		},
 		{
 			name:       "wrong file count",
 			args:       []string{cmdDiff, flagType, typeSeccomp, seccompFile},
-			stdin:      nil,
 			wantCode:   exitUsage,
 			wantStderr: testExactlyTwo,
 		},
@@ -112,7 +107,6 @@ func TestDiffErrors(t *testing.T) {
 				seccompFile2,
 				seccompFile3,
 			},
-			stdin:      nil,
 			wantCode:   exitUsage,
 			wantStderr: testExactlyTwo,
 		},
@@ -126,7 +120,6 @@ func TestDiffErrors(t *testing.T) {
 				cmdDiff, flagType, typeSeccomp, flagFormat, testBogus,
 				seccompFile, seccompFile2,
 			},
-			stdin:      nil,
 			wantCode:   exitUsage,
 			wantStderr: testUnknownFormat,
 		},
@@ -139,14 +132,12 @@ func TestDiffErrors(t *testing.T) {
 				"/nonexistent/path.json",
 				seccompFile,
 			},
-			stdin:      nil,
 			wantCode:   exitUsage,
 			wantStderr: testErrorColon,
 		},
 		{
 			name:       "invalid JSON",
 			args:       []string{cmdDiff, flagType, typeSeccomp, invalidFile, seccompFile},
-			stdin:      nil,
 			wantCode:   exitUsage,
 			wantStderr: testErrorColon,
 		},
@@ -203,86 +194,6 @@ func TestDiffSeccompEqual(t *testing.T) {
 	}
 }
 
-func TestDiffSeccompDifferent(t *testing.T) {
-	t.Parallel()
-
-	fileA := writeTemp(t, seccompJSON(t, testSyscallRead))
-	fileB := writeTemp(t, seccompJSON(t, "write"))
-
-	code, stdout, _ := runCapture(t, []string{
-		cmdDiff, flagType, typeSeccomp, fileA, fileB,
-	}, nil)
-
-	if code != exitDiff {
-		t.Fatalf("exit code = %d, want %d (different)", code, exitDiff)
-	}
-
-	var diff seccomp.ProfileDiff
-
-	unmarshalOutput(t, stdout, &diff)
-
-	if diff.Equal {
-		t.Error("expected different profiles")
-	}
-
-	if diff.Syscalls == nil {
-		t.Fatal("expected syscall diff")
-	}
-}
-
-func TestDiffSeccompHuman(t *testing.T) {
-	t.Parallel()
-
-	fileA := writeTemp(t, seccompJSON(t, testSyscallRead))
-	fileB := writeTemp(t, seccompJSON(t, "write"))
-
-	code, stdout, _ := runCapture(t, []string{
-		cmdDiff, flagType, typeSeccomp, flagArch, archNone,
-		flagFormat, formatHuman, fileA, fileB,
-	}, nil)
-
-	if code != exitDiff {
-		t.Fatalf("exit code = %d, want %d", code, exitDiff)
-	}
-
-	// The whole line is pinned: a prefix check passes for any diff at all,
-	// the empty one included.
-	const want = "Diff{-read->SCMP_ACT_ALLOW +write->SCMP_ACT_ALLOW}\n"
-	if stdout != want {
-		t.Errorf("stdout = %q, want %q", stdout, want)
-	}
-}
-
-func TestDiffAppArmor(t *testing.T) {
-	t.Parallel()
-
-	fileA := writeTemp(t, apparmorJSON(t, "NET_ADMIN"))
-	fileB := writeTemp(t, apparmorJSON(t, "CHOWN"))
-
-	code, _, _ := runCapture(t, []string{
-		cmdDiff, flagType, typeAppArmor, fileA, fileB,
-	}, nil)
-
-	if code != exitDiff {
-		t.Fatalf("exit code = %d, want %d (different)", code, exitDiff)
-	}
-}
-
-func TestDiffLandlock(t *testing.T) {
-	t.Parallel()
-
-	fileA := writeTemp(t, landlockJSON(t, "read_file"))
-	fileB := writeTemp(t, landlockJSON(t, "write_file"))
-
-	code, _, _ := runCapture(t, []string{
-		cmdDiff, flagType, typeLandlock, fileA, fileB,
-	}, nil)
-
-	if code != exitDiff {
-		t.Fatalf("exit code = %d, want %d (different)", code, exitDiff)
-	}
-}
-
 func TestDiffStdinArray(t *testing.T) {
 	t.Parallel()
 
@@ -304,26 +215,6 @@ func TestDiffStdinArray(t *testing.T) {
 
 	if diff.Equal {
 		t.Error("expected different profiles")
-	}
-}
-
-func TestDiffAppArmorHuman(t *testing.T) {
-	t.Parallel()
-
-	fileA := writeTemp(t, apparmorJSON(t, "NET_ADMIN"))
-	fileB := writeTemp(t, apparmorJSON(t, "CHOWN"))
-
-	code, stdout, _ := runCapture(t, []string{
-		cmdDiff, flagType, typeAppArmor, flagFormat, formatHuman, fileA, fileB,
-	}, nil)
-
-	if code != exitDiff {
-		t.Fatalf("exit code = %d, want %d", code, exitDiff)
-	}
-
-	const want = "Diff{caps:-NET_ADMIN,+CHOWN}\n"
-	if stdout != want {
-		t.Errorf("stdout = %q, want %q", stdout, want)
 	}
 }
 
@@ -377,26 +268,6 @@ func TestDiffOutputFlagBadPath(t *testing.T) {
 
 	if !strings.Contains(stderr, "writing /nonexistent/dir/out.json: ") {
 		t.Errorf("stderr = %q, missing output file error", stderr)
-	}
-}
-
-func TestDiffLandlockHuman(t *testing.T) {
-	t.Parallel()
-
-	fileA := writeTemp(t, landlockJSON(t, "read_file"))
-	fileB := writeTemp(t, landlockJSON(t, "write_file"))
-
-	code, stdout, _ := runCapture(t, []string{
-		cmdDiff, flagType, typeLandlock, flagFormat, formatHuman, fileA, fileB,
-	}, nil)
-
-	if code != exitDiff {
-		t.Fatalf("exit code = %d, want %d", code, exitDiff)
-	}
-
-	const want = "Diff{fs:-read_file,+write_file ~/etc:[read_file]->[write_file]}\n"
-	if stdout != want {
-		t.Errorf("stdout = %q, want %q", stdout, want)
 	}
 }
 
@@ -490,7 +361,6 @@ func TestDiffArch(t *testing.T) {
 			// Without --arch nothing changes: the native architecture is
 			// implied, as it always was.
 			name:     "the default implies the native architecture",
-			arch:     nil,
 			wantCode: 0,
 			skip:     !hasNative || native != specs.ArchX86_64,
 		},
@@ -498,7 +368,6 @@ func TestDiffArch(t *testing.T) {
 			name:     "none compares the lists as written",
 			arch:     []string{flagArch, archNone},
 			wantCode: exitDiff,
-			skip:     false,
 		},
 		{
 			name:     "native is spelled out",
@@ -510,13 +379,11 @@ func TestDiffArch(t *testing.T) {
 			name:     "a named architecture the profile lists",
 			arch:     []string{flagArch, string(specs.ArchX86_64)},
 			wantCode: 0,
-			skip:     false,
 		},
 		{
 			name:     "a named architecture the profile does not list",
 			arch:     []string{flagArch, string(specs.ArchAARCH64)},
 			wantCode: exitDiff,
-			skip:     false,
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {

@@ -173,11 +173,7 @@ func TestGoldenABIVersions(t *testing.T) {
 
 	for right, want := range goldenScopeRights {
 		profile := &landlock.Profile{
-			HandledAccessFS:  nil,
-			HandledAccessNet: nil,
-			Scoped:           []landlock.ScopeRight{right},
-			PathRules:        nil,
-			NetRules:         nil,
+			Scoped: []landlock.ScopeRight{right},
 		}
 		if got := requiredABI(t, profile); got != want {
 			t.Errorf("RequiredABIVersion(%q) = v%d, want v%d", right, got, want)
@@ -264,10 +260,10 @@ func TestGoldenProfileJSON(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if want := goldenProfile(); landlock.FormatProfile(&got) != landlock.FormatProfile(want) {
+	if want := goldenProfile(); got.String() != want.String() {
 		t.Errorf(
 			"unmarshal = %s, want %s",
-			landlock.FormatProfile(&got), landlock.FormatProfile(want),
+			got.String(), want.String(),
 		)
 	}
 }

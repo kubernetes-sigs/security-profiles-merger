@@ -56,7 +56,6 @@ func buildLandlockProfile(numPaths int) *landlock.Profile {
 			landlock.NetAccessBindTCP,
 			landlock.NetAccessConnectTCP,
 		},
-		Scoped:    nil,
 		PathRules: pathRules,
 		NetRules:  netRules,
 	}
@@ -122,10 +121,7 @@ func buildDeepLandlockProfile(depth, offset int) *landlock.Profile {
 			landlock.FSAccessWriteFile,
 			landlock.FSAccessExecute,
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        pathRules,
-		NetRules:         nil,
+		PathRules: pathRules,
 	}
 }
 
@@ -224,7 +220,6 @@ func BenchmarkLandlockIntersectDisjoint(b *testing.B) {
 		HandledAccessNet: []landlock.NetAccessRight{
 			landlock.NetAccessBindTCP,
 		},
-		Scoped: nil,
 		PathRules: []landlock.PathRule{
 			{Path: pathEtc, AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile}},
 			{Path: pathHome, AccessFS: []landlock.FSAccessRight{landlock.FSAccessWriteFile}},
@@ -242,7 +237,6 @@ func BenchmarkLandlockIntersectDisjoint(b *testing.B) {
 		HandledAccessNet: []landlock.NetAccessRight{
 			landlock.NetAccessConnectTCP,
 		},
-		Scoped: nil,
 		PathRules: []landlock.PathRule{
 			{Path: pathVar, AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile}},
 			{Path: pathTmp, AccessFS: []landlock.FSAccessRight{landlock.FSAccessExecute}},
@@ -284,7 +278,7 @@ func BenchmarkLandlockDiff(b *testing.B) {
 	}
 }
 
-func BenchmarkLandlockFormatDiff(b *testing.B) {
+func BenchmarkLandlockDiffString(b *testing.B) {
 	for _, numPaths := range []int{10, 50, 200} {
 		left := buildLandlockProfile(numPaths)
 
@@ -296,9 +290,6 @@ func BenchmarkLandlockFormatDiff(b *testing.B) {
 			HandledAccessNet: []landlock.NetAccessRight{
 				landlock.NetAccessConnectTCP,
 			},
-			Scoped:    nil,
-			PathRules: nil,
-			NetRules:  nil,
 		}
 
 		diff, err := landlock.Diff(left, right)
@@ -310,13 +301,13 @@ func BenchmarkLandlockFormatDiff(b *testing.B) {
 			b.ReportAllocs()
 
 			for range b.N {
-				_ = landlock.FormatDiff(diff)
+				_ = diff.String()
 			}
 		})
 	}
 }
 
-func BenchmarkLandlockFormatProfile(b *testing.B) {
+func BenchmarkLandlockProfileString(b *testing.B) {
 	for _, numPaths := range []int{10, 50, 200} {
 		profile := buildLandlockProfile(numPaths)
 
@@ -324,7 +315,7 @@ func BenchmarkLandlockFormatProfile(b *testing.B) {
 			b.ReportAllocs()
 
 			for range b.N {
-				_ = landlock.FormatProfile(profile)
+				_ = profile.String()
 			}
 		})
 	}

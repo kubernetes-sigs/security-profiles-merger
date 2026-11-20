@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"reflect"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 	"sigs.k8s.io/security-profiles-merger/spm"
@@ -57,8 +58,6 @@ func Unmarshal[T any](data []byte, target *T, required *Required) error {
 		return err
 	}
 
-	// The decoder is asked about unknown members on its way through, which
-	// spares UnknownFieldsFound a second decode of the whole document.
 	var decoded T
 
 	hint, decoder, err := decodeFirst(data, &decoded)
@@ -92,9 +91,8 @@ func Unmarshal[T any](data []byte, target *T, required *Required) error {
 		return spm.ErrUnexpectedData
 	}
 
-	// The findings come in the order of their kinds, and only the first is
-	// reported, so the walks behind the others never run for a document
-	// that is refused anyway. Invalid UTF-8 was ruled out before decoding.
+	// Only the first finding is reported. Invalid UTF-8 was ruled out
+	// before decoding.
 	for finding := range findings(data, &decoded, hint, required, false) {
 		return finding.Err
 	}
@@ -116,10 +114,8 @@ type Hint struct {
 // Decode decodes data into target as json.Unmarshal does, failing the same
 // way and leaving target as it leaves it, also where target is not zero,
 // and returns a Hint saying whether the decoder met a member the type of
-// target has no field for. Asking the decoder that on the way costs
-// nothing for a document that has none, where asking afterwards costs a
-// second decode of the whole document, which for a profile of millions of
-// entries is hundreds of megabytes more at its peak.
+// target has no field for, which Findings takes as the word on whether a
+// document has one.
 func Decode[T any](data []byte, target *T) (Hint, error) {
 	// A document json.Unmarshal refuses before decoding anything, such as
 	// one with data behind it, is refused with its error.
@@ -156,7 +152,6 @@ func decodeFirst[T any](data []byte, target *T) (Hint, *json.Decoder, error) {
 		err = decoder.Decode(target)
 	}
 
-	//nolint:wrapcheck // the callers wrap it, or fail as json.Unmarshal fails
 	return Hint{unknown: name, found: unknown}, decoder, err
 }
 
@@ -187,12 +182,12 @@ type Finding struct {
 // Findings yields what the decoder read without a word in a document that
 // decoded into decoded, one Finding per kind that occurs, in this order:
 // repeated members, unknown members, misspelled members, missing members
-// and invalid UTF-8. Unmarshal reports the first of them, except that it
+// and invalid UTF-8. A document that repeats a member yields that alone
+// (see scanDocument). Unmarshal reports the first of them, except that it
 // rules out invalid UTF-8 before decoding. hint is what Decode returned for
-// the document, and required marks fields as Unmarshal takes it. Each kind
-// is only looked for once the caller asks for the next finding, so a caller
-// that stops at the first one does not pay for the walks behind it, except
-// that repeated and missing members are found in one read of the document.
+// the document, and required marks fields as Unmarshal takes it. One read
+// of the document's tokens finds all but invalid UTF-8, which is only
+// looked for once the caller asks for it.
 func Findings[T any](
 	data []byte, decoded *T, hint Hint, required *Required,
 ) iter.Seq[Finding] {
@@ -205,80 +200,61 @@ func Findings[T any](
 func findings[T any](
 	data []byte, decoded *T, hint Hint, required *Required, withUTF8 bool,
 ) iter.Seq[Finding] {
-	last := findInvalidUTF8
-	if !withUTF8 {
-		last--
-	}
-
 	return func(yield func(Finding) bool) {
-		// The repeated members are looked for first, by reading the
-		// document's tokens, and the missing ones are found in the same
-		// read, which spares a second read of the whole document.
-		scan := scanDocument(data, missingTarget(decoded, required), required)
+		scan := scanDocument(data, reflect.TypeFor[T](), required, checksMissing(decoded, required))
 
-		for kind := findDuplicate; kind <= last; kind++ {
-			err := find(kind, data, decoded, hint, required, scan)
-			if err != nil && !yield(Finding{Kind: kind.sentinel(), Err: err}) {
+		err := scan.duplicates.err(spm.ErrDuplicateKey)
+		if err != nil {
+			yield(Finding{Kind: spm.ErrDuplicateKey, Err: err})
+
+			return
+		}
+
+		for _, finding := range []Finding{
+			{Kind: spm.ErrUnknownField, Err: scan.unknownErr(data, hint)},
+			{Kind: spm.ErrMisspelledField, Err: scan.misspelledErr()},
+			{Kind: spm.ErrMissingField, Err: scan.missing.err(spm.ErrMissingField)},
+		} {
+			if finding.Err != nil && !yield(finding) {
 				return
 			}
+		}
+
+		if !withUTF8 {
+			return
+		}
+
+		err = invalidUTF8(data)
+		if err != nil {
+			yield(Finding{Kind: spm.ErrInvalidUTF8, Err: err})
 		}
 	}
 }
 
-// findingKind names one kind of Finding, in the order Findings yields them.
-type findingKind int
-
-const (
-	findDuplicate findingKind = iota
-	findUnknown
-	findMisspelled
-	findMissing
-	findInvalidUTF8
-)
-
-// sentinel returns the error a finding of the kind wraps.
-func (kind findingKind) sentinel() error {
-	switch kind {
-	case findDuplicate:
-		return spm.ErrDuplicateKey
-	case findUnknown:
-		return spm.ErrUnknownField
-	case findMisspelled:
-		return spm.ErrMisspelledField
-	case findMissing:
-		return spm.ErrMissingField
-	case findInvalidUTF8:
-		return spm.ErrInvalidUTF8
+// unknownErr reports the members no field reads. The decoder is what
+// decides that, so they are only reported where hint says the decoder met
+// one; should the scan ever disagree and find none, the decoder's own
+// finding is reported rather than dropped, so that the check fails closed.
+// A document that is not valid JSON is the decoder's to refuse, and says
+// nothing here.
+func (scan *documentScan) unknownErr(data []byte, hint Hint) error {
+	switch {
+	case !hint.found:
+		return nil
+	case len(scan.unknown.paths) == 0 && json.Valid(data):
+		return pathsError(spm.ErrUnknownField, []string{hint.unknown}, nil, 0)
+	default:
+		return scan.unknown.err(spm.ErrUnknownField)
 	}
-
-	return nil
 }
 
-// find looks for the findings of one kind in a document that decoded into
-// decoded, and returns them as one error, or nil when there are none.
-// scan holds the repeated and the missing members, which one read of the
-// document finds.
-func find[T any](
-	kind findingKind, data []byte, decoded *T, hint Hint, required *Required,
-	scan *documentScan,
-) error {
-	var (
-		paths, wants []string
-		omitted      int
-	)
-
-	switch kind {
-	case findDuplicate:
-		paths, omitted = scan.duplicates.result()
-	case findUnknown:
-		paths, omitted = unknownFieldsFound[T](data, hint)
-	case findMisspelled:
-		paths, wants, omitted = misspelledFieldsOf[T](data)
-	case findMissing:
-		paths, omitted = missingIn(scan, data, decoded, required)
-	case findInvalidUTF8:
-		return invalidUTF8(data)
+// misspelledErr reports the members a field reads only ignoring case. A
+// scan that cannot finish a document must not read as a clean one, so it
+// reports the document instead.
+func (scan *documentScan) misspelledErr() error {
+	if scan.failed && len(scan.misspelled.paths) == 0 {
+		return pathsError(spm.ErrMisspelledField, []string{unreadableDocument}, nil, 0)
 	}
 
-	return pathsError(kind.sentinel(), paths, wants, omitted)
+	return scan.misspelled.err(spm.ErrMisspelledField)
 }

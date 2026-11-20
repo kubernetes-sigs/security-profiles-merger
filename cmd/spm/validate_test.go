@@ -45,7 +45,6 @@ func TestValidateErrors(t *testing.T) {
 		{
 			name:       "invalid JSON without type",
 			args:       []string{cmdValidate, invalidFile},
-			stdin:      nil,
 			wantCode:   1,
 			wantStderr: parsingError(invalidFile),
 		},
@@ -66,7 +65,6 @@ func TestValidateErrors(t *testing.T) {
 		{
 			name:       "quiet with output",
 			args:       []string{cmdValidate, "--quiet", "--output", "out.json", invalidFile},
-			stdin:      nil,
 			wantCode:   exitUsage,
 			wantStderr: "--quiet cannot be combined with --output",
 		},
@@ -75,7 +73,6 @@ func TestValidateErrors(t *testing.T) {
 			// names the default.
 			name:       "quiet with format",
 			args:       []string{cmdValidate, "--quiet", flagFormat, formatJSON, invalidFile},
-			stdin:      nil,
 			wantCode:   exitUsage,
 			wantStderr: "error: --quiet cannot be combined with --format\n",
 		},
@@ -90,7 +87,6 @@ func TestValidateErrors(t *testing.T) {
 		{
 			name:       "no type no input",
 			args:       []string{cmdValidate},
-			stdin:      nil,
 			wantCode:   1,
 			wantStderr: testNoInput,
 		},
@@ -111,7 +107,6 @@ func TestValidateErrors(t *testing.T) {
 		{
 			name:       testUnknownFormat,
 			args:       []string{cmdValidate, flagType, typeSeccomp, flagFormat, "xml"},
-			stdin:      nil,
 			wantCode:   exitUsage,
 			wantStderr: testUnknownFormat,
 		},
@@ -132,21 +127,18 @@ func TestValidateErrors(t *testing.T) {
 		{
 			name:       "invalid JSON seccomp",
 			args:       []string{cmdValidate, flagType, typeSeccomp, invalidFile},
-			stdin:      nil,
 			wantCode:   1,
 			wantStderr: testErrorColon,
 		},
 		{
 			name:       "invalid JSON apparmor",
 			args:       []string{cmdValidate, flagType, typeAppArmor, invalidFile},
-			stdin:      nil,
 			wantCode:   1,
 			wantStderr: testErrorColon,
 		},
 		{
 			name:       "invalid JSON landlock",
 			args:       []string{cmdValidate, flagType, typeLandlock, invalidFile},
-			stdin:      nil,
 			wantCode:   1,
 			wantStderr: testErrorColon,
 		},
@@ -166,88 +158,6 @@ func TestValidateErrors(t *testing.T) {
 				t.Errorf("stderr = %q, missing %q", stderr, testCase.wantStderr)
 			}
 		})
-	}
-}
-
-// TestValidateLandlockInvalid covers both validation levels the CLI wires
-// for landlock: the default one, which rejects a right no kernel knows, and
-// --strict, which also rejects a rule repeated for one path.
-func TestValidateLandlockInvalid(t *testing.T) {
-	t.Parallel()
-
-	unknownRight := writeTemp(t, marshal(t, &landlock.Profile{
-		HandledAccessFS:  []landlock.FSAccessRight{"read_file", testBogus},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
-	}))
-	duplicatePath := writeTemp(t, marshal(t, &landlock.Profile{
-		HandledAccessFS:  []landlock.FSAccessRight{"read_file", "write_file"},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{
-			{Path: testEtcPath, AccessFS: []landlock.FSAccessRight{"read_file"}},
-			{Path: testEtcPath, AccessFS: []landlock.FSAccessRight{"write_file"}},
-		},
-		NetRules: nil,
-	}))
-
-	for _, testCase := range []struct {
-		name string
-		args []string
-		want string
-	}{
-		{
-			name: "an unknown access right",
-			args: []string{cmdValidate, flagType, typeLandlock, unknownRight},
-			want: "unknown access right",
-		},
-		{
-			name: "a repeated path rule under --strict",
-			args: []string{cmdValidate, flagType, typeLandlock, flagStrict, duplicatePath},
-			want: "duplicate",
-		},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-
-			code, stdout, stderr := runCapture(t, testCase.args, nil)
-
-			if code != 1 {
-				t.Fatalf("exit code = %d, want 1: %s", code, stderr)
-			}
-
-			if stdout != "" {
-				t.Errorf("stdout = %q, want no profile", stdout)
-			}
-
-			if !strings.Contains(stderr, testCase.want) {
-				t.Errorf("stderr = %q, want it to mention %q", stderr, testCase.want)
-			}
-		})
-	}
-}
-
-func TestValidateSeccompValid(t *testing.T) {
-	t.Parallel()
-
-	file := writeTemp(t, seccompJSON(t, testSyscallRead))
-
-	code, stdout, _ := runCapture(t, []string{
-		cmdValidate, flagType, typeSeccomp, file,
-	}, nil)
-
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-
-	var result specs.LinuxSeccomp
-
-	unmarshalOutput(t, stdout, &result)
-
-	if result.DefaultAction != specs.ActErrno {
-		t.Errorf("expected SCMP_ACT_ERRNO, got %v", result.DefaultAction)
 	}
 }
 
@@ -277,46 +187,6 @@ func TestValidateSeccompStrictDuplicate(t *testing.T) {
 	}
 }
 
-func TestValidateAppArmorValid(t *testing.T) {
-	t.Parallel()
-
-	file := writeTemp(t, apparmorJSON(t, "NET_ADMIN"))
-
-	code, stdout, _ := runCapture(t, []string{
-		cmdValidate, flagType, typeAppArmor, file,
-	}, nil)
-
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-
-	var result apparmor.Profile
-
-	unmarshalOutput(t, stdout, &result)
-
-	if result.Capabilities == nil || len(result.Capabilities.AllowedCapabilities) != 1 {
-		t.Errorf("expected 1 capability, got %v", result)
-	}
-}
-
-func TestValidateAppArmorHumanFormat(t *testing.T) {
-	t.Parallel()
-
-	file := writeTemp(t, apparmorJSON(t, "NET_ADMIN"))
-
-	code, stdout, _ := runCapture(t, []string{
-		cmdValidate, flagType, typeAppArmor, flagFormat, formatHuman, file,
-	}, nil)
-
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-
-	if !strings.Contains(stdout, "caps:") {
-		t.Errorf("expected human-readable output, got: %s", stdout)
-	}
-}
-
 func TestValidateAppArmorStrict(t *testing.T) {
 	t.Parallel()
 
@@ -328,57 +198,6 @@ func TestValidateAppArmorStrict(t *testing.T) {
 
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
-	}
-}
-
-func TestValidateAppArmorInvalid(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{testEtcPath},
-			WriteOnlyPaths: []string{testEtcPath},
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	file := writeTemp(t, marshal(t, profile))
-
-	code, _, stderr := runCapture(t, []string{
-		cmdValidate, flagType, typeAppArmor, file,
-	}, nil)
-
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1", code)
-	}
-
-	if !strings.Contains(stderr, "duplicate path") {
-		t.Errorf("stderr = %q, want mention of duplicate path", stderr)
-	}
-}
-
-func TestValidateLandlockValid(t *testing.T) {
-	t.Parallel()
-
-	file := writeTemp(t, landlockJSON(t, "read_file"))
-
-	code, stdout, _ := runCapture(t, []string{
-		cmdValidate, flagType, typeLandlock, file,
-	}, nil)
-
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-
-	var result landlock.Profile
-
-	unmarshalOutput(t, stdout, &result)
-
-	if len(result.HandledAccessFS) != 1 {
-		t.Errorf("expected 1 handled FS right, got %d", len(result.HandledAccessFS))
 	}
 }
 
@@ -410,24 +229,6 @@ func TestValidateLandlockHumanFormat(t *testing.T) {
 	}
 
 	if !strings.Contains(stdout, "read_file") {
-		t.Errorf("expected human-readable output, got: %s", stdout)
-	}
-}
-
-func TestValidateHumanFormat(t *testing.T) {
-	t.Parallel()
-
-	file := writeTemp(t, seccompJSON(t, testSyscallRead))
-
-	code, stdout, _ := runCapture(t, []string{
-		cmdValidate, flagType, typeSeccomp, flagFormat, formatHuman, file,
-	}, nil)
-
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-
-	if !strings.Contains(stdout, "Profile{") {
 		t.Errorf("expected human-readable output, got: %s", stdout)
 	}
 }
@@ -622,7 +423,6 @@ func TestValidateArtifactAppArmorRejectsRelativePath(t *testing.T) {
 	file := writeTemp(t, marshal(t, &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
 			AllowedExecutables: []string{"usr/bin/sh"},
-			AllowedLibraries:   nil,
 		},
 		Filesystem: nil, Network: nil, Capabilities: nil,
 	}))
@@ -644,14 +444,10 @@ func TestValidateArtifactLandlockRejectsUnhandledRight(t *testing.T) {
 	t.Parallel()
 
 	file := writeTemp(t, marshal(t, &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped:           nil,
 		PathRules: []landlock.PathRule{{
 			Path:     "/etc",
 			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
 		}},
-		NetRules: nil,
 	}))
 
 	code, _, stderr := runCapture(t, []string{

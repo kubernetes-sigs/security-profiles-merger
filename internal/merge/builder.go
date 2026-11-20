@@ -23,8 +23,8 @@ import (
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
-// MaxFormattedBytes bounds the output of a formatter: FormatProfile,
-// FormatDiff and the String methods of the profile and diff types, all of
+// MaxFormattedBytes bounds the output of a formatter: seccomp.FormatProfile
+// and the String methods of the profile and diff types, all of
 // which render through a Builder. Escaping keeps an artifact's values from
 // acting on a terminal or forging a log line, but not from choosing how
 // much is written: an artifact ValidateArtifact accepts may hold a thousand

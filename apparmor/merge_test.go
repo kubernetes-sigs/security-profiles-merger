@@ -64,321 +64,465 @@ func allKnownTestCaps() []string {
 	}
 }
 
-func TestIntersectEmpty(t *testing.T) {
-	t.Parallel()
+// capsOnly builds a profile holding only a capability section.
+func capsOnly(names ...string) *apparmor.Profile {
+	return &apparmor.Profile{Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: names}}
+}
 
-	_, err := apparmor.Intersect()
-	if err == nil {
-		t.Fatal("expected error for empty profiles")
+// netRules builds a network section with a protocols section; a nil
+// argument leaves that boolean unset.
+func netRules(raw, tcp, udp *bool) *apparmor.NetworkRules {
+	return &apparmor.NetworkRules{
+		AllowRaw:  raw,
+		Protocols: &apparmor.AllowedProtocols{AllowTCP: tcp, AllowUDP: udp},
 	}
 }
 
-func TestIntersectNil(t *testing.T) {
-	t.Parallel()
-
-	_, err := apparmor.Intersect(nil)
-	if err == nil {
-		t.Fatal("expected error for nil profile")
+// explicit fills the sections a profile leaves out with the explicit
+// denial Intersect writes for them: to AppArmor an absent section denies
+// everything it covers.
+func explicit(profile *apparmor.Profile) *apparmor.Profile {
+	if profile.Executable == nil {
+		profile.Executable = &apparmor.ExecutableRules{}
 	}
+
+	if profile.Filesystem == nil {
+		profile.Filesystem = &apparmor.FilesystemRules{}
+	}
+
+	if profile.Network == nil {
+		profile.Network = netRules(boolPtr(false), boolPtr(false), boolPtr(false))
+	}
+
+	if profile.Capabilities == nil {
+		profile.Capabilities = &apparmor.CapabilityRules{}
+	}
+
+	return profile
 }
 
-func TestIntersectSingleProfile(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{pathBinBash},
-			AllowedLibraries:   []string{pathLibC},
-		},
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig},
-			WriteOnlyPaths: []string{pathVarLog},
-			ReadWritePaths: nil,
-		},
-		Network: &apparmor.NetworkRules{
-			AllowRaw: boolPtr(true),
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: boolPtr(false),
-				AllowUDP: boolPtr(true),
-			},
-		},
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin, capSysTime},
-		},
-	}
-
-	result, err := apparmor.Intersect(profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	assertProfileLists(t, result, map[string][]string{
-		"capabilities":     {capNetAdmin, capSysTime},
-		"executables":      {pathBinBash},
-		"libraries":        {pathLibC},
-		"read-only paths":  {pathEtcConfig},
-		"write-only paths": {pathVarLog},
-		"read-write paths": nil,
-	})
-
-	if !*result.Network.AllowRaw {
-		t.Error("AllowRaw should be true")
-	}
-
-	if *result.Network.Protocols.AllowTCP || !*result.Network.Protocols.AllowUDP {
-		t.Errorf("protocols = tcp:%v udp:%v, want tcp:false udp:true",
-			*result.Network.Protocols.AllowTCP, *result.Network.Protocols.AllowUDP)
-	}
+// mergeCase is a merge and the whole result it must give.
+type mergeCase struct {
+	name   string
+	merge  mergeFunc
+	inputs []*apparmor.Profile
+	want   *apparmor.Profile
 }
 
-// assertProfileLists compares every list of a profile against what it should
-// hold, named the way the field is.
-func assertProfileLists(t *testing.T, profile *apparmor.Profile, want map[string][]string) {
+// checkMergeCases runs each case as a subtest. It compares whole results
+// with reflect.DeepEqual, so that a section or list left nil is told apart
+// from an empty one.
+func checkMergeCases(t *testing.T, cases []mergeCase) {
 	t.Helper()
 
-	got := map[string][]string{
-		"capabilities":     profile.Capabilities.AllowedCapabilities,
-		"executables":      profile.Executable.AllowedExecutables,
-		"libraries":        profile.Executable.AllowedLibraries,
-		"read-only paths":  profile.Filesystem.ReadOnlyPaths,
-		"write-only paths": profile.Filesystem.WriteOnlyPaths,
-		"read-write paths": profile.Filesystem.ReadWritePaths,
-	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	for name, expected := range want {
-		if !slices.Equal(got[name], expected) {
-			t.Errorf("%s = %v, want %v", name, got[name], expected)
+			got, err := test.merge(test.inputs...)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if !reflect.DeepEqual(got, test.want) {
+				t.Errorf("merge = %s, want %s (or a nil and an empty list apart)", got, test.want)
+			}
+		})
+	}
+}
+
+// TestMergeSections pins whole merge results for the capability, network and
+// executable sections, and for profiles leaving sections out.
+func TestMergeSections(t *testing.T) {
+	t.Parallel()
+
+	fullProfile := func() *apparmor.Profile {
+		return &apparmor.Profile{
+			Executable: &apparmor.ExecutableRules{
+				AllowedExecutables: []string{pathBinBash},
+				AllowedLibraries:   []string{pathLibC},
+			},
+			Filesystem: &apparmor.FilesystemRules{
+				ReadOnlyPaths:  []string{pathEtcConfig},
+				WriteOnlyPaths: []string{pathVarLog},
+			},
+			Network: netRules(boolPtr(true), boolPtr(true), boolPtr(false)),
+			Capabilities: &apparmor.CapabilityRules{
+				AllowedCapabilities: []string{capNetAdmin, capSysTime},
+			},
 		}
 	}
-}
 
-func TestIntersectIdenticalProfiles(t *testing.T) {
-	t.Parallel()
+	everySection := func() *apparmor.Profile {
+		return &apparmor.Profile{
+			Executable: &apparmor.ExecutableRules{
+				AllowedExecutables: []string{pathBinBash},
+				AllowedLibraries:   []string{pathLibC},
+			},
+			Filesystem: &apparmor.FilesystemRules{
+				ReadOnlyPaths:  []string{pathEtcConfig},
+				WriteOnlyPaths: []string{pathVarLog},
+				ReadWritePaths: []string{pathTmp},
+			},
+			Network:      netRules(boolPtr(true), boolPtr(true), boolPtr(true)),
+			Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{capNetAdmin}},
+		}
+	}
 
-	profile := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{pathBinBash},
-			AllowedLibraries:   []string{pathLibC},
+	// A raw socket and a capability, with no protocols section. Each use
+	// builds its own, so that a merge returning or changing an input
+	// cannot pass by comparing that input with itself.
+	rawAndCap := func() *apparmor.Profile {
+		return &apparmor.Profile{
+			Network:      &apparmor.NetworkRules{AllowRaw: boolPtr(true)},
+			Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{capNetAdmin}},
+		}
+	}
+
+	checkMergeCases(t, []mergeCase{
+		{
+			name:   "intersect identical profiles",
+			merge:  apparmor.Intersect,
+			inputs: []*apparmor.Profile{fullProfile(), fullProfile()},
+			want:   fullProfile(),
 		},
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig},
-			WriteOnlyPaths: []string{pathVarLog},
-			ReadWritePaths: nil,
+		{
+			name:  "intersect capabilities",
+			merge: apparmor.Intersect,
+			inputs: []*apparmor.Profile{
+				capsOnly(capNetAdmin, capSysTime, capChown),
+				capsOnly(capNetAdmin, capSysPtrace, capChown),
+			},
+			want: explicit(capsOnly(capChown, capNetAdmin)),
 		},
-		Network: &apparmor.NetworkRules{
-			AllowRaw: boolPtr(true),
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: boolPtr(true),
-				AllowUDP: boolPtr(false),
+		{
+			name:  "intersect capabilities in any case",
+			merge: apparmor.Intersect,
+			inputs: []*apparmor.Profile{
+				capsOnly("NET_ADMIN", "SYS_TIME"),
+				capsOnly("net_admin", "CHOWN"),
+			},
+			want: explicit(capsOnly(capNetAdmin)),
+		},
+		{
+			name:   "intersect folds duplicate capabilities",
+			merge:  apparmor.Intersect,
+			inputs: []*apparmor.Profile{capsOnly(capNetAdmin, capSysTime, capNetAdmin, capSysTime)},
+			want:   explicit(capsOnly(capNetAdmin, capSysTime)),
+		},
+		{
+			name:   "union capabilities",
+			merge:  apparmor.Union,
+			inputs: []*apparmor.Profile{capsOnly(capNetAdmin), capsOnly(capNetAdmin, capSysTime)},
+			want:   capsOnly(capNetAdmin, capSysTime),
+		},
+		{
+			name:   "union capabilities in any case",
+			merge:  apparmor.Union,
+			inputs: []*apparmor.Profile{capsOnly("net_admin"), capsOnly("NET_ADMIN", capSysTime)},
+			want:   capsOnly(capNetAdmin, capSysTime),
+		},
+		{
+			name:   "union capabilities on one side",
+			merge:  apparmor.Union,
+			inputs: []*apparmor.Profile{{}, capsOnly(capSysTime)},
+			want:   capsOnly(capSysTime),
+		},
+		{
+			name:  "intersect network keeps a boolean only where both allow it",
+			merge: apparmor.Intersect,
+			inputs: []*apparmor.Profile{
+				{Network: netRules(boolPtr(true), boolPtr(true), boolPtr(true))},
+				{Network: netRules(boolPtr(false), boolPtr(true), boolPtr(false))},
+			},
+			want: explicit(&apparmor.Profile{
+				Network: netRules(boolPtr(false), boolPtr(true), boolPtr(false)),
+			}),
+		},
+		{
+			// A nil boolean is false on intersection: raw is unset on the
+			// left, tcp is unset on the right (its whole protocols section
+			// is), and udp is unset on both.
+			name:  "intersect unset network booleans are false",
+			merge: apparmor.Intersect,
+			inputs: []*apparmor.Profile{
+				{
+					Network: &apparmor.NetworkRules{
+						Protocols: &apparmor.AllowedProtocols{AllowTCP: boolPtr(true)},
+					},
+				},
+				{Network: &apparmor.NetworkRules{AllowRaw: boolPtr(true)}},
+			},
+			want: explicit(&apparmor.Profile{}),
+		},
+		{
+			name:  "union network ors each boolean",
+			merge: apparmor.Union,
+			inputs: []*apparmor.Profile{
+				{Network: netRules(boolPtr(false), boolPtr(false), boolPtr(true))},
+				{Network: netRules(boolPtr(true), boolPtr(true), boolPtr(false))},
+			},
+			want: &apparmor.Profile{Network: netRules(boolPtr(true), boolPtr(true), boolPtr(true))},
+		},
+		{
+			// A boolean unset on one side takes the other side's value:
+			// raw is unset on the left, tcp and udp on one side each.
+			name:  "union unset boolean takes the other side",
+			merge: apparmor.Union,
+			inputs: []*apparmor.Profile{
+				{
+					Network: &apparmor.NetworkRules{
+						Protocols: &apparmor.AllowedProtocols{AllowTCP: boolPtr(false)},
+					},
+				},
+				{Network: &apparmor.NetworkRules{
+					AllowRaw:  boolPtr(false),
+					Protocols: &apparmor.AllowedProtocols{AllowUDP: boolPtr(true)},
+				}},
+			},
+			want: &apparmor.Profile{
+				Network: netRules(boolPtr(false), boolPtr(false), boolPtr(true)),
 			},
 		},
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin, capSysTime},
-		},
-	}
-
-	clone := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{pathBinBash},
-			AllowedLibraries:   []string{pathLibC},
-		},
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig},
-			WriteOnlyPaths: []string{pathVarLog},
-			ReadWritePaths: nil,
-		},
-		Network: &apparmor.NetworkRules{
-			AllowRaw: boolPtr(true),
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: boolPtr(true),
-				AllowUDP: boolPtr(false),
+		{
+			name:  "intersect executable",
+			merge: apparmor.Intersect,
+			inputs: []*apparmor.Profile{
+				{Executable: &apparmor.ExecutableRules{
+					AllowedExecutables: []string{pathBinPython, pathBinBash, pathBinCurl},
+					AllowedLibraries:   []string{pathLibC, pathLibM},
+				}},
+				{Executable: &apparmor.ExecutableRules{
+					AllowedExecutables: []string{pathBinPython, pathBinCurl},
+					AllowedLibraries:   []string{pathLibC},
+				}},
 			},
+			want: explicit(&apparmor.Profile{Executable: &apparmor.ExecutableRules{
+				AllowedExecutables: []string{pathBinCurl, pathBinPython},
+				AllowedLibraries:   []string{pathLibC},
+			}}),
 		},
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin, capSysTime},
+		{
+			name:  "union executable",
+			merge: apparmor.Union,
+			inputs: []*apparmor.Profile{
+				execProfile(pathBinPython),
+				execProfile(pathBinPython, pathBinBash),
+			},
+			want: execProfile(pathBinBash, pathBinPython),
 		},
-	}
-
-	result, err := apparmor.Intersect(profile, clone)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !reflect.DeepEqual(result.Executable, profile.Executable) {
-		t.Errorf("executable = %v, want %v", result.Executable, profile.Executable)
-	}
-
-	if !slices.Equal(result.Filesystem.ReadOnlyPaths, profile.Filesystem.ReadOnlyPaths) {
-		t.Errorf("ReadOnlyPaths = %v, want %v",
-			result.Filesystem.ReadOnlyPaths, profile.Filesystem.ReadOnlyPaths)
-	}
-
-	if !slices.Equal(result.Filesystem.WriteOnlyPaths, profile.Filesystem.WriteOnlyPaths) {
-		t.Errorf("WriteOnlyPaths = %v, want %v",
-			result.Filesystem.WriteOnlyPaths, profile.Filesystem.WriteOnlyPaths)
-	}
-
-	if !*result.Network.AllowRaw {
-		t.Error("AllowRaw should be true")
-	}
-
-	if !*result.Network.Protocols.AllowTCP {
-		t.Error("AllowTCP should be true")
-	}
-
-	if *result.Network.Protocols.AllowUDP {
-		t.Error("AllowUDP should be false")
-	}
-
-	want := []string{capNetAdmin, capSysTime}
-	if !slices.Equal(result.Capabilities.AllowedCapabilities, want) {
-		t.Errorf("capabilities = %v, want %v",
-			result.Capabilities.AllowedCapabilities, want)
-	}
+		// To AppArmor an absent section denies everything it covers, so a
+		// profile that omits every section permits nothing, whichever side
+		// it is on, and the intersection spells the denial explicitly.
+		{
+			name:   "intersect without sections on the left",
+			merge:  apparmor.Intersect,
+			inputs: []*apparmor.Profile{{}, everySection()},
+			want:   explicit(&apparmor.Profile{}),
+		},
+		{
+			name:   "intersect without sections on the right",
+			merge:  apparmor.Intersect,
+			inputs: []*apparmor.Profile{everySection(), {}},
+			want:   explicit(&apparmor.Profile{}),
+		},
+		{
+			name:   "intersect without sections on both sides",
+			merge:  apparmor.Intersect,
+			inputs: []*apparmor.Profile{{}, {}},
+			want:   explicit(&apparmor.Profile{}),
+		},
+		{
+			name:   "intersect of one profile without sections",
+			merge:  apparmor.Intersect,
+			inputs: []*apparmor.Profile{{}},
+			want:   explicit(&apparmor.Profile{}),
+		},
+		// A union defers to the other side for a section one side omits,
+		// and leaves a section both omit out.
+		{
+			name:   "union without sections on the left",
+			merge:  apparmor.Union,
+			inputs: []*apparmor.Profile{{}, rawAndCap()},
+			want:   rawAndCap(),
+		},
+		{
+			name:   "union without sections on the right",
+			merge:  apparmor.Union,
+			inputs: []*apparmor.Profile{rawAndCap(), {}},
+			want:   rawAndCap(),
+		},
+	})
 }
 
-func TestIntersectCapabilities(t *testing.T) {
+// TestMergeFilesystem pins whole merge results for the filesystem section.
+func TestMergeFilesystem(t *testing.T) {
 	t.Parallel()
 
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin, capSysTime, capChown},
+	// A literal the other profile's glob matches is pruned whichever side
+	// lists it, while a literal its own profile's glob matches is kept.
+	withGlob := func() *apparmor.Profile {
+		return readOnly("/etc/foo", "/etc/*")
+	}
+	withoutGlob := func() *apparmor.Profile {
+		return readOnly("/x", "/etc/bar")
+	}
+
+	checkMergeCases(t, []mergeCase{
+		{
+			name:  "intersect filesystem",
+			merge: apparmor.Intersect,
+			inputs: []*apparmor.Profile{
+				fsProfile(&apparmor.FilesystemRules{
+					ReadOnlyPaths:  []string{pathEtcConfig, pathVarLog},
+					ReadWritePaths: []string{pathTmp},
+				}),
+				fsProfile(&apparmor.FilesystemRules{
+					ReadOnlyPaths:  []string{pathEtcConfig},
+					WriteOnlyPaths: []string{pathTmp},
+				}),
+			},
+			want: explicit(fsProfile(&apparmor.FilesystemRules{
+				ReadOnlyPaths:  []string{pathEtcConfig},
+				WriteOnlyPaths: []string{pathTmp},
+			})),
 		},
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin, capSysPtrace, capChown},
+		{
+			name:   "intersect read-write on both sides",
+			merge:  apparmor.Intersect,
+			inputs: []*apparmor.Profile{readWrite(pathTmp), readWrite(pathTmp)},
+			want:   explicit(readWrite(pathTmp)),
 		},
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	want := []string{capChown, capNetAdmin}
-	if !slices.Equal(result.Capabilities.AllowedCapabilities, want) {
-		t.Errorf("capabilities = %v, want %v", result.Capabilities.AllowedCapabilities, want)
-	}
-}
-
-func TestIntersectCapabilitiesCaseInsensitive(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{"NET_ADMIN", "SYS_TIME"},
+		{
+			name:  "intersect read-write and write-only",
+			merge: apparmor.Intersect,
+			inputs: []*apparmor.Profile{
+				readWrite(pathTmp),
+				fsProfile(&apparmor.FilesystemRules{WriteOnlyPaths: []string{pathTmp}}),
+			},
+			want: explicit(fsProfile(&apparmor.FilesystemRules{WriteOnlyPaths: []string{pathTmp}})),
 		},
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{"net_admin", "CHOWN"},
+		{
+			name:  "intersect write-only paths",
+			merge: apparmor.Intersect,
+			inputs: []*apparmor.Profile{
+				fsProfile(&apparmor.FilesystemRules{WriteOnlyPaths: []string{pathVarLog, pathTmp}}),
+				fsProfile(&apparmor.FilesystemRules{WriteOnlyPaths: []string{pathVarLog}}),
+			},
+			want: explicit(
+				fsProfile(&apparmor.FilesystemRules{WriteOnlyPaths: []string{pathVarLog}}),
+			),
 		},
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	want := []string{capNetAdmin}
-	if !slices.Equal(result.Capabilities.AllowedCapabilities, want) {
-		t.Errorf("capabilities = %v, want %v", result.Capabilities.AllowedCapabilities, want)
-	}
-}
-
-func TestUnionCapabilities(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{capNetAdmin}},
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin, capSysTime},
+		{
+			// Both inputs hold a filesystem section, so the result does too,
+			// although it grants nothing.
+			name:   "intersect disjoint read-only paths",
+			merge:  apparmor.Intersect,
+			inputs: []*apparmor.Profile{readOnly(pathEtcConfig), readOnly(pathVarLog)},
+			want:   explicit(&apparmor.Profile{}),
 		},
-	}
-
-	result, err := apparmor.Union(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	want := []string{capNetAdmin, capSysTime}
-	if !slices.Equal(result.Capabilities.AllowedCapabilities, want) {
-		t.Errorf("capabilities = %v, want %v", result.Capabilities.AllowedCapabilities, want)
-	}
-}
-
-func TestUnionCapabilitiesCaseInsensitive(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{"net_admin"},
+		{
+			name:   "intersect folds paths that normalize alike",
+			merge:  apparmor.Intersect,
+			inputs: []*apparmor.Profile{readOnly("/etc//config", "/etc/config")},
+			want:   explicit(readOnly("/etc/config")),
 		},
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{"NET_ADMIN", capSysTime},
+		{
+			name:   "intersect normalizes a pattern's prefix",
+			merge:  apparmor.Intersect,
+			inputs: []*apparmor.Profile{readOnly("/etc//data/*")},
+			want:   explicit(readOnly("/etc/data/*")),
 		},
-	}
-
-	result, err := apparmor.Union(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	want := []string{capNetAdmin, capSysTime}
-	if !slices.Equal(result.Capabilities.AllowedCapabilities, want) {
-		t.Errorf("capabilities = %v, want %v", result.Capabilities.AllowedCapabilities, want)
-	}
+		{
+			// A read on one side and a write on the other make read-write.
+			name:  "union filesystem",
+			merge: apparmor.Union,
+			inputs: []*apparmor.Profile{
+				readOnly(pathEtcConfig),
+				fsProfile(&apparmor.FilesystemRules{
+					ReadOnlyPaths:  []string{pathVarLog},
+					WriteOnlyPaths: []string{pathEtcConfig},
+				}),
+			},
+			want: fsProfile(&apparmor.FilesystemRules{
+				ReadOnlyPaths:  []string{pathVarLog},
+				ReadWritePaths: []string{pathEtcConfig},
+			}),
+		},
+		{
+			// The write-only glob covers every read-only literal, which
+			// become read-write, while the glob stays write-only.
+			name:  "union glob subsumes several literals",
+			merge: apparmor.Union,
+			inputs: []*apparmor.Profile{
+				readOnly("/data/a", "/data/b", "/data/c"),
+				fsProfile(&apparmor.FilesystemRules{WriteOnlyPaths: []string{"/data/*"}}),
+			},
+			want: fsProfile(&apparmor.FilesystemRules{
+				WriteOnlyPaths: []string{"/data/*"},
+				ReadWritePaths: []string{"/data/a", "/data/b", "/data/c"},
+			}),
+		},
+		{
+			// A pattern read on one side and written on the other moves to
+			// read-write, leaving neither of its own categories.
+			name:  "union promotes a pattern in both categories",
+			merge: apparmor.Union,
+			inputs: []*apparmor.Profile{
+				readOnly("/var/log/**"),
+				fsProfile(&apparmor.FilesystemRules{WriteOnlyPaths: []string{"/var/log/**"}}),
+			},
+			want: readWrite("/var/log/**"),
+		},
+		{
+			name:   "union prunes a literal the other glob covers",
+			merge:  apparmor.Union,
+			inputs: []*apparmor.Profile{withoutGlob(), withGlob()},
+			want:   readOnly("/etc/*", "/etc/foo", "/x"),
+		},
+		{
+			name:   "union prunes a literal the other glob covers, swapped",
+			merge:  apparmor.Union,
+			inputs: []*apparmor.Profile{withGlob(), withoutGlob()},
+			want:   readOnly("/etc/*", "/etc/foo", "/x"),
+		},
+		{
+			// A pattern that does not start with "/" is no file rule to
+			// apparmor_parser, so it grants nothing, whatever names its
+			// expression covers: an intersection drops it.
+			name:   "intersect of one profile drops a relative glob",
+			merge:  apparmor.Intersect,
+			inputs: []*apparmor.Profile{readOnly("**/*.log")},
+			want:   explicit(&apparmor.Profile{}),
+		},
+		{
+			// It keeps no literal on the relative glob's account either.
+			name:   "intersect keeps no literal a relative glob covers",
+			merge:  apparmor.Intersect,
+			inputs: []*apparmor.Profile{readOnly("**"), readOnly("/etc/passwd", "/etc/*")},
+			want:   explicit(&apparmor.Profile{}),
+		},
+		{
+			// A union keeps the relative glob as written without dropping
+			// the literals its expression covers.
+			name:   "union keeps the literal a relative glob covers",
+			merge:  apparmor.Union,
+			inputs: []*apparmor.Profile{readOnly("/etc/passwd"), readOnly("**")},
+			want:   readOnly("**", "/etc/passwd"),
+		},
+	})
 }
 
 func TestCapabilityCaseRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{"sys_admin", "net_admin"},
 		},
 	}
 
 	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{"net_admin", "sys_ptrace"},
 		},
@@ -434,896 +578,6 @@ func TestCapabilityCaseRoundTrip(t *testing.T) {
 	}
 }
 
-func TestIntersectNetwork(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw: boolPtr(true),
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: boolPtr(true),
-				AllowUDP: boolPtr(true),
-			},
-		},
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw: boolPtr(false),
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: boolPtr(true),
-				AllowUDP: boolPtr(false),
-			},
-		},
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.Network.AllowRaw == nil || *result.Network.AllowRaw {
-		t.Error("AllowRaw should be false (AND of true, false)")
-	}
-
-	if result.Network.Protocols.AllowTCP == nil || !*result.Network.Protocols.AllowTCP {
-		t.Error("AllowTCP should be true (AND of true, true)")
-	}
-
-	if result.Network.Protocols.AllowUDP == nil || *result.Network.Protocols.AllowUDP {
-		t.Error("AllowUDP should be false (AND of true, false)")
-	}
-}
-
-func TestUnionNetwork(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw: boolPtr(false),
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: boolPtr(false),
-				AllowUDP: boolPtr(true),
-			},
-		},
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw: boolPtr(true),
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: boolPtr(true),
-				AllowUDP: boolPtr(false),
-			},
-		},
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Union(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.Network.AllowRaw == nil || !*result.Network.AllowRaw {
-		t.Error("AllowRaw should be true (OR of false, true)")
-	}
-
-	if result.Network.Protocols.AllowTCP == nil || !*result.Network.Protocols.AllowTCP {
-		t.Error("AllowTCP should be true (OR of false, true)")
-	}
-
-	if result.Network.Protocols.AllowUDP == nil || !*result.Network.Protocols.AllowUDP {
-		t.Error("AllowUDP should be true (OR of true, false)")
-	}
-}
-
-func TestIntersectFilesystem(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig, pathVarLog},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: []string{pathTmp},
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig},
-			WriteOnlyPaths: []string{pathTmp},
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !slices.Equal(result.Filesystem.ReadOnlyPaths, []string{pathEtcConfig}) {
-		t.Errorf("ReadOnlyPaths = %v, want [%s]", result.Filesystem.ReadOnlyPaths, pathEtcConfig)
-	}
-
-	if !slices.Equal(result.Filesystem.WriteOnlyPaths, []string{pathTmp}) {
-		t.Errorf("WriteOnlyPaths = %v, want [%s]", result.Filesystem.WriteOnlyPaths, pathTmp)
-	}
-
-	if result.Filesystem.ReadWritePaths != nil {
-		t.Errorf("ReadWritePaths = %v, want nil", result.Filesystem.ReadWritePaths)
-	}
-}
-
-func TestUnionFilesystem(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathVarLog},
-			WriteOnlyPaths: []string{pathEtcConfig},
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Union(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !slices.Equal(result.Filesystem.ReadWritePaths, []string{pathEtcConfig}) {
-		t.Errorf("ReadWritePaths = %v, want [%s]", result.Filesystem.ReadWritePaths, pathEtcConfig)
-	}
-
-	if !slices.Equal(result.Filesystem.ReadOnlyPaths, []string{pathVarLog}) {
-		t.Errorf("ReadOnlyPaths = %v, want [%s]", result.Filesystem.ReadOnlyPaths, pathVarLog)
-	}
-}
-
-func TestUnionFilesystemGlobSubsumesMultipleLiterals(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{"/data/a", "/data/b", "/data/c"},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  nil,
-			WriteOnlyPaths: []string{"/data/*"},
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Union(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.Filesystem.ReadOnlyPaths) != 0 {
-		t.Errorf("ReadOnlyPaths = %v, want empty (all subsumed by glob)",
-			result.Filesystem.ReadOnlyPaths)
-	}
-
-	wantRW := []string{"/data/a", "/data/b", "/data/c"}
-	if !slices.Equal(result.Filesystem.ReadWritePaths, wantRW) {
-		t.Errorf("ReadWritePaths = %v, want %v",
-			result.Filesystem.ReadWritePaths, wantRW)
-	}
-
-	if !slices.Equal(result.Filesystem.WriteOnlyPaths, []string{"/data/*"}) {
-		t.Errorf("WriteOnlyPaths = %v, want [/data/*]",
-			result.Filesystem.WriteOnlyPaths)
-	}
-}
-
-func TestIntersectExecutable(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{pathBinPython, pathBinBash, pathBinCurl},
-			AllowedLibraries:   []string{pathLibC, pathLibM},
-		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{pathBinPython, pathBinCurl},
-			AllowedLibraries:   []string{pathLibC},
-		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	wantExec := []string{pathBinCurl, pathBinPython}
-	if !slices.Equal(result.Executable.AllowedExecutables, wantExec) {
-		t.Errorf("AllowedExecutables = %v, want %v", result.Executable.AllowedExecutables, wantExec)
-	}
-
-	wantLib := []string{pathLibC}
-	if !slices.Equal(result.Executable.AllowedLibraries, wantLib) {
-		t.Errorf("AllowedLibraries = %v, want %v", result.Executable.AllowedLibraries, wantLib)
-	}
-}
-
-func TestUnionExecutable(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{pathBinPython},
-			AllowedLibraries:   nil,
-		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{pathBinPython, pathBinBash},
-			AllowedLibraries:   nil,
-		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Union(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	want := []string{pathBinBash, pathBinPython}
-	if !slices.Equal(result.Executable.AllowedExecutables, want) {
-		t.Errorf("AllowedExecutables = %v, want %v", result.Executable.AllowedExecutables, want)
-	}
-}
-
-func TestIntersectFilesystemBothRW(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  nil,
-			WriteOnlyPaths: nil,
-			ReadWritePaths: []string{pathTmp},
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  nil,
-			WriteOnlyPaths: nil,
-			ReadWritePaths: []string{pathTmp},
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !slices.Equal(result.Filesystem.ReadWritePaths, []string{pathTmp}) {
-		t.Errorf("ReadWritePaths = %v, want [%s]", result.Filesystem.ReadWritePaths, pathTmp)
-	}
-}
-
-func TestIntersectFilesystemRWAndWriteOnly(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  nil,
-			WriteOnlyPaths: nil,
-			ReadWritePaths: []string{pathTmp},
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  nil,
-			WriteOnlyPaths: []string{pathTmp},
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !slices.Equal(result.Filesystem.WriteOnlyPaths, []string{pathTmp}) {
-		t.Errorf("WriteOnlyPaths = %v, want [%s]", result.Filesystem.WriteOnlyPaths, pathTmp)
-	}
-
-	if len(result.Filesystem.ReadOnlyPaths) != 0 {
-		t.Errorf("ReadOnlyPaths = %v, want empty", result.Filesystem.ReadOnlyPaths)
-	}
-
-	if len(result.Filesystem.ReadWritePaths) != 0 {
-		t.Errorf("ReadWritePaths = %v, want empty", result.Filesystem.ReadWritePaths)
-	}
-}
-
-func TestIntersectThreeProfiles(t *testing.T) {
-	t.Parallel()
-
-	first := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin, capSysTime, capChown},
-		},
-	}
-
-	second := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin, capChown, capSysPtrace},
-		},
-	}
-
-	third := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capChown, capSysPtrace, capDacOverride},
-		},
-	}
-
-	result, err := apparmor.Intersect(first, second, third)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	want := []string{capChown}
-	if !slices.Equal(result.Capabilities.AllowedCapabilities, want) {
-		t.Errorf("capabilities = %v, want %v", result.Capabilities.AllowedCapabilities, want)
-	}
-}
-
-func TestIntersectNilSectionsDenyEverything(t *testing.T) {
-	t.Parallel()
-
-	full := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{"/usr/bin/bash"},
-			AllowedLibraries:   []string{"/usr/lib/libc.so"},
-		},
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig},
-			WriteOnlyPaths: []string{pathVarLog},
-			ReadWritePaths: []string{"/tmp"},
-		},
-		Network: &apparmor.NetworkRules{
-			AllowRaw: boolPtr(true),
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: boolPtr(true),
-				AllowUDP: boolPtr(true),
-			},
-		},
-		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{capNetAdmin}},
-	}
-
-	// To AppArmor an absent section denies everything it covers, so a
-	// profile that omits every section permits nothing, whichever side it
-	// is on, and the result spells the denial explicitly.
-	empty := &apparmor.Profile{Executable: nil, Filesystem: nil, Network: nil, Capabilities: nil}
-	want := "Profile{net:!raw,!tcp,!udp caps:none}"
-
-	for name, inputs := range map[string][]*apparmor.Profile{
-		"left nil":  {empty, full},
-		"right nil": {full, empty},
-		"both nil":  {empty, empty},
-		"single":    {empty},
-	} {
-		result, err := apparmor.Intersect(inputs...)
-		if err != nil {
-			t.Fatalf("%s: unexpected error: %v", name, err)
-		}
-
-		if got := apparmor.FormatProfile(result); got != want {
-			t.Errorf("%s: Intersect = %s, want %s", name, got, want)
-		}
-
-		if result.Executable == nil || result.Filesystem == nil ||
-			result.Network == nil || result.Network.Protocols == nil {
-			t.Errorf("%s: every section must be explicit in the result", name)
-		}
-	}
-}
-
-func TestIntersectNilNetworkBooleansAreFalse(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw:  nil,
-			Protocols: &apparmor.AllowedProtocols{AllowTCP: boolPtr(true), AllowUDP: nil},
-		},
-		Capabilities: nil,
-	}
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw:  boolPtr(true),
-			Protocols: nil,
-		},
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// A nil boolean is false on intersection: raw is unset on the left,
-	// tcp is unset on the right (its whole protocols section is), and udp
-	// is unset on both.
-	want := "Profile{net:!raw,!tcp,!udp caps:none}"
-	if got := apparmor.FormatProfile(result); got != want {
-		t.Errorf("Intersect = %s, want %s", got, want)
-	}
-}
-
-func TestUnionNilSectionsDeferToTheOtherSide(t *testing.T) {
-	t.Parallel()
-
-	empty := &apparmor.Profile{Executable: nil, Filesystem: nil, Network: nil, Capabilities: nil}
-	caps := &apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      &apparmor.NetworkRules{AllowRaw: boolPtr(true), Protocols: nil},
-		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{capNetAdmin}},
-	}
-
-	for name, inputs := range map[string][]*apparmor.Profile{
-		"left nil":  {empty, caps},
-		"right nil": {caps, empty},
-	} {
-		result, err := apparmor.Union(inputs...)
-		if err != nil {
-			t.Fatalf("%s: unexpected error: %v", name, err)
-		}
-
-		want := "Profile{net:raw caps:NET_ADMIN}"
-		if got := apparmor.FormatProfile(result); got != want {
-			t.Errorf("%s: Union = %s, want %s", name, got, want)
-		}
-
-		if result.Executable != nil || result.Filesystem != nil {
-			t.Errorf("%s: sections nil on both sides stay nil", name)
-		}
-	}
-}
-
-func TestNilProfileAtIndex(t *testing.T) {
-	t.Parallel()
-
-	valid := &apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	_, err := apparmor.Intersect(valid, nil)
-	if err == nil {
-		t.Fatal("expected error for nil profile at index 1")
-	}
-
-	_, err = apparmor.Union(valid, nil)
-	if err == nil {
-		t.Fatal("expected error for nil profile at index 1 (union)")
-	}
-}
-
-func TestUnionBoolOneNil(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw: nil,
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: boolPtr(false),
-				AllowUDP: nil,
-			},
-		},
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw: boolPtr(false),
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: nil,
-				AllowUDP: boolPtr(true),
-			},
-		},
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Union(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.Network.AllowRaw == nil || *result.Network.AllowRaw {
-		t.Error("AllowRaw should be false (left nil, right false)")
-	}
-
-	if result.Network.Protocols.AllowTCP == nil || *result.Network.Protocols.AllowTCP {
-		t.Error("AllowTCP should be false (left false, right nil)")
-	}
-
-	if result.Network.Protocols.AllowUDP == nil || !*result.Network.Protocols.AllowUDP {
-		t.Error("AllowUDP should be true (left nil, right true)")
-	}
-}
-
-func TestUnionCapabilitiesOneNil(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capSysTime},
-		},
-	}
-
-	result, err := apparmor.Union(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.Capabilities == nil {
-		t.Fatal("capabilities should not be nil")
-	}
-
-	if !slices.Equal(result.Capabilities.AllowedCapabilities, []string{capSysTime}) {
-		t.Errorf(
-			"capabilities = %v, want [%s]",
-			result.Capabilities.AllowedCapabilities, capSysTime,
-		)
-	}
-}
-
-func TestFilesystemWriteOnlyOnly(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  nil,
-			WriteOnlyPaths: []string{pathVarLog, pathTmp},
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  nil,
-			WriteOnlyPaths: []string{pathVarLog},
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.Filesystem == nil {
-		t.Fatal("filesystem should not be nil")
-	}
-
-	if !slices.Equal(result.Filesystem.WriteOnlyPaths, []string{pathVarLog}) {
-		t.Errorf("WriteOnlyPaths = %v, want [%s]", result.Filesystem.WriteOnlyPaths, pathVarLog)
-	}
-
-	if result.Filesystem.ReadOnlyPaths != nil {
-		t.Errorf("ReadOnlyPaths = %v, want nil", result.Filesystem.ReadOnlyPaths)
-	}
-}
-
-func TestFilesystemIntersectNoOverlap(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathVarLog},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.Filesystem == nil {
-		t.Fatal("filesystem should not be nil (both inputs were non-nil)")
-	}
-
-	if len(result.Filesystem.ReadOnlyPaths) != 0 {
-		t.Errorf("ReadOnlyPaths = %v, want empty", result.Filesystem.ReadOnlyPaths)
-	}
-
-	if len(result.Filesystem.WriteOnlyPaths) != 0 {
-		t.Errorf("WriteOnlyPaths = %v, want empty", result.Filesystem.WriteOnlyPaths)
-	}
-
-	if len(result.Filesystem.ReadWritePaths) != 0 {
-		t.Errorf("ReadWritePaths = %v, want empty", result.Filesystem.ReadWritePaths)
-	}
-}
-
-func TestMergeDoesNotMutateInputs(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin, capChown},
-		},
-	}
-
-	right := &apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{capChown}},
-	}
-
-	origLeft := slices.Clone(left.Capabilities.AllowedCapabilities)
-	origRight := slices.Clone(right.Capabilities.AllowedCapabilities)
-
-	_, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !slices.Equal(left.Capabilities.AllowedCapabilities, origLeft) {
-		t.Error("Intersect mutated first input")
-	}
-
-	if !slices.Equal(right.Capabilities.AllowedCapabilities, origRight) {
-		t.Error("Intersect mutated second input")
-	}
-}
-
-func TestMergeDoesNotMutateAllFields(t *testing.T) {
-	t.Parallel()
-
-	left := buildFullProfile()
-
-	right := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{pathBinPython},
-			AllowedLibraries:   []string{pathLibC},
-		},
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig, pathVarLog},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
-		},
-		Network: &apparmor.NetworkRules{
-			AllowRaw: boolPtr(false),
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: boolPtr(false),
-				AllowUDP: boolPtr(true),
-			},
-		},
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capChown},
-		},
-	}
-
-	snap := snapshotProfile(left)
-
-	_, err := apparmor.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	assertProfileUnchanged(t, left, &snap)
-}
-
-func buildFullProfile() *apparmor.Profile {
-	return &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{pathBinPython, pathBinBash},
-			AllowedLibraries:   []string{pathLibC, pathLibM},
-		},
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig},
-			WriteOnlyPaths: []string{pathVarLog},
-			ReadWritePaths: []string{pathTmp},
-		},
-		Network: &apparmor.NetworkRules{
-			AllowRaw: boolPtr(true),
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: boolPtr(true),
-				AllowUDP: boolPtr(false),
-			},
-		},
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin, capChown},
-		},
-	}
-}
-
-type profileSnapshot struct {
-	executables []string
-	libraries   []string
-	readOnly    []string
-	writeOnly   []string
-	readWrite   []string
-	allowRaw    bool
-	allowTCP    bool
-	allowUDP    bool
-	caps        []string
-}
-
-func snapshotProfile(profile *apparmor.Profile) profileSnapshot {
-	return profileSnapshot{
-		executables: slices.Clone(profile.Executable.AllowedExecutables),
-		libraries:   slices.Clone(profile.Executable.AllowedLibraries),
-		readOnly:    slices.Clone(profile.Filesystem.ReadOnlyPaths),
-		writeOnly:   slices.Clone(profile.Filesystem.WriteOnlyPaths),
-		readWrite:   slices.Clone(profile.Filesystem.ReadWritePaths),
-		allowRaw:    *profile.Network.AllowRaw,
-		allowTCP:    *profile.Network.Protocols.AllowTCP,
-		allowUDP:    *profile.Network.Protocols.AllowUDP,
-		caps:        slices.Clone(profile.Capabilities.AllowedCapabilities),
-	}
-}
-
-func assertProfileUnchanged(t *testing.T, profile *apparmor.Profile, snap *profileSnapshot) {
-	t.Helper()
-
-	if !slices.Equal(profile.Executable.AllowedExecutables, snap.executables) {
-		t.Error("merge mutated AllowedExecutables")
-	}
-
-	if !slices.Equal(profile.Executable.AllowedLibraries, snap.libraries) {
-		t.Error("merge mutated AllowedLibraries")
-	}
-
-	if !slices.Equal(profile.Filesystem.ReadOnlyPaths, snap.readOnly) {
-		t.Error("merge mutated ReadOnlyPaths")
-	}
-
-	if !slices.Equal(profile.Filesystem.WriteOnlyPaths, snap.writeOnly) {
-		t.Error("merge mutated WriteOnlyPaths")
-	}
-
-	if !slices.Equal(profile.Filesystem.ReadWritePaths, snap.readWrite) {
-		t.Error("merge mutated ReadWritePaths")
-	}
-
-	if *profile.Network.AllowRaw != snap.allowRaw {
-		t.Error("merge mutated AllowRaw")
-	}
-
-	if *profile.Network.Protocols.AllowTCP != snap.allowTCP {
-		t.Error("merge mutated AllowTCP")
-	}
-
-	if *profile.Network.Protocols.AllowUDP != snap.allowUDP {
-		t.Error("merge mutated AllowUDP")
-	}
-
-	if !slices.Equal(profile.Capabilities.AllowedCapabilities, snap.caps) {
-		t.Error("merge mutated AllowedCapabilities")
-	}
-}
-
 // TestIntersectIsNotAssociativeWithGlobs pins the order dependence the
 // Intersect godoc describes. A pattern survives an intersection only where
 // the other side spells it alike or expands over it, so two patterns that
@@ -1353,188 +607,72 @@ func TestIntersectIsNotAssociativeWithGlobs(t *testing.T) {
 	}
 }
 
-// TestIntersectAssociativity covers capability-only profiles, where the fold
+// TestMergeIsAssociative covers capability-only profiles, where the fold
 // order cannot matter. TestIntersectGroupingStaysSafe covers what happens
 // with patterns, where it does.
-func TestIntersectAssociativity(t *testing.T) {
+func TestMergeIsAssociative(t *testing.T) {
 	t.Parallel()
 
-	profileA := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin, capSysTime, capChown},
+	withRaw := func(raw bool, names ...string) *apparmor.Profile {
+		profile := capsOnly(names...)
+		profile.Network = &apparmor.NetworkRules{AllowRaw: boolPtr(raw)}
+
+		return profile
+	}
+
+	for _, test := range []struct {
+		name  string
+		merge mergeFunc
+		a     *apparmor.Profile
+		b     *apparmor.Profile
+		c     *apparmor.Profile
+	}{
+		{
+			name:  "Intersect",
+			merge: apparmor.Intersect,
+			a:     withRaw(true, capNetAdmin, capSysTime, capChown),
+			b:     withRaw(true, capNetAdmin, capChown),
+			c:     withRaw(false, capChown, capSysPtrace),
 		},
-		Network: &apparmor.NetworkRules{
-			AllowRaw:  boolPtr(true),
-			Protocols: nil,
+		{
+			name:  "Union",
+			merge: apparmor.Union,
+			a:     capsOnly(capNetAdmin),
+			b:     capsOnly(capChown),
+			c:     capsOnly(capSysTime),
 		},
-	}
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	profileB := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin, capChown},
-		},
-		Network: &apparmor.NetworkRules{
-			AllowRaw:  boolPtr(true),
-			Protocols: nil,
-		},
-	}
+			mergedBC, err := test.merge(test.b, test.c)
+			if err != nil {
+				t.Fatalf("merge(b,c): %v", err)
+			}
 
-	profileC := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capChown, capSysPtrace},
-		},
-		Network: &apparmor.NetworkRules{
-			AllowRaw:  boolPtr(false),
-			Protocols: nil,
-		},
-	}
+			leftAssoc, err := test.merge(test.a, mergedBC)
+			if err != nil {
+				t.Fatalf("merge(a, merge(b,c)): %v", err)
+			}
 
-	assertAppArmorAssociative(t, apparmor.Intersect, profileA, profileB, profileC)
-}
+			mergedAB, err := test.merge(test.a, test.b)
+			if err != nil {
+				t.Fatalf("merge(a,b): %v", err)
+			}
 
-func TestUnionAssociativity(t *testing.T) {
-	t.Parallel()
+			rightAssoc, err := test.merge(mergedAB, test.c)
+			if err != nil {
+				t.Fatalf("merge(merge(a,b), c): %v", err)
+			}
 
-	profileA := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin},
-		},
-	}
-
-	profileB := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capChown},
-		},
-	}
-
-	profileC := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capSysTime},
-		},
-	}
-
-	assertAppArmorAssociative(t, apparmor.Union, profileA, profileB, profileC)
-}
-
-func assertAppArmorAssociative(
-	t *testing.T,
-	merge func(...*apparmor.Profile) (*apparmor.Profile, error),
-	profileA, profileB, profileC *apparmor.Profile,
-) {
-	t.Helper()
-
-	mergedBC, err := merge(profileB, profileC)
-	if err != nil {
-		t.Fatalf("merge(b,c): %v", err)
-	}
-
-	leftAssoc, err := merge(profileA, mergedBC)
-	if err != nil {
-		t.Fatalf("merge(a, merge(b,c)): %v", err)
-	}
-
-	mergedAB, err := merge(profileA, profileB)
-	if err != nil {
-		t.Fatalf("merge(a,b): %v", err)
-	}
-
-	rightAssoc, err := merge(mergedAB, profileC)
-	if err != nil {
-		t.Fatalf("merge(merge(a,b), c): %v", err)
-	}
-
-	if !reflect.DeepEqual(leftAssoc, rightAssoc) {
-		t.Error("Merge(A, Merge(B,C)) != Merge(Merge(A,B), C)")
-	}
-}
-
-func TestIntersectEmptyPathRejected(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{""},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	_, err := apparmor.Intersect(profile)
-	if err == nil {
-		t.Fatal("expected error for empty path through merge")
-	}
-
-	if !errors.Is(err, apparmor.ErrEmptyPath) {
-		t.Errorf("expected ErrEmptyPath, got: %v", err)
-	}
-}
-
-func TestIntersectNormalizedDuplicatePaths(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{"/etc//config", "/etc/config"},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !slices.Equal(result.Filesystem.ReadOnlyPaths, []string{"/etc/config"}) {
-		t.Errorf("ReadOnlyPaths = %v, want [/etc/config]", result.Filesystem.ReadOnlyPaths)
-	}
-}
-
-func TestNormalizeGlobPathPrefix(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{"/etc//data/*"},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Intersect(profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !slices.Equal(result.Filesystem.ReadOnlyPaths, []string{"/etc/data/*"}) {
-		t.Errorf(
-			"ReadOnlyPaths = %v, want [/etc/data/*]",
-			result.Filesystem.ReadOnlyPaths,
-		)
+			if !reflect.DeepEqual(leftAssoc, rightAssoc) {
+				t.Errorf(
+					"merge(a, merge(b,c)) = %s, merge(merge(a,b), c) = %s",
+					leftAssoc,
+					rightAssoc,
+				)
+			}
+		})
 	}
 }
 
@@ -1548,14 +686,9 @@ func TestMergeEscapedSlashRuns(t *testing.T) {
 
 	fsProfile := func(paths ...string) *apparmor.Profile {
 		return &apparmor.Profile{
-			Executable: nil,
 			Filesystem: &apparmor.FilesystemRules{
-				ReadOnlyPaths:  paths,
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: paths,
 			},
-			Network:      nil,
-			Capabilities: nil,
 		}
 	}
 
@@ -1641,145 +774,6 @@ func TestMergeEscapedSlashRuns(t *testing.T) {
 	}
 }
 
-func TestDeduplicateCapabilities(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin, capSysTime, capNetAdmin, capSysTime},
-		},
-	}
-
-	result, err := apparmor.Intersect(profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	want := []string{capNetAdmin, capSysTime}
-
-	if !slices.Equal(result.Capabilities.AllowedCapabilities, want) {
-		t.Errorf(
-			"capabilities = %v, want %v (deduplicated)",
-			result.Capabilities.AllowedCapabilities, want,
-		)
-	}
-}
-
-func TestUnionPopExactRemovesGlobPattern(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{"/var/log/**"},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  nil,
-			WriteOnlyPaths: []string{"/var/log/**"},
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	result, err := apparmor.Union(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.Filesystem.ReadOnlyPaths) != 0 {
-		t.Errorf(
-			"ReadOnlyPaths = %v, want empty (glob promoted to ReadWrite)",
-			result.Filesystem.ReadOnlyPaths,
-		)
-	}
-
-	if len(result.Filesystem.WriteOnlyPaths) != 0 {
-		t.Errorf(
-			"WriteOnlyPaths = %v, want empty (glob promoted to ReadWrite)",
-			result.Filesystem.WriteOnlyPaths,
-		)
-	}
-
-	if !slices.Contains(result.Filesystem.ReadWritePaths, "/var/log/**") {
-		t.Errorf(
-			"ReadWritePaths = %v, want [/var/log/**]",
-			result.Filesystem.ReadWritePaths,
-		)
-	}
-}
-
-// TestRelativeGlobMatchesNothing covers a pattern that does not start with
-// "/". apparmor_parser reads no file rule from it, so it grants nothing,
-// whatever names its expression covers: an intersection drops it and keeps
-// no literal on its account, and a union keeps it as written without
-// dropping the literals its expression covers.
-func TestRelativeGlobMatchesNothing(t *testing.T) {
-	t.Parallel()
-
-	readOnly := func(paths ...string) *apparmor.Profile {
-		return &apparmor.Profile{
-			Executable: nil,
-			Filesystem: &apparmor.FilesystemRules{
-				ReadOnlyPaths:  paths,
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
-			},
-			Network:      nil,
-			Capabilities: nil,
-		}
-	}
-
-	for _, testCase := range []struct {
-		name   string
-		merge  func(...*apparmor.Profile) (*apparmor.Profile, error)
-		inputs []*apparmor.Profile
-		want   []string
-	}{
-		{
-			name:   "intersect of one profile drops it",
-			merge:  apparmor.Intersect,
-			inputs: []*apparmor.Profile{readOnly("**/*.log")},
-			want:   nil,
-		},
-		{
-			name:   "intersect keeps no literal it covers",
-			merge:  apparmor.Intersect,
-			inputs: []*apparmor.Profile{readOnly("**"), readOnly("/etc/passwd", "/etc/*")},
-			want:   nil,
-		},
-		{
-			name:   "union keeps the literal it covers",
-			merge:  apparmor.Union,
-			inputs: []*apparmor.Profile{readOnly("/etc/passwd"), readOnly("**")},
-			want:   []string{"**", "/etc/passwd"},
-		},
-	} {
-		result, err := testCase.merge(testCase.inputs...)
-		if err != nil {
-			t.Fatalf("%s: unexpected error: %v", testCase.name, err)
-		}
-
-		if !slices.Equal(result.Filesystem.ReadOnlyPaths, testCase.want) {
-			t.Errorf(
-				"%s: ReadOnlyPaths = %v, want %v",
-				testCase.name, result.Filesystem.ReadOnlyPaths, testCase.want,
-			)
-		}
-	}
-}
-
 // TestRelativeGlobKeepsItsIdentity covers two spellings of one relative
 // pattern. It matches nothing, but it still spells one rule, so Validate,
 // the merge and Diff identify it by its expression as they do an absolute
@@ -1789,14 +783,9 @@ func TestRelativeGlobKeepsItsIdentity(t *testing.T) {
 
 	readOnly := func(paths ...string) *apparmor.Profile {
 		return &apparmor.Profile{
-			Executable: nil,
 			Filesystem: &apparmor.FilesystemRules{
-				ReadOnlyPaths:  paths,
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: paths,
 			},
-			Network:      nil,
-			Capabilities: nil,
 		}
 	}
 
@@ -1820,7 +809,7 @@ func TestRelativeGlobKeepsItsIdentity(t *testing.T) {
 	}
 
 	if !diff.Equal {
-		t.Errorf("Diff of two spellings = %s, want equal", apparmor.FormatDiff(diff))
+		t.Errorf("Diff of two spellings = %s, want equal", diff.String())
 	}
 
 	// A relative pattern is no rule an absolute one spells.
@@ -1851,15 +840,10 @@ func TestUnionIgnoresPathOrder(t *testing.T) {
 		profile := &apparmor.Profile{
 			Executable: &apparmor.ExecutableRules{
 				AllowedExecutables: paths,
-				AllowedLibraries:   nil,
 			},
 			Filesystem: &apparmor.FilesystemRules{
-				ReadOnlyPaths:  paths,
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: paths,
 			},
-			Network:      nil,
-			Capabilities: nil,
 		}
 
 		merged, err := apparmor.Union(profile, profile)
@@ -1873,7 +857,7 @@ func TestUnionIgnoresPathOrder(t *testing.T) {
 		}
 
 		if !diff.Equal {
-			t.Errorf("Union(p, p) for %q differs from p: %s", paths, apparmor.FormatDiff(diff))
+			t.Errorf("Union(p, p) for %q differs from p: %s", paths, diff.String())
 		}
 
 		results = append(results, merged.Filesystem.ReadOnlyPaths)
@@ -1894,15 +878,12 @@ func TestUnionIsCommutative(t *testing.T) {
 		return &apparmor.Profile{
 			Executable: &apparmor.ExecutableRules{
 				AllowedExecutables: slices.Concat(readOnly, writeOnly, readWrite),
-				AllowedLibraries:   nil,
 			},
 			Filesystem: &apparmor.FilesystemRules{
 				ReadOnlyPaths:  readOnly,
 				WriteOnlyPaths: writeOnly,
 				ReadWritePaths: readWrite,
 			},
-			Network:      nil,
-			Capabilities: nil,
 		}
 	}
 
@@ -1951,40 +932,9 @@ func TestUnionIsCommutative(t *testing.T) {
 
 			if !reflect.DeepEqual(forward, backward) {
 				t.Errorf("Union(a, b) = %s, Union(b, a) = %s",
-					apparmor.FormatProfile(forward), apparmor.FormatProfile(backward))
+					forward.String(), backward.String())
 			}
 		})
-	}
-}
-
-// TestUnionOtherGlobPrunesLiteral covers a literal the other profile's glob
-// matches: it is pruned whichever side lists it, while a literal its own
-// profile's glob matches is kept.
-func TestUnionOtherGlobPrunesLiteral(t *testing.T) {
-	t.Parallel()
-
-	withGlob := fsProfile(&apparmor.FilesystemRules{
-		ReadOnlyPaths:  []string{"/etc/foo", "/etc/*"},
-		WriteOnlyPaths: nil,
-		ReadWritePaths: nil,
-	})
-	other := fsProfile(&apparmor.FilesystemRules{
-		ReadOnlyPaths:  []string{"/x", "/etc/bar"},
-		WriteOnlyPaths: nil,
-		ReadWritePaths: nil,
-	})
-
-	want := []string{"/etc/*", "/etc/foo", "/x"}
-
-	for _, order := range [][]*apparmor.Profile{{other, withGlob}, {withGlob, other}} {
-		result, err := apparmor.Union(order...)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		if got := result.Filesystem.ReadOnlyPaths; !slices.Equal(got, want) {
-			t.Errorf("Union = %q, want %q", got, want)
-		}
 	}
 }
 
@@ -1998,15 +948,12 @@ func TestUnionFoldIsDeterministic(t *testing.T) {
 		fsProfile(&apparmor.FilesystemRules{
 			ReadOnlyPaths:  []string{"/etc/b", "/etc/a", "/var/*"},
 			WriteOnlyPaths: []string{"/etc/c"},
-			ReadWritePaths: nil,
 		}),
 		fsProfile(&apparmor.FilesystemRules{
 			ReadOnlyPaths:  []string{"/var/log", "/etc/*"},
 			WriteOnlyPaths: []string{"/var/**", "/etc/a"},
-			ReadWritePaths: nil,
 		}),
 		fsProfile(&apparmor.FilesystemRules{
-			ReadOnlyPaths:  nil,
 			WriteOnlyPaths: []string{"/var/tmp"},
 			ReadWritePaths: []string{"/etc/c", "/etc/{a,b}"},
 		}),
@@ -2025,7 +972,7 @@ func TestUnionFoldIsDeterministic(t *testing.T) {
 
 		if !reflect.DeepEqual(first, again) {
 			t.Fatalf("Union = %s, then %s",
-				apparmor.FormatProfile(first), apparmor.FormatProfile(again))
+				first.String(), again.String())
 		}
 	}
 }
@@ -2033,42 +980,48 @@ func TestUnionFoldIsDeterministic(t *testing.T) {
 // TestMergeErrorsNameTheCallersEntry pins where a merge failure points: at
 // the entry the caller wrote, at its index in the caller's list, although the
 // merge goes on to work with a copy whose duplicates are folded and whose
-// paths are normalized.
+// paths are normalized. Each profile fails alone, as input 0, and after a
+// valid one, as input 1.
 func TestMergeErrorsNameTheCallersEntry(t *testing.T) {
 	t.Parallel()
 
 	for _, testCase := range []struct {
-		name    string
-		profile *apparmor.Profile
-		want    string
+		name     string
+		profile  *apparmor.Profile
+		sentinel error
+		want     string
 	}{
 		{
-			name:    "after a folded duplicate path",
-			profile: readOnly("/a", "/a", "/b", "@{HOME}/x"),
-			want:    `filesystem.readOnlyPaths[3]: "@{HOME}/x"`,
+			name:     "an empty path",
+			profile:  readOnly(""),
+			sentinel: apparmor.ErrEmptyPath,
+			want:     "filesystem.readOnlyPaths[0]",
 		},
 		{
-			name:    "after folded aliases",
-			profile: readOnly(`/\x61`, "/a", "/b//c", `/b//@{x}`),
-			want:    `filesystem.readOnlyPaths[3]: "/b//@{x}"`,
+			name:     "after a folded duplicate path",
+			profile:  readOnly("/a", "/a", "/b", "@{HOME}/x"),
+			sentinel: apparmor.ErrUnsupportedVariable,
+			want:     `filesystem.readOnlyPaths[3]: "@{HOME}/x"`,
 		},
 		{
-			name: "after a folded duplicate capability",
-			profile: &apparmor.Profile{
-				Executable: nil, Filesystem: nil, Network: nil,
-				Capabilities: &apparmor.CapabilityRules{
-					AllowedCapabilities: []string{"chown", "CHOWN", ""},
-				},
-			},
-			want: "capability.allowedCapabilities[2]",
+			name:     "after folded aliases",
+			profile:  readOnly(`/\x61`, "/a", "/b//c", `/b//@{x}`),
+			sentinel: apparmor.ErrUnsupportedVariable,
+			want:     `filesystem.readOnlyPaths[3]: "/b//@{x}"`,
+		},
+		{
+			name:     "after a folded duplicate capability",
+			profile:  capsOnly("chown", "CHOWN", ""),
+			sentinel: apparmor.ErrEmptyCapability,
+			want:     "capability.allowedCapabilities[2]",
 		},
 		{
 			name: "a path in two categories as written",
 			profile: fsProfile(&apparmor.FilesystemRules{
 				ReadOnlyPaths:  []string{"/etc//passwd"},
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{`/etc/\passwd`},
 			}),
+			sentinel: apparmor.ErrDuplicatePath,
 			want: `filesystem.readWritePaths[0]: "/etc/\\passwd": ` +
 				`duplicate path across filesystem categories (also at filesystem.readOnlyPaths[0])`,
 		},
@@ -2080,35 +1033,29 @@ func TestMergeErrorsNameTheCallersEntry(t *testing.T) {
 				"Intersect": apparmor.Intersect,
 				"Union":     apparmor.Union,
 			} {
-				_, err := mergeFn(readOnly("/x"), testCase.profile)
+				for index, inputs := range [][]*apparmor.Profile{
+					{testCase.profile},
+					{readOnly("/x"), testCase.profile},
+				} {
+					_, err := mergeFn(inputs...)
 
-				var inputErr *apparmor.InputError
-				if !errors.As(err, &inputErr) || inputErr.Index != 1 {
-					t.Fatalf("%s = %v, want an InputError for input 1", name, err)
-				}
+					var inputErr *apparmor.InputError
+					if !errors.As(err, &inputErr) || inputErr.Index != index {
+						t.Errorf("%s = %v, want an InputError for input %d", name, err, index)
 
-				if !strings.Contains(err.Error(), testCase.want) {
-					t.Errorf("%s = %q, want it to name %s", name, err, testCase.want)
+						continue
+					}
+
+					if !errors.Is(err, testCase.sentinel) {
+						t.Errorf("%s = %v, want %v", name, err, testCase.sentinel)
+					}
+
+					if !strings.Contains(err.Error(), testCase.want) {
+						t.Errorf("%s = %q, want it to name %s", name, err, testCase.want)
+					}
 				}
 			}
 		})
-	}
-}
-
-// TestMergeWithoutProfiles pins the error for an empty argument list: the
-// sentinel, wrapped as the seccomp and landlock merges wrap it.
-func TestMergeWithoutProfiles(t *testing.T) {
-	t.Parallel()
-
-	for name, mergeFn := range map[string]mergeFunc{
-		"Intersect": apparmor.Intersect,
-		"Union":     apparmor.Union,
-	} {
-		result, err := mergeFn()
-		if result != nil || !errors.Is(err, apparmor.ErrNoProfiles) ||
-			err.Error() != "merge: "+apparmor.ErrNoProfiles.Error() {
-			t.Errorf("%s() = %v, %v, want ErrNoProfiles", name, result, err)
-		}
 	}
 }
 
@@ -2194,7 +1141,6 @@ func TestMergesReportEveryBadInput(t *testing.T) {
 		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{""}},
 	}
 	variable := &apparmor.Profile{
-		Executable: nil,
 		Filesystem: &apparmor.FilesystemRules{
 			ReadOnlyPaths: []string{"@{HOME}/x"}, WriteOnlyPaths: nil, ReadWritePaths: nil,
 		},

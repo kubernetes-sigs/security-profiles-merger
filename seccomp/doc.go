@@ -51,11 +51,8 @@ limitations under the License.
 // them as the same action, and results spell both SCMP_ACT_KILL. Default
 // actions are merged with the same ranking as syscall actions.
 //
-// [MoreRestrictive] and [LessRestrictive] rank an unknown action above
-// SCMP_ACT_KILL_PROCESS and report it as SCMP_ACT_KILL_PROCESS, so a caller
-// writing the result into a profile writes an action a runtime loads rather
-// than the unknown one back. [Intersect] and [Union] validate their inputs
-// first and reject unknown actions with [ErrUnknownAction].
+// [Intersect] and [Union] validate their inputs first and reject unknown
+// actions with [ErrUnknownAction].
 //
 // # Evaluation model
 //

@@ -213,7 +213,7 @@ func TestMergesLeaveBlocksThatDoNotLoseRules(t *testing.T) {
 				}
 
 				if !diff.Equal {
-					t.Errorf("%s changed the profile: %s", name, seccomp.FormatDiff(diff))
+					t.Errorf("%s changed the profile: %s", name, diff.String())
 				}
 			}
 		})
@@ -348,9 +348,7 @@ func TestMergesKeepRulesForAnUnknownNative(t *testing.T) {
 		filtered("open", specs.ActErrno),
 		filtered("socket", specs.ActErrno, arg(0, specs.OpEqualTo, 40)))
 
-	result, err := seccomp.Options{
-		Arch: "",
-	}.Intersect(
+	result, err := seccomp.Options{}.Intersect(
 		baseline,
 		listing(aarch64),
 	)

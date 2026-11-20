@@ -374,8 +374,8 @@ func fuzzMerge(
 	if !cfg.equal(idempotent, single) {
 		t.Errorf(
 			"Merge(X,X) should equal Merge(X)\n  got:  %s\n  want: %s",
-			landlock.FormatProfile(idempotent),
-			landlock.FormatProfile(single),
+			idempotent.String(),
+			single.String(),
 		)
 	}
 }
@@ -517,7 +517,7 @@ func assertResultShape(t *testing.T, result *landlock.Profile, inputs ...*landlo
 
 	err = landlock.ValidateStrict(result)
 	if err != nil {
-		t.Errorf("merge result is not loadable: %v\nresult=%s", err, landlock.FormatProfile(result))
+		t.Errorf("merge result is not loadable: %v\nresult=%s", err, result.String())
 	}
 }
 
@@ -563,7 +563,7 @@ func assertReferFromInputRules(
 
 		if _, ok := granted[rule.Path]; !ok {
 			t.Errorf("result grants refer on %q, where no input rule grants it\nresult=%s",
-				rule.Path, landlock.FormatProfile(result))
+				rule.Path, result.String())
 		}
 	}
 }
@@ -796,9 +796,9 @@ func assertFSExact(
 				t.Errorf(
 					"%s permits %q at %q = %v, want %v\nleft=%s\nright=%s\nresult=%s",
 					name, access, path, got, want,
-					landlock.FormatProfile(left),
-					landlock.FormatProfile(right),
-					landlock.FormatProfile(result),
+					left.String(),
+					right.String(),
+					result.String(),
 				)
 			}
 		}
@@ -883,9 +883,9 @@ func assertUnionKeepsInputPaths(
 				t.Errorf(
 					"union dropped the rule path %q\nleft=%s\nright=%s\nresult=%s",
 					rule.Path,
-					landlock.FormatProfile(left),
-					landlock.FormatProfile(right),
-					landlock.FormatProfile(result),
+					left.String(),
+					right.String(),
+					result.String(),
 				)
 			}
 		}
@@ -1199,67 +1199,6 @@ func FuzzLandlockDiff(f *testing.F) {
 	})
 }
 
-func FuzzLandlockValidateStrict(f *testing.F) {
-	f.Add(
-		uint32(0x07), uint8(0x03), uint8(0x03), "/etc", "/home",
-		uint32(0x05), uint32(0x03), uint16(80), uint16(443),
-		uint8(0x01), uint8(0x02),
-	)
-	f.Add(
-		uint32(0x03), uint8(0x01), uint8(0x02), "/etc", "/home",
-		uint32(0x01), uint32(0x02), uint16(80), uint16(443),
-		uint8(0x01), uint8(0x02),
-	)
-	f.Add(
-		uint32(0x3FFFF), uint8(0x3F), uint8(0x00), "/a", "/b",
-		uint32(0x01), uint32(0x02), uint16(80), uint16(443),
-		uint8(0x01), uint8(0x02),
-	)
-	f.Add(
-		uint32(0x3FFFF), uint8(0x3F), uint8(0x03), "/etc", "/home",
-		uint32(0x00), uint32(0x00), uint16(80), uint16(443),
-		uint8(0x00), uint8(0x00),
-	)
-
-	f.Fuzz(func(
-		t *testing.T,
-		hfs uint32, hnet uint8, scope uint8,
-		path1, path2 string,
-		am1, am2 uint32,
-		port1, port2 uint16,
-		nm1, nm2 uint8,
-	) {
-		profile := fuzzLandlockProfile(
-			hfs, hnet, scope, path1, path2,
-			am1, am2, port1, port2, nm1, nm2,
-		)
-
-		strict := landlock.ValidateStrict(profile)
-		if strict != nil {
-			return
-		}
-
-		// ValidateStrict is ValidateArtifact plus the duplicate checks, and
-		// ValidateArtifact is Validate plus what a kernel could not load,
-		// so a profile strict accepts is accepted by both.
-		err := landlock.Validate(profile)
-		if err != nil {
-			t.Fatalf(
-				"ValidateStrict accepted a profile Validate rejects: %v\nprofile=%s",
-				err, landlock.FormatProfile(profile),
-			)
-		}
-
-		err = landlock.ValidateArtifact(profile)
-		if err != nil {
-			t.Fatalf(
-				"ValidateStrict accepted a profile ValidateArtifact rejects: %v\nprofile=%s",
-				err, landlock.FormatProfile(profile),
-			)
-		}
-	})
-}
-
 func assertRightsDiffSwapped[T comparable](
 	t *testing.T, label string,
 	fwd, rev *landlock.SliceDiff[T],
@@ -1291,11 +1230,11 @@ func assertRightsDiffSwapped[T comparable](
 func assertDiffFormat(t *testing.T, diff *landlock.ProfileDiff, left, right *landlock.Profile) {
 	t.Helper()
 
-	formatted := landlock.FormatDiff(diff)
+	formatted := diff.String()
 
 	if diff.Equal {
 		if formatted != "Diff{equal}" {
-			t.Errorf("FormatDiff of an equal diff = %q, want %q", formatted, "Diff{equal}")
+			t.Errorf("String of an equal diff = %q, want %q", formatted, "Diff{equal}")
 		}
 
 		return
@@ -1303,8 +1242,8 @@ func assertDiffFormat(t *testing.T, diff *landlock.ProfileDiff, left, right *lan
 
 	if formatted == "Diff{}" || formatted == "Diff{equal}" {
 		t.Errorf(
-			"FormatDiff = %q for differing profiles\nleft=%s\nright=%s",
-			formatted, landlock.FormatProfile(left), landlock.FormatProfile(right),
+			"String = %q for differing profiles\nleft=%s\nright=%s",
+			formatted, left.String(), right.String(),
 		)
 	}
 
@@ -1328,13 +1267,13 @@ func assertDiffNamesPaths(t *testing.T, formatted string, pathRules *landlock.Pa
 	// profile choose the bytes.
 	for _, rule := range slices.Concat(pathRules.Added, pathRules.Removed) {
 		if !strings.Contains(formatted, merge.SafeText(rule.Path)) {
-			t.Errorf("FormatDiff = %q, missing the path %q", formatted, rule.Path)
+			t.Errorf("String = %q, missing the path %q", formatted, rule.Path)
 		}
 	}
 
 	for _, change := range pathRules.Changed {
 		if !strings.Contains(formatted, merge.SafeText(change.Path)) {
-			t.Errorf("FormatDiff = %q, missing the changed path %q", formatted, change.Path)
+			t.Errorf("String = %q, missing the changed path %q", formatted, change.Path)
 		}
 	}
 }
@@ -1453,6 +1392,21 @@ func FuzzLandlockValidateArtifact(f *testing.F) {
 		uint32(0x3FFFF), uint8(0x3F), uint8(0x03), "relative", "/b/../c",
 		uint32(0x01), uint32(0x02), uint16(80), uint16(443),
 		uint8(0x01), uint8(0x02),
+	)
+	f.Add(
+		uint32(0x03), uint8(0x01), uint8(0x02), "/etc", "/home",
+		uint32(0x01), uint32(0x02), uint16(80), uint16(443),
+		uint8(0x01), uint8(0x02),
+	)
+	f.Add(
+		uint32(0x3FFFF), uint8(0x3F), uint8(0x00), "/a", "/b",
+		uint32(0x01), uint32(0x02), uint16(80), uint16(443),
+		uint8(0x01), uint8(0x02),
+	)
+	f.Add(
+		uint32(0x3FFFF), uint8(0x3F), uint8(0x03), "/etc", "/home",
+		uint32(0x00), uint32(0x00), uint16(80), uint16(443),
+		uint8(0x00), uint8(0x00),
 	)
 
 	f.Fuzz(func(

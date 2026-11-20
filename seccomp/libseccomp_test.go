@@ -351,12 +351,9 @@ func runProgramTraced(
 	copy(data.args[:], args)
 
 	machine := &bpfMachine{
-		prog:       prog,
-		data:       data.encode(),
-		acc:        0,
-		idx:        0,
-		mem:        [bpfMemSlots]uint32{},
-		readNumber: false,
+		prog: prog,
+		data: data.encode(),
+		mem:  [bpfMemSlots]uint32{},
 	}
 
 	action, errno := decodeAction(machine.run(t))
@@ -814,10 +811,9 @@ type libseccompDirection struct {
 
 func intersectDirection() libseccompDirection {
 	return libseccompDirection{
-		name:    "Intersect",
-		merge:   seccomp.Intersect,
-		safe:    atMostAsPermissive,
-		foreign: false,
+		name:  "Intersect",
+		merge: seccomp.Intersect,
+		safe:  atMostAsPermissive,
 	}
 }
 
@@ -828,7 +824,6 @@ func unionDirection() libseccompDirection {
 		safe: func(got, input specs.LinuxSeccompAction) bool {
 			return atMostAsPermissive(input, got)
 		},
-		foreign: false,
 	}
 }
 

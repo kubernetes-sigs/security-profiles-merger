@@ -26,18 +26,12 @@ import (
 
 func ExampleIntersect() {
 	base := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{capNetAdmin, capSysTime, capChown},
 		},
 	}
 
 	oci := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{capNetAdmin, capChown},
 		},
@@ -56,14 +50,10 @@ func ExampleIntersect() {
 
 func ExampleValidate() {
 	profile := &apparmor.Profile{
-		Executable: nil,
 		Filesystem: &apparmor.FilesystemRules{
 			ReadOnlyPaths:  []string{"/"},
 			WriteOnlyPaths: []string{"/"},
-			ReadWritePaths: nil,
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	err := apparmor.Validate(profile)
@@ -75,9 +65,6 @@ func ExampleValidate() {
 
 func ExampleValidate_emptyCapability() {
 	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{capNetAdmin, ""},
 		},
@@ -94,11 +81,7 @@ func ExampleValidateStrict() {
 	profile := &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
 			AllowedExecutables: []string{"/bin/sh", "/bin/sh"},
-			AllowedLibraries:   nil,
 		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	err := apparmor.ValidateStrict(profile)
@@ -108,17 +91,14 @@ func ExampleValidateStrict() {
 	// executable.allowedExecutables[1]: "/bin/sh": duplicate executable path (also at executable.allowedExecutables[0])
 }
 
-func ExampleFormatProfile() {
+func ExampleProfile_String() {
 	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{capNetAdmin},
 		},
 	}
 
-	fmt.Println(apparmor.FormatProfile(profile))
+	fmt.Println(profile.String())
 
 	// Output:
 	// Profile{caps:NET_ADMIN}
@@ -126,18 +106,12 @@ func ExampleFormatProfile() {
 
 func ExampleDiff() {
 	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{capNetAdmin, capSysTime},
 		},
 	}
 
 	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{capNetAdmin, capChown},
 		},
@@ -158,20 +132,14 @@ func ExampleDiff() {
 	// Added: [CHOWN]
 }
 
-func ExampleFormatDiff() {
+func ExampleProfileDiff_String() {
 	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{capNetAdmin, capSysTime},
 		},
 	}
 
 	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{capNetAdmin, capChown},
 		},
@@ -182,7 +150,7 @@ func ExampleFormatDiff() {
 		panic(err)
 	}
 
-	fmt.Println(apparmor.FormatDiff(diff))
+	fmt.Println(diff.String())
 
 	// Output:
 	// Diff{caps:-SYS_TIME,+CHOWN}
@@ -199,18 +167,12 @@ func ExampleIsGlobPattern() {
 
 func ExampleUnion() {
 	recording1 := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{capNetAdmin},
 		},
 	}
 
 	recording2 := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{capNetAdmin, capSysTime},
 		},
@@ -249,15 +211,12 @@ func ExampleUnmarshalStrict() {
 
 func ExampleValidateArtifact() {
 	artifact := &apparmor.Profile{
-		Executable: nil,
 		Filesystem: &apparmor.FilesystemRules{
 			// A newline would end the rule a consumer renders and start
 			// one the artifact's author chose.
 			ReadOnlyPaths:  []string{"/etc/hosts\n/** rw"},
-			WriteOnlyPaths: nil,
 			ReadWritePaths: []string{"tmp/cache"},
 		},
-		Network: nil,
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{"chown"},
 		},
@@ -284,13 +243,11 @@ func Example() {
 	baseline := &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
 			AllowedExecutables: []string{"/usr/bin/*"},
-			AllowedLibraries:   nil,
 		},
 		Filesystem: &apparmor.FilesystemRules{
 			ReadOnlyPaths: []string{
 				"/etc/**",
 			},
-			WriteOnlyPaths: nil,
 			ReadWritePaths: []string{"/tmp/**"},
 		},
 		Network: &apparmor.NetworkRules{
@@ -326,7 +283,7 @@ func Example() {
 		return
 	}
 
-	fmt.Println(apparmor.FormatProfile(effective))
+	fmt.Println(effective.String())
 
 	for _, name := range effective.Capabilities.AllowedCapabilities {
 		fmt.Printf("capability %s,\n", strings.ToLower(name))
@@ -339,14 +296,9 @@ func Example() {
 
 func ExampleProfile_Clone() {
 	profile := &apparmor.Profile{
-		Executable: nil,
 		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{"/etc"},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
+			ReadOnlyPaths: []string{"/etc"},
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	clone := profile.Clone()

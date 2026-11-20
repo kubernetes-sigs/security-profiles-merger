@@ -202,16 +202,10 @@ func TestSliceDiffIsTheSameType(t *testing.T) {
 	}
 }
 
-// profileDiff is what the three ProfileDiff types share.
-type profileDiff interface {
-	IsEqual() bool
-	String() string
-}
-
-// TestProfileDiffsHaveValueMethods checks that IsEqual and String have
-// value receivers on all three ProfileDiff types, so that a diff held by
-// value is a fmt.Stringer as much as a pointer to one. The assignments
-// below would not build otherwise.
+// TestProfileDiffsHaveValueMethods checks that String has a value receiver
+// on all three ProfileDiff types, so that a diff held by value is a
+// fmt.Stringer as much as a pointer to one. The assignments below would not
+// build otherwise.
 func TestProfileDiffsHaveValueMethods(t *testing.T) {
 	t.Parallel()
 
@@ -225,34 +219,24 @@ func TestProfileDiffsHaveValueMethods(t *testing.T) {
 	apparmorDiff.Equal = true
 	landlockDiff.Equal = true
 
-	for name, diff := range map[string]profileDiff{
+	for name, diff := range map[string]fmt.Stringer{
 		"seccomp":  seccompDiff,
 		"apparmor": apparmorDiff,
 		"landlock": landlockDiff,
 	} {
-		if !diff.IsEqual() {
-			t.Errorf("%s: ProfileDiff with Equal set reports not equal", name)
-		}
-
 		if got, want := fmt.Sprintf("diff %v", diff), "diff Diff{equal}"; got != want {
 			t.Errorf("%s: a ProfileDiff by value prints %q, want %q", name, got, want)
 		}
 	}
 }
 
-// TestDiffsFromTheAPIReportEqual checks IsEqual on the values the packages
+// TestDiffsFromTheAPIReportEqual checks Equal on the values the packages
 // hand out, for a profile compared with itself.
 func TestDiffsFromTheAPIReportEqual(t *testing.T) {
 	t.Parallel()
 
 	seccompProfile := &specs.LinuxSeccomp{
-		DefaultAction:    specs.ActErrno,
-		DefaultErrnoRet:  nil,
-		Architectures:    nil,
-		Flags:            nil,
-		ListenerPath:     "",
-		ListenerMetadata: "",
-		Syscalls:         nil,
+		DefaultAction: specs.ActErrno,
 	}
 
 	seccompDiff, err := seccomp.Diff(seccompProfile, seccompProfile)
@@ -261,14 +245,9 @@ func TestDiffsFromTheAPIReportEqual(t *testing.T) {
 	}
 
 	apparmorProfile := &apparmor.Profile{
-		Executable: nil,
 		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{"/etc"},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
+			ReadOnlyPaths: []string{"/etc"},
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	apparmorDiff, err := apparmor.Diff(apparmorProfile, apparmorProfile)
@@ -277,14 +256,11 @@ func TestDiffsFromTheAPIReportEqual(t *testing.T) {
 	}
 
 	landlockProfile := &landlock.Profile{
-		HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessReadFile},
-		HandledAccessNet: nil,
-		Scoped:           nil,
+		HandledAccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
 		PathRules: []landlock.PathRule{{
 			Path:     "/etc",
 			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
 		}},
-		NetRules: nil,
 	}
 
 	landlockDiff, err := landlock.Diff(landlockProfile, landlockProfile)
@@ -292,12 +268,12 @@ func TestDiffsFromTheAPIReportEqual(t *testing.T) {
 		t.Fatalf("landlock.Diff: %v", err)
 	}
 
-	for name, diff := range map[string]profileDiff{
-		"seccomp":  seccompDiff,
-		"apparmor": apparmorDiff,
-		"landlock": landlockDiff,
+	for name, equal := range map[string]bool{
+		"seccomp":  seccompDiff.Equal,
+		"apparmor": apparmorDiff.Equal,
+		"landlock": landlockDiff.Equal,
 	} {
-		if !diff.IsEqual() {
+		if !equal {
 			t.Errorf("%s: diff of a profile with itself reports not equal", name)
 		}
 	}

@@ -19,7 +19,6 @@ package landlock_test
 import (
 	"errors"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 
@@ -33,1226 +32,504 @@ const (
 	pathVar  = "/var"
 )
 
-func TestIntersectEmpty(t *testing.T) {
-	t.Parallel()
-
-	_, err := landlock.Intersect()
-	if !errors.Is(err, landlock.ErrNoProfiles) {
-		t.Fatalf("Intersect() = %v, want ErrNoProfiles", err)
-	}
+// mergeCase is what Intersect and Union make of inputs, as String renders
+// it. String keeps the order of each list, so a want also pins that the
+// result comes out sorted. An empty want skips that merge.
+type mergeCase struct {
+	name             string
+	inputs           []*landlock.Profile
+	intersect, union string
 }
 
-func TestIntersectNil(t *testing.T) {
+// TestMergeRights covers the handled sets and the scopes, and profiles
+// without rules.
+func TestMergeRights(t *testing.T) {
 	t.Parallel()
 
-	_, err := landlock.Intersect(nil)
-	if !errors.Is(err, landlock.ErrNilProfile) {
-		t.Fatalf("Intersect(nil) = %v, want ErrNilProfile", err)
-	}
-}
-
-func TestIntersectSingleProfile(t *testing.T) {
-	t.Parallel()
-
-	profile := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
-			landlock.FSAccessWriteFile,
-		},
-		HandledAccessNet: []landlock.NetAccessRight{
-			landlock.NetAccessBindTCP,
-		},
-		Scoped: nil,
-		PathRules: []landlock.PathRule{{
-			Path:     pathEtc,
-			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
-		}},
-		NetRules: []landlock.NetRule{{
-			Port:      80,
-			AccessNet: []landlock.NetAccessRight{landlock.NetAccessBindTCP},
-		}},
-	}
-
-	result, err := landlock.Intersect(profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.PathRules) != 1 {
-		t.Errorf("expected 1 path rule, got %d", len(result.PathRules))
-	}
-
-	if len(result.NetRules) != 1 {
-		t.Errorf("expected 1 net rule, got %d", len(result.NetRules))
-	}
-}
-
-func TestIntersectIdenticalProfiles(t *testing.T) {
-	t.Parallel()
-
-	profile := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
-			landlock.FSAccessWriteFile,
-		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path: pathEtc,
-			AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessReadFile,
-				landlock.FSAccessWriteFile,
-			},
-		}},
-		NetRules: nil,
-	}
-
-	result, err := landlock.Intersect(profile, profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.PathRules) != 1 {
-		t.Fatalf("expected 1 path rule, got %d", len(result.PathRules))
-	}
-
-	wantAccess := []landlock.FSAccessRight{
-		landlock.FSAccessReadFile,
-		landlock.FSAccessWriteFile,
-	}
-
-	if !slices.Equal(result.PathRules[0].AccessFS, wantAccess) {
-		t.Errorf(
-			"AccessFS = %v, want %v",
-			result.PathRules[0].AccessFS, wantAccess,
-		)
-	}
-}
-
-func TestIntersectOverlappingPathRules(t *testing.T) {
-	t.Parallel()
-
-	handled := []landlock.FSAccessRight{
-		landlock.FSAccessReadFile,
-		landlock.FSAccessWriteFile,
-		landlock.FSAccessExecute,
-	}
-
-	left := &landlock.Profile{
-		HandledAccessFS:  handled,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path: pathEtc,
-			AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessReadFile,
-				landlock.FSAccessWriteFile,
-			},
-		}},
-		NetRules: nil,
-	}
-
-	right := &landlock.Profile{
-		HandledAccessFS:  handled,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path: pathEtc,
-			AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessReadFile,
-				landlock.FSAccessExecute,
-			},
-		}},
-		NetRules: nil,
-	}
-
-	result, err := landlock.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.PathRules) != 1 {
-		t.Fatalf("expected 1 path rule, got %d", len(result.PathRules))
-	}
-
-	if result.PathRules[0].Path != pathEtc {
-		t.Errorf(
-			"path = %q, want %q",
-			result.PathRules[0].Path, pathEtc,
-		)
-	}
-
-	wantAccess := []landlock.FSAccessRight{landlock.FSAccessReadFile}
-	if !slices.Equal(result.PathRules[0].AccessFS, wantAccess) {
-		t.Errorf(
-			"AccessFS = %v, want %v",
-			result.PathRules[0].AccessFS, wantAccess,
-		)
-	}
-}
-
-func TestIntersectDisjointPathsHandled(t *testing.T) {
-	t.Parallel()
-
-	handled := []landlock.FSAccessRight{
-		landlock.FSAccessReadFile,
-		landlock.FSAccessWriteFile,
-	}
-
-	left := &landlock.Profile{
-		HandledAccessFS:  handled,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path:     pathEtc,
-			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
-		}},
-		NetRules: nil,
-	}
-
-	right := &landlock.Profile{
-		HandledAccessFS:  handled,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path: pathHome,
-			AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessWriteFile,
-			},
-		}},
-		NetRules: nil,
-	}
-
-	result, err := landlock.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.PathRules) != 0 {
-		t.Errorf(
-			"expected 0 path rules (handled by other), got %d",
-			len(result.PathRules),
-		)
-	}
-}
-
-func TestIntersectDisjointPathsUnhandled(t *testing.T) {
-	t.Parallel()
-
-	left := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
-		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path:     pathEtc,
-			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
-		}},
-		NetRules: nil,
-	}
-
-	right := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessWriteFile,
-		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path: pathHome,
-			AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessWriteFile,
-			},
-		}},
-		NetRules: nil,
-	}
-
-	result, err := landlock.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.PathRules) != 2 {
-		t.Fatalf(
-			"expected 2 path rules (not handled by other), got %d",
-			len(result.PathRules),
-		)
-	}
-}
-
-func bothNetHandled() []landlock.NetAccessRight {
-	return []landlock.NetAccessRight{
+	read := fsRights{landlock.FSAccessReadFile}
+	write := fsRights{landlock.FSAccessWriteFile}
+	bind := []landlock.NetAccessRight{landlock.NetAccessBindTCP}
+	bindConnect := []landlock.NetAccessRight{
 		landlock.NetAccessBindTCP,
 		landlock.NetAccessConnectTCP,
 	}
+	signal := []landlock.ScopeRight{landlock.ScopeSignal}
+	unixSocket := []landlock.ScopeRight{landlock.ScopeAbstractUnixSocket}
+	scoped := func() *landlock.Profile {
+		return &landlock.Profile{
+			Scoped: []landlock.ScopeRight{landlock.ScopeAbstractUnixSocket, landlock.ScopeSignal},
+		}
+	}
+	empty := func() *landlock.Profile {
+		return &landlock.Profile{}
+	}
+	emptySets := func() *landlock.Profile {
+		return &landlock.Profile{
+			HandledAccessFS:  fsRights{},
+			HandledAccessNet: []landlock.NetAccessRight{},
+			Scoped:           []landlock.ScopeRight{},
+			PathRules:        []landlock.PathRule{},
+			NetRules:         []landlock.NetRule{},
+		}
+	}
+	handledOnly := func() *landlock.Profile {
+		return &landlock.Profile{HandledAccessFS: read, HandledAccessNet: bind}
+	}
+	readOnly := func() *landlock.Profile {
+		return readFileProfile(nil)
+	}
+
+	checkMergeResults(t, []mergeCase{
+		{
+			// Intersect handles what either side handles.
+			name:      "handled filesystem rights",
+			inputs:    []*landlock.Profile{fsProfile(read), fsProfile(write)},
+			intersect: "Profile{fs:read_file,write_file}",
+		},
+		{
+			// Union handles what both sides handle.
+			name:   "handled network rights",
+			inputs: []*landlock.Profile{netProfile(bindConnect), netProfile(bind)},
+			union:  "Profile{net:bind_tcp}",
+		},
+		{
+			name:      "different scopes",
+			inputs:    []*landlock.Profile{{Scoped: signal}, {Scoped: unixSocket}},
+			intersect: "Profile{scoped:abstract_unix_socket,signal}",
+		},
+		{
+			name: "nested scopes",
+			inputs: []*landlock.Profile{
+				{
+					Scoped: []landlock.ScopeRight{
+						landlock.ScopeSignal,
+						landlock.ScopeAbstractUnixSocket,
+					},
+				},
+				{Scoped: signal},
+			},
+			union: "Profile{scoped:signal}",
+		},
+		{
+			name:      "identical scopes",
+			inputs:    []*landlock.Profile{scoped(), scoped()},
+			intersect: "Profile{scoped:abstract_unix_socket,signal}",
+		},
+		{
+			name: "duplicate scope",
+			inputs: []*landlock.Profile{{Scoped: []landlock.ScopeRight{
+				landlock.ScopeSignal, landlock.ScopeSignal, landlock.ScopeAbstractUnixSocket,
+			}}},
+			intersect: "Profile{scoped:abstract_unix_socket,signal}",
+		},
+		{
+			name:      "empty profiles",
+			inputs:    []*landlock.Profile{empty(), empty()},
+			intersect: "Profile{}",
+			union:     "Profile{}",
+		},
+		{
+			name:      "empty sets",
+			inputs:    []*landlock.Profile{emptySets()},
+			intersect: "Profile{}",
+			union:     "Profile{}",
+		},
+		{
+			name:      "two profiles of empty sets",
+			inputs:    []*landlock.Profile{emptySets(), emptySets()},
+			intersect: "Profile{}",
+			union:     "Profile{}",
+		},
+		{
+			name:      "three profiles of empty sets",
+			inputs:    []*landlock.Profile{emptySets(), emptySets(), emptySets()},
+			intersect: "Profile{}",
+			union:     "Profile{}",
+		},
+		{
+			name:      "single profile without rules",
+			inputs:    []*landlock.Profile{handledOnly()},
+			intersect: "Profile{fs:read_file net:bind_tcp}",
+			union:     "Profile{fs:read_file net:bind_tcp}",
+		},
+		{
+			name:      "single profile without rules, handling filesystem rights only",
+			inputs:    []*landlock.Profile{readOnly()},
+			intersect: "Profile{fs:read_file}",
+		},
+		{
+			name:      "pair of profiles without rules",
+			inputs:    []*landlock.Profile{readOnly(), readOnly()},
+			intersect: "Profile{fs:read_file}",
+		},
+	})
 }
 
-func TestIntersectNetworkRules(t *testing.T) {
+// TestMergeRules covers how rules on the same and on different paths and
+// ports combine.
+func TestMergeRules(t *testing.T) {
 	t.Parallel()
 
-	left := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: bothNetHandled(),
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules: []landlock.NetRule{
-			{Port: 80, AccessNet: bothNetHandled()},
-			{Port: 443, AccessNet: []landlock.NetAccessRight{
-				landlock.NetAccessConnectTCP,
+	read := fsRights{landlock.FSAccessReadFile}
+	write := fsRights{landlock.FSAccessWriteFile}
+	readWrite := fsRights{landlock.FSAccessReadFile, landlock.FSAccessWriteFile}
+	readExecute := fsRights{landlock.FSAccessReadFile, landlock.FSAccessExecute}
+	readWriteExecute := fsRights{
+		landlock.FSAccessReadFile, landlock.FSAccessWriteFile, landlock.FSAccessExecute,
+	}
+	bind := []landlock.NetAccessRight{landlock.NetAccessBindTCP}
+	connect := []landlock.NetAccessRight{landlock.NetAccessConnectTCP}
+	bindConnect := []landlock.NetAccessRight{
+		landlock.NetAccessBindTCP,
+		landlock.NetAccessConnectTCP,
+	}
+	rule := func(path string, access fsRights) landlock.PathRule {
+		return landlock.PathRule{Path: path, AccessFS: access}
+	}
+	identical := func() *landlock.Profile {
+		return fsProfile(readWrite, rule(pathEtc, readWrite))
+	}
+	readEtc := func() *landlock.Profile {
+		return fsProfile(readWrite, rule(pathEtc, read))
+	}
+	noop := func() *landlock.Profile {
+		return readFileProfile([]landlock.PathRule{rule(pathTmp, write)})
+	}
+
+	checkMergeResults(t, []mergeCase{
+		{
+			name:      "identical profiles",
+			inputs:    []*landlock.Profile{identical(), identical()},
+			intersect: "Profile{fs:read_file,write_file /etc(read_file,write_file)}",
+		},
+		{
+			name:   "identical profiles granting less than they handle",
+			inputs: []*landlock.Profile{readEtc(), readEtc()},
+			union:  "Profile{fs:read_file,write_file /etc(read_file)}",
+		},
+		{
+			name: "overlapping rules",
+			inputs: []*landlock.Profile{
+				fsProfile(readWriteExecute, rule(pathEtc, readWrite)),
+				fsProfile(readWriteExecute, rule(pathEtc, readExecute)),
+			},
+			intersect: "Profile{fs:execute,read_file,write_file /etc(read_file)}",
+		},
+		{
+			name: "overlapping rules granting different rights",
+			inputs: []*landlock.Profile{
+				fsProfile(readWrite, rule(pathEtc, read)),
+				fsProfile(readWrite, rule(pathEtc, write)),
+			},
+			union: "Profile{fs:read_file,write_file /etc(read_file,write_file)}",
+		},
+		{
+			// Each side handles what the other's rule grants, so the
+			// intersection denies both.
+			name: "disjoint rules on handled rights",
+			inputs: []*landlock.Profile{
+				fsProfile(readWrite, rule(pathEtc, read)),
+				fsProfile(readWrite, rule(pathHome, write)),
+			},
+			intersect: "Profile{fs:read_file,write_file}",
+			union:     "Profile{fs:read_file,write_file /etc(read_file) /home(write_file)}",
+		},
+		{
+			// Neither side handles what the other's rule grants. The
+			// intersection keeps both rules; the union handles neither
+			// right, so both become implicitly allowed and no rule is
+			// needed. Both sides still deny refer by default, so the union
+			// handles only refer.
+			name: "disjoint rules on rights the other side does not handle",
+			inputs: []*landlock.Profile{
+				fsProfile(read, rule(pathEtc, read)),
+				fsProfile(write, rule(pathHome, write)),
+			},
+			intersect: "Profile{fs:read_file,write_file /etc(read_file) /home(write_file)}",
+			union:     "Profile{fs:refer}",
+		},
+		{
+			// A rule on a right the other side does not handle keeps that
+			// right.
+			name: "rule partially handled by the other side",
+			inputs: []*landlock.Profile{
+				fsProfile(readWrite, rule(pathEtc, readWrite)),
+				fsProfile(read),
+			},
+			intersect: "Profile{fs:read_file,write_file /etc(write_file)}",
+		},
+		{
+			name: "network rules",
+			inputs: []*landlock.Profile{
+				netProfile(bindConnect,
+					landlock.NetRule{Port: 80, AccessNet: bindConnect},
+					landlock.NetRule{Port: 443, AccessNet: connect},
+				),
+				netProfile(bindConnect, landlock.NetRule{Port: 80, AccessNet: connect}),
+			},
+			intersect: "Profile{net:bind_tcp,connect_tcp :80(connect_tcp)}",
+		},
+		{
+			name: "network rules on shared and new ports",
+			inputs: []*landlock.Profile{
+				netProfile(bindConnect, landlock.NetRule{Port: 80, AccessNet: bind}),
+				netProfile(bindConnect,
+					landlock.NetRule{Port: 80, AccessNet: connect},
+					landlock.NetRule{Port: 443, AccessNet: connect},
+				),
+			},
+			union: "Profile{net:bind_tcp,connect_tcp :80(bind_tcp,connect_tcp) :443(connect_tcp)}",
+		},
+		{
+			name: "unsorted lists",
+			inputs: []*landlock.Profile{{
+				HandledAccessFS: fsRights{landlock.FSAccessWriteFile, landlock.FSAccessReadFile},
+				HandledAccessNet: []landlock.NetAccessRight{
+					landlock.NetAccessConnectTCP, landlock.NetAccessBindTCP,
+				},
+				PathRules: []landlock.PathRule{rule(pathVar, read), rule(pathEtc, read)},
+				NetRules: []landlock.NetRule{
+					{Port: 443, AccessNet: connect},
+					{Port: 80, AccessNet: bind},
+				},
 			}},
+			intersect: "Profile{fs:read_file,write_file net:bind_tcp,connect_tcp " +
+				"/etc(read_file) /var(read_file) :80(bind_tcp) :443(connect_tcp)}",
 		},
-	}
-
-	right := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: bothNetHandled(),
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules: []landlock.NetRule{{
-			Port:      80,
-			AccessNet: []landlock.NetAccessRight{landlock.NetAccessConnectTCP},
-		}},
-	}
-
-	result, err := landlock.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.NetRules) != 1 {
-		t.Fatalf("expected 1 net rule, got %d", len(result.NetRules))
-	}
-
-	if result.NetRules[0].Port != 80 {
-		t.Errorf("port = %d, want 80", result.NetRules[0].Port)
-	}
-
-	want := []landlock.NetAccessRight{landlock.NetAccessConnectTCP}
-	if !slices.Equal(result.NetRules[0].AccessNet, want) {
-		t.Errorf(
-			"AccessNet = %v, want %v",
-			result.NetRules[0].AccessNet, want,
-		)
-	}
-}
-
-func TestIntersectHandledAccessFSUnion(t *testing.T) {
-	t.Parallel()
-
-	left := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
-		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
-	}
-
-	right := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessWriteFile,
-		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
-	}
-
-	result, err := landlock.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// The result is documented to come out sorted, so the want list is
-	// compared as it is rather than after sorting the result.
-	want := []landlock.FSAccessRight{
-		landlock.FSAccessReadFile,
-		landlock.FSAccessWriteFile,
-	}
-
-	if !slices.Equal(result.HandledAccessFS, want) {
-		t.Errorf(
-			"HandledAccessFS = %v, want %v (union for intersection)",
-			result.HandledAccessFS, want,
-		)
-	}
-}
-
-func TestIntersectThreeProfiles(t *testing.T) {
-	t.Parallel()
-
-	handled := []landlock.FSAccessRight{
-		landlock.FSAccessReadFile,
-		landlock.FSAccessWriteFile,
-	}
-
-	first := &landlock.Profile{
-		HandledAccessFS:  handled,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path: pathEtc,
-			AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessReadFile,
-				landlock.FSAccessWriteFile,
+		{
+			name: "rules granting nothing",
+			inputs: []*landlock.Profile{
+				readFileProfile([]landlock.PathRule{rule(pathEtc, fsRights{})}),
+				readFileProfile([]landlock.PathRule{rule(pathEtc, fsRights{})}),
 			},
-		}},
-		NetRules: nil,
+			union: "Profile{fs:read_file}",
+		},
+		{
+			// A rule granting only unhandled rights disappears entirely.
+			name:      "rule granting only unhandled rights",
+			inputs:    []*landlock.Profile{noop(), noop()},
+			intersect: "Profile{fs:read_file}",
+		},
+		{
+			name: "rules on one port",
+			inputs: []*landlock.Profile{netProfile(bindConnect,
+				landlock.NetRule{Port: 80, AccessNet: bind},
+				landlock.NetRule{Port: 80, AccessNet: connect},
+			)},
+			intersect: "Profile{net:bind_tcp,connect_tcp :80(bind_tcp,connect_tcp)}",
+		},
+	})
+}
+
+// TestMergePaths covers path cleaning and the path hierarchy: what an
+// ancestor rule covers, and what it does not.
+func TestMergePaths(t *testing.T) {
+	t.Parallel()
+
+	read := fsRights{landlock.FSAccessReadFile}
+	readWrite := fsRights{landlock.FSAccessReadFile, landlock.FSAccessWriteFile}
+	readRefer := fsRights{landlock.FSAccessReadFile, landlock.FSAccessRefer}
+	rule := func(path string, access fsRights) landlock.PathRule {
+		return landlock.PathRule{Path: path, AccessFS: access}
+	}
+	slashes := func() *landlock.Profile {
+		return fsProfile(read, rule("//etc//", read))
+	}
+	relative := func() *landlock.Profile {
+		return fsProfile(read, rule("./etc", read))
+	}
+	root := func() *landlock.Profile {
+		return fsProfile(readWrite, rule("/", read))
+	}
+	nested := func() *landlock.Profile {
+		return fsProfile(readWrite, rule(pathEtc, read), rule("/etc/ssl", readWrite))
+	}
+	nestedVar := func() *landlock.Profile {
+		return fsProfile(read, rule(pathVar, read), rule("/var/run", read))
 	}
 
-	second := &landlock.Profile{
-		HandledAccessFS:  handled,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path: pathEtc,
-			AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessReadFile,
+	checkMergeResults(t, []mergeCase{
+		{
+			name: "rules on one path after cleaning",
+			inputs: []*landlock.Profile{
+				readFileProfile(
+					[]landlock.PathRule{rule("/etc/./config", read), rule("/etc/config", read)},
+				),
 			},
-		}},
-		NetRules: nil,
-	}
-
-	third := &landlock.Profile{
-		HandledAccessFS:  handled,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path: pathEtc,
-			AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessReadFile,
+			intersect: "Profile{fs:read_file /etc/config(read_file)}",
+		},
+		{
+			name:      "slashes and dots",
+			inputs:    []*landlock.Profile{slashes(), fsProfile(read, rule("/./etc/./", read))},
+			intersect: "Profile{fs:read_file /etc(read_file)}",
+			union:     "Profile{fs:read_file /etc(read_file)}",
+		},
+		{
+			// A relative path is unrelated to the absolute one, even when
+			// their components match.
+			name:      "relative path",
+			inputs:    []*landlock.Profile{slashes(), relative()},
+			intersect: "Profile{fs:read_file}",
+			union:     "Profile{fs:read_file /etc(read_file) etc(read_file)}",
+		},
+		{
+			// "/" is not the ancestor of a relative path.
+			name:      "relative path under the root rule",
+			inputs:    []*landlock.Profile{fsProfile(read, rule("/", read)), relative()},
+			intersect: "Profile{fs:read_file}",
+		},
+		{
+			name:      "nested rules under the root rule",
+			inputs:    []*landlock.Profile{root(), nested()},
+			intersect: "Profile{fs:read_file,write_file /etc(read_file)}",
+			union: "Profile{fs:read_file,write_file /(read_file) /etc(read_file) " +
+				"/etc/ssl(read_file,write_file)}",
+		},
+		{
+			// A right an ancestor grants is not repeated on a descendant.
+			name:      "nested rules",
+			inputs:    []*landlock.Profile{nested()},
+			intersect: "Profile{fs:read_file,write_file /etc(read_file) /etc/ssl(write_file)}",
+		},
+		{
+			// A right an ancestor grants is not repeated on a file rule,
+			// which the kernel would refuse for a directory-only right such
+			// as read_dir.
+			name: "file rule under a directory rule",
+			inputs: []*landlock.Profile{
+				fsProfile(fsRights{landlock.FSAccessReadDir},
+					rule("/", fsRights{landlock.FSAccessReadDir})),
+				fsProfile(read, rule("/etc/passwd", read)),
 			},
-		}},
-		NetRules: nil,
-	}
-
-	result, err := landlock.Intersect(first, second, third)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.PathRules) != 1 {
-		t.Fatalf("expected 1 path rule, got %d", len(result.PathRules))
-	}
-
-	wantAccess := []landlock.FSAccessRight{landlock.FSAccessReadFile}
-	if !slices.Equal(result.PathRules[0].AccessFS, wantAccess) {
-		t.Errorf(
-			"AccessFS = %v, want %v",
-			result.PathRules[0].AccessFS, wantAccess,
-		)
-	}
-}
-
-func TestUnionEmpty(t *testing.T) {
-	t.Parallel()
-
-	_, err := landlock.Union()
-	if !errors.Is(err, landlock.ErrNoProfiles) {
-		t.Fatalf("Union() = %v, want ErrNoProfiles", err)
-	}
-}
-
-func TestUnionNil(t *testing.T) {
-	t.Parallel()
-
-	_, err := landlock.Union(nil)
-	if !errors.Is(err, landlock.ErrNilProfile) {
-		t.Fatalf("Union(nil) = %v, want ErrNilProfile", err)
-	}
-}
-
-func TestUnionIdenticalProfiles(t *testing.T) {
-	t.Parallel()
-
-	profile := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
-			landlock.FSAccessWriteFile,
+			intersect: "Profile{fs:read_dir,read_file /(read_dir) /etc/passwd(read_file)}",
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path: pathEtc,
-			AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessReadFile,
-			},
-		}},
-		NetRules: nil,
-	}
-
-	result, err := landlock.Union(profile, profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.PathRules) != 1 {
-		t.Fatalf("expected 1 path rule, got %d", len(result.PathRules))
-	}
-
-	wantAccess := []landlock.FSAccessRight{landlock.FSAccessReadFile}
-	if !slices.Equal(result.PathRules[0].AccessFS, wantAccess) {
-		t.Errorf(
-			"AccessFS = %v, want %v",
-			result.PathRules[0].AccessFS, wantAccess,
-		)
-	}
-}
-
-func TestUnionOverlappingPathRules(t *testing.T) {
-	t.Parallel()
-
-	handled := []landlock.FSAccessRight{
-		landlock.FSAccessReadFile,
-		landlock.FSAccessWriteFile,
-	}
-
-	left := &landlock.Profile{
-		HandledAccessFS:  handled,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path: pathEtc,
-			AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessReadFile,
-			},
-		}},
-		NetRules: nil,
-	}
-
-	right := &landlock.Profile{
-		HandledAccessFS:  handled,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path: pathEtc,
-			AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessWriteFile,
-			},
-		}},
-		NetRules: nil,
-	}
-
-	result, err := landlock.Union(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.PathRules) != 1 {
-		t.Fatalf("expected 1 path rule, got %d", len(result.PathRules))
-	}
-
-	wantAccess := []landlock.FSAccessRight{
-		landlock.FSAccessReadFile,
-		landlock.FSAccessWriteFile,
-	}
-
-	if !slices.Equal(result.PathRules[0].AccessFS, wantAccess) {
-		t.Errorf(
-			"AccessFS = %v, want %v",
-			result.PathRules[0].AccessFS, wantAccess,
-		)
-	}
-}
-
-func TestUnionDisjointPathRules(t *testing.T) {
-	t.Parallel()
-
-	// Each side handles only the right it grants. The union handles neither,
-	// so both rights become implicitly allowed and no rule is needed. Both
-	// sides still deny refer by default, so the union handles only refer.
-	left := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
+		{
+			// A rule granting refer is minimized as any other: the kernel
+			// decides a move from the rights each directory inherits, past
+			// its mount point up to the real root. A right the root rule
+			// grants and /etc repeats is the documented exception: inside
+			// a mount other than the root mount it makes the input deny
+			// moves into /etc that the result allows.
+			name: "refer granted on the root",
+			inputs: []*landlock.Profile{fsProfile(readRefer,
+				rule("/", readRefer),
+				rule(pathEtc, read),
+			)},
+			intersect: "Profile{fs:read_file,refer /(read_file,refer)}",
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path: pathEtc,
-			AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessReadFile,
-			},
-		}},
-		NetRules: nil,
-	}
-
-	right := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessWriteFile,
+		{
+			name: "refer granted below the root",
+			inputs: []*landlock.Profile{fsProfile(readRefer,
+				rule("/", read),
+				rule(pathEtc, readRefer),
+			)},
+			intersect: "Profile{fs:read_file,refer /(read_file) /etc(refer)}",
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path: pathHome,
-			AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessWriteFile,
-			},
-		}},
-		NetRules: nil,
-	}
-
-	result, err := landlock.Union(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if got, want := landlock.FormatProfile(result), "Profile{fs:refer}"; got != want {
-		t.Fatalf("Union = %s, want %s", got, want)
-	}
-
-	// When both sides handle both rights, the disjoint rules are kept.
-	both := []landlock.FSAccessRight{landlock.FSAccessReadFile, landlock.FSAccessWriteFile}
-	left.HandledAccessFS = both
-	right.HandledAccessFS = both
-
-	result, err = landlock.Union(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.PathRules) != 2 {
-		t.Fatalf("expected 2 path rules (all kept), got %s", landlock.FormatProfile(result))
-	}
-}
-
-func buildUnionNetLeft() *landlock.Profile {
-	return &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: bothNetHandled(),
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules: []landlock.NetRule{{
-			Port:      80,
-			AccessNet: []landlock.NetAccessRight{landlock.NetAccessBindTCP},
-		}},
-	}
-}
-
-func buildUnionNetRight() *landlock.Profile {
-	return &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: bothNetHandled(),
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules: []landlock.NetRule{
-			{Port: 80, AccessNet: []landlock.NetAccessRight{
-				landlock.NetAccessConnectTCP,
-			}},
-			{Port: 443, AccessNet: []landlock.NetAccessRight{
-				landlock.NetAccessConnectTCP,
-			}},
+		{
+			// The rule on /var/run may be a symlink: on systemd
+			// distributions /var/run points to /run, so the rule on
+			// /var/run grants access under /run that the rule on /var does
+			// not.
+			name:   "nested rules a symlink may separate",
+			inputs: []*landlock.Profile{nestedVar(), fsProfile(read, rule("/opt", read))},
+			union:  "Profile{fs:read_file /opt(read_file) /var(read_file) /var/run(read_file)}",
 		},
-	}
-}
-
-func TestUnionNetworkRules(t *testing.T) {
-	t.Parallel()
-
-	result, err := landlock.Union(
-		buildUnionNetLeft(), buildUnionNetRight(),
-	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.NetRules) != 2 {
-		t.Fatalf("expected 2 net rules, got %d", len(result.NetRules))
-	}
-
-	ruleMap := make(map[uint16][]landlock.NetAccessRight)
-	for _, rule := range result.NetRules {
-		ruleMap[rule.Port] = rule.AccessNet
-	}
-
-	if !slices.Equal(ruleMap[80], bothNetHandled()) {
-		t.Errorf(
-			"port 80 AccessNet = %v, want %v",
-			ruleMap[80], bothNetHandled(),
-		)
-	}
-
-	want443 := []landlock.NetAccessRight{landlock.NetAccessConnectTCP}
-	if !slices.Equal(ruleMap[443], want443) {
-		t.Errorf(
-			"port 443 AccessNet = %v, want %v",
-			ruleMap[443], want443,
-		)
-	}
-}
-
-func TestUnionHandledAccessNetIntersection(t *testing.T) {
-	t.Parallel()
-
-	left := &landlock.Profile{
-		HandledAccessFS: nil,
-		HandledAccessNet: []landlock.NetAccessRight{
-			landlock.NetAccessBindTCP,
-			landlock.NetAccessConnectTCP,
+		{
+			name:   "single profile with nested rules a symlink may separate",
+			inputs: []*landlock.Profile{nestedVar()},
+			union:  "Profile{fs:read_file /var(read_file) /var/run(read_file)}",
 		},
-		Scoped:    nil,
-		PathRules: nil,
-		NetRules:  nil,
-	}
-
-	right := &landlock.Profile{
-		HandledAccessFS: nil,
-		HandledAccessNet: []landlock.NetAccessRight{
-			landlock.NetAccessBindTCP,
-		},
-		Scoped:    nil,
-		PathRules: nil,
-		NetRules:  nil,
-	}
-
-	result, err := landlock.Union(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	want := []landlock.NetAccessRight{landlock.NetAccessBindTCP}
-	if !slices.Equal(result.HandledAccessNet, want) {
-		t.Errorf(
-			"HandledAccessNet = %v, want %v (intersection for union)",
-			result.HandledAccessNet, want,
-		)
-	}
+	})
 }
 
-func TestIntersectScopedUnion(t *testing.T) {
-	t.Parallel()
-
-	left := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped: []landlock.ScopeRight{
-			landlock.ScopeSignal,
-		},
-		PathRules: nil,
-		NetRules:  nil,
-	}
-
-	right := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped: []landlock.ScopeRight{
-			landlock.ScopeAbstractUnixSocket,
-		},
-		PathRules: nil,
-		NetRules:  nil,
-	}
-
-	result, err := landlock.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	want := []landlock.ScopeRight{
-		landlock.ScopeAbstractUnixSocket,
-		landlock.ScopeSignal,
-	}
-
-	if !slices.Equal(result.Scoped, want) {
-		t.Errorf(
-			"Scoped = %v, want %v (union for intersection)",
-			result.Scoped, want,
-		)
-	}
-}
-
-func TestUnionScopedIntersection(t *testing.T) {
-	t.Parallel()
-
-	left := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped: []landlock.ScopeRight{
-			landlock.ScopeSignal,
-			landlock.ScopeAbstractUnixSocket,
-		},
-		PathRules: nil,
-		NetRules:  nil,
-	}
-
-	right := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped: []landlock.ScopeRight{
-			landlock.ScopeSignal,
-		},
-		PathRules: nil,
-		NetRules:  nil,
-	}
-
-	result, err := landlock.Union(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	want := []landlock.ScopeRight{landlock.ScopeSignal}
-
-	if !slices.Equal(result.Scoped, want) {
-		t.Errorf(
-			"Scoped = %v, want %v (intersection for union)",
-			result.Scoped, want,
-		)
-	}
-}
-
-func TestIntersectScopedIdentical(t *testing.T) {
-	t.Parallel()
-
-	profile := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped: []landlock.ScopeRight{
-			landlock.ScopeAbstractUnixSocket,
-			landlock.ScopeSignal,
-		},
-		PathRules: nil,
-		NetRules:  nil,
-	}
-
-	result, err := landlock.Intersect(profile, profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	want := []landlock.ScopeRight{
-		landlock.ScopeAbstractUnixSocket,
-		landlock.ScopeSignal,
-	}
-
-	if !slices.Equal(result.Scoped, want) {
-		t.Errorf("Scoped = %v, want %v", result.Scoped, want)
-	}
-}
-
-func TestNilProfileAtIndex(t *testing.T) {
-	t.Parallel()
-
-	valid := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
-	}
-
-	_, err := landlock.Intersect(valid, nil)
-	if !errors.Is(err, landlock.ErrNilProfile) {
-		t.Fatalf("Intersect(valid, nil) = %v, want ErrNilProfile", err)
-	}
-
-	if !strings.Contains(err.Error(), "profile 1") {
-		t.Errorf("Intersect error %q does not name the input index", err)
-	}
-
-	_, err = landlock.Union(valid, nil)
-	if !errors.Is(err, landlock.ErrNilProfile) {
-		t.Fatalf("Union(valid, nil) = %v, want ErrNilProfile", err)
-	}
-}
-
-func TestIntersectDoesNotMutateInputs(t *testing.T) {
-	t.Parallel()
-
-	left := buildMutationTestProfile()
-	right := buildMutationTestRight()
-
-	snap := snapshotMutationProfile(left)
-
-	_, err := landlock.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	assertMutationProfileUnchanged(t, left, &snap)
-}
-
-func TestUnionDoesNotMutateInputs(t *testing.T) {
-	t.Parallel()
-
-	left := buildMutationTestProfile()
-	right := buildMutationTestRight()
-
-	snap := snapshotMutationProfile(left)
-
-	_, err := landlock.Union(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	assertMutationProfileUnchanged(t, left, &snap)
-}
-
-func buildMutationTestProfile() *landlock.Profile {
-	return &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
-			landlock.FSAccessWriteFile,
-		},
-		HandledAccessNet: []landlock.NetAccessRight{
-			landlock.NetAccessBindTCP,
-			landlock.NetAccessConnectTCP,
-		},
-		Scoped: []landlock.ScopeRight{
-			landlock.ScopeSignal,
-		},
-		PathRules: []landlock.PathRule{{
-			Path: pathEtc,
-			AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessReadFile,
-				landlock.FSAccessWriteFile,
-			},
-		}},
-		NetRules: []landlock.NetRule{{
-			Port: 80,
-			AccessNet: []landlock.NetAccessRight{
-				landlock.NetAccessBindTCP,
-				landlock.NetAccessConnectTCP,
-			},
-		}},
-	}
-}
-
-func buildMutationTestRight() *landlock.Profile {
-	return &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
-		},
-		HandledAccessNet: []landlock.NetAccessRight{
-			landlock.NetAccessBindTCP,
-		},
-		Scoped: nil,
-		PathRules: []landlock.PathRule{{
-			Path: pathEtc,
-			AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessReadFile,
-			},
-		}},
-		NetRules: []landlock.NetRule{{
-			Port: 80,
-			AccessNet: []landlock.NetAccessRight{
-				landlock.NetAccessBindTCP,
-			},
-		}},
-	}
-}
-
-type mutationSnapshot struct {
-	handledFS  []landlock.FSAccessRight
-	handledNet []landlock.NetAccessRight
-	scoped     []landlock.ScopeRight
-	pathAccess []landlock.FSAccessRight
-	netAccess  []landlock.NetAccessRight
-}
-
-func snapshotMutationProfile(
-	profile *landlock.Profile,
-) mutationSnapshot {
-	return mutationSnapshot{
-		handledFS:  slices.Clone(profile.HandledAccessFS),
-		handledNet: slices.Clone(profile.HandledAccessNet),
-		scoped:     slices.Clone(profile.Scoped),
-		pathAccess: slices.Clone(profile.PathRules[0].AccessFS),
-		netAccess:  slices.Clone(profile.NetRules[0].AccessNet),
-	}
-}
-
-func assertMutationProfileUnchanged(
-	t *testing.T,
-	profile *landlock.Profile,
-	snap *mutationSnapshot,
-) {
+// checkMergeResults runs each case as a subtest, and checks that every
+// empty field of a result is nil.
+func checkMergeResults(t *testing.T, tests []mergeCase) {
 	t.Helper()
 
-	if !slices.Equal(profile.HandledAccessFS, snap.handledFS) {
-		t.Error("Intersect mutated HandledAccessFS")
-	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	if !slices.Equal(profile.HandledAccessNet, snap.handledNet) {
-		t.Error("Intersect mutated HandledAccessNet")
-	}
-
-	if !slices.Equal(profile.Scoped, snap.scoped) {
-		t.Error("Intersect mutated Scoped")
-	}
-
-	if !slices.Equal(profile.PathRules[0].AccessFS, snap.pathAccess) {
-		t.Error("Intersect mutated PathRules AccessFS")
-	}
-
-	if !slices.Equal(profile.NetRules[0].AccessNet, snap.netAccess) {
-		t.Error("Intersect mutated NetRules AccessNet")
-	}
-}
-
-func TestNilSubFields(t *testing.T) {
-	t.Parallel()
-
-	empty := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
-	}
-
-	result, err := landlock.Intersect(empty, empty)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.HandledAccessFS) != 0 {
-		t.Errorf(
-			"HandledAccessFS = %v, want empty",
-			result.HandledAccessFS,
-		)
-	}
-
-	if len(result.PathRules) != 0 {
-		t.Errorf("PathRules = %v, want empty", result.PathRules)
-	}
-
-	result, err = landlock.Union(empty, empty)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.HandledAccessFS) != 0 {
-		t.Errorf(
-			"HandledAccessFS = %v, want empty",
-			result.HandledAccessFS,
-		)
-	}
-
-	if len(result.PathRules) != 0 {
-		t.Errorf("PathRules = %v, want empty", result.PathRules)
+			for _, merge := range []struct {
+				name string
+				fn   func(...*landlock.Profile) (*landlock.Profile, error)
+				want string
+			}{
+				{"Intersect", landlock.Intersect, test.intersect},
+				{"Union", landlock.Union, test.union},
+			} {
+				if merge.want != "" {
+					result := assertMergeFormat(t, merge.name, merge.fn, merge.want, test.inputs...)
+					assertEmptyIsNil(t, merge.name, result)
+				}
+			}
+		})
 	}
 }
 
-func TestIntersectDisjointPathPartiallyHandled(t *testing.T) {
-	t.Parallel()
-
-	left := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
-			landlock.FSAccessWriteFile,
-		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path: pathEtc,
-			AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessReadFile,
-				landlock.FSAccessWriteFile,
-			},
-		}},
-		NetRules: nil,
-	}
-
-	right := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
-		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
-	}
-
-	result, err := landlock.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.PathRules) != 1 {
-		t.Fatalf(
-			"expected 1 path rule (write_file not handled by right), got %d",
-			len(result.PathRules),
-		)
-	}
-
-	wantAccess := []landlock.FSAccessRight{
-		landlock.FSAccessWriteFile,
-	}
-
-	if !slices.Equal(result.PathRules[0].AccessFS, wantAccess) {
-		t.Errorf(
-			"AccessFS = %v, want %v",
-			result.PathRules[0].AccessFS, wantAccess,
-		)
-	}
-}
-
-func buildUnsortedProfile() *landlock.Profile {
-	return &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessWriteFile,
-			landlock.FSAccessReadFile,
-		},
-		HandledAccessNet: []landlock.NetAccessRight{
-			landlock.NetAccessConnectTCP,
-			landlock.NetAccessBindTCP,
-		},
-		Scoped: nil,
-		PathRules: []landlock.PathRule{
-			{Path: pathVar, AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessReadFile,
-			}},
-			{Path: pathEtc, AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessReadFile,
-			}},
-		},
-		NetRules: []landlock.NetRule{
-			{Port: 443, AccessNet: []landlock.NetAccessRight{
-				landlock.NetAccessConnectTCP,
-			}},
-			{Port: 80, AccessNet: []landlock.NetAccessRight{
-				landlock.NetAccessBindTCP,
-			}},
-		},
-	}
-}
-
-func assertSorted(
-	t *testing.T, result *landlock.Profile,
-) {
+// assertEmptyIsNil checks that no field of result holds an empty but
+// non-nil list.
+func assertEmptyIsNil(t *testing.T, name string, result *landlock.Profile) {
 	t.Helper()
 
-	if result.PathRules[0].Path != pathEtc {
-		t.Errorf(
-			"first path = %q, want %q (sorted)",
-			result.PathRules[0].Path, pathEtc,
-		)
-	}
-
-	if result.PathRules[1].Path != pathVar {
-		t.Errorf(
-			"second path = %q, want %q (sorted)",
-			result.PathRules[1].Path, pathVar,
-		)
-	}
-
-	if result.NetRules[0].Port != 80 {
-		t.Errorf("first port = %d, want 80", result.NetRules[0].Port)
-	}
-
-	if result.NetRules[1].Port != 443 {
-		t.Errorf(
-			"second port = %d, want 443",
-			result.NetRules[1].Port,
-		)
-	}
-
-	wantFS := []landlock.FSAccessRight{
-		landlock.FSAccessReadFile,
-		landlock.FSAccessWriteFile,
-	}
-
-	if !slices.Equal(result.HandledAccessFS, wantFS) {
-		t.Errorf(
-			"HandledAccessFS = %v, want %v (sorted)",
-			result.HandledAccessFS, wantFS,
-		)
+	for field, empty := range map[string]bool{
+		"HandledAccessFS":  result.HandledAccessFS != nil && len(result.HandledAccessFS) == 0,
+		"HandledAccessNet": result.HandledAccessNet != nil && len(result.HandledAccessNet) == 0,
+		"Scoped":           result.Scoped != nil && len(result.Scoped) == 0,
+		"PathRules":        result.PathRules != nil && len(result.PathRules) == 0,
+		"NetRules":         result.NetRules != nil && len(result.NetRules) == 0,
+	} {
+		if empty {
+			t.Errorf("%s left %s empty but not nil: %#v", name, field, result)
+		}
 	}
 }
 
-func TestCloneSingleProfileNilRules(t *testing.T) {
+// TestMergeAssociativity checks that merging a with the merge of b and c
+// gives what merging the merge of a and b with c does.
+func TestMergeAssociativity(t *testing.T) {
 	t.Parallel()
 
-	profile := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
+	rule := func(path string, access ...landlock.FSAccessRight) landlock.PathRule {
+		return landlock.PathRule{Path: path, AccessFS: access}
+	}
+
+	read, write := landlock.FSAccessReadFile, landlock.FSAccessWriteFile
+	execute := landlock.FSAccessExecute
+
+	for _, test := range []struct {
+		name                         string
+		mergeFn                      func(...*landlock.Profile) (*landlock.Profile, error)
+		profileA, profileB, profileC *landlock.Profile
+	}{
+		{
+			"Intersect", landlock.Intersect,
+			fsProfile(fsRights{read, write}, rule(pathEtc, read)),
+			fsProfile(fsRights{read, execute}, rule(pathEtc, read)),
+			fsProfile(fsRights{read, execute}, rule(pathEtc, read, execute)),
 		},
-		HandledAccessNet: []landlock.NetAccessRight{
-			landlock.NetAccessBindTCP,
+		{
+			"Union", landlock.Union,
+			fsProfile(fsRights{read}, rule(pathEtc, read)),
+			fsProfile(fsRights{read, write}, rule(pathHome, write)),
+			fsProfile(fsRights{read, execute}, rule(pathEtc, execute)),
 		},
-		Scoped:    nil,
-		PathRules: nil,
-		NetRules:  nil,
-	}
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	result, err := landlock.Intersect(profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.PathRules != nil {
-		t.Errorf("PathRules = %v, want nil", result.PathRules)
-	}
-
-	if result.NetRules != nil {
-		t.Errorf("NetRules = %v, want nil", result.NetRules)
-	}
-
-	result, err = landlock.Union(profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.PathRules != nil {
-		t.Errorf("PathRules = %v, want nil (union)", result.PathRules)
-	}
-
-	if result.NetRules != nil {
-		t.Errorf("NetRules = %v, want nil (union)", result.NetRules)
+			assertLandlockAssociative(t, test.mergeFn, test.profileA, test.profileB, test.profileC)
+		})
 	}
 }
 
-func TestIntersectAssociativity(t *testing.T) {
-	t.Parallel()
-
-	profileA := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile, landlock.FSAccessWriteFile,
-		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path:     pathEtc,
-			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
-		}},
-		NetRules: nil,
-	}
-
-	profileB := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile, landlock.FSAccessExecute,
-		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path:     pathEtc,
-			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
-		}},
-		NetRules: nil,
-	}
-
-	profileC := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile, landlock.FSAccessExecute,
-		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path: pathEtc,
-			AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessReadFile, landlock.FSAccessExecute,
-			},
-		}},
-		NetRules: nil,
-	}
-
-	assertLandlockAssociative(t, landlock.Intersect, profileA, profileB, profileC)
-}
-
-// TestIntersectAssociativityWithRefer covers the fixtures the test above
-// never had: a refer grant used to make the fold keep a rule in one grouping
-// that never appeared in the other, because the redundancy pruning stopped
-// as soon as any rule granted refer. The result is the same ruleset either
-// way, so the output must be the same too.
+// TestIntersectAssociativityWithRefer covers the fixtures
+// TestMergeAssociativity never had: a refer grant used to make the fold
+// keep a rule in one grouping that never appeared in the other, because
+// the redundancy pruning stopped as soon as any rule granted refer. The
+// result is the same ruleset either way, so the output must be the same
+// too.
 func TestIntersectAssociativityWithRefer(t *testing.T) {
 	t.Parallel()
 
@@ -1313,7 +590,7 @@ func assertFoldOrderIndependent(
 			t.Fatalf("merge: %v", err)
 		}
 
-		got := landlock.FormatProfile(result)
+		got := result.String()
 		if idx == 0 {
 			want = got
 
@@ -1324,51 +601,6 @@ func assertFoldOrderIndependent(
 			t.Errorf("merge order %d = %s, want %s", idx, got, want)
 		}
 	}
-}
-
-func TestUnionAssociativity(t *testing.T) {
-	t.Parallel()
-
-	profileA := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
-		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path:     pathEtc,
-			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
-		}},
-		NetRules: nil,
-	}
-
-	profileB := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile, landlock.FSAccessWriteFile,
-		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path:     pathHome,
-			AccessFS: []landlock.FSAccessRight{landlock.FSAccessWriteFile},
-		}},
-		NetRules: nil,
-	}
-
-	profileC := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile, landlock.FSAccessExecute,
-		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path:     pathEtc,
-			AccessFS: []landlock.FSAccessRight{landlock.FSAccessExecute},
-		}},
-		NetRules: nil,
-	}
-
-	assertLandlockAssociative(t, landlock.Union, profileA, profileB, profileC)
 }
 
 func assertLandlockAssociative(
@@ -1403,261 +635,47 @@ func assertLandlockAssociative(
 	}
 }
 
-func TestIntersectSortedOutput(t *testing.T) {
-	t.Parallel()
-
-	result, err := landlock.Intersect(buildUnsortedProfile())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	assertSorted(t, result)
-}
-
-func TestIntersectEmptyPathRejected(t *testing.T) {
-	t.Parallel()
-
-	profile := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
-		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path:     "",
-			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
-		}},
-		NetRules: nil,
-	}
-
-	_, err := landlock.Intersect(profile)
-	if err == nil {
-		t.Fatal("expected error for empty path through merge")
-	}
-
-	if !errors.Is(err, landlock.ErrEmptyPath) {
-		t.Errorf("expected ErrEmptyPath, got: %v", err)
-	}
-}
-
-func TestUnionEmptyAccessDropsRule(t *testing.T) {
-	t.Parallel()
-
-	left := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
-		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{
-			{Path: pathEtc, AccessFS: []landlock.FSAccessRight{}},
-		},
-		NetRules: nil,
-	}
-
-	right := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
-		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{
-			{Path: pathEtc, AccessFS: []landlock.FSAccessRight{}},
-		},
-		NetRules: nil,
-	}
-
-	result, err := landlock.Union(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.PathRules) != 0 {
-		t.Errorf("expected no path rules for empty access union, got %d", len(result.PathRules))
-	}
-}
-
-func TestIntersectNormalizedDuplicatePaths(t *testing.T) {
-	t.Parallel()
-
-	profile := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
-		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{
-			{Path: "/etc/./config", AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile}},
-			{Path: "/etc/config", AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile}},
-		},
-		NetRules: nil,
-	}
-
-	result, err := landlock.Intersect(profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.PathRules) != 1 {
-		t.Fatalf("expected 1 path rule after dedup, got %d", len(result.PathRules))
-	}
-
-	if result.PathRules[0].Path != "/etc/config" {
-		t.Errorf("expected /etc/config, got %s", result.PathRules[0].Path)
-	}
-}
-
-func TestIntersectDeduplicatesNetRules(t *testing.T) {
-	t.Parallel()
-
-	profile := &landlock.Profile{
-		HandledAccessFS: nil,
-		HandledAccessNet: []landlock.NetAccessRight{
-			landlock.NetAccessBindTCP,
-			landlock.NetAccessConnectTCP,
-		},
-		Scoped:    nil,
-		PathRules: nil,
-		NetRules: []landlock.NetRule{
-			{Port: 80, AccessNet: []landlock.NetAccessRight{landlock.NetAccessBindTCP}},
-			{Port: 80, AccessNet: []landlock.NetAccessRight{landlock.NetAccessConnectTCP}},
-		},
-	}
-
-	result, err := landlock.Intersect(profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result.NetRules) != 1 {
-		t.Fatalf("expected 1 net rule after dedup, got %d", len(result.NetRules))
-	}
-
-	if result.NetRules[0].Port != 80 {
-		t.Errorf("expected port 80, got %d", result.NetRules[0].Port)
-	}
-
-	want := []landlock.NetAccessRight{landlock.NetAccessBindTCP, landlock.NetAccessConnectTCP}
-	slices.Sort(want)
-
-	if got := result.NetRules[0].AccessNet; !slices.Equal(got, want) {
-		t.Errorf("expected access %v, got %v", want, got)
-	}
-}
-
-func TestIntersectDeduplicatesScoped(t *testing.T) {
-	t.Parallel()
-
-	profile := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped: []landlock.ScopeRight{
-			landlock.ScopeSignal,
-			landlock.ScopeSignal,
-			landlock.ScopeAbstractUnixSocket,
-		},
-		PathRules: nil,
-		NetRules:  nil,
-	}
-
-	result, err := landlock.Intersect(profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	want := []landlock.ScopeRight{landlock.ScopeAbstractUnixSocket, landlock.ScopeSignal}
-
-	if got := result.Scoped; !slices.Equal(got, want) {
-		t.Errorf("expected scoped %v, got %v", want, got)
-	}
-}
-
 // readFileProfile builds a profile handling read_file with the given rules.
 func readFileProfile(rules []landlock.PathRule) *landlock.Profile {
 	return &landlock.Profile{
-		HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessReadFile},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        rules,
-		NetRules:         nil,
+		HandledAccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
+		PathRules:       rules,
 	}
 }
 
+// TestMergePrunesUnhandledRights covers rule rights the result does not
+// handle, which it drops so that it passes ValidateStrict.
 func TestMergePrunesUnhandledRights(t *testing.T) {
 	t.Parallel()
 
-	readWrite := []landlock.FSAccessRight{landlock.FSAccessReadFile, landlock.FSAccessWriteFile}
+	readWrite := fsRights{landlock.FSAccessReadFile, landlock.FSAccessWriteFile}
 	bindConnect := []landlock.NetAccessRight{
 		landlock.NetAccessBindTCP,
 		landlock.NetAccessConnectTCP,
 	}
+	connect := []landlock.NetAccessRight{landlock.NetAccessConnectTCP}
 
 	wide := &landlock.Profile{
 		HandledAccessFS:  readWrite,
 		HandledAccessNet: bindConnect,
-		Scoped:           nil,
-		PathRules:        []landlock.PathRule{{Path: "/etc", AccessFS: readWrite}},
+		PathRules:        []landlock.PathRule{{Path: pathEtc, AccessFS: readWrite}},
 		NetRules:         []landlock.NetRule{{Port: 443, AccessNet: bindConnect}},
 	}
 	narrow := &landlock.Profile{
-		HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessReadFile},
-		HandledAccessNet: []landlock.NetAccessRight{landlock.NetAccessConnectTCP},
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path: "/etc", AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
-		}},
-		NetRules: []landlock.NetRule{{
-			Port: 443, AccessNet: []landlock.NetAccessRight{landlock.NetAccessConnectTCP},
-		}},
+		HandledAccessFS:  fsRights{landlock.FSAccessReadFile},
+		HandledAccessNet: connect,
+		PathRules: []landlock.PathRule{
+			{Path: pathEtc, AccessFS: fsRights{landlock.FSAccessReadFile}},
+		},
+		NetRules: []landlock.NetRule{{Port: 443, AccessNet: connect}},
 	}
 
-	result, err := landlock.Union(wide, narrow)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	result := assertMergeFormat(t, "Union", landlock.Union,
+		"Profile{fs:read_file net:connect_tcp /etc(read_file) :443(connect_tcp)}", wide, narrow)
 
-	want := "Profile{fs:read_file net:connect_tcp /etc(read_file) :443(connect_tcp)}"
-	if got := landlock.FormatProfile(result); got != want {
-		t.Errorf("Union = %s, want %s", got, want)
-	}
-
-	err = landlock.ValidateStrict(result)
+	err := landlock.ValidateStrict(result)
 	if err != nil {
 		t.Errorf("ValidateStrict(Union) = %v, want nil", err)
-	}
-
-	// A rule granting only unhandled rights disappears entirely.
-	noop := readFileProfile([]landlock.PathRule{{
-		Path: "/tmp", AccessFS: []landlock.FSAccessRight{landlock.FSAccessWriteFile},
-	}})
-
-	result, err = landlock.Intersect(noop, noop)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.PathRules != nil {
-		t.Errorf("Intersect kept a rule without handled rights: %s", landlock.FormatProfile(result))
-	}
-}
-
-func TestSingleAndPairwiseMergeAgree(t *testing.T) {
-	t.Parallel()
-
-	profile := readFileProfile(nil)
-
-	single, err := landlock.Intersect(profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	pair, err := landlock.Intersect(profile, profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if single.PathRules != nil || pair.PathRules != nil {
-		t.Errorf("PathRules = %v and %v, want nil for both", single.PathRules, pair.PathRules)
 	}
 }
 
@@ -1674,10 +692,12 @@ func assertMergeFormat(
 
 	result, err := mergeFn(profiles...)
 	if err != nil {
-		t.Fatalf("%s: unexpected error: %v", name, err)
+		t.Errorf("%s: unexpected error: %v", name, err)
+
+		return nil
 	}
 
-	if got := landlock.FormatProfile(result); got != want {
+	if got := result.String(); got != want {
 		t.Errorf("%s = %s, want %s", name, got, want)
 	}
 
@@ -1725,28 +745,6 @@ func TestMergeRejectsParentComponents(t *testing.T) {
 	}
 }
 
-func TestMergeFoldsSlashesAndDots(t *testing.T) {
-	t.Parallel()
-
-	read := fsRights{landlock.FSAccessReadFile}
-	left := fsProfile(read, landlock.PathRule{Path: "//etc//", AccessFS: read})
-	right := fsProfile(read, landlock.PathRule{Path: "/./etc/./", AccessFS: read})
-
-	want := "Profile{fs:read_file /etc(read_file)}"
-	assertMergeFormat(t, "Intersect", landlock.Intersect, want, left, right)
-	assertMergeFormat(t, "Union", landlock.Union, want, left, right)
-
-	// A relative path is unrelated to the absolute one, even when their
-	// components match, and "/" is not its ancestor.
-	relative := fsProfile(read, landlock.PathRule{Path: "./etc", AccessFS: read})
-	root := fsProfile(read, landlock.PathRule{Path: "/", AccessFS: read})
-
-	assertMergeFormat(t, "Intersect", landlock.Intersect, "Profile{fs:read_file}", left, relative)
-	assertMergeFormat(t, "Intersect", landlock.Intersect, "Profile{fs:read_file}", root, relative)
-	assertMergeFormat(t, "Union", landlock.Union,
-		"Profile{fs:read_file /etc(read_file) etc(read_file)}", left, relative)
-}
-
 func TestMergeErrorsNameInputIndices(t *testing.T) {
 	t.Parallel()
 
@@ -1791,7 +789,6 @@ func TestMergeDeduplicatesRuleRights(t *testing.T) {
 	profile := &landlock.Profile{
 		HandledAccessFS:  readTwice,
 		HandledAccessNet: bindTwice,
-		Scoped:           nil,
 		PathRules: []landlock.PathRule{
 			{Path: "/a", AccessFS: readTwice},
 			{Path: "/b", AccessFS: nil},
@@ -1807,108 +804,6 @@ func TestMergeDeduplicatesRuleRights(t *testing.T) {
 	err := landlock.ValidateArtifact(profile)
 	if !errors.Is(err, landlock.ErrEmptyRule) || errors.Is(err, landlock.ErrDuplicateRight) {
 		t.Errorf("ValidateArtifact = %v, want ErrEmptyRule only", err)
-	}
-}
-
-func TestMergeOutputIsMinimal(t *testing.T) {
-	t.Parallel()
-
-	read := fsRights{landlock.FSAccessReadFile}
-	readWrite := fsRights{landlock.FSAccessReadFile, landlock.FSAccessWriteFile}
-
-	root := fsProfile(readWrite, landlock.PathRule{Path: "/", AccessFS: read})
-	nested := fsProfile(readWrite,
-		landlock.PathRule{Path: "/etc", AccessFS: read},
-		landlock.PathRule{Path: "/etc/ssl", AccessFS: readWrite},
-	)
-
-	assertMergeFormat(t, "Intersect", landlock.Intersect,
-		"Profile{fs:read_file,write_file /etc(read_file)}", root, nested)
-	assertMergeFormat(
-		t,
-		"Union",
-		landlock.Union,
-		"Profile{fs:read_file,write_file /(read_file) /etc(read_file) /etc/ssl(read_file,write_file)}",
-		root,
-		nested,
-	)
-	assertMergeFormat(t, "Intersect", landlock.Intersect,
-		"Profile{fs:read_file,write_file /etc(read_file) /etc/ssl(write_file)}", nested)
-
-	// A right an ancestor grants is not repeated on a file rule, which the
-	// kernel would refuse for a directory-only right such as read_dir.
-	dirs := fsProfile(fsRights{landlock.FSAccessReadDir},
-		landlock.PathRule{Path: "/", AccessFS: fsRights{landlock.FSAccessReadDir}})
-	file := fsProfile(read, landlock.PathRule{Path: "/etc/passwd", AccessFS: read})
-	assertMergeFormat(t, "Intersect", landlock.Intersect,
-		"Profile{fs:read_dir,read_file /(read_dir) /etc/passwd(read_file)}", dirs, file)
-
-	// A rule granting refer is minimized as any other: the kernel decides a
-	// move from the rights each directory inherits, past its mount point up
-	// to the real root. A right the root rule grants and /etc repeats is
-	// the documented exception: inside a mount other than the root mount it
-	// makes the input deny moves into /etc that the result allows.
-	readRefer := fsRights{landlock.FSAccessReadFile, landlock.FSAccessRefer}
-	referRules := fsProfile(readRefer,
-		landlock.PathRule{Path: "/", AccessFS: readRefer},
-		landlock.PathRule{Path: "/etc", AccessFS: read},
-	)
-	assertMergeFormat(t, "Intersect", landlock.Intersect,
-		"Profile{fs:read_file,refer /(read_file,refer)}", referRules)
-
-	nestedRefer := fsProfile(readRefer,
-		landlock.PathRule{Path: "/", AccessFS: read},
-		landlock.PathRule{Path: "/etc", AccessFS: readRefer},
-	)
-	assertMergeFormat(t, "Intersect", landlock.Intersect,
-		"Profile{fs:read_file,refer /(read_file) /etc(refer)}", nestedRefer)
-}
-
-// TestUnionKeepsNestedRules covers rules whose path may be a symlink: on
-// systemd distributions /var/run points to /run, so the rule on /var/run
-// grants access under /run that the rule on /var does not.
-func TestUnionKeepsNestedRules(t *testing.T) {
-	t.Parallel()
-
-	read := fsRights{landlock.FSAccessReadFile}
-	nested := fsProfile(read,
-		landlock.PathRule{Path: "/var", AccessFS: read},
-		landlock.PathRule{Path: "/var/run", AccessFS: read},
-	)
-	other := fsProfile(read, landlock.PathRule{Path: "/opt", AccessFS: read})
-
-	assertMergeFormat(t, "Union", landlock.Union,
-		"Profile{fs:read_file /opt(read_file) /var(read_file) /var/run(read_file)}", nested, other)
-	assertMergeFormat(t, "Union", landlock.Union,
-		"Profile{fs:read_file /var(read_file) /var/run(read_file)}", nested)
-}
-
-func TestMergeReturnsNilForEmptySets(t *testing.T) {
-	t.Parallel()
-
-	empty := &landlock.Profile{
-		HandledAccessFS:  []landlock.FSAccessRight{},
-		HandledAccessNet: []landlock.NetAccessRight{},
-		Scoped:           []landlock.ScopeRight{},
-		PathRules:        []landlock.PathRule{},
-		NetRules:         []landlock.NetRule{},
-	}
-
-	for name, mergeFn := range map[string]func(...*landlock.Profile) (*landlock.Profile, error){
-		"Intersect": landlock.Intersect,
-		"Union":     landlock.Union,
-	} {
-		for _, inputs := range [][]*landlock.Profile{{empty}, {empty, empty}, {empty, empty, empty}} {
-			result, err := mergeFn(inputs...)
-			if err != nil {
-				t.Fatalf("%s: unexpected error: %v", name, err)
-			}
-
-			if result.HandledAccessFS != nil || result.HandledAccessNet != nil ||
-				result.Scoped != nil || result.PathRules != nil || result.NetRules != nil {
-				t.Errorf("%s of %d empty profiles = %#v, want all nil", name, len(inputs), result)
-			}
-		}
 	}
 }
 

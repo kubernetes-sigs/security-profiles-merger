@@ -20,6 +20,13 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
 
+// MoreRestrictive and LessRestrictive expose the action order, so that the
+// external tests can state what never permits more.
+var (
+	MoreRestrictive = moreRestrictive
+	LessRestrictive = lessRestrictive
+)
+
 // NativeArchitectures exposes the GOARCH lookup table, so that the external
 // tests can assert all of it rather than only the entry for the platform
 // they happen to run on.

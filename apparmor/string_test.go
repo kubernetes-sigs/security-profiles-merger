@@ -17,6 +17,7 @@ limitations under the License.
 package apparmor_test
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -40,7 +41,6 @@ func TestProfileString(t *testing.T) {
 		},
 		Filesystem: &apparmor.FilesystemRules{
 			ReadOnlyPaths:  []string{pathEtcPasswd},
-			WriteOnlyPaths: nil,
 			ReadWritePaths: []string{"/tmp"},
 		},
 		Network: &apparmor.NetworkRules{
@@ -66,12 +66,7 @@ func TestProfileString(t *testing.T) {
 func TestProfileStringEmpty(t *testing.T) {
 	t.Parallel()
 
-	profile := apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
+	profile := apparmor.Profile{}
 
 	const want = "Profile{}"
 
@@ -166,9 +161,7 @@ func TestCapabilityRulesStringQuotesNone(t *testing.T) {
 func TestCapabilityRulesStringEmpty(t *testing.T) {
 	t.Parallel()
 
-	rules := apparmor.CapabilityRules{
-		AllowedCapabilities: nil,
-	}
+	rules := apparmor.CapabilityRules{}
 
 	const want = "caps:none"
 
@@ -180,10 +173,7 @@ func TestCapabilityRulesStringEmpty(t *testing.T) {
 func TestNetworkRulesStringEmpty(t *testing.T) {
 	t.Parallel()
 
-	rules := apparmor.NetworkRules{
-		AllowRaw:  nil,
-		Protocols: nil,
-	}
+	rules := apparmor.NetworkRules{}
 
 	if got := rules.String(); got != "" {
 		t.Errorf("String() = %q, want empty string", got)
@@ -194,11 +184,7 @@ func TestNetworkRulesStringEmptyProtocols(t *testing.T) {
 	t.Parallel()
 
 	rules := apparmor.NetworkRules{
-		AllowRaw: nil,
-		Protocols: &apparmor.AllowedProtocols{
-			AllowTCP: nil,
-			AllowUDP: nil,
-		},
+		Protocols: &apparmor.AllowedProtocols{},
 	}
 
 	if got := rules.String(); got != "" {
@@ -210,13 +196,7 @@ func TestProfileStringWithEmptyNetwork(t *testing.T) {
 	t.Parallel()
 
 	profile := apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw:  nil,
-			Protocols: nil,
-		},
-		Capabilities: nil,
+		Network: &apparmor.NetworkRules{},
 	}
 
 	const want = "Profile{}"
@@ -226,23 +206,10 @@ func TestProfileStringWithEmptyNetwork(t *testing.T) {
 	}
 }
 
-func TestFormatProfileNil(t *testing.T) {
-	t.Parallel()
-
-	const want = "Profile{<nil>}"
-
-	if got := apparmor.FormatProfile(nil); got != want {
-		t.Errorf("FormatProfile(nil) = %q, want %q", got, want)
-	}
-}
-
-func TestFormatProfileNonNil(t *testing.T) {
+func TestProfileStringCapabilitiesOnly(t *testing.T) {
 	t.Parallel()
 
 	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{capNetAdmin},
 		},
@@ -250,13 +217,13 @@ func TestFormatProfileNonNil(t *testing.T) {
 
 	const want = "Profile{caps:NET_ADMIN}"
 
-	if got := apparmor.FormatProfile(profile); got != want {
-		t.Errorf("FormatProfile() = %q, want %q", got, want)
+	if got := profile.String(); got != want {
+		t.Errorf("String() = %q, want %q", got, want)
 	}
 }
 
-// TestProfileStringNil pins that String reports a nil profile the way
-// FormatProfile does rather than panicking.
+// TestProfileStringNil pins that String reports a nil profile as
+// "Profile{<nil>}" rather than panicking.
 func TestProfileStringNil(t *testing.T) {
 	t.Parallel()
 
@@ -269,11 +236,11 @@ func TestProfileStringNil(t *testing.T) {
 	}
 }
 
-// TestFormatProfileQuotesControlBytes covers the values of a profile an
+// TestProfileStringQuotesControlBytes covers the values of a profile an
 // artifact's author chooses: a newline in one would forge a log line and an
 // escape sequence would repaint the terminal it is printed on, so both come
 // out quoted, in every list and in the capabilities.
-func TestFormatProfileQuotesControlBytes(t *testing.T) {
+func TestProfileStringQuotesControlBytes(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -292,13 +259,12 @@ func TestFormatProfileQuotesControlBytes(t *testing.T) {
 			WriteOnlyPaths: []string{escape},
 			ReadWritePaths: []string{newline, escape},
 		},
-		Network:      nil,
 		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{capName}},
 	}
 
 	for name, formatted := range map[string]string{
-		"FormatProfile": apparmor.FormatProfile(profile),
-		"String":        profile.String(),
+		"Profile.String": profile.String(),
+		"fmt":            fmt.Sprintf("profile %v", profile),
 	} {
 		if strings.ContainsAny(formatted, "\n\x1b") {
 			t.Errorf("%s = %q holds a raw control byte", name, formatted)
@@ -312,37 +278,31 @@ func TestFormatProfileQuotesControlBytes(t *testing.T) {
 	}
 }
 
-// TestFormatProfileQuotesSeparators covers values holding the separators a
+// TestProfileStringQuotesSeparators covers values holding the separators a
 // profile and a diff are built from. An alternation is quoted too: that is
 // noisier, but a path and the two paths that split it at its comma no
 // longer render alike, and a capability cannot pose as a diff of three.
-func TestFormatProfileQuotesSeparators(t *testing.T) {
+func TestProfileStringQuotesSeparators(t *testing.T) {
 	t.Parallel()
 
 	readOnly := func(paths ...string) *apparmor.Profile {
 		return &apparmor.Profile{
-			Executable: nil,
 			Filesystem: &apparmor.FilesystemRules{
 				ReadOnlyPaths: paths, WriteOnlyPaths: nil, ReadWritePaths: nil,
 			},
-			Network:      nil,
-			Capabilities: nil,
 		}
 	}
 	caps := func(names ...string) *apparmor.Profile {
 		return &apparmor.Profile{
-			Executable:   nil,
-			Filesystem:   nil,
-			Network:      nil,
 			Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: names},
 		}
 	}
 
-	one := apparmor.FormatProfile(readOnly("/etc/{a,b}"))
-	two := apparmor.FormatProfile(readOnly("/etc/{a", "b}"))
+	one := readOnly("/etc/{a,b}").String()
+	two := readOnly("/etc/{a", "b}").String()
 
 	if one != `Profile{r:"/etc/{a,b}"}` {
-		t.Errorf("FormatProfile() = %s", one)
+		t.Errorf("String() = %s", one)
 	}
 
 	if one == two {
@@ -354,8 +314,8 @@ func TestFormatProfileQuotesSeparators(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, want := apparmor.FormatDiff(diff), `Diff{caps:+"KILL,-CHOWN,+SYS_ADMIN"}`; got != want {
-		t.Errorf("FormatDiff() = %s, want %s", got, want)
+	if got, want := diff.String(), `Diff{caps:+"KILL,-CHOWN,+SYS_ADMIN"}`; got != want {
+		t.Errorf("String() = %s, want %s", got, want)
 	}
 }
 
@@ -385,7 +345,6 @@ func TestFormattersAreBounded(t *testing.T) {
 		Filesystem: &apparmor.FilesystemRules{
 			ReadOnlyPaths: nil, WriteOnlyPaths: nil, ReadWritePaths: nil,
 		},
-		Network:      nil,
 		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: caps},
 	}
 
@@ -402,14 +361,12 @@ func TestFormattersAreBounded(t *testing.T) {
 	}
 
 	filesystem := apparmor.FilesystemRules{
-		ReadOnlyPaths:  paths,
-		WriteOnlyPaths: nil,
-		ReadWritePaths: nil,
+		ReadOnlyPaths: paths,
 	}
 
 	for name, format := range map[string]func() string{
-		"FormatProfile":          func() string { return apparmor.FormatProfile(artifact) },
-		"FormatDiff":             func() string { return apparmor.FormatDiff(diff) },
+		"Profile.String":         func() string { return artifact.String() },
+		"ProfileDiff.String":     func() string { return diff.String() },
 		"ExecutableRules.String": artifact.Executable.String,
 		"FilesystemRules.String": filesystem.String,
 		"CapabilityRules.String": artifact.Capabilities.String,
@@ -429,23 +386,23 @@ func TestFormattersAreBounded(t *testing.T) {
 	}
 }
 
-// TestFormatProfileShowsWholePaths covers paths of MaxPathLen bytes, every
+// TestProfileStringShowsWholePaths covers paths of MaxPathLen bytes, every
 // one of them escaped: a profile holding a few of them renders whole, so
 // the bound does not hide a rule of an ordinary profile.
-func TestFormatProfileShowsWholePaths(t *testing.T) {
+func TestProfileStringShowsWholePaths(t *testing.T) {
 	t.Parallel()
 
 	path := "/" + strings.Repeat("\xff", apparmor.MaxPathLen-1)
 	profile := readOnly(path+"a", path+"b", path+"c")
 
-	got := apparmor.FormatProfile(profile)
+	got := profile.String()
 	if strings.HasSuffix(got, merge.TruncationMarker) {
-		t.Fatalf("FormatProfile() of three escaped paths is cut at %d bytes", len(got))
+		t.Fatalf("String() of three escaped paths is cut at %d bytes", len(got))
 	}
 
 	for _, suffix := range []string{"a", "b", "c"} {
 		if !strings.Contains(got, strconv.Quote(path+suffix)) {
-			t.Errorf("FormatProfile() does not show the path ending in %q whole", suffix)
+			t.Errorf("String() does not show the path ending in %q whole", suffix)
 		}
 	}
 }

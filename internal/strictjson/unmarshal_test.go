@@ -251,41 +251,51 @@ func decodeSeccomp(data []byte) error {
 }
 
 // TestFindingsComeInOrderAndOnDemand covers the findings the command and
-// Unmarshal share: one per kind, in the order Unmarshal checks them, and
-// only as far as the caller asks.
+// Unmarshal share: one per kind, in the order Unmarshal checks them, a
+// repeated member alone, and only as far as the caller asks.
 func TestFindingsComeInOrderAndOnDemand(t *testing.T) {
 	t.Parallel()
 
-	raw := []byte(`{"defaultAction":"A","DEFAULTACTION":"B","bogus":1,` +
-		`"syscalls":[{"Names":["` + "\xff" + `"]}]}`)
+	findingKinds := func(raw []byte) []error {
+		var decoded specs.LinuxSeccomp
 
-	var decoded specs.LinuxSeccomp
-
-	hint, err := strictjson.Decode(raw, &decoded)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var kinds []error
-
-	for finding := range strictjson.Findings(raw, &decoded, hint, nil) {
-		if !errors.Is(finding.Err, finding.Kind) {
-			t.Errorf("finding %v does not wrap its kind %v", finding.Err, finding.Kind)
+		hint, err := strictjson.Decode(raw, &decoded)
+		if err != nil {
+			t.Fatal(err)
 		}
 
-		kinds = append(kinds, finding.Kind)
+		var kinds []error
+
+		for finding := range strictjson.Findings(raw, &decoded, hint, nil) {
+			if !errors.Is(finding.Err, finding.Kind) {
+				t.Errorf("finding %v does not wrap its kind %v", finding.Err, finding.Kind)
+			}
+
+			kinds = append(kinds, finding.Kind)
+		}
+
+		return kinds
 	}
 
-	want := []error{
-		spm.ErrDuplicateKey, spm.ErrUnknownField, spm.ErrMisspelledField, spm.ErrInvalidUTF8,
-	}
-	if !slices.Equal(kinds, want) {
+	raw := []byte(`{"defaultAction":"A","bogus":1,` +
+		`"syscalls":[{"Names":["` + "\xff" + `"]}]}`)
+
+	want := []error{spm.ErrUnknownField, spm.ErrMisspelledField, spm.ErrInvalidUTF8}
+	if kinds := findingKinds(raw); !slices.Equal(kinds, want) {
 		t.Errorf("kinds = %v, want %v", kinds, want)
 	}
 
+	repeated := []byte(`{"defaultAction":"A","DEFAULTACTION":"B","bogus":1}`)
+	if kinds := findingKinds(repeated); !slices.Equal(kinds, []error{spm.ErrDuplicateKey}) {
+		t.Errorf("kinds = %v, want the repeated member alone", kinds)
+	}
+
+	var decoded specs.LinuxSeccomp
+
+	hint, _ := strictjson.Decode(raw, &decoded)
 	for finding := range strictjson.Findings(raw, &decoded, hint, nil) {
-		if !errors.Is(finding.Kind, spm.ErrDuplicateKey) {
-			t.Errorf("first finding = %v, want the repeated member", finding.Kind)
+		if !errors.Is(finding.Kind, spm.ErrUnknownField) {
+			t.Errorf("first finding = %v, want the unknown member", finding.Kind)
 		}
 
 		break

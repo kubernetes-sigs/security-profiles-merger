@@ -206,16 +206,13 @@ const MaxArtifactPaths = 1024
 // pattern syntax count: a literal path is matched by comparison, while a
 // pattern is compiled into a program first.
 //
-// Compiling a pattern costs time and memory in proportion to its length, and
-// one call compiles each pattern it reads once. A merge bounds what it
-// compiles on its own, at four times this bound per call, in the order of
-// its inputs, so a baseline of up to twice this bound and two artifacts
-// this bound admits are compiled and matched in full. A pattern past the
-// merge's bound matches no name and no other pattern: an intersection fails
-// with ErrBudgetExceeded when the result may lose access, which is when
-// neither input is kept whole, and a union keeps it. Compiled patterns are
-// also kept across calls in a cache bounded by an estimate of the memory
-// they hold, which only saves a later call the compiling.
+// Compiling a pattern costs time and memory in proportion to its length. A
+// merge bounds what it compiles on its own, at four times this bound per
+// call, so a baseline of up to twice this bound and two artifacts this
+// bound admits are compiled and matched in full (see the Cost bounds section
+// of the package documentation). Compiled patterns are also kept across
+// calls in a cache bounded by an estimate of the memory they hold, which
+// only saves a later call the compiling.
 //
 // Profiles of the size KEP-6061 recommends runtimes accept spell a few
 // patterns of a few dozen bytes each.

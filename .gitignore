@@ -1,13 +1,11 @@
 build/
 dist/
 fuzz.log
-benchmark.txt
 # What the CI jobs leave in the checkout, so that make api-report, which
 # refuses a working tree with untracked files, runs after them too: the
-# libseccomp build of test-libseccomp, the benchmark baseline and the
-# upstream report of dependency-updates.
+# libseccomp build of test-libseccomp and the upstream report of
+# dependency-updates.
 /.libseccomp/
 /libseccomp-*/
 /libseccomp.tar.gz
-/cache/
 /report.txt

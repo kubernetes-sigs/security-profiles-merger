@@ -253,13 +253,7 @@ var (
 // rights the ruleset handles, and ruleMask gives each rule path one bit per
 // right.
 func evalProfile(handledMask uint8, ruleMask uint32) *landlock.Profile {
-	profile := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
-	}
+	profile := &landlock.Profile{}
 
 	for idx, right := range evalRights {
 		if handledMask&(1<<uint(idx)) != 0 {
@@ -347,9 +341,9 @@ func FuzzLandlockIntersectPermitsAt(f *testing.F) {
 					"intersect permits %q at %q that an input denies\n"+
 						"left=%s\nright=%s\nresult=%s",
 					access, probe,
-					landlock.FormatProfile(left),
-					landlock.FormatProfile(right),
-					landlock.FormatProfile(result),
+					left.String(),
+					right.String(),
+					result.String(),
 				)
 			}
 		}
@@ -388,9 +382,9 @@ func FuzzLandlockUnionPermitsAt(f *testing.F) {
 					"union denies %q at %q that an input permits\n"+
 						"left=%s\nright=%s\nresult=%s",
 					access, probe,
-					landlock.FormatProfile(left),
-					landlock.FormatProfile(right),
-					landlock.FormatProfile(result),
+					left.String(),
+					right.String(),
+					result.String(),
 				)
 			}
 		}
@@ -412,7 +406,7 @@ func assertIntersectMoves(t *testing.T, inputs []*landlock.Profile, result *land
 		for _, input := range inputs {
 			if !evalMove(input, file, dst, dir, true) {
 				t.Fatalf("Intersect allows moving %q (dir %v) into %q, which %s denies\nresult=%s",
-					file, dir, dst, landlock.FormatProfile(input), landlock.FormatProfile(result))
+					file, dir, dst, input.String(), result.String())
 			}
 		}
 	})
@@ -448,7 +442,7 @@ func assertUnionMoves(t *testing.T, inputs []*landlock.Profile, result *landlock
 						"Union denies moving %q (dir %v, root mount %v) into %q, "+
 							"which %s allows\nresult=%s",
 						file, dir, rootMount, dst,
-						landlock.FormatProfile(input), landlock.FormatProfile(result),
+						input.String(), result.String(),
 					)
 				}
 			}
@@ -502,13 +496,13 @@ func assertManyPermitsAt(
 			got := evalPermits(intersected, probe, access)
 			if got != every && (got || access != landlock.FSAccessRefer) {
 				t.Fatalf("Intersect permits %q at %q = %v, want %v\ninputs=%v\nresult=%s",
-					access, probe, got, every, profiles, landlock.FormatProfile(intersected))
+					access, probe, got, every, profiles, intersected.String())
 			}
 
 			got = evalPermits(united, probe, access)
 			if got != some && (!got || evalHandles(united, access)) {
 				t.Fatalf("Union permits %q at %q = %v, want %v\ninputs=%v\nresult=%s",
-					access, probe, got, some, profiles, landlock.FormatProfile(united))
+					access, probe, got, some, profiles, united.String())
 			}
 		}
 	}

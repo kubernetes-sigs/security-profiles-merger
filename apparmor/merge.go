@@ -75,8 +75,9 @@ type InputError = spm.InputError
 // the result permits only what every input permits. Matching paths against
 // patterns and compiling them is bounded, and a merge past a budget fails
 // with ErrBudgetExceeded when the result may lose access, which is when
-// neither input is kept whole, rather than return a result that may be
-// narrower than its inputs call for (see the Cost bounds section).
+// neither input of a merge step is kept whole (see ErrBudgetExceeded and
+// the Cost bounds section), rather than return a result that may be
+// narrower than its inputs call for.
 //
 // Each input is validated as the Validation section of the package
 // documentation describes, and every one that fails is reported as an
@@ -158,14 +159,11 @@ func foldProfiles(
 		return nil, err
 	}
 
+	unifyAliasSpellings(normalized, matchers)
+
 	for _, profile := range normalized {
 		deduplicateProfile(profile)
-		canonicalizeAliases(profile, matchers)
 	}
-
-	// Each profile now holds one spelling per rule, but two profiles may
-	// hold different ones, and the merge compares paths as text.
-	unifyAliasSpellings(normalized, matchers)
 
 	// Preparing may drop paths, so it runs after validation, which must see
 	// every path the caller passed.
@@ -189,33 +187,15 @@ func foldProfiles(
 	return result, nil
 }
 
-// canonicalizeAliases folds the paths of one list that spell the same rule
-// into one entry, keeping the simplest spelling. Two such spellings differ
-// only in escapes or repeated slashes the parser resolves, so they are one
-// rule for one file, and the merge would otherwise carry both and match only
-// one of them. Lists holding no such pair, which is every list of a profile
-// written by hand, are left as they are.
-//
-// It runs on each input, not on the result. Two spellings in different
-// categories are left alone: a profile naming one file twice that way fails
-// the merge whether or not its spellings agree, which is what it does for an
-// exact duplicate. The result needs no folding of its own, since
-// unifyAliasSpellings has given every input the same spelling for a rule and
-// the merge introduces no new one.
-func canonicalizeAliases(profile *Profile, matchers *matcherCache) {
-	for _, paths := range pathLists(profile) {
-		*paths = foldAliasList(*paths, matchers)
-	}
-}
-
 // unifyAliasSpellings gives every profile the same spelling for a rule any
 // of them holds, so that two profiles naming one file differently name it
-// alike from here on. canonicalizeAliases folds the aliases within a
-// profile, but it keeps a spelling that profile happens to hold, and the
+// alike from here on. Two such spellings differ only in escapes or repeated
+// slashes the parser resolves, so they are one rule for one file, and the
 // merge compares literal paths and glob patterns as text: without this, an
 // intersection of "/etc/passwd" with an escaped spelling of the same file
 // would drop a path both profiles grant, in the direction that silently
-// costs a workload its access.
+// costs a workload its access, and a list holding both spellings would
+// carry both and match only one of them.
 //
 // The spelling kept is the simplest one some input holds (simplestSpelling),
 // never one derived from the decoded name: a decoded name may hold a
@@ -224,11 +204,11 @@ func canonicalizeAliases(profile *Profile, matchers *matcherCache) {
 // result no consumer can spell. Rewriting a path to another input's spelling
 // of the same rule cannot: it is a path an input already carried.
 //
-// It cannot make a profile hold one rule twice. Within a list, each profile
-// holds one path per key already, and rewriting maps equal keys to one
-// spelling, so the rewritten list has one path per key as well. Across the
-// categories of one profile, validation has rejected two paths sharing a
-// key, so no two categories can collapse onto one spelling here.
+// Within a list, the spellings of one rule become one path, which
+// deduplicateProfile then keeps once. Across the categories of one
+// profile, validation has rejected two paths sharing a key, so no two
+// categories can collapse onto one spelling here. The result needs no
+// unifying of its own, since the merge introduces no new spelling.
 func unifyAliasSpellings(profiles []*Profile, matchers *matcherCache) {
 	simplest := make(map[pathKey]string)
 
@@ -275,50 +255,6 @@ func pathLists(profile *Profile) iter.Seq2[string, *[]string] {
 			yield(readWritePathsPath, &profile.Filesystem.ReadWritePaths)
 		}
 	}
-}
-
-// hasAliases reports whether two different paths of a list spell one rule.
-func hasAliases(paths []string, matchers *matcherCache) bool {
-	seen := make(map[pathKey]string, len(paths))
-
-	for _, path := range paths {
-		key := matchers.key(path)
-
-		if earlier, ok := seen[key]; ok && earlier != path {
-			return true
-		}
-
-		seen[key] = path
-	}
-
-	return false
-}
-
-// foldAliasList returns the list with one spelling per rule.
-func foldAliasList(paths []string, matchers *matcherCache) []string {
-	if !hasAliases(paths, matchers) {
-		return paths
-	}
-
-	sorted := slices.Clone(paths)
-	slices.SortFunc(sorted, simplestSpelling)
-
-	seen := make(map[pathKey]struct{}, len(sorted))
-	folded := make([]string, 0, len(sorted))
-
-	for _, path := range sorted {
-		key := matchers.key(path)
-
-		if _, ok := seen[key]; ok {
-			continue
-		}
-
-		seen[key] = struct{}{}
-
-		folded = append(folded, path)
-	}
-
-	return folded
 }
 
 // simplestSpelling orders two spellings of one rule: a spelling a consumer

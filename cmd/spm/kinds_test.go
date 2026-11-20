@@ -39,9 +39,6 @@ func TestDetectMixedProfileTypes(t *testing.T) {
 		DefaultAction: specs.ActErrno,
 	}))
 	apparmorFile := writeTemp(t, marshal(t, &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{"CHOWN"},
 		},

@@ -22,8 +22,6 @@ package seccomp
 // 2.6.0 or 2.6.1 knows to where those releases place a rule on it, per
 // architecture (see syscallPlacement). Regenerate it with make
 // verify-syscalls.
-//
-//nolint:gochecknoglobals // immutable lookup table
 var syscallPlacements = map[string]syscallPlacement{
 	"_llseek":                      {direct: 0x00717929, kept: 0x000e06d6, viaMux: 0x00000000, reach: 0x00737929},
 	"_newselect":                   {direct: 0x00737fe9, kept: 0x000c0016, viaMux: 0x00000000, reach: 0x00737fe9},

@@ -373,13 +373,13 @@ func nilIfEmpty[T any](items []T) []T {
 // (_LANDLOCK_ACCESS_FS_INITIALLY_DENIED). On Landlock ABI version 1, which
 // does not know the right, moving or linking a file to another directory is
 // always denied, so the rule holds there too.
-func effectiveHandledFS(handled []FSAccessRight) map[FSAccessRight]struct{} {
-	set := toSet(handled)
-	if len(set) > 0 {
-		set[FSAccessRefer] = struct{}{}
+func effectiveHandledFS(handled []FSAccessRight) uint32 {
+	mask := fsBits.mask(handled)
+	if mask != 0 {
+		mask |= fsBits.of(FSAccessRefer)
 	}
 
-	return set
+	return mask
 }
 
 func intersectTwo(left, right *Profile) *Profile {
@@ -391,17 +391,19 @@ func intersectTwo(left, right *Profile) *Profile {
 			left.PathRules, right.PathRules,
 			effectiveHandledFS(left.HandledAccessFS),
 			effectiveHandledFS(right.HandledAccessFS),
-			pathKind(), effectiveFSAccess,
+			pathKind(), fsBits, effectiveFSAccess,
 		),
 		NetRules: intersectRules(
 			left.NetRules, right.NetRules,
-			toSet(left.HandledAccessNet), toSet(right.HandledAccessNet),
-			netKind(), directAccess[uint16, NetAccessRight],
+			netBits.mask(left.HandledAccessNet), netBits.mask(right.HandledAccessNet),
+			netKind(), netBits, directAccess[uint16],
 		),
 	}
 
-	pruneUnhandledRights(result)
-
+	// A right is only kept where a side's rule grants it, and the inputs'
+	// rules grant only rights they handle (foldProfiles prunes them), which
+	// the union of the handled sets above holds: the result needs no
+	// pruning.
 	return result
 }
 
@@ -444,22 +446,21 @@ func rulesGrant(rules []PathRule, right FSAccessRight) bool {
 // key present on either side it computes the rights each side effectively
 // grants there (through the lookup effective prepares for the rules of the
 // side, which may consult ancestor rules) and keeps the rights both sides
-// permit. The handled sets hold the rights each side denies unless a rule
-// grants them.
-func intersectRules[Rule any, Key cmp.Ordered, Right comparable](
-	leftRules, rightRules []Rule,
-	leftHandled, rightHandled map[Right]struct{},
-	kind ruleKind[Rule, Key, Right],
-	effective func(map[Key][]Right) func(Key) []Right,
+// permit: a side permits a right it does not handle or its rules grant. The
+// handled masks hold the rights each side denies unless a rule grants them.
+func intersectRules[Rule any, Key, Right cmp.Ordered](
+	leftRules, rightRules []Rule, leftHandled, rightHandled uint32,
+	kind ruleKind[Rule, Key, Right], numbered rightBits[Right],
+	effective func(map[Key]uint32) func(Key) uint32,
 ) []Rule {
-	leftMap := kind.ruleMap(leftRules)
-	rightMap := kind.ruleMap(rightRules)
-	leftEffective, rightEffective := effective(leftMap), effective(rightMap)
+	leftMasks := ruleMasks(numbered, kind.ruleMap(leftRules))
+	rightMasks := ruleMasks(numbered, kind.ruleMap(rightRules))
+	leftEffective, rightEffective := effective(leftMasks), effective(rightMasks)
 
-	keys := slices.Collect(maps.Keys(leftMap))
+	keys := slices.Collect(maps.Keys(leftMasks))
 
-	for ruleKey := range rightMap {
-		if _, ok := leftMap[ruleKey]; !ok {
+	for ruleKey := range rightMasks {
+		if _, ok := leftMasks[ruleKey]; !ok {
 			keys = append(keys, ruleKey)
 		}
 	}
@@ -467,59 +468,24 @@ func intersectRules[Rule any, Key cmp.Ordered, Right comparable](
 	// The keys are left in map order, as unionRules leaves its rules: no
 	// step of the merge depends on the order of the rules, and
 	// foldProfiles sorts the result once at the end.
-
 	result := make([]Rule, 0, len(keys))
 
 	for _, ruleKey := range keys {
-		granted := intersectAccess(
-			leftEffective(ruleKey), rightEffective(ruleKey),
-			leftHandled, rightHandled,
-		)
-		if len(granted) > 0 {
-			result = append(result, kind.build(ruleKey, granted))
+		left, right := leftEffective(ruleKey), rightEffective(ruleKey)
+
+		granted := (left | right) & (left | ^leftHandled) & (right | ^rightHandled)
+		if granted != 0 {
+			result = append(result, kind.build(ruleKey, numbered.rights(granted)))
 		}
 	}
 
 	return result
 }
 
-// intersectAccess returns the rights permitted by both sides. A side permits
-// a right if it does not handle it (unhandled rights are implicitly allowed)
-// or if its effective rules grant it.
-func intersectAccess[Right comparable](
-	leftAccess, rightAccess []Right,
-	leftHandled, rightHandled map[Right]struct{},
-) []Right {
-	leftSet := toSet(leftAccess)
-	rightSet := toSet(rightAccess)
-
-	var granted []Right
-
-	for _, right := range merge.UnionSlice(leftAccess, rightAccess) {
-		if permits(right, leftSet, leftHandled) && permits(right, rightSet, rightHandled) {
-			granted = append(granted, right)
-		}
-	}
-
-	return granted
-}
-
-func permits[Right comparable](
-	right Right, access, handled map[Right]struct{},
-) bool {
-	if _, ok := handled[right]; !ok {
-		return true
-	}
-
-	_, ok := access[right]
-
-	return ok
-}
-
 // directAccess returns a lookup of the rights of the rule with exactly the
 // given key.
-func directAccess[Key comparable, Right comparable](rules map[Key][]Right) func(Key) []Right {
-	return func(ruleKey Key) []Right { return rules[ruleKey] }
+func directAccess[Key comparable](masks map[Key]uint32) func(Key) uint32 {
+	return func(ruleKey Key) uint32 { return masks[ruleKey] }
 }
 
 // effectiveFSAccess returns a lookup of the rights a profile grants for a
@@ -541,76 +507,81 @@ func directAccess[Key comparable, Right comparable](rules map[Key][]Right) func(
 // a merge does not know. A union settles its moves for both (see
 // unhandleMoveConflicts); the Refer section of the package documentation
 // says what that leaves open for an intersection.
-func effectiveFSAccess(rules map[string][]FSAccessRight) func(string) []FSAccessRight {
-	masks := fsBits.ruleMasks(rules)
-
-	return func(path string) []FSAccessRight {
-		return fsBits.rights(ancestorMask(ancestors(path), masks))
-	}
+func effectiveFSAccess(masks map[string]uint32) func(string) uint32 {
+	return func(path string) uint32 { return ancestorMask(ancestors(path), masks) }
 }
 
-// rightBits numbers filesystem rights, so that sets of them become masks.
-type rightBits map[FSAccessRight]uint32
+// rightBits numbers the rights of one kind, so that sets of them become
+// masks: bit maps each right to its bit, and byBit lists the rights at the
+// positions of their bits, which is their sorted order.
+type rightBits[Right cmp.Ordered] struct {
+	bit   map[Right]uint32
+	byBit []Right
+}
 
 // fsRightsByBit lists every filesystem right this package knows, each at
 // the position of its bit in fsBits.
-//
-//nolint:gochecknoglobals // immutable lookup table derived from fsAccessABI
 var fsRightsByBit = slices.Sorted(maps.Keys(fsAccessABI))
 
-// fsBits numbers every filesystem right this package knows. Validate
+// fsBits and netBits number every right this package knows. Validate
 // rejects any other, so a merge never meets one, and a mask leaves it out.
-//
-//nolint:gochecknoglobals // immutable lookup table derived from fsAccessABI
-var fsBits = newRightBits(fsRightsByBit)
+var (
+	fsBits  = newRightBits(fsRightsByBit)
+	netBits = newRightBits(slices.Sorted(maps.Keys(netAccessABI)))
+)
 
-// newRightBits numbers the rights in their order.
-func newRightBits(rights []FSAccessRight) rightBits {
-	numbered := make(rightBits, len(rights))
+// newRightBits numbers the rights, which are sorted, in their order.
+func newRightBits[Right cmp.Ordered](rights []Right) rightBits[Right] {
+	numbered := rightBits[Right]{bit: make(map[Right]uint32, len(rights)), byBit: rights}
 	for idx, right := range rights {
-		numbered[right] = 1 << idx
+		numbered.bit[right] = 1 << idx
 	}
 
 	return numbered
 }
 
-func (b rightBits) mask(rights []FSAccessRight) uint32 {
+// of returns the bit of a right, or zero for one this package does not
+// know.
+func (b rightBits[Right]) of(right Right) uint32 {
+	return b.bit[right]
+}
+
+func (b rightBits[Right]) mask(rights []Right) uint32 {
 	var mask uint32
 
 	for _, right := range rights {
-		mask |= b[right]
+		mask |= b.bit[right]
 	}
 
 	return mask
 }
 
-// rights returns the rights of fsBits the mask holds, in the order of
-// fsRightsByBit.
-func (b rightBits) rights(mask uint32) []FSAccessRight {
+// rights returns the rights the mask holds, sorted, or nil for none.
+func (b rightBits[Right]) rights(mask uint32) []Right {
 	if mask == 0 {
 		return nil
 	}
 
-	rights := make([]FSAccessRight, 0, bits.OnesCount32(mask))
+	rights := make([]Right, 0, bits.OnesCount32(mask))
 
-	for _, right := range fsRightsByBit {
-		if b[right]&mask != 0 {
-			rights = append(rights, right)
-		}
+	for rest := mask; rest != 0; rest &= rest - 1 {
+		rights = append(rights, b.byBit[bits.TrailingZeros32(rest)])
 	}
 
 	return rights
 }
 
-// ruleMasks maps every rule path to the mask of the rights its rule grants.
+// ruleMasks maps every rule key to the mask of the rights its rule grants.
 // Ancestor lookups then combine masks rather than lists: a profile whose
 // rules nest has every rule as an ancestor of the ones beneath it, and
 // gathering their rights as a list per rule allocated in the square of the
 // rules, six gigabytes for a thousand nested rules ValidateArtifact accepts.
-func (b rightBits) ruleMasks(rules map[string][]FSAccessRight) map[string]uint32 {
-	masks := make(map[string]uint32, len(rules))
-	for path, access := range rules {
-		masks[path] = b.mask(access)
+func ruleMasks[Key comparable, Right cmp.Ordered](
+	numbered rightBits[Right], rules map[Key][]Right,
+) map[Key]uint32 {
+	masks := make(map[Key]uint32, len(rules))
+	for key, access := range rules {
+		masks[key] = numbered.mask(access)
 	}
 
 	return masks
@@ -735,7 +706,7 @@ func minimizePathRules(rules []PathRule) []PathRule {
 		kept := make([]FSAccessRight, 0, len(rule.AccessFS))
 
 		for _, right := range rule.AccessFS {
-			if fsBits[right]&inherited == 0 {
+			if fsBits.of(right)&inherited == 0 {
 				kept = append(kept, right)
 			}
 		}
@@ -854,33 +825,21 @@ func loweredAt(path string, access uint32, inputMasks map[string]uint32) bool {
 	return access&^inputMasks[path]&inherited != 0
 }
 
-// unionRules is a generic union for keyed rule slices.
+// unionRules is a generic union for keyed rule slices. The result shares no
+// slices with the inputs: UnionSlice returns a new one.
 func unionRules[Rule any, Key cmp.Ordered, Right comparable](
 	leftRules, rightRules []Rule, kind ruleKind[Rule, Key, Right],
 ) []Rule {
-	leftMap := kind.ruleMap(leftRules)
-	rightMap := kind.ruleMap(rightRules)
+	leftMap, rightMap := kind.ruleMap(leftRules), kind.ruleMap(rightRules)
+	result := make([]Rule, 0, len(leftMap)+len(rightMap))
 
-	result := make([]Rule, 0, len(leftRules)+len(rightRules))
-
-	for ruleKey, leftAccess := range leftMap {
-		if rightAccess, ok := rightMap[ruleKey]; ok {
-			merged := merge.UnionSlice(leftAccess, rightAccess)
-			if len(merged) > 0 {
-				result = append(result, kind.build(ruleKey, merged))
-			}
-		} else if len(leftAccess) > 0 {
-			result = append(result, kind.build(ruleKey, slices.Clone(leftAccess)))
-		}
+	for ruleKey, access := range leftMap {
+		result = append(result, kind.build(ruleKey, merge.UnionSlice(access, rightMap[ruleKey])))
 	}
 
-	for ruleKey, rightAccess := range rightMap {
-		if _, ok := leftMap[ruleKey]; ok {
-			continue
-		}
-
-		if len(rightAccess) > 0 {
-			result = append(result, kind.build(ruleKey, slices.Clone(rightAccess)))
+	for ruleKey, access := range rightMap {
+		if _, ok := leftMap[ruleKey]; !ok {
+			result = append(result, kind.build(ruleKey, slices.Clone(access)))
 		}
 	}
 
@@ -921,7 +880,7 @@ func (k ruleKind[Rule, Key, Right]) ruleMap(rules []Rule) map[Key][]Right {
 // pathRuleMasks maps every rule path to the mask of the rights its rule
 // grants.
 func pathRuleMasks(rules []PathRule) map[string]uint32 {
-	return fsBits.ruleMasks(pathKind().ruleMap(rules))
+	return ruleMasks(fsBits, pathKind().ruleMap(rules))
 }
 
 // Rule accessor and builder functions for PathRule.
@@ -986,11 +945,11 @@ func cleanPaths(rules []PathRule) []string {
 // the one given, which for a path rule is its cleaned path rather than the
 // path the kind reads. The result shares no slices with the input.
 //
-// The rights of a key that more rules share are gathered with a set of the
-// ones seen, so that each rule costs its own rights: concatenating every
-// rule into the rights gathered so far cost an unvalidated profile, which
-// Diff and LoweredRulePaths read, time and memory in the square of its rules
-// for one path.
+// The rights of a key are appended and deduplicated once at the end, so
+// that each rule costs its own rights: concatenating every rule into the
+// rights gathered so far cost an unvalidated profile, which Diff and
+// LoweredRulePaths read, time and memory in the square of its rules for one
+// path.
 func mergeDuplicateRules[Rule any, Key cmp.Ordered, Right comparable](
 	rules []Rule, kind ruleKind[Rule, Key, Right], key func(int, Rule) Key,
 ) []Rule {
@@ -1002,38 +961,23 @@ func mergeDuplicateRules[Rule any, Key cmp.Ordered, Right comparable](
 	keys := make([]Key, 0, len(rules))
 	rights := make([][]Right, 0, len(rules))
 
-	// The rights seen for each key, made on the first repeat of the key.
-	sets := make(map[int]map[Right]struct{})
-
 	for idx, rule := range rules {
 		ruleKey := key(idx, rule)
 
 		pos, found := seen[ruleKey]
 		if !found {
-			seen[ruleKey] = len(keys)
+			pos = len(keys)
+			seen[ruleKey] = pos
 			keys = append(keys, ruleKey)
-			rights = append(rights, merge.DeduplicateSlice(kind.access(rule)))
-
-			continue
+			rights = append(rights, nil)
 		}
 
-		set, found := sets[pos]
-		if !found {
-			set = toSet(rights[pos])
-			sets[pos] = set
-		}
-
-		for _, right := range kind.access(rule) {
-			if _, dup := set[right]; !dup {
-				set[right] = struct{}{}
-				rights[pos] = append(rights[pos], right)
-			}
-		}
+		rights[pos] = append(rights[pos], kind.access(rule)...)
 	}
 
 	result := make([]Rule, len(keys))
 	for idx, ruleKey := range keys {
-		result[idx] = kind.build(ruleKey, rights[idx])
+		result[idx] = kind.build(ruleKey, merge.DeduplicateSlice(rights[idx]))
 	}
 
 	return result

@@ -234,10 +234,8 @@ type compilerPool struct {
 }
 
 var compilers = &compilerPool{
-	mu:      sync.Mutex{},
-	idle:    nil,
-	slots:   make(chan struct{}, runtime.GOMAXPROCS(0)),
-	scratch: "",
+	mu:    sync.Mutex{},
+	slots: make(chan struct{}, runtime.GOMAXPROCS(0)),
 }
 
 func (p *compilerPool) acquire() (*compileWorker, error) {

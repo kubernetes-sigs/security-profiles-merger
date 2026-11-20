@@ -1,6 +1,8 @@
 # One pull request per ecosystem and week, for updates released at least
 # three days earlier: a release that gets pulled or patched within days
-# never reaches a pull request.
+# never reaches a pull request. Dependabot does not read .go-version, the
+# Go the release is built with, nor the tool pins in the Makefile and the
+# workflows; dependencies.yaml tracks those.
 version: 2
 updates:
   - package-ecosystem: github-actions

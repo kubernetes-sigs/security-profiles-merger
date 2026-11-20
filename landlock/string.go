@@ -20,19 +20,14 @@ import (
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
-// FormatProfile returns a human-readable representation of a Landlock
-// profile, as a single line that is safe to log: a value holding a control
-// character, an invisible rune, a byte that is not valid UTF-8 or the
-// punctuation the format is built from is quoted, and the line is cut at
-// 64 KiB, ending in "... (output truncated)" where it is. No real profile
-// comes near that bound; it is there because an artifact chooses how many
-// rules it holds and how many bytes of their paths need escaping.
-func FormatProfile(profile *Profile) string {
-	return profile.String()
-}
-
-// String returns a human-readable representation of the profile, which is
-// "Profile{<nil>}" for a nil profile, as FormatProfile does.
+// String returns a human-readable representation of the profile, as a
+// single line that is safe to log: a value holding a control character, an
+// invisible rune, a byte that is not valid UTF-8 or the punctuation the
+// format is built from is quoted, and the line is cut at 64 KiB, ending in
+// "... (output truncated)" where it is. No real profile comes near that
+// bound; it is there because an artifact chooses how many rules it holds
+// and how many bytes of their paths need escaping. A nil profile reads
+// "Profile{<nil>}".
 func (p *Profile) String() string {
 	if p == nil {
 		return "Profile{<nil>}"
@@ -72,7 +67,7 @@ func (p *Profile) String() string {
 }
 
 // String returns a human-readable representation of the path rule, quoted
-// and bounded as FormatProfile is.
+// and bounded as Profile.String is.
 func (r PathRule) String() string {
 	var out merge.Builder
 
@@ -89,7 +84,7 @@ func (r PathRule) writeTo(out *merge.Builder) {
 }
 
 // String returns a human-readable representation of the network rule,
-// quoted and bounded as FormatProfile is.
+// quoted and bounded as Profile.String is.
 func (r NetRule) String() string {
 	var out merge.Builder
 

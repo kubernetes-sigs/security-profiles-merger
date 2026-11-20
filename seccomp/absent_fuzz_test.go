@@ -157,6 +157,6 @@ func checkAbsentResult(
 	diff, err := forNode(native).Diff(result, again)
 	if err != nil || !diff.Equal {
 		t.Errorf("%s on %q is not settled: %v %s\n  result: %s",
-			name, native, err, seccomp.FormatDiff(diff), seccomp.FormatProfile(result))
+			name, native, err, diff.String(), seccomp.FormatProfile(result))
 	}
 }

@@ -17,13 +17,11 @@ limitations under the License.
 package seccomp
 
 import (
-	"cmp"
 	"errors"
 	"fmt"
 	"maps"
 	"math"
 	"slices"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -855,18 +853,25 @@ func validateDuplicateNames(profile *specs.LinuxSeccomp) error {
 	return validateDuplicateSyscallNames(profile.Syscalls)
 }
 
-// conflictTracker remembers the rules seen for one syscall name, keyed by
-// their filter and by every filter strictly wider than theirs.
-//
-// A rule has up to 63 such filters, so the maps hold far more keys than
-// there are rules, and a key is kept small: each condition is numbered once
-// per syscall (see filterKey), and each result once (see resultSet), so a
-// map slot takes 16 bytes rather than a string per filter.
+// conflictTracker remembers the rules seen for one syscall name, each as
+// the key of its filter and the number of its result. Each condition is
+// numbered once per syscall (see filterKey), and each result once (see
+// resultOf), so comparing two rules compares a few small numbers. A syscall
+// whose rules are checked loads at most MaxArtifactRulesPerSyscall of them,
+// so comparing each with every rule before it costs some 32 thousand
+// comparisons per syscall and tracker, twice that with the tracker for a
+// 32-bit architecture, and up to some two million for a profile at
+// MaxArtifactRules.
 type conflictTracker struct {
 	conditions map[condition]uint16
 	results    []clause
-	exact      map[filterKey]resultSet
-	narrower   map[filterKey]resultSet
+	rules      []trackedRule
+}
+
+// trackedRule is a rule a conflictTracker has seen.
+type trackedRule struct {
+	key    filterKey
+	result uint16
 }
 
 // condition is one condition of a filter without its argument index, which
@@ -880,53 +885,39 @@ type condition struct {
 // argSlots is how many argument indices a condition can test.
 const argSlots = maxSyscallArgIndex + 1
 
-// filterKey is a rule's filter as a map key: the number of the condition on
-// each argument index, or zero where the index carries none. A rule of a
-// profile that passes Validate has at most one condition per index, so
-// every filter of one has a key, and the key of a subset of its conditions
-// is its own with the other indices cleared, which costs neither an
-// allocation nor a sort. Two filters of one syscall have the same key
-// exactly when sortedArgsKey spells them alike.
+// filterKey is a rule's filter as the number of the condition on each
+// argument index, or zero where the index carries none. A rule of a profile
+// that passes Validate has at most one condition per index, so every filter
+// of one has a key. Two filters of one syscall have the same key exactly
+// when sortedArgsKey spells them alike.
 type filterKey [argSlots]uint16
 
-// subset returns the key of the conditions on the indices in mask.
-func (k filterKey) subset(mask uint8) filterKey {
+// nested reports whether one of the filters k and other is equal to or
+// wider than the other: every condition of one is one of the other's.
+func (k filterKey) nested(other filterKey) bool {
+	kWider, otherWider := true, true
+
 	for idx := range argSlots {
-		if mask&(1<<idx) == 0 {
-			k[idx] = 0
+		if k[idx] == other[idx] {
+			continue
+		}
+
+		kWider = kWider && k[idx] == 0
+		otherWider = otherWider && other[idx] == 0
+
+		if !kWider && !otherWider {
+			return false
 		}
 	}
 
-	return k
-}
-
-// mask returns the indices the key carries a condition on.
-func (k filterKey) mask() uint8 {
-	var mask uint8
-
-	for idx := range argSlots {
-		if k[idx] != 0 {
-			mask |= 1 << idx
-		}
-	}
-
-	return mask
-}
-
-// resultSet summarizes the results of the rules recorded under one key: the
-// number of the result of the first (see conflictTracker.resultOf), and
-// whether a later one differs.
-type resultSet struct {
-	result uint16
-	mixed  bool
+	return true
 }
 
 func newConflictTracker() *conflictTracker {
 	return &conflictTracker{
 		conditions: make(map[condition]uint16),
 		results:    nil,
-		exact:      make(map[filterKey]resultSet),
-		narrower:   make(map[filterKey]resultSet),
+		rules:      nil,
 	}
 }
 
@@ -982,44 +973,6 @@ func (t *conflictTracker) resultOf(next clause) uint16 {
 	return number
 }
 
-// conflictsIn reports whether a rule recorded under key yields a result
-// other than the numbered one.
-func conflictsIn(sets map[filterKey]resultSet, key filterKey, result uint16) bool {
-	current, ok := sets[key]
-
-	return ok && (current.mixed || current.result != result)
-}
-
-func recordResult(sets map[filterKey]resultSet, key filterKey, result uint16) {
-	current, ok := sets[key]
-	if !ok {
-		sets[key] = resultSet{result: result, mixed: false}
-
-		return
-	}
-
-	if !current.mixed && current.result != result {
-		sets[key] = resultSet{result: current.result, mixed: true}
-	}
-}
-
-// forEachProperSubmask calls visit with every proper subset of mask, the
-// empty one included.
-func forEachProperSubmask(mask uint8, visit func(submask uint8)) {
-	if mask == 0 {
-		return
-	}
-
-	for sub := mask; ; {
-		sub = (sub - 1) & mask
-		visit(sub)
-
-		if sub == 0 {
-			return
-		}
-	}
-}
-
 // The numbers operatorCode gives the operators, zero for an unknown one.
 const (
 	opUnknown uint8 = iota
@@ -1058,8 +1011,7 @@ func operatorCode(op specs.LinuxSeccompOperator) uint8 {
 // record stores next and reports whether an earlier rule yields a different
 // result while its filter is equal to, wider than, or narrower than the
 // filter of next. A filter is wider when its conditions are a proper subset
-// of the other's. A rule of a profile that passes Validate has at most one
-// condition per argument index, so it has at most 63 such subsets.
+// of the other's.
 func (t *conflictTracker) record(next clause) bool {
 	key, ok := t.keyOf(next.args)
 	if !ok {
@@ -1069,16 +1021,11 @@ func (t *conflictTracker) record(next clause) bool {
 	}
 
 	result := t.resultOf(next)
-	conflict := conflictsIn(t.exact, key, result) || conflictsIn(t.narrower, key, result)
-
-	forEachProperSubmask(key.mask(), func(submask uint8) {
-		subsetKey := key.subset(submask)
-		conflict = conflict || conflictsIn(t.exact, subsetKey, result)
-
-		recordResult(t.narrower, subsetKey, result)
+	conflict := slices.ContainsFunc(t.rules, func(earlier trackedRule) bool {
+		return earlier.result != result && earlier.key.nested(key)
 	})
 
-	recordResult(t.exact, key, result)
+	t.rules = append(t.rules, trackedRule{key: key, result: result})
 
 	return conflict
 }
@@ -1108,9 +1055,8 @@ type syscallRuleState struct {
 	// trackers find conflicts among the rules as written and as libseccomp
 	// adds them for a 32-bit architecture. They are dropped once the last
 	// rule of the syscall is recorded, or once it is reported, so that
-	// their maps, which hold up to 63 subsets per rule, are held for one
-	// syscall at a time where the entries of a profile come syscall by
-	// syscall, rather than for the whole profile.
+	// they are held for one syscall at a time where the entries of a
+	// profile come syscall by syscall, rather than for the whole profile.
 	trackers [2]*conflictTracker
 	// recorded counts the rules recorded so far.
 	recorded uint64
@@ -1551,154 +1497,61 @@ func validateNoListener(profile *specs.LinuxSeccomp) error {
 	return errs.Err()
 }
 
-// validateDuplicateSyscallNames reports each duplicated syscall name once,
-// at the second entry that names it and listing every entry that does, and
-// separately at each entry that repeats a name within itself. The reports
-// come in the order of the entries they are at.
+// validateDuplicateSyscallNames reports each syscall name several entries
+// name once, at the second of them and naming the first, and separately at
+// each entry that repeats a name within itself. One report per name, rather
+// than one per entry naming it, keeps a name an artifact repeats in every
+// entry from crowding the other problems out of the bounded report. The
+// reports come in the order of the entries and of the names within each.
 func validateDuplicateSyscallNames(syscalls []specs.LinuxSyscall) error {
-	seen := nameOccurrences(syscalls)
+	// The entry that names each name first, or -1 once the name has been
+	// reported as named by several entries.
+	first := make(map[string]int)
 
 	var errs merge.Collector
 
-	for _, current := range duplicateReports(seen) {
-		errs.Report(func() error {
-			if current.within {
-				return fmt.Errorf(
-					"syscalls[%d]: %s: %w (repeated within the entry)",
-					current.entry, merge.QuoteBounded(current.name), ErrDuplicateSyscallName,
-				)
-			}
+	for idx, sc := range syscalls {
+		// Each name of the entry, mapped to whether it was reported as
+		// repeated within the entry.
+		inEntry := make(map[string]bool, len(sc.Names))
 
-			return fmt.Errorf(
-				"syscalls[%d]: %s: %w (named by entries %s)",
-				current.entry, merge.QuoteBounded(current.name), ErrDuplicateSyscallName,
-				formatEntries(seen[current.name].entries),
-			)
-		})
+		for _, name := range sc.Names {
+			reported, again := inEntry[name]
+
+			switch {
+			case again && !reported:
+				inEntry[name] = true
+
+				errs.Report(func() error {
+					return fmt.Errorf("syscalls[%d]: %s: %w (repeated within the entry)",
+						idx, merge.QuoteBounded(name), ErrDuplicateSyscallName)
+				})
+			case again:
+			default:
+				inEntry[name] = false
+
+				earlier, seen := first[name]
+
+				switch {
+				case !seen:
+					first[name] = idx
+
+					continue
+				case earlier < 0:
+					continue
+				}
+
+				first[name] = -1
+
+				errs.Report(func() error {
+					return fmt.Errorf("syscalls[%d]: %s: %w (first named by entry %d)",
+						idx, merge.QuoteBounded(name), ErrDuplicateSyscallName, earlier)
+				})
+			}
+		}
 	}
 
 	return errs.Err()
-}
-
-// nameOccurrence is where one syscall name occurs in a profile.
-type nameOccurrence struct {
-	// entries lists the entries naming it, each once and in order.
-	entries []int
-	// repeatedIn lists the entries naming it more than once, in order.
-	repeatedIn []int
-}
-
-// nameOccurrences maps every syscall name of the entries to where it occurs.
-func nameOccurrences(syscalls []specs.LinuxSyscall) map[string]*nameOccurrence {
-	seen := make(map[string]*nameOccurrence)
-
-	for idx, sc := range syscalls {
-		inEntry := make(map[string]struct{}, len(sc.Names))
-
-		for _, name := range sc.Names {
-			current, ok := seen[name]
-			if !ok {
-				current = &nameOccurrence{entries: nil, repeatedIn: nil}
-				seen[name] = current
-			}
-
-			if _, dup := inEntry[name]; dup {
-				// Entries are visited in order, so an entry already
-				// recorded is the last one.
-				last := len(current.repeatedIn) - 1
-				if last < 0 || current.repeatedIn[last] != idx {
-					current.repeatedIn = append(current.repeatedIn, idx)
-				}
-
-				continue
-			}
-
-			inEntry[name] = struct{}{}
-
-			current.entries = append(current.entries, idx)
-		}
-	}
-
-	return seen
-}
-
-// nameDuplicate is one report of validateDuplicateSyscallNames.
-type nameDuplicate struct {
-	entry int
-	name  string
-	// within reports a name repeated within the entry, rather than one
-	// several entries use.
-	within bool
-}
-
-// duplicateReports lists the reports of validateDuplicateSyscallNames in the
-// order of the entries they are at: one per name that several entries use,
-// and one per entry that repeats a name, so at most as many as the profile
-// holds names.
-func duplicateReports(seen map[string]*nameOccurrence) []nameDuplicate {
-	var found []nameDuplicate
-
-	for name, current := range seen {
-		if len(current.entries) > 1 {
-			found = append(
-				found,
-				nameDuplicate{entry: current.entries[1], name: name, within: false},
-			)
-		}
-
-		for _, idx := range current.repeatedIn {
-			found = append(found, nameDuplicate{entry: idx, name: name, within: true})
-		}
-	}
-
-	slices.SortFunc(found, func(left, right nameDuplicate) int {
-		return cmp.Or(
-			cmp.Compare(left.entry, right.entry),
-			strings.Compare(left.name, right.name),
-			// Several entries naming a name are reported before the
-			// entry repeating it within itself.
-			cmp.Compare(boolRank(left.within), boolRank(right.within)),
-		)
-	})
-
-	return found
-}
-
-// boolRank orders false before true.
-func boolRank(value bool) int {
-	if value {
-		return 1
-	}
-
-	return 0
-}
-
-// maxListedEntries bounds how many entry indices formatEntries lists. One
-// name can sit in as many entries as a profile has, so an error listing all
-// of them would grow with the profile (see merge.MaxJoinedErrors).
-const maxListedEntries = 8
-
-// formatEntries renders entry indices as "0", "0 and 1", or "0, 1 and 2",
-// and past maxListedEntries the first of them followed by how many it left
-// out, as in "0, 1, 2, 3, 4, 5, 6, 7 and 5 more".
-func formatEntries(entries []int) string {
-	listed := min(len(entries), maxListedEntries)
-
-	parts := make([]string, listed)
-	for idx, entry := range entries[:listed] {
-		parts[idx] = strconv.Itoa(entry)
-	}
-
-	if omitted := len(entries) - listed; omitted > 0 {
-		return strings.Join(parts, ", ") + " and " + strconv.Itoa(omitted) + " more"
-	}
-
-	last := len(parts) - 1
-	if last < 1 {
-		return strings.Join(parts, "")
-	}
-
-	return strings.Join(parts[:last], ", ") + " and " + parts[last]
 }
 
 // isKnownAction reports whether this package knows the action.

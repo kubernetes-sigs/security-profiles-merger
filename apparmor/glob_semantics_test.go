@@ -28,10 +28,7 @@ import (
 
 func fsProfile(rules *apparmor.FilesystemRules) *apparmor.Profile {
 	return &apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   rules,
-		Network:      nil,
-		Capabilities: nil,
+		Filesystem: rules,
 	}
 }
 
@@ -39,26 +36,18 @@ func execProfile(paths ...string) *apparmor.Profile {
 	return &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
 			AllowedExecutables: paths,
-			AllowedLibraries:   nil,
 		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
 	}
 }
 
 func readOnly(paths ...string) *apparmor.Profile {
 	return fsProfile(&apparmor.FilesystemRules{
-		ReadOnlyPaths:  paths,
-		WriteOnlyPaths: nil,
-		ReadWritePaths: nil,
+		ReadOnlyPaths: paths,
 	})
 }
 
 func readWrite(paths ...string) *apparmor.Profile {
 	return fsProfile(&apparmor.FilesystemRules{
-		ReadOnlyPaths:  nil,
-		WriteOnlyPaths: nil,
 		ReadWritePaths: paths,
 	})
 }
@@ -76,11 +65,7 @@ func mergeFs(
 	}
 
 	if result.Filesystem == nil {
-		return &apparmor.FilesystemRules{
-			ReadOnlyPaths:  nil,
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
-		}
+		return &apparmor.FilesystemRules{}
 	}
 
 	return result.Filesystem
@@ -295,19 +280,14 @@ func TestUnionPromotedLiteralLeavesWriteOnly(t *testing.T) {
 	t.Parallel()
 
 	globProfile := fsProfile(&apparmor.FilesystemRules{
-		ReadOnlyPaths:  []string{"/etc/*"},
-		WriteOnlyPaths: nil,
-		ReadWritePaths: nil,
+		ReadOnlyPaths: []string{"/etc/*"},
 	})
 	literalProfile := fsProfile(&apparmor.FilesystemRules{
-		ReadOnlyPaths:  nil,
 		WriteOnlyPaths: []string{"/etc/passwd"},
-		ReadWritePaths: nil,
 	})
 	both := fsProfile(&apparmor.FilesystemRules{
 		ReadOnlyPaths:  []string{"/etc/*"},
 		WriteOnlyPaths: []string{"/etc/passwd"},
-		ReadWritePaths: nil,
 	})
 
 	for _, test := range []struct {
@@ -328,7 +308,7 @@ func TestUnionPromotedLiteralLeavesWriteOnly(t *testing.T) {
 			t.Errorf("Union result is invalid: %v", err)
 		}
 
-		if got := apparmor.FormatProfile(result); got != test.want {
+		if got := result.String(); got != test.want {
 			t.Errorf("Union = %s, want %s", got, test.want)
 		}
 	}
@@ -350,8 +330,6 @@ func TestSingleIntersectDropsUnusableGlobs(t *testing.T) {
 			WriteOnlyPaths: []string{"/etc/{a}"},
 			ReadWritePaths: []string{"/tmp/**"},
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	single, err := apparmor.Intersect(profile)
@@ -369,7 +347,7 @@ func TestSingleIntersectDropsUnusableGlobs(t *testing.T) {
 	}
 
 	want := "Profile{exec:/bin/sh r:/etc/passwd rw:/tmp/** net:!raw,!tcp,!udp caps:none}"
-	if got := apparmor.FormatProfile(single); got != want {
+	if got := single.String(); got != want {
 		t.Errorf("Intersect(p) = %s, want %s", got, want)
 	}
 }
@@ -384,7 +362,6 @@ func TestTrailingSlashDistinguishesDirectoryRules(t *testing.T) {
 
 	profile := fsProfile(&apparmor.FilesystemRules{
 		ReadOnlyPaths:  []string{"/var/log/"},
-		WriteOnlyPaths: nil,
 		ReadWritePaths: []string{"/var/log"},
 	})
 
@@ -507,7 +484,6 @@ func TestValidateNormalizesPathsForDuplicateChecks(t *testing.T) {
 
 	profile := fsProfile(&apparmor.FilesystemRules{
 		ReadOnlyPaths:  []string{"/etc/passwd"},
-		WriteOnlyPaths: nil,
 		ReadWritePaths: []string{"/etc//passwd"},
 	})
 
