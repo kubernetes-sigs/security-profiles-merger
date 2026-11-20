@@ -983,6 +983,9 @@ type fsSide struct {
 	// literalBytes and globBytes are the total lengths of the literals and
 	// of the globs of the side, which the work budget weighs.
 	literalBytes, globBytes int
+	// globPerms is the union of what the globs grant, which bounds what
+	// they grant any one literal.
+	globPerms fsPermission
 }
 
 // size is what the budgets weigh of the side.
@@ -1027,6 +1030,7 @@ func buildFsSide(perms map[string]fsPermission, matchers *matcherCache) fsSide {
 
 		literalBytes: 0,
 		globBytes:    0,
+		globPerms:    fsPermission{read: false, write: false},
 	}
 
 	for path, perm := range perms {
@@ -1054,6 +1058,7 @@ func buildFsSide(perms map[string]fsPermission, matchers *matcherCache) fsSide {
 		}
 
 		side.globBytes += len(path)
+		side.globPerms = side.globPerms.union(perm)
 		side.globs[path] = fsPathEntry{path: path, perm: perm, matcher: matcher, mapped: ""}
 		side.byPrefix.add(matcher.prefix, path)
 		side.starStar.addStarStar(path, matcher)

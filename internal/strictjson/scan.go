@@ -67,11 +67,16 @@ type scanFrame struct {
 	// decodes into, behind any pointers; nil for any other type and where
 	// the scan follows no type, which leaves every value inside unchecked.
 	typ reflect.Type
-	// named holds the folded names of the members given a value other than
-	// null, for an object of a struct type with required fields where the
-	// scan looks for missing members; nil otherwise. child is the type of
-	// the value of the member or element that comes next.
+	// named maps the JSON name of each field a member fills to whether the
+	// member is given a value other than null, for an object of a struct
+	// type with required fields where the scan looks for missing members;
+	// nil otherwise. It is keyed by the field rather than the folded member
+	// name, since two fields whose names fold alike are filled apart. field
+	// is the JSON name of the field the member whose value comes next
+	// fills, "" for none, and child the type of the value of the member or
+	// element that comes next.
 	named map[string]bool
+	field string
 	child reflect.Type
 }
 
@@ -248,15 +253,7 @@ func (state *scanState) next(token json.Token, after, end int64) bool {
 	switch {
 	case isClosing(delim):
 		state.stack = state.stack[:len(state.stack)-1]
-
-		if top.named != nil {
-			state.required.reportMissing(
-				top.typ,
-				func() (string, bool) { return memberPath(state.stack) },
-				top.named,
-				&state.scan.missing,
-			)
-		}
+		state.closed(top)
 	case top.expectsKey():
 		key, _ := token.(string)
 		state.member(top, key)
@@ -294,6 +291,7 @@ func (state *scanState) member(frame *scanFrame, key string) {
 	}
 
 	frame.child = nil
+	frame.field = ""
 
 	switch {
 	case frame.typ == nil:
@@ -313,6 +311,43 @@ func (state *scanState) member(frame *scanFrame, key string) {
 		}
 
 		frame.child = field.typ
+
+		if known {
+			frame.fills(field.name)
+		}
+	}
+}
+
+// fills records that the member whose value comes next fills the field of
+// the given JSON name, where the frame looks for missing members. The
+// field counts as named before its value is read: the decoder allocates a
+// struct embedded through a pointer for the member even where its value
+// is null (see reportMissing).
+func (frame *scanFrame) fills(name string) {
+	if frame.named == nil {
+		return
+	}
+
+	frame.field = name
+
+	if _, seen := frame.named[name]; !seen {
+		frame.named[name] = false
+	}
+}
+
+// closed reports, where the scan looks for missing members, the required
+// members of an object of frame left out or null, and those of the elements
+// of a Go array that the array of frame does not give, which encoding/json
+// zeroes.
+func (state *scanState) closed(frame *scanFrame) {
+	path := func() (string, bool) { return memberPath(state.stack) }
+
+	switch {
+	case frame.named != nil:
+		state.required.reportMissing(frame.typ, path, frame.named, &state.scan.missing)
+	case state.checkMissing && frame.typ != nil && frame.typ.Kind() == reflect.Array &&
+		frame.index < frame.typ.Len():
+		state.required.reportZeroElements(frame.typ, frame.index, path, &state.scan.missing)
 	}
 }
 
@@ -327,25 +362,15 @@ func (state *scanState) scalar(top *scanFrame, token json.Token) {
 		top.markNamed()
 	case !state.checkMissing:
 	case top == nil || top.named == nil:
-		state.required.reportNull(
+		// encoding/json leaves a value set to null where nothing else
+		// names it, as an element of a list or a value of a map, as it was.
+		state.required.reportZero(
 			child, func() (string, bool) { return memberPath(state.stack) }, &state.scan.missing,
 		)
 	default:
 		// A member of an object read as null is missing where the object
 		// closes, as one left out is.
 	}
-}
-
-// reportNull collects the required members of a value of type typ that the
-// document sets to null where nothing else names them, as an element of a
-// list or a value of a map: encoding/json leaves a struct there zero. A
-// pointer stays nil and holds nothing to miss.
-func (required *Required) reportNull(typ reflect.Type, path pathOf, found *pathCollector) {
-	if typ == nil || typ.Kind() != reflect.Struct || !required.requiresFields(typ) {
-		return
-	}
-
-	required.reportMissing(typ, path, nil, found)
 }
 
 func isClosing(delim json.Delim) bool {
@@ -357,7 +382,7 @@ func isClosing(delim json.Delim) bool {
 func (state *scanState) newFrame(object bool, typ reflect.Type) *scanFrame {
 	frame := &scanFrame{
 		keys: nil, first: "", member: "", folded: "", index: 0, object: object, wantKey: object,
-		typ: nil, named: nil, child: nil,
+		typ: nil, named: nil, field: "", child: nil,
 	}
 
 	for typ != nil && typ.Kind() == reflect.Pointer {
@@ -407,8 +432,8 @@ func (frame *scanFrame) valueType(target reflect.Type) reflect.Type {
 
 // markNamed records that the member whose value starts next is given one.
 func (frame *scanFrame) markNamed() {
-	if frame != nil && frame.named != nil {
-		frame.named[frame.folded] = true
+	if frame != nil && frame.named != nil && frame.field != "" {
+		frame.named[frame.field] = true
 	}
 }
 

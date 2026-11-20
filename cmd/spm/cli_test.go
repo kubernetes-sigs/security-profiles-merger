@@ -1002,3 +1002,36 @@ func TestEmptyFlagValuesAreRefused(t *testing.T) {
 			code, stdout, stderr)
 	}
 }
+
+// TestFlagValuesAreEscaped covers every flag whose value an error quotes:
+// the value is escaped as merge.QuoteBounded escapes a value of a profile,
+// so that U+3164, which prints as nothing and which %q leaves as it is,
+// shows as an escape, and a long value is cut.
+func TestFlagValuesAreEscaped(t *testing.T) {
+	t.Parallel()
+
+	const invisible = "x\u3164"
+
+	long := strings.Repeat("y", 100)
+
+	for _, args := range [][]string{
+		{cmdValidate, flagType, invisible, testdataSeccompA},
+		{cmdValidate, flagFormat, invisible, testdataSeccompA},
+		{cmdValidate, "--abi", invisible, testdataLandlockA},
+		{cmdValidate, flagStrict, flagArch, invisible, testdataSeccompA},
+		{cmdMerge, flagType, typeSeccomp, "--validate", invisible, testdataSeccompA},
+		{cmdMerge, flagType, typeSeccomp, flagStrategy, invisible, testdataSeccompA},
+		{cmdDiff, flagArch, invisible, testdataSeccompA, testdataSeccompB},
+	} {
+		code, _, stderr := runCapture(t, args, nil)
+		if code != exitUsage || !strings.Contains(stderr, `"x\u3164"`) {
+			t.Errorf("%q: exit code = %d, stderr = %q, want %d and the value escaped",
+				args, code, stderr, exitUsage)
+		}
+	}
+
+	_, _, stderr := runCapture(t, []string{cmdValidate, flagType, long, testdataSeccompA}, nil)
+	if !strings.Contains(stderr, `"`+long[:merge.MaxQuotedBytes]+`"...`) {
+		t.Errorf("a long --type: stderr = %q, want the value cut", stderr)
+	}
+}

@@ -443,7 +443,7 @@ func readFileWithLimit(path string, allowance int) ([]byte, int, error) {
 	switch {
 	case pipe && len(data) == 0:
 		return nil, 0, errNoWriter
-	case len(bytes.TrimSpace(data)) == 0:
+	case len(bytes.Trim(data, strictjson.Space)) == 0:
 		return nil, len(data), errEmptyFile
 	}
 
@@ -541,7 +541,7 @@ func readStdin(reader io.Reader, allowance int) ([]profileInput, int, error) {
 		return nil, len(data), err
 	}
 
-	if len(bytes.TrimSpace(data)) == 0 {
+	if len(bytes.Trim(data, strictjson.Space)) == 0 {
 		return unreadStdin(errEmptyInput), len(data), nil
 	}
 

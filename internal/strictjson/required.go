@@ -19,6 +19,7 @@ package strictjson
 import (
 	"reflect"
 	"slices"
+	"strconv"
 	"sync"
 )
 
@@ -163,21 +164,20 @@ func (required *Required) structHoldsZeroRequired(value reflect.Value) bool {
 }
 
 // layoutMember is a member of a struct type as the missing-member check
-// reads it: its JSON name, folded the way encoding/json matches names, its
-// type and whether it is required.
+// reads it: its JSON name, its type, whether it is required, its index
+// sequence (see visibleField) and gate, the index sequence of the innermost
+// struct embedded through a pointer that holds it, or nil for none.
 type layoutMember struct {
 	name     string
-	folded   string
 	typ      reflect.Type
 	required bool
+	index    []int
+	gate     []int
 }
 
 // structLayout returns the members of a struct type, those of an embedded
 // struct included, which sit in the object of the struct embedding it, in
-// field order, as encoding/json resolves them (see visibleFields). A member
-// of a struct embedded through a pointer is left out: the pointer stays
-// nil, and holds nothing to miss, unless the document names one of its
-// members.
+// field order, as encoding/json resolves them (see visibleFields).
 func (required *Required) structLayout(typ reflect.Type) []layoutMember {
 	table := required.orTags()
 
@@ -193,15 +193,13 @@ func (required *Required) structLayout(typ reflect.Type) []layoutMember {
 
 	for idx := range fields {
 		field := &fields[idx]
-		if field.viaPointer {
-			continue
-		}
 
 		members = append(members, layoutMember{
 			name:     field.name,
-			folded:   foldName(field.name),
 			typ:      field.field.Type,
 			required: table.has(field.owner, &field.field),
+			index:    field.index,
+			gate:     field.gate,
 		})
 	}
 
@@ -211,15 +209,24 @@ func (required *Required) structLayout(typ reflect.Type) []layoutMember {
 }
 
 // reportMissing collects the required members of an object of a struct
-// type at path that named holds no value for, and those of a struct member
-// it holds no object for, whose fields are all zero then. A path is only
-// built for a member the collector keeps, since an object closes with
-// nothing missing far more often than not.
+// type at path that named holds no value for, and those of a struct or
+// array member it holds no value for, whose fields are all zero then (see
+// reportZero). named maps the JSON name of each field a member of the
+// object fills to whether that member is given a value other than null;
+// nil stands for an object naming nothing.
+//
+// A member of a struct embedded through a pointer is only looked for where
+// the decoder allocates that struct, which it does for any member of it
+// the object names, null or not: otherwise the pointer stays nil and holds
+// nothing to miss. A path is only built for a member the collector keeps,
+// since an object closes with nothing missing far more often than not.
 func (required *Required) reportMissing(
 	typ reflect.Type, path pathOf, named map[string]bool, found *pathCollector,
 ) {
-	for _, member := range required.structLayout(typ) {
-		if named[member.folded] {
+	members := required.structLayout(typ)
+
+	for _, member := range members {
+		if named[member.name] || member.gate != nil && !allocated(members, member.gate, named) {
 			continue
 		}
 
@@ -232,8 +239,51 @@ func (required *Required) reportMissing(
 			found.addLazily(memberPath)
 		}
 
-		if member.typ.Kind() == reflect.Struct && required.requiresFields(member.typ) {
-			required.reportMissing(member.typ, memberPath, nil, found)
-		}
+		required.reportZero(member.typ, memberPath, found)
+	}
+}
+
+// allocated reports whether the decoder allocates the struct embedded
+// through a pointer at the index sequence gate: whether named holds a
+// member of it, at any depth.
+func allocated(members []layoutMember, gate []int, named map[string]bool) bool {
+	return slices.ContainsFunc(members, func(member layoutMember) bool {
+		_, given := named[member.name]
+
+		return given && len(member.index) > len(gate) &&
+			slices.Equal(member.index[:len(gate)], gate)
+	})
+}
+
+// reportZero collects the required members of a value of type typ the
+// decoder leaves zero at path: those of a struct, and those of every
+// element of an array, whose elements a zero array holds as zero values.
+// A pointer, slice or map stays nil and holds nothing to miss.
+func (required *Required) reportZero(typ reflect.Type, path pathOf, found *pathCollector) {
+	switch {
+	case typ == nil || !required.requiresFields(typ):
+	case typ.Kind() == reflect.Struct:
+		required.reportMissing(typ, path, nil, found)
+	case typ.Kind() == reflect.Array:
+		required.reportZeroElements(typ, 0, path, found)
+	}
+}
+
+// reportZeroElements is reportZero for the elements of an array of type typ
+// at path from index from on, which encoding/json zeroes where a document
+// gives fewer elements than the array holds.
+func (required *Required) reportZeroElements(
+	typ reflect.Type, from int, path pathOf, found *pathCollector,
+) {
+	if !required.requiresFields(typ.Elem()) {
+		return
+	}
+
+	for idx := from; idx < typ.Len(); idx++ {
+		required.reportZero(typ.Elem(), func() (string, bool) {
+			outer, cut := path()
+
+			return outer + "[" + strconv.Itoa(idx) + "]", cut
+		}, found)
 	}
 }

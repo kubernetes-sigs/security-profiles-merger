@@ -425,3 +425,71 @@ func FuzzUnionSafety(f *testing.F) {
 		checkMergeSafety(t, unionSafety(), left, right, !errnos)
 	})
 }
+
+// TestMergeOfThreeInEveryOrder pins three inputs on which the merges once
+// depended on the order of the inputs, as two inputs never do: a filter
+// that covers "a0 == 0", here "a0 & 1 == 0", was not seen to cover "a0 < 1",
+// which matches the same calls. Union then returned an unconditional ERRNO
+// for read in four of the six orders, although every input kills read(1),
+// and Intersect dropped the TRAP of a0 == 0 in two. Every order must be
+// safe against every input, and the three spellings now give one result.
+func TestMergeOfThreeInEveryOrder(t *testing.T) {
+	t.Parallel()
+
+	kill := specs.ActKillProcess
+	inputs := []*specs.LinuxSeccomp{
+		profileOf(kill, filtered("read", specs.ActTrap, arg(0, specs.OpLessThan, 1))),
+		profileOf(kill, filtered("read", specs.ActTrap, arg(0, specs.OpEqualTo, 0))),
+		profileOf(kill, filtered("read", specs.ActErrno, masked(0, 1, 0))),
+	}
+	orders := [][]int{{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}}
+
+	for _, direction := range []safetyDirection{intersectSafety(), unionSafety()} {
+		first := ""
+
+		for _, order := range orders {
+			ordered := []*specs.LinuxSeccomp{inputs[order[0]], inputs[order[1]], inputs[order[2]]}
+
+			result, err := direction.merge(ordered...)
+			if err != nil {
+				t.Fatalf("%s%v: %v", direction.name, order, err)
+			}
+
+			formatted := seccomp.FormatProfile(result)
+			if first == "" {
+				first = formatted
+			}
+
+			if formatted != first {
+				t.Errorf("%s%v = %s, want %s as in the first order",
+					direction.name, order, formatted, first)
+			}
+
+			checkSafeAgainstEach(t, direction, inputs, result)
+		}
+	}
+}
+
+// checkSafeAgainstEach checks for every sampled call that a merge result is
+// safe against every one of the inputs.
+func checkSafeAgainstEach(
+	t *testing.T, direction safetyDirection, inputs []*specs.LinuxSeccomp,
+	result *specs.LinuxSeccomp,
+) {
+	t.Helper()
+
+	cache := judges{}
+
+	forEachCall(inputs, func(name string, call []uint64) {
+		got := cache.evalCall(t, result, name, call)
+
+		for idx, input := range inputs {
+			verdict := cache.judgeCall(input, name, call)
+			if !direction.safe(got, verdict) {
+				t.Errorf("%s: %s%v yields %s, input %d may yield %v\n  result: %s",
+					direction.name, name, call, got, idx, verdict.possible,
+					seccomp.FormatProfile(result))
+			}
+		}
+	})
+}

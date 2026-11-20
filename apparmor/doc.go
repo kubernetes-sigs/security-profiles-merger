@@ -277,11 +277,11 @@ limitations under the License.
 // Every order is safe: the result permits only what every input permits.
 // Nesting is not the same: Intersect(a, Intersect(b, c)) loses a literal
 // only a lists where the patterns of b and c cancel out. Past the pass
-// budget the literals are those the fold kept, and the compile budget is
-// spent in input order, so a later input's uncompiled pattern matches only
-// its own spelling: a literal it covers is kept in some orders and not
-// others, and some orders may fail with [ErrBudgetExceeded] (see Cost
-// bounds).
+// budget the literals are those the fold kept, which may keep less than
+// every input grants. The compile budget is spent in input order, so a
+// later input's uncompiled pattern matches only its own spelling: a literal
+// it covers is kept in some orders and not others, and some orders may fail
+// with [ErrBudgetExceeded] (see Cost bounds).
 //
 // # Nil and empty sections
 //
@@ -325,9 +325,19 @@ limitations under the License.
 // profiles costs up to three times one list at its budget. The literal pass
 // an intersection ends with (see Filesystem merge) has budgets of the same
 // size, each list its own, so an intersection costs up to six times one
-// list at its budget. Past them the pass leaves the list as the fold
-// returned it, which permits no more than the inputs do, so the pass never
-// makes Intersect fail.
+// list at its budget. The pass looks only for what the fold's entry for a
+// literal lacks, skipping a literal it kept read-write, narrows that by
+// what each input's entry and patterns can grant at most before matching
+// any, and matches a literal against the patterns of the input listing it
+// only where the other inputs grant the literal more than that input
+// lists for it, so a baseline's literals cost it no matches against the
+// baseline's own patterns unless an artifact asks for more on them. Past
+// its budget the pass leaves the list as the fold returned it, which
+// permits no more than the inputs do, so the pass never makes Intersect
+// fail, but a literal then may keep less than every input grants it. A
+// baseline with many literals in directories its patterns cover can make
+// the pass fall back for an artifact asking for more on those literals;
+// [ValidateBaseline] does not detect it.
 //
 // Every pattern is compiled before it is matched, at a cost in time and
 // memory proportional to its length. A call compiles each pattern once, up

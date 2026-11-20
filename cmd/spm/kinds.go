@@ -27,6 +27,7 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 	"sigs.k8s.io/security-profiles-merger/internal/strictjson"
 	"sigs.k8s.io/security-profiles-merger/landlock"
 	"sigs.k8s.io/security-profiles-merger/seccomp"
@@ -344,7 +345,7 @@ func (ops kindOps[T, D]) mergeCommand(
 	mergeFn, known := ops.mergeFn(strategy)
 	if !known {
 		// runMerge checks the strategy before reading any input.
-		_, _ = fmt.Fprintf(inv.stderr, "error: unknown strategy %q\n", strategy)
+		_, _ = fmt.Fprintf(inv.stderr, "error: unknown strategy %s\n", merge.QuoteBounded(strategy))
 
 		return exitUsage
 	}
@@ -632,7 +633,8 @@ func unknownType(stderr io.Writer, name string) int {
 // unknownTypeError says that no profile type has the given name.
 func unknownTypeError(name string) error {
 	return &detectionError{text: fmt.Sprintf(
-		"unknown type %q (use %s, %s, or %s)", name, typeSeccomp, typeAppArmor, typeLandlock,
+		"unknown type %s (use %s, %s, or %s)",
+		merge.QuoteBounded(name), typeSeccomp, typeAppArmor, typeLandlock,
 	)}
 }
 

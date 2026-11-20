@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -174,5 +175,47 @@ func TestUnmarshalAllReportsEveryInput(t *testing.T) {
 		"error: profile2.json: line 1, column 18: defaultAction: want a string, got number\n"
 	if decoded || stderr != want {
 		t.Errorf("decoded = %v, stderr = %q, want a failure and %q", decoded, stderr, want)
+	}
+}
+
+// TestInvalidUTF8CountsBytesOfTheInput covers the offset an invalid UTF-8
+// finding names: of a file, the byte in the file, and of an element of a
+// stdin array, the byte in the array, as a decode error counts lines and
+// columns of the array, whether the finding is a warning or, with --strict,
+// an error.
+func TestInvalidUTF8CountsBytesOfTheInput(t *testing.T) {
+	t.Parallel()
+
+	const (
+		element = `{"defaultAction":"SCMP_ACT_ERRNO","listenerMetadata":"` + "\xff" + `"}`
+		first   = `{"defaultAction":"SCMP_ACT_ERRNO"}`
+		message = "invalid UTF-8, which the JSON decoder replaces with U+FFFD, " +
+			"so distinct profiles can decode alike (first at byte "
+	)
+
+	file := writeTemp(t, element)
+	array := "[" + first + ",\n " + element + "]"
+	inArray := len("[" + first + ",\n ")
+
+	for _, test := range []struct {
+		args  []string
+		stdin string
+		want  string
+	}{
+		{[]string{file}, "", "warning: " + file + ": " + message + "54)\n"},
+		{[]string{flagStrict, file}, "", "error: " + file + ": " + message + "54)\n"},
+		{[]string{stdinArg}, array, "warning: stdin[1]: " + message + strconv.Itoa(inArray+54) + ")\n"},
+		{
+			[]string{flagStrict, stdinArg},
+			array,
+			"error: stdin[1]: " + message + strconv.Itoa(inArray+54) + ")\n",
+		},
+	} {
+		_, _, stderr := runCapture(t,
+			append([]string{cmdValidate, flagType, typeSeccomp, "--quiet"}, test.args...),
+			strings.NewReader(test.stdin))
+		if stderr != test.want {
+			t.Errorf("%q: stderr = %q, want %q", test.args, stderr, test.want)
+		}
 	}
 }

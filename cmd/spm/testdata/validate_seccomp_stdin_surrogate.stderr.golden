@@ -1,0 +1,1 @@
+warning: stdin[1]: invalid UTF-8, which the JSON decoder replaces with U+FFFD, so distinct profiles can decode alike (lone surrogate escape at byte 100)

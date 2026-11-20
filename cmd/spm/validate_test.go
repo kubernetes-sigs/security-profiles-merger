@@ -1123,6 +1123,19 @@ func TestValidateBaselineAndABI(t *testing.T) {
 			want:     `error: invalid Landlock ABI version "+6" (use a whole number from 1 on)` + "\n",
 		},
 		{
+			name:     "an --abi past the range of an int",
+			args:     []string{"--abi", "99999999999999999999", scoped},
+			wantCode: exitUsage,
+			want:     `error: invalid Landlock ABI version "99999999999999999999" (too large)` + "\n",
+		},
+		{
+			name:     "a negative --abi past the range of an int",
+			args:     []string{"--abi", "-99999999999999999999", scoped},
+			wantCode: exitUsage,
+			want: `error: invalid Landlock ABI version "-99999999999999999999" ` +
+				"(use a whole number from 1 on)\n",
+		},
+		{
 			name:     "--baseline with --artifact",
 			args:     []string{"--baseline", "--artifact", scoped},
 			wantCode: exitUsage,

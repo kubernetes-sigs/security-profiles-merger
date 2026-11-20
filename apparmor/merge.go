@@ -59,8 +59,10 @@ type InputError = spm.InputError
 // where every input permits it, the merge KEP-6061 defines for a CRI
 // runtime combining an artifact with its baseline. Each input is validated
 // as the Validation section describes, every failing one reported as an
-// InputError, and past a budget Intersect fails with ErrBudgetExceeded
-// when the result may lose access (see the Cost bounds section). A nil
+// InputError, and past the budget of a merge step Intersect fails with
+// ErrBudgetExceeded when the result may lose access, while past the budget
+// of the literal pass it ends with, a literal keeps what the fold kept
+// (see the Cost bounds section). A nil
 // section counts as an explicit empty one, the result carries every
 // section, and capability names come back lower-cased. Within the budgets,
 // what the result permits on every literal path an input lists does not
@@ -111,6 +113,11 @@ func Union(profiles ...*Profile) (*Profile, error) {
 //     diff is reported with ErrInexactBaseline and the diff in the message:
 //     it names what every merge with this baseline takes away, such as a
 //     pattern apparmor_parser rejects.
+//
+// It does not detect a baseline with many literal paths in directories its
+// patterns cover, which can make the literal pass of an intersection fall
+// back for an artifact: the result then may keep less on those literals
+// than every input grants, never more (see the Cost bounds section).
 //
 // See
 // https://github.com/kubernetes-sigs/security-profiles-merger/blob/main/docs/integration.md#the-runtime-flow
@@ -580,7 +587,8 @@ var permLists = []struct {
 //
 // The pass charges its comparisons to a budget of its own, as the fold
 // charges each step (see matchBudget), and leaves a list as the fold
-// returned it where the pass would run past that budget.
+// returned it where the pass would run past that budget: the result then
+// grants a literal no more than every input does, and may keep less on it.
 func keepGrantedLiterals(result *Profile, inputs []*Profile, matchers *matcherCache) {
 	for _, list := range permLists {
 		perms := make([]map[string]fsPermission, len(inputs))
@@ -631,12 +639,12 @@ func addPerms(perms, more map[string]fsPermission) map[string]fsPermission {
 }
 
 // missingLiteralGrants returns, for every literal path one of the inputs
-// lists, the permissions every input grants it that the patterns of kept,
-// the result of the fold, do not, leaving out the paths that need nothing,
-// and false where matching ran past the budget. Every path is matched
-// against every input, without stopping at the first input that grants
-// nothing, so that what the budget is charged does not depend on the order
-// of the inputs.
+// lists, the permissions every input grants it that kept, the result of
+// the fold, does not, through its entry for the path or its patterns,
+// leaving out the paths that need nothing, and false where matching ran
+// past the budget. Given kept, what the budget is charged does not depend
+// on the order of the inputs (see literalGrant); kept, the fold's result,
+// depends on that order for three inputs or more.
 func missingLiteralGrants(
 	inputs []map[string]fsPermission, kept map[string]fsPermission, matchers *matcherCache,
 ) (map[string]fsPermission, bool) {
@@ -657,27 +665,12 @@ func missingLiteralGrants(
 				continue
 			}
 
-			perm := permReadWrite
-
-			for idx := range sides {
-				if !budget.charge(1, 0) {
-					return nil, false
-				}
-
-				byGlobs, within := sides[idx].grants(literal, budget)
-				if !within {
-					return nil, false
-				}
-
-				perm = perm.intersect(inputs[idx][literal.path].union(byGlobs))
-			}
-
-			byKept, within := keptSide.grants(literal, budget)
+			perm, within := missingGrant(literal, inputs, sides, kept, &keptSide, budget)
 			if !within {
 				return nil, false
 			}
 
-			missing[literal.path] = perm.without(byKept)
+			missing[literal.path] = perm
 		}
 	}
 
@@ -686,6 +679,106 @@ func missingLiteralGrants(
 	})
 
 	return missing, true
+}
+
+// missingGrant returns what missingLiteralGrants returns for one literal,
+// and false where matching ran past the budget. What the fold kept on the
+// literal's own entry needs no adding, so a literal kept read-write costs
+// the pass nothing, and the patterns of kept are matched only where they
+// can grant some of what every input grants beyond that entry.
+func missingGrant(
+	literal fsPathEntry, inputs []map[string]fsPermission, sides []fsSide,
+	kept map[string]fsPermission, keptSide *fsSide, budget *matchBudget,
+) (fsPermission, bool) {
+	possible := permReadWrite.without(kept[literal.path])
+	if !possible.read && !possible.write {
+		return possible, true
+	}
+
+	perm, within := literalGrant(literal, possible, inputs, sides, budget)
+	if !within || !anyPerm(perm.intersect(keptSide.globPerms)) {
+		return perm, within
+	}
+
+	byKept, within := keptSide.grants(literal, budget)
+
+	return perm.without(byKept), within
+}
+
+// literalGrant returns the permissions of possible every input grants a
+// literal: what an input lists for the literal itself, joined with what
+// its patterns that match the literal grant. It first narrows possible by
+// what each input can grant at most, its entry and the union of what its
+// patterns grant, which costs no matching and is all a literal needs where
+// one input's patterns grant nothing more than the literal already has.
+// It then matches the literal against the patterns of every input that
+// does not list it, and against the patterns of an input that lists it
+// only where that input's own entry does not grant all the others grant
+// together: such an input grants the literal at least its entry, so where
+// the entry grants that much, the input takes nothing away and its
+// patterns need not be matched. That keeps the pass from paying for a
+// baseline's literals against its own patterns, which no fold step matches
+// and which for many of both under one directory costs more than the
+// budget, where the artifact asks for no more on them. Every input of each
+// kind is matched, without stopping at the first that grants nothing, so
+// that the charge does not depend on the order of the inputs.
+func literalGrant(
+	literal fsPathEntry, possible fsPermission, inputs []map[string]fsPermission, sides []fsSide,
+	budget *matchBudget,
+) (fsPermission, bool) {
+	for idx := range sides {
+		possible = possible.intersect(inputs[idx][literal.path].union(sides[idx].globPerms))
+	}
+
+	if !anyPerm(possible) {
+		return possible, true
+	}
+
+	for idx := range sides {
+		if _, listed := inputs[idx][literal.path]; listed {
+			continue
+		}
+
+		byGlobs, within := chargedGrants(&sides[idx], literal, budget)
+		if !within {
+			return fsPermission{read: false, write: false}, false
+		}
+
+		possible = possible.intersect(byGlobs)
+	}
+
+	perm := possible
+
+	for idx := range sides {
+		own, listed := inputs[idx][literal.path]
+		if !listed || !anyPerm(possible.without(own)) {
+			continue
+		}
+
+		byGlobs, within := chargedGrants(&sides[idx], literal, budget)
+		if !within {
+			return fsPermission{read: false, write: false}, false
+		}
+
+		perm = perm.intersect(own.union(byGlobs))
+	}
+
+	return perm, true
+}
+
+// anyPerm reports whether perm grants anything.
+func anyPerm(perm fsPermission) bool {
+	return perm.read || perm.write
+}
+
+// chargedGrants is fsSide.grants, charging the budget one comparison for
+// looking at the side at all.
+func chargedGrants(side *fsSide, literal fsPathEntry, budget *matchBudget) (fsPermission, bool) {
+	if !budget.charge(1, 0) {
+		return fsPermission{read: false, write: false}, false
+	}
+
+	return side.grants(literal, budget)
 }
 
 // populateEmpty replaces every nil section of the profile with an explicit

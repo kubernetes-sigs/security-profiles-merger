@@ -368,6 +368,12 @@ func TestCondImpliesIsSound(t *testing.T) {
 			true,
 		},
 		{
+			"a range of one value implies what its equality implies",
+			cond(specs.OpLessThan, 1),
+			specs.LinuxSeccompArg{Index: 0, Value: 1, ValueTwo: 0, Op: specs.OpMaskedEqual},
+			true,
+		},
+		{
 			// On a 32-bit architecture the first matches 40.
 			"a wide value implies nothing",
 			cond(specs.OpEqualTo, 0x100000028), cond(specs.OpNotEqual, 40), false,
@@ -375,6 +381,32 @@ func TestCondImpliesIsSound(t *testing.T) {
 	} {
 		if got := condImplies(test.strong, test.weak); got != test.want {
 			t.Errorf("%s: condImplies = %v, want %v", test.name, got, test.want)
+		}
+	}
+}
+
+// TestCondImpliesIsTransitive checks that condImplies, over every
+// condition of a small domain, sees an implication it sees through a third
+// condition: one it missed there made argsCover tell spellings of one
+// filter apart, such as "a0 < 1" and "a0 == 0", and a merge of three inputs
+// depend on their order.
+func TestCondImpliesIsTransitive(t *testing.T) {
+	t.Parallel()
+
+	conds := smallConditions()
+
+	for _, strong := range conds {
+		for _, middle := range conds {
+			if !condImplies(strong, middle) {
+				continue
+			}
+
+			for _, weak := range conds {
+				if condImplies(middle, weak) && !condImplies(strong, weak) {
+					t.Errorf("%+v implies %+v, which implies %+v, but not that",
+						strong, middle, weak)
+				}
+			}
 		}
 	}
 }

@@ -81,7 +81,7 @@ func main() {
 func validateFormat(format string, stderr io.Writer) int {
 	if format != formatJSON && format != formatHuman {
 		_, _ = fmt.Fprintf(
-			stderr, "error: unknown format %q (use json or human)\n", format,
+			stderr, "error: unknown format %s (use json or human)\n", merge.QuoteBounded(format),
 		)
 
 		return exitUsage

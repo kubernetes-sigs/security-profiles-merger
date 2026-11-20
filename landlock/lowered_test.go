@@ -470,6 +470,19 @@ func TestLoweredRulePathsRootAncestor(t *testing.T) {
 			},
 			want: []landlock.LoweredPath{{Path: "/data/f", Ancestor: "/data", Input: 1}},
 		},
+		// The first input has a rule on /data too, but grants what it does
+		// there on "/" as well, and its write comes from /data/sub.
+		"an earlier input's rule on the ancestor": {
+			inputs: []*landlock.Profile{
+				fsProfile(readWrite,
+					landlock.PathRule{Path: "/", AccessFS: read},
+					landlock.PathRule{Path: "/data", AccessFS: read},
+					landlock.PathRule{Path: "/data/sub", AccessFS: write}),
+				fsProfile(readWrite, landlock.PathRule{Path: "/data", AccessFS: readWrite}),
+				fsProfile(readWrite, landlock.PathRule{Path: "/data/sub/f", AccessFS: readWrite}),
+			},
+			want: []landlock.LoweredPath{{Path: "/data/sub/f", Ancestor: "/data", Input: 1}},
+		},
 	}
 
 	for name, test := range tests {

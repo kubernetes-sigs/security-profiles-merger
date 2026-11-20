@@ -90,14 +90,28 @@ func unmarshalOne[T any](input *profileInput, strict bool, warn func(error)) (*T
 	}
 
 	for finding := range strictjson.Findings(input.data, profile, hint, requiredOf[T]()) {
+		err = input.utf8InSource(finding.Err)
 		if rejects(strict, finding.Kind) {
-			return nil, finding.Err
+			return nil, err
 		}
 
-		warn(finding.Err)
+		warn(err)
 	}
 
 	return profile, nil
+}
+
+// utf8InSource returns err, and for an invalid UTF-8 finding of an element
+// of a stdin array the same finding at the offset of the byte in the array,
+// so that it counts bytes of what was read, as the line and column of a
+// decode error do (see profileInput.position).
+func (input *profileInput) utf8InSource(err error) error {
+	var utf8Err *strictjson.UTF8Error
+	if input.offset == 0 || !errors.As(err, &utf8Err) {
+		return err
+	}
+
+	return &strictjson.UTF8Error{Offset: utf8Err.Offset + input.offset, Escape: utf8Err.Escape}
 }
 
 // requiredOf returns the members the profile type requires besides those
