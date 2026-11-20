@@ -116,6 +116,7 @@ func testInvocation(inputs []profileInput) *invocation {
 		kind:        nil,
 		checks:      nil,
 		arch:        archOption{named: false, value: seccomp.ForAnyArch()},
+		abi:         0,
 		format:      formatJSON,
 		out:         bytes.Buffer{},
 		stdout:      io.Discard,

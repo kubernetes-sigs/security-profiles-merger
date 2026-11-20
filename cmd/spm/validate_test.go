@@ -672,7 +672,7 @@ func TestArchErrorsForMergeAndValidate(t *testing.T) {
 		},
 		{
 			[]string{cmdValidate, flagArch, archNative, apparmorA},
-			"--arch only applies with --strict or --artifact",
+			"--arch only applies with --strict, --artifact or --baseline",
 		},
 		{
 			[]string{cmdValidate, "--artifact", flagArch, archNative, apparmorA},
@@ -887,7 +887,7 @@ func TestUsageErrorsAfterABadInput(t *testing.T) {
 		{
 			name: "--arch for a type without architectures",
 			args: []string{cmdValidate, flagStrict, flagArch, "SCMP_ARCH_X86_64", bad, landlockProfile},
-			want: "auto-detected profile type: landlock\n" + parseError +
+			want: parseError +
 				"error: --arch only applies to seccomp profiles\n",
 		},
 	} {
@@ -1048,5 +1048,119 @@ func TestValidateListOfTheWrongLengthUsesItsWeakestMode(t *testing.T) {
 			t.Errorf("--validate %s: exit code = %d, stderr = %q, want %d and %q",
 				test.modes, code, stderr, test.code, test.want)
 		}
+	}
+}
+
+// TestValidateBaselineAndABI covers --baseline, which checks a baseline as
+// a runtime does at config load, and --abi, which names the Landlock ABI
+// version of the kernel: what each refuses that the default checks accept,
+// and the flags they cannot be combined with.
+func TestValidateBaselineAndABI(t *testing.T) {
+	t.Parallel()
+
+	relative := writeTemp(t, `{"handledAccessFs":["read_file"],`+
+		`"pathRules":[{"path":"usr","accessFs":["read_file"]}]}`)
+	scoped := writeTemp(t, `{"scoped":["signal"]}`)
+	unhandled := writeTemp(t, `{"handledAccessFs":["read_file"],`+
+		`"pathRules":[{"path":"/usr","accessFs":["write_file"]}]}`)
+	unquotable := writeTemp(t, `{"filesystem":{"readOnlyPaths":["/a{b,,c}"]}}`)
+
+	for _, test := range []struct {
+		name     string
+		args     []string
+		wantCode int
+		want     string
+	}{
+		{
+			name:     "a relative Landlock path passes the default checks",
+			args:     []string{relative},
+			wantCode: 0,
+		},
+		{
+			name:     "a relative Landlock path fails --baseline",
+			args:     []string{"--baseline", relative},
+			wantCode: 1,
+			want:     "pathRules[0].path",
+		},
+		{
+			name:     "an AppArmor path QuotePath refuses passes the default checks",
+			args:     []string{unquotable},
+			wantCode: 0,
+		},
+		{
+			name:     "an AppArmor path QuotePath refuses fails --baseline",
+			args:     []string{"--baseline", unquotable},
+			wantCode: 1,
+			want:     `filesystem.readOnlyPaths[0]: "/a{b,,c}"`,
+		},
+		{
+			name:     "a right a kernel does not know fails --abi",
+			args:     []string{"--abi", "5", scoped},
+			wantCode: 1,
+			want:     `scoped[0]: "signal": access right needs a newer Landlock ABI (needs v6, have v5)`,
+		},
+		{
+			name:     "the kernel that knows it passes",
+			args:     []string{"--abi", "6", scoped},
+			wantCode: 0,
+		},
+		{
+			name:     "--abi for another profile type",
+			args:     []string{"--abi", "6", testdataSeccompA},
+			wantCode: exitUsage,
+			want:     "error: " + errABINotApplicable.Error() + "\n",
+		},
+		{
+			name:     "an --abi that names no version",
+			args:     []string{"--abi", "0", scoped},
+			wantCode: exitUsage,
+			want:     `error: invalid Landlock ABI version "0" (use a whole number from 1 on)` + "\n",
+		},
+		{
+			name:     "an --abi with a sign",
+			args:     []string{"--abi", "+6", scoped},
+			wantCode: exitUsage,
+			want:     `error: invalid Landlock ABI version "+6" (use a whole number from 1 on)` + "\n",
+		},
+		{
+			name:     "--baseline with --artifact",
+			args:     []string{"--baseline", "--artifact", scoped},
+			wantCode: exitUsage,
+			want:     "error: --baseline cannot be combined with --strict or --artifact\n",
+		},
+		{
+			name:     "--arch with --baseline",
+			args:     []string{"--baseline", flagArch, "SCMP_ARCH_X86_64", testdataSeccompA},
+			wantCode: 0,
+		},
+		{
+			name:     "a value above 32 bits on a 32-bit node fails --baseline",
+			args:     []string{"--baseline", flagArch, "SCMP_ARCH_X86", testdataSeccompWideValue},
+			wantCode: 1,
+			want:     "baseline holds rules the merge does not read exactly: next to an artifact",
+		},
+		{
+			name:     "a Landlock rule granting a right the baseline does not handle fails --baseline",
+			args:     []string{"--baseline", unhandled},
+			wantCode: 1,
+			want:     "pathRules[0]",
+		},
+		{
+			name:     "and passes the default checks",
+			args:     []string{unhandled},
+			wantCode: 0,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			code, _, stderr := runCapture(t,
+				append([]string{cmdValidate, "--quiet"}, test.args...), nil)
+			if code != test.wantCode || !strings.Contains(stderr, test.want) ||
+				test.want == "" && stderr != "" {
+				t.Errorf("exit code = %d, stderr = %q, want %d and %q",
+					code, stderr, test.wantCode, test.want)
+			}
+		})
 	}
 }

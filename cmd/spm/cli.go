@@ -31,6 +31,7 @@ import (
 	"unicode/utf8"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/landlock"
 )
 
 // newFlagSet returns a flag set for a subcommand. The flag package prints
@@ -76,7 +77,8 @@ func (opts *commonOptions) bind(flags *flag.FlagSet, result, outputDefault, arch
 	)
 	flags.StringVar(&opts.format, "format", formatJSON, "output format: json, human")
 	flags.StringVar(
-		&opts.output, "output", "", "write output to file (default: "+outputDefault+")",
+		&opts.output, "output", "",
+		"write output to file, or to stdout with - (default: "+outputDefault+")",
 	)
 	flags.BoolVar(
 		&opts.noDetectNote, "no-detect-note", false,
@@ -91,6 +93,23 @@ func (opts *commonOptions) checkFlags(_ *flag.FlagSet, stderr io.Writer) int {
 	return opts.check(stderr)
 }
 
+// checkEmpty refuses --type and --output given an empty value, which would
+// otherwise read as the flag left out: an unset variable in a script that
+// meant to name a file would write to stdout, and one that meant to name a
+// type would detect it. An empty file argument is refused the same way.
+func (opts *commonOptions) checkEmpty(flags *flag.FlagSet, stderr io.Writer) int {
+	switch {
+	case opts.profileType == "" && flagNamed(flags, "type"):
+		_, _ = fmt.Fprintln(stderr, "error: --type is empty (leave it out to detect the type)")
+	case opts.output == "" && flagNamed(flags, "output"):
+		_, _ = fmt.Fprintln(stderr, "error: --output is empty (use - for stdout)")
+	default:
+		return 0
+	}
+
+	return exitUsage
+}
+
 // check reports a --format or --type value no command takes.
 func (opts *commonOptions) check(stderr io.Writer) int {
 	if code := validateFormat(opts.format, stderr); code != 0 {
@@ -102,9 +121,9 @@ func (opts *commonOptions) check(stderr io.Writer) int {
 
 // parseFlags parses a subcommand's arguments. Requested help goes to stdout
 // and exits 0. A parse error is reported on stderr, followed by the usage,
-// and exits with the usage code. The error quotes the argument it is about,
-// which the caller chose, so it is written the way every other argument is
-// (see merge.SafeName), and with the dashes the caller wrote (see
+// and exits with the usage code. The error names the argument it is about,
+// which the caller chose, so that is written the way every other argument
+// is (see merge.SafeName), and with the dashes the caller wrote (see
 // flagAsWritten). The first result reports whether the command should stop
 // with the second.
 func parseFlags(
@@ -119,7 +138,7 @@ func parseFlags(
 		return true, printHelp(usageWithFlags(flags, usageText), stdout, stderr)
 	}
 
-	_, _ = fmt.Fprintln(stderr, "error: "+merge.SafeName(flagAsWritten(err.Error(), args)))
+	_, _ = fmt.Fprintln(stderr, "error: "+flagAsWritten(err.Error(), args))
 
 	printUsage(flags, usageText, stderr)
 
@@ -133,6 +152,12 @@ func parseFlags(
 // written with the two dashes the usage and the documentation spell a flag
 // with. The name follows one of a few phrases; the last of them in the
 // message is taken, since a value the error quotes comes before it.
+//
+// The name is written as merge.SafeName writes an argument, quoted only
+// when it holds a character that does not print as itself, and the rest of
+// the message is left as it is: a value the flag package quotes is escaped
+// already. The argument of a "bad flag syntax" error is written the same
+// way, and a message of another shape is quoted whole where it needs it.
 func flagAsWritten(message string, args []string) string {
 	found, start, last := -1, 0, false
 
@@ -154,7 +179,11 @@ func flagAsWritten(message string, args []string) string {
 	}
 
 	if found < 0 {
-		return message
+		if syntax, ok := strings.CutPrefix(message, badFlagSyntax); ok {
+			return badFlagSyntax + merge.SafeName(syntax)
+		}
+
+		return merge.SafeName(message)
 	}
 
 	name := message[start+1:]
@@ -162,8 +191,14 @@ func flagAsWritten(message string, args []string) string {
 		name, _, _ = strings.Cut(name, ": ")
 	}
 
-	return message[:start] + writtenFlag(name, args) + message[start+1+len(name):]
+	return message[:start] + merge.SafeName(writtenFlag(name, args)) +
+		message[start+1+len(name):]
 }
+
+// badFlagSyntax starts the error of the flag package about an argument it
+// cannot parse as a flag, such as "---x", which it follows with the
+// argument as it is.
+const badFlagSyntax = "bad flag syntax: "
 
 // writtenFlag returns the flag of the given name as the arguments spell it,
 // with one dash or two, or with two when they do not show it.
@@ -371,6 +406,8 @@ type invocation struct {
 	// inputs disagree on the type needs before it has a kind.
 	checks *inputChecks
 	arch   archOption
+	// abi is the Landlock ABI version validate --abi names, or 0 for none.
+	abi    landlock.ABIVersion
 	format string
 	// out holds what the command writes on success, which flushOutput then
 	// writes to stdout or to the --output file, so that a failed run never
@@ -404,11 +441,15 @@ func startCommand(
 		return nil, code
 	}
 
-	if code := opts.checkFlags(flags, stderr); code != 0 {
+	common := opts.common()
+
+	if code := common.checkEmpty(flags, stderr); code != 0 {
 		return nil, code
 	}
 
-	common := opts.common()
+	if code := opts.checkFlags(flags, stderr); code != 0 {
+		return nil, code
+	}
 
 	arch, code := parseArchFlag(flags, common.arch, stderr)
 	if code != 0 {
@@ -434,6 +475,7 @@ func startCommand(
 		kind:        nil,
 		checks:      nil,
 		arch:        arch,
+		abi:         0,
 		format:      common.format,
 		out:         bytes.Buffer{},
 		stdout:      stdout,

@@ -42,6 +42,7 @@ const (
 
 var (
 	errDuplicateStdin = errors.New("stdin (\"-\") can only be specified once")
+	errStdinReadTwice = errors.New("stdin can only be read once")
 	errEmptyInput     = errors.New("no input provided")
 	errEmptyFile      = errors.New("file is empty")
 	errEmptyArgument  = errors.New("empty file argument (use - for stdin)")
@@ -50,15 +51,17 @@ var (
 	errNoWriter       = errors.New("FIFO has no writer (nothing was written)")
 )
 
-// The inputs past the limits (see inputLimitError).
+// The inputs past the limits (see inputLimitError). One that a single
+// input is past names it, as every error about an input does: stdin here,
+// and a file by its path where readFileInput returns errFileTooLarge.
 var (
 	errTooManyFiles  = newInputLimitError("too many input files (max %d)", maxInputFiles)
-	errTooManyStdin  = newInputLimitError("too many profiles on stdin (max %d)", maxInputFiles)
+	errTooManyStdin  = newInputLimitError(stdinName+": too many profiles (max %d)", maxInputFiles)
 	errTooManyInputs = newInputLimitError(
 		"too many profiles (max %d, counting each element of a stdin array and each file)",
 		maxInputFiles,
 	)
-	errStdinTooLarge = newInputLimitError("stdin input exceeds %d bytes", maxInputSize)
+	errStdinTooLarge = newInputLimitError(stdinName+": input exceeds %d byte limit", maxInputSize)
 	errFileTooLarge  = newInputLimitError("file exceeds %d byte limit", maxInputSize)
 	errInputTooLarge = newInputLimitError("inputs exceed %d bytes in total", maxTotalInputSize)
 )
@@ -172,31 +175,39 @@ func (input *profileInput) position(offset int64) string {
 // Every error it returns is a usage error: file arguments that cannot be
 // meant, which are refused before anything is read (see checkPaths), or an
 // input past the limits (see inputLimitError).
+//
+// The bound on the inputs together, maxTotalInputSize, counts every byte
+// read, whatever becomes of it: the space around a document and between the
+// elements of a stdin array, and a file that holds nothing but space, cost
+// memory to read as a profile does. Each read stops where the inputs before
+// it leave no room, so that no more than the bound is ever held.
 func readInputs(paths []string, stdin io.Reader) ([]profileInput, error) {
 	if len(paths) == 0 {
 		return readFromStdin(stdin)
 	}
 
-	err := checkPaths(paths)
+	err := checkPaths(paths, stdin)
 	if err != nil {
 		return nil, err
 	}
 
-	var (
-		result []profileInput
-		total  int
-	)
+	var result []profileInput
+
+	allowance := maxTotalInputSize
 
 	for _, path := range paths {
-		var items []profileInput
+		var (
+			items []profileInput
+			read  int
+		)
 
 		if path == stdinArg {
 			// Every other argument is one more profile.
-			items, err = readStdinArgument(stdin, len(paths)-1)
+			items, read, err = readStdinArgument(stdin, len(paths)-1, allowance)
 		} else {
 			var input profileInput
 
-			input, err = readFileInput(path)
+			input, read, err = readFileInput(path, allowance)
 			items = []profileInput{input}
 		}
 
@@ -204,13 +215,7 @@ func readInputs(paths []string, stdin io.Reader) ([]profileInput, error) {
 			return nil, err
 		}
 
-		for _, item := range items {
-			total += len(item.data)
-		}
-
-		if total > maxTotalInputSize {
-			return nil, errInputTooLarge
-		}
+		allowance -= read
 
 		result = append(result, items...)
 	}
@@ -218,15 +223,56 @@ func readInputs(paths []string, stdin io.Reader) ([]profileInput, error) {
 	return result, nil
 }
 
+// readLimit returns how many bytes a read of one input may take: the bound
+// on one input, or what the inputs read before it leave of the bound on all
+// of them, whichever is lower. A read takes one byte more, to tell an input
+// at the limit from one past it, and reports the bound it went past (see
+// pastLimit).
+func readLimit(allowance int) int {
+	return min(maxInputSize, allowance)
+}
+
+// pastLimit returns the limit error of a read of read bytes under the given
+// allowance, or nil when it stayed within readLimit: own names the bound
+// on one input, and errInputTooLarge is returned where the allowance left
+// is what it went past.
+func pastLimit(read, allowance int, own error) error {
+	switch {
+	case read <= readLimit(allowance):
+		return nil
+	case allowance < maxInputSize:
+		return errInputTooLarge
+	default:
+		return own
+	}
+}
+
+// stdinAliases lists the file names that read the stdin of the process as
+// "-" does, wherever stdin leads.
+var stdinAliases = []string{"/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"}
+
 // checkPaths refuses file arguments that cannot be meant: too many of them,
 // an empty one, which names no file, and stdin named twice. None of these
 // depends on what an input holds, so they are refused before one is read.
-func checkPaths(paths []string) error {
+//
+// Stdin is named by "-", and where stdin is not a regular file, also by
+// one of stdinAliases and, for a pipe, by any path that leads to that pipe,
+// such as /dev/fd/0 spelled another way. A pipe can be read once, so naming
+// it twice would leave the second reader with nothing, which would be
+// reported as an input that is empty rather than as the invocation it is.
+// Another path to the pipe is found where stat of it reports the pipe, as
+// on Linux; on darwin stat of /dev/fd/N does not, so such a path is read
+// as a second reader of the pipe there, and whichever reads second fails
+// as empty.
+// A regular file on stdin reads whole through an alias, which opens it
+// afresh, so only "-" twice is refused then.
+func checkPaths(paths []string, stdin io.Reader) error {
 	if len(paths) > maxInputFiles {
 		return errTooManyFiles
 	}
 
-	stdinUsed := false
+	source := describeStdin(stdin)
+	first := ""
 
 	for _, path := range paths {
 		switch {
@@ -234,47 +280,114 @@ func checkPaths(paths []string) error {
 			// os.Open would report it as a file that does not exist, under
 			// an empty name.
 			return errEmptyArgument
-		case path == stdinArg && stdinUsed:
-			return errDuplicateStdin
-		case path == stdinArg:
-			stdinUsed = true
+		case !source.namedBy(path):
+		case first == "":
+			first = path
+		default:
+			return stdinNamedTwice(first, path)
 		}
 	}
 
 	return nil
 }
 
-// readFileInput reads the profile of a file argument. A file it cannot read
-// is returned as an input that failed; only a file past the limit is an
-// error.
-func readFileInput(path string) (profileInput, error) {
-	data, err := readFileWithLimit(path)
+// stdinNamedTwice returns the error of two file arguments that both read
+// stdin. "-" is named in it only where the caller wrote it.
+func stdinNamedTwice(first, second string) error {
+	switch {
+	case first == stdinArg && second == stdinArg:
+		return errDuplicateStdin
+	case first == stdinArg || second == stdinArg:
+		return fmt.Errorf("%w: %s and %s both read it",
+			errDuplicateStdin, merge.SafeName(first), merge.SafeName(second))
+	default:
+		return fmt.Errorf("%w: %s and %s both read it",
+			errStdinReadTwice, merge.SafeName(first), merge.SafeName(second))
+	}
+}
+
+// stdinSource is what checkPaths knows of stdin: whether it is a regular
+// file, and what it is when it is a pipe, or nil.
+type stdinSource struct {
+	regular bool
+	pipe    fs.FileInfo
+}
+
+// describeStdin tells what stdin is. Stdin that is no file, as in a test,
+// or whose kind cannot be told, is neither a regular file nor a pipe.
+func describeStdin(stdin io.Reader) stdinSource {
+	file, ok := stdin.(*os.File)
+	if !ok || file == nil {
+		return stdinSource{regular: false, pipe: nil}
+	}
+
+	info, err := file.Stat()
+	if err != nil {
+		return stdinSource{regular: false, pipe: nil}
+	}
+
+	if info.Mode()&fs.ModeNamedPipe == 0 {
+		return stdinSource{regular: info.Mode().IsRegular(), pipe: nil}
+	}
+
+	return stdinSource{regular: false, pipe: info}
+}
+
+// namedBy reports whether a file argument reads stdin (see checkPaths).
+func (source stdinSource) namedBy(path string) bool {
+	switch {
+	case path == stdinArg:
+		return true
+	case source.regular:
+		return false
+	case slices.Contains(stdinAliases, path):
+		return true
+	case source.pipe == nil:
+		return false
+	}
+
+	// Stat does not open the file, so a FIFO without a writer does not
+	// hold it.
+	info, err := os.Stat(path)
+
+	return err == nil && os.SameFile(info, source.pipe)
+}
+
+// readFileInput reads the profile of a file argument within the allowance
+// the inputs read before it leave (see readInputs), and returns how many
+// bytes it read. A file it cannot read is returned as an input that failed;
+// only a file past the limits is an error.
+func readFileInput(path string, allowance int) (profileInput, int, error) {
+	data, read, err := readFileWithLimit(path, allowance)
 
 	switch {
+	case errors.Is(err, errInputTooLarge):
+		return profileInput{}, read, err
 	case isInputLimitError(err):
-		return profileInput{}, fmt.Errorf("reading %s: %w", merge.SafeName(path), err)
+		return profileInput{}, read, fmt.Errorf("%s: %w", merge.SafeName(path), err)
 	case err != nil:
-		return failedInput(path, err), nil
+		return failedInput(path, err), read, nil
 	default:
-		return newInput(path, data), nil
+		return newInput(path, data), read, nil
 	}
 }
 
 // readStdinArgument reads the profiles of a "-" argument given beside others
-// that bring one profile each. A stdin array brings up to maxInputFiles
-// profiles of its own, so the bound is on the profiles rather than on the
-// arguments.
-func readStdinArgument(stdin io.Reader, others int) ([]profileInput, error) {
-	items, err := readFromStdin(stdin)
+// that bring one profile each, within the allowance the inputs read before
+// it leave, and returns how many bytes it read. A stdin array brings up to
+// maxInputFiles profiles of its own, so the bound is on the profiles rather
+// than on the arguments.
+func readStdinArgument(stdin io.Reader, others, allowance int) ([]profileInput, int, error) {
+	items, read, err := readStdin(stdin, allowance)
 	if err != nil {
-		return nil, err
+		return nil, read, err
 	}
 
 	if len(items)+others > maxInputFiles {
-		return nil, errTooManyInputs
+		return nil, read, errTooManyInputs
 	}
 
-	return items, nil
+	return items, read, nil
 }
 
 // readFileWithLimit reads a regular file of at most maxInputSize bytes. The
@@ -302,21 +415,25 @@ func readStdinArgument(stdin io.Reader, others int) ([]profileInput, error) {
 // read may never end, as /dev/zero's does, or wait without a writer to
 // close, as a terminal's does even without blocking. /dev/null is refused
 // with them, rather than read as an empty file.
-func readFileWithLimit(path string) ([]byte, error) {
+//
+// It reads no more than readLimit of the allowance allows, and returns how
+// many bytes it read, which the allowance is charged with.
+func readFileWithLimit(path string, allowance int) ([]byte, int, error) {
 	file, pipe, err := openInput(path)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	defer func() { _ = file.Close() }()
 
-	data, err := io.ReadAll(io.LimitReader(file, maxInputSize+1))
+	data, err := io.ReadAll(io.LimitReader(file, int64(readLimit(allowance))+1))
 	if err != nil {
-		return nil, bareFileError(err)
+		return nil, len(data), bareFileError(err)
 	}
 
-	if len(data) > maxInputSize {
-		return nil, errFileTooLarge
+	err = pastLimit(len(data), allowance, errFileTooLarge)
+	if err != nil {
+		return nil, len(data), err
 	}
 
 	// An empty file is reported as such, as empty stdin is, rather than
@@ -325,12 +442,12 @@ func readFileWithLimit(path string) ([]byte, error) {
 	// one that wrote nothing.
 	switch {
 	case pipe && len(data) == 0:
-		return nil, errNoWriter
+		return nil, 0, errNoWriter
 	case len(bytes.TrimSpace(data)) == 0:
-		return nil, errEmptyFile
+		return nil, len(data), errEmptyFile
 	}
 
-	return data, nil
+	return data, len(data), nil
 }
 
 // openInput opens a file argument for readFileWithLimit and reports whether
@@ -394,31 +511,93 @@ func bareFileError(err error) error {
 // named stdin, which fails as a file that cannot be read does; only an input
 // past the limits is an error.
 func readFromStdin(reader io.Reader) ([]profileInput, error) {
+	items, _, err := readStdin(reader, maxTotalInputSize)
+
+	return items, err
+}
+
+// readStdin is readFromStdin within the allowance the inputs read before it
+// leave (see readInputs), and returns how many bytes it read, which the
+// allowance is charged with whatever the bytes hold. Stdin that is a device
+// or a directory is refused before anything is read from it, as a file
+// argument is (see checkStdinFile).
+func readStdin(reader io.Reader, allowance int) ([]profileInput, int, error) {
 	if reader == nil {
-		return unreadStdin(errEmptyInput), nil
+		return unreadStdin(errEmptyInput), 0, nil
 	}
 
-	data, err := io.ReadAll(io.LimitReader(reader, maxInputSize+1))
+	err := checkStdinFile(reader)
 	if err != nil {
-		return unreadStdin(bareFileError(err)), nil
+		return unreadStdin(err), 0, nil
 	}
 
-	if len(data) > maxInputSize {
-		return nil, errStdinTooLarge
+	data, err := io.ReadAll(io.LimitReader(reader, int64(readLimit(allowance))+1))
+	if err != nil {
+		return unreadStdin(bareFileError(err)), len(data), nil
+	}
+
+	err = pastLimit(len(data), allowance, errStdinTooLarge)
+	if err != nil {
+		return nil, len(data), err
 	}
 
 	if len(bytes.TrimSpace(data)) == 0 {
-		return unreadStdin(errEmptyInput), nil
+		return unreadStdin(errEmptyInput), len(data), nil
 	}
 
 	// Anything that does not open an array is a single document. That
 	// includes null, which decodes into a slice as no elements at all and
 	// would otherwise read as no input rather than as the document it is.
 	if !bytes.HasPrefix(bytes.TrimLeft(data, strictjson.Space), []byte("[")) {
-		return []profileInput{newInput(stdinName, data)}, nil
+		return []profileInput{newInput(stdinName, data)}, len(data), nil
 	}
 
-	return readStdinArray(data)
+	items, err := readStdinArray(data)
+
+	return items, len(data), err
+}
+
+// checkStdinFile refuses stdin that is neither a regular file, a pipe nor
+// a socket, before anything is read from it, as openInput refuses such a
+// file argument: a terminal, which waits for input, and outside Windows
+// any character device but the null device (see isTerminal), such as
+// /dev/zero, which never ends; a block device; and a directory. The null
+// device reads as empty input. Stdin that is no file, as in a test, or
+// whose kind cannot be told, is read.
+func checkStdinFile(reader io.Reader) error {
+	file, ok := reader.(*os.File)
+	if !ok || file == nil {
+		return nil
+	}
+
+	if isTerminal(file) {
+		return errNotRegularFile
+	}
+
+	mode, known := fileMode(file)
+
+	switch {
+	case !known:
+		// Stdin whose kind cannot be told is read, and fails there if it
+		// cannot be.
+		return nil
+	case mode.IsDir():
+		return errDirectoryInput
+	case mode&fs.ModeDevice != 0 && mode&fs.ModeCharDevice == 0:
+		return errNotRegularFile
+	default:
+		return nil
+	}
+}
+
+// fileMode returns the mode of an open file, and whether it could be told.
+func fileMode(file *os.File) (fs.FileMode, bool) {
+	info, err := file.Stat()
+	if err != nil {
+		return 0, false
+	}
+
+	return info.Mode(), true
 }
 
 // unreadStdin returns the input of stdin that could not be read, and why.

@@ -34,10 +34,14 @@ Compare two security profiles and show their differences.
 Reads from stdin (as a JSON array of exactly 2 profiles) when no files are provided.
 A file argument of - reads stdin beside the other file.
 Flags must precede file arguments, and -- ends them.
-Exit code 0 means equal, 1 means different, 2 means error.
+Exit status: 0 when the profiles are equal, 1 when they differ, 2 on any
+error.
 
-The profiles are not validated: two copies of an invalid profile compare
-equal. Run spm validate on them first where that matters.
+Without --validate the profiles are not validated: two copies of an invalid
+profile compare equal. --validate names the checks to run on them first, as
+merge --validate does: one mode for both, or one mode per profile,
+separated by commas. --validate artifact also bounds what an untrusted
+profile can make the comparison hold in memory.
 
 --arch selects the seccomp architecture implied on both sides, which a node
 covers whether or not a profile lists it. It defaults to the architecture
@@ -53,14 +57,41 @@ Options:
 // two.
 var errDiffRequiresTwo = errors.New("diff requires exactly 2 profiles")
 
-// bindDiffFlags declares the diff flags, which are the common ones, on the
-// set and returns the struct they fill in.
-func bindDiffFlags(flags *flag.FlagSet) *commonOptions {
-	opts := new(commonOptions)
+// diffOptions holds the parsed flags of the diff command.
+type diffOptions struct {
+	commonOptions
+
+	// validate is the --validate value, empty for no checks.
+	validate string
+}
+
+// bindDiffFlags declares the diff flags on the set and returns the struct
+// they fill in.
+func bindDiffFlags(flags *flag.FlagSet) *diffOptions {
+	opts := new(diffOptions)
 
 	opts.bind(flags, "the diff", "stdout", "implied on both sides")
+	flags.StringVar(
+		&opts.validate, "validate", "",
+		"checks to run on the profiles before comparing them: default, strict, "+
+			"artifact; or one mode per profile, comma separated (default: none)",
+	)
 
 	return opts
+}
+
+// checkFlags checks the diff flags (see commandOptions).
+func (opts *diffOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) int {
+	if flagNamed(flags, "validate") {
+		_, err := parseValidateModes(opts.validate, 1)
+		if errors.Is(err, errUnknownValidateMode) {
+			_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+
+			return exitUsage
+		}
+	}
+
+	return opts.check(stderr)
 }
 
 func runDiff(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -77,8 +108,21 @@ func runDiff(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 // diffInputs resolves the profile type, compares the two profiles, and
 // writes the result.
-func diffInputs(opts *commonOptions, inv *invocation) int {
+func diffInputs(opts *diffOptions, inv *invocation) int {
 	checkDiffCount(inv)
+
+	// Without --validate the profiles are decoded and compared, and nothing
+	// else is checked, as the library's Diff checks nothing. With it, each
+	// is checked under its mode first, which also bounds what a profile can
+	// make the comparison hold in memory (see the artifact limits).
+	if opts.validate != "" {
+		modes, err := parseValidateModes(opts.validate, len(inv.inputs))
+		if err != nil && !inv.stdinUnread {
+			inv.refusals = append(inv.refusals, err)
+		}
+
+		inv.checks = &inputChecks{modes: modes, strategy: ""}
+	}
 
 	// Exit code 1 means "different" for diff, so unparsable input is a
 	// usage error like every other diff failure.
@@ -128,10 +172,25 @@ func checkDiffCount(inv *invocation) {
 	))
 }
 
-// diffCommand compares two profiles.
+// diffCommand compares two profiles, once each has passed the checks of its
+// --validate mode, if any.
 func (ops kindOps[T, D]) diffCommand(inv *invocation) int {
-	ops = ops.atArch(inv)
-	profiles := unmarshalAll[T](inv.inputs, make([]bool, len(inv.inputs)), inv.report)
+	ops = ops.atNode(inv)
+	strict := make([]bool, len(inv.inputs))
+
+	if inv.checks != nil {
+		for idx, mode := range inv.checks.modes {
+			strict[idx] = mode.strictDecode()
+		}
+	}
+
+	profiles := unmarshalAll[T](inv.inputs, strict, inv.report)
+
+	if inv.checks != nil {
+		checkInputs(profiles, inv.report, func(idx int, profile *T) error {
+			return ops.checker(inv.checks.modes[idx])(profile)
+		})
+	}
 
 	if inv.halted() {
 		return inv.stop(exitUsage)

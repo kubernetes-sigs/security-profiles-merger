@@ -268,8 +268,8 @@ func (ops kindOps[T, D]) checkLeftInputs(
 }
 
 // mergeInputCheck returns the check the merge functions run on one input on
-// its own: inputCheck, or where the package exports none, a merge of the
-// input alone with mergeFn, of which only a failure it blames on the input
+// its own: inputCheck, or where that is nil, a merge of the input alone
+// with mergeFn, of which only a failure it blames on the input
 // counts.
 func (ops kindOps[T, D]) mergeInputCheck(mergeFn func(...*T) (*T, error)) func(*T) error {
 	if ops.inputCheck != nil {

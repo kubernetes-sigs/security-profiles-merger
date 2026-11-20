@@ -22,6 +22,7 @@ import (
 	"io"
 	"reflect"
 	"slices"
+	"strings"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
@@ -47,6 +48,11 @@ const (
 	// may read a repeated or misspelled member differently, and an unknown
 	// one drops the rule it was meant to carry.
 	modeArtifact
+	// modeBaseline runs the checks a runtime runs on its baseline at
+	// config load, for validate --baseline alone: merge --validate and diff
+	// --validate take no such mode, since neither checks a baseline as the
+	// runtime loads it.
+	modeBaseline
 )
 
 // The names --validate and the validate command's flags spell the modes.
@@ -95,8 +101,10 @@ type profileKind interface {
 	mergeCommand(inv *invocation, strategy string, modes []validateMode) int
 	diffCommand(inv *invocation) int
 	validateCommand(inv *invocation, mode validateMode) int
-	// hasArch reports whether the profile type has architectures.
+	// hasArch reports whether the profile type has architectures, and
+	// hasABI whether it has kernel ABI versions.
 	hasArch() bool
+	hasABI() bool
 	// checkAlone checks the input at idx on its own, as a profile of this
 	// kind (see checkEachAlone).
 	checkAlone(inv *invocation, idx int)
@@ -117,9 +125,15 @@ type kindOps[T any, D any] struct {
 	validate         func(*T) error
 	validateStrict   func(*T) error
 	validateArtifact func(*T) error
+	// validateBaseline is the check of a baseline at config load (see
+	// modeBaseline).
+	validateBaseline func(*T) error
 	// inputCheck is the check the merge functions run on each input on its
-	// own, or nil where the package exports none: apparmor folds an entry
-	// repeated within one list, which its Validate refuses.
+	// own, or nil where no exported function runs exactly that check, so
+	// that the input is merged alone instead: apparmor folds an entry
+	// repeated within one list, which its Validate refuses, and a seccomp
+	// merge checks an input against the node's architecture, which
+	// seccomp.Validate does not, refusing one of another byte order.
 	inputCheck func(*T) error
 	format     func(*T) string
 	diff       func(*T, *T) (*D, error)
@@ -130,7 +144,15 @@ type kindOps[T any, D any] struct {
 	// profile type that has no architectures. Validate has no such
 	// variant, since what it checks does not depend on the architecture.
 	forArch func(node seccomp.Options) kindOps[T, D]
+	// forABI returns the validators as they check a profile for a kernel
+	// of the ABI version the options name, and is nil for a profile type
+	// that has no such versions.
+	forABI func(kernel landlock.Options) kindOps[T, D]
 }
+
+// errABINotApplicable reports --abi named for a profile type that has no
+// kernel ABI versions.
+var errABINotApplicable = fmt.Errorf("--abi only applies to %s profiles", typeLandlock)
 
 // errArchNotApplicable reports --arch named for a profile type that has no
 // architectures.
@@ -149,12 +171,27 @@ func (ops kindOps[T, D]) atArch(inv *invocation) kindOps[T, D] {
 
 func (ops kindOps[T, D]) hasArch() bool { return ops.forArch != nil }
 
+func (ops kindOps[T, D]) hasABI() bool { return ops.forABI != nil }
+
+// atNode returns the functions as the node --arch and --abi name runs them
+// (see atArch). A run that names no ABI version, or names one for a profile
+// type without versions, which is refused (see checkArch), keeps the
+// validators that check no version.
+func (ops kindOps[T, D]) atNode(inv *invocation) kindOps[T, D] {
+	ops = ops.atArch(inv)
+	if ops.forABI == nil || inv.abi == 0 {
+		return ops
+	}
+
+	return ops.forABI(landlock.Options{ABI: inv.abi})
+}
+
 // checkAlone decodes the input at idx as a profile of this kind and checks
 // it as the command would (see inputChecks), recording what it finds in the
 // report. A merge in the default mode runs the check its functions run on
 // one input (see mergeInputCheck).
 func (ops kindOps[T, D]) checkAlone(inv *invocation, idx int) {
-	ops = ops.atArch(inv)
+	ops = ops.atNode(inv)
 	checks, report := inv.checks, inv.report
 
 	mode := modeDefault
@@ -224,6 +261,10 @@ func (inv *invocation) checkArch() {
 	if inv.arch.named && !inv.kind.hasArch() {
 		inv.refusals = append(inv.refusals, errArchNotApplicable)
 	}
+
+	if inv.abi != 0 && !inv.kind.hasABI() {
+		inv.refusals = append(inv.refusals, errABINotApplicable)
+	}
 }
 
 // seccompOps returns the functions of the seccomp package for the node the
@@ -235,13 +276,48 @@ func seccompOps(opts seccomp.Options) kindOps[specs.LinuxSeccomp, seccomp.Profil
 		validate:         seccomp.Validate,
 		validateStrict:   opts.ValidateStrict,
 		validateArtifact: opts.ValidateArtifact,
-		inputCheck:       seccomp.Validate,
+		validateBaseline: opts.ValidateBaseline,
+		inputCheck:       nil,
 		format:           seccomp.FormatProfile,
 		diff:             opts.Diff,
 		formatDiff:       (*seccomp.ProfileDiff).String,
 		equal:            func(diff *seccomp.ProfileDiff) bool { return diff.Equal },
 		forArch:          seccompOps,
+		forABI:           nil,
 	}
+}
+
+// landlockOps returns the functions of the landlock package, with the
+// validators of the options where they name an ABI version, so that
+// --baseline runs Options.ValidateBaseline for the version --abi names and
+// ValidateBaseline, which checks no version, without it.
+func landlockOps(kernel *landlock.Options) kindOps[landlock.Profile, landlock.ProfileDiff] {
+	ops := kindOps[landlock.Profile, landlock.ProfileDiff]{
+		intersect:        landlock.Intersect,
+		union:            landlock.Union,
+		validate:         landlock.Validate,
+		validateStrict:   landlock.ValidateStrict,
+		validateArtifact: landlock.ValidateArtifact,
+		validateBaseline: landlock.ValidateBaseline,
+		inputCheck:       landlock.Validate,
+		format:           (*landlock.Profile).String,
+		diff:             landlock.Diff,
+		formatDiff:       (*landlock.ProfileDiff).String,
+		equal:            func(diff *landlock.ProfileDiff) bool { return diff.Equal },
+		forArch:          nil,
+		forABI: func(options landlock.Options) kindOps[landlock.Profile, landlock.ProfileDiff] {
+			return landlockOps(&options)
+		},
+	}
+
+	if kernel != nil {
+		ops.validate = kernel.Validate
+		ops.validateStrict = kernel.ValidateStrict
+		ops.validateArtifact = kernel.ValidateArtifact
+		ops.validateBaseline = kernel.ValidateBaseline
+	}
+
+	return ops
 }
 
 // mergeFn returns the merge function of the strategy, and whether the
@@ -298,6 +374,8 @@ func (ops kindOps[T, D]) checker(mode validateMode) func(*T) error {
 		return ops.validateStrict
 	case modeArtifact:
 		return ops.validateArtifact
+	case modeBaseline:
+		return ops.validateBaseline
 	case modeDefault:
 		return ops.validate
 	}
@@ -324,27 +402,17 @@ func (inv *invocation) useKind(name string) bool {
 			validate:         apparmor.Validate,
 			validateStrict:   apparmor.ValidateStrict,
 			validateArtifact: apparmor.ValidateArtifact,
+			validateBaseline: apparmor.ValidateBaseline,
 			inputCheck:       nil,
 			format:           (*apparmor.Profile).String,
 			diff:             apparmor.Diff,
 			formatDiff:       (*apparmor.ProfileDiff).String,
 			equal:            func(diff *apparmor.ProfileDiff) bool { return diff.Equal },
 			forArch:          nil,
+			forABI:           nil,
 		}
 	case typeLandlock:
-		inv.kind = kindOps[landlock.Profile, landlock.ProfileDiff]{
-			intersect:        landlock.Intersect,
-			union:            landlock.Union,
-			validate:         landlock.Validate,
-			validateStrict:   landlock.ValidateStrict,
-			validateArtifact: landlock.ValidateArtifact,
-			inputCheck:       landlock.Validate,
-			format:           (*landlock.Profile).String,
-			diff:             landlock.Diff,
-			formatDiff:       (*landlock.ProfileDiff).String,
-			equal:            func(diff *landlock.ProfileDiff) bool { return diff.Equal },
-			forArch:          nil,
-		}
+		inv.kind = landlockOps(nil)
 	default:
 		return false
 	}
@@ -416,7 +484,10 @@ func resolveKind(inv *invocation, profileType string, parseExit int, noDetectNot
 	// does not parse does, and the others are checked all the same.
 	checkTypeMatchesInputs(profileType, inputs, report)
 
-	if !named && !noDetectNote {
+	// A run that a usage error stops says nothing about the type it would
+	// have used: the error is the answer, and every usage error that comes
+	// up once the inputs are read is known by now.
+	if !named && !noDetectNote && len(inv.refusals) == 0 {
 		_, _ = fmt.Fprintf(inv.stderr, "auto-detected profile type: %s\n", profileType)
 	}
 
@@ -485,13 +556,13 @@ func detectKind(inv *invocation) (string, bool) {
 		}
 
 		report.fail(conflict.index, &detectionError{text: fmt.Sprintf(
-			"mixes profile types (%s and %s), use --type", conflict.first, conflict.second,
+			"mixes profile types (%s), use --type", listTypes(conflict.types),
 		)})
 	}
 
 	if between != nil {
 		inv.refusals = append(inv.refusals, &detectionError{text: fmt.Sprintf(
-			"inputs mix profile types (%s and %s), use --type", between.first, between.second,
+			"inputs mix profile types (%s), use --type", listTypes(between.types),
 		)})
 
 		return "", false
@@ -565,16 +636,27 @@ func unknownTypeError(name string) error {
 	)}
 }
 
-// typeConflict names two profile types that cannot both be right for the
-// same run.
+// typeConflict names the profile types that cannot all be right for the
+// same run, two or more.
 type typeConflict struct {
-	// first and second name the two types, in the order they were found.
-	first, second string
-	// input names the input carrying members of both types, and index is
-	// its position; input is empty when the two types come from different
+	// types names the types, in the order they were found.
+	types []string
+	// input names the input carrying members of all of them, and index is
+	// its position; input is empty when the types come from different
 	// inputs.
 	input string
 	index int
+}
+
+// listTypes writes the names of profile types as a list a message can hold:
+// "seccomp and apparmor", or "seccomp, landlock and apparmor".
+func listTypes(types []string) string {
+	last := len(types) - 1
+	if last < 1 {
+		return strings.Join(types, "")
+	}
+
+	return strings.Join(types[:last], ", ") + " and " + types[last]
 }
 
 // detectProfileType infers the profile type from the members the inputs
@@ -590,14 +672,13 @@ type typeConflict struct {
 // profile that is mostly empty, and report success for it.
 //
 // The first result is the detected type, empty when no input reveals one.
-// The second lists every input carrying the members of two types, and the
-// first disagreement between two inputs, and is empty when the inputs agree
-// on one type.
+// The second lists every input carrying the members of several types, and
+// then, when the inputs that reveal one type each disagree, every type they
+// reveal, and is empty when the inputs agree on one type.
 func detectProfileType(inputs []profileInput, report *inputReport) (string, []typeConflict) {
 	var (
-		detected  string
 		conflicts []typeConflict
-		between   bool
+		revealed  []string
 	)
 
 	for idx, input := range inputs {
@@ -610,21 +691,22 @@ func detectProfileType(inputs []profileInput, report *inputReport) (string, []ty
 		switch {
 		case len(current) > 1:
 			conflicts = append(conflicts, typeConflict{
-				first: current[0], second: current[1], input: input.name, index: idx,
+				types: current, input: input.name, index: idx,
 			})
-		case len(current) == 0:
-		case detected == "":
-			detected = current[0]
-		case current[0] != detected && !between:
-			between = true
-
-			conflicts = append(conflicts, typeConflict{
-				first: detected, second: current[0], input: "", index: -1,
-			})
+		case len(current) == 1 && !slices.Contains(revealed, current[0]):
+			revealed = append(revealed, current[0])
 		}
 	}
 
-	return detected, conflicts
+	if len(revealed) > 1 {
+		conflicts = append(conflicts, typeConflict{types: revealed, input: "", index: -1})
+	}
+
+	if len(revealed) == 0 {
+		return "", conflicts
+	}
+
+	return revealed[0], conflicts
 }
 
 // parseObject decodes one input as a JSON object, the shape all profile

@@ -666,8 +666,9 @@ func TestMergeFileTooLarge(t *testing.T) {
 		t.Fatalf("exit code = %d, want %d", code, exitUsage)
 	}
 
-	if !strings.Contains(stderr, "exceeds") {
-		t.Errorf("stderr = %q, missing file too large error", stderr)
+	// The error names the file as every error about an input does.
+	if want := "error: " + bigFile + ": file exceeds 10485760 byte limit\n"; stderr != want {
+		t.Errorf("stderr = %q, want %q", stderr, want)
 	}
 }
 
@@ -1776,13 +1777,26 @@ func TestMergeNamesListenerConflictInputs(t *testing.T) {
 // and the one left to the merge's own checks is checked all the same, so
 // that one run names both, in the order of the inputs. AppArmor exports no
 // check of its own that the merge runs, so it is checked by a merge of the
-// one input.
+// one input, and so is seccomp, whose merge refuses for the node --arch
+// names what seccomp.Validate, which ignores the architecture, accepts.
 func TestMergeReportsEveryBadInputAcrossModes(t *testing.T) {
 	t.Parallel()
 
 	for _, test := range []struct {
-		name, profileType, modes, defaultBad, checkedBad, wantDefault, wantChecked string
+		name, profileType, modes, arch, defaultBad, checkedBad, wantDefault, wantChecked string
 	}{
+		{
+			name:        "seccomp of another byte order",
+			profileType: typeSeccomp,
+			modes:       "default,artifact",
+			arch:        "SCMP_ARCH_S390X",
+			defaultBad: `{"defaultAction":"SCMP_ACT_ERRNO",` +
+				`"architectures":["SCMP_ARCH_X86_64"]}`,
+			checkedBad: `{"defaultAction":"SCMP_ACT_ERRNO","syscals":[]}`,
+			wantDefault: `architectures[0]: "SCMP_ARCH_X86_64": architecture of another ` +
+				`byte order (little-endian, native SCMP_ARCH_S390X is big-endian)`,
+			wantChecked: `unknown field "syscals"`,
+		},
 		{
 			name:        "seccomp",
 			profileType: typeSeccomp,
@@ -1809,10 +1823,15 @@ func TestMergeReportsEveryBadInputAcrossModes(t *testing.T) {
 			first := writeTemp(t, test.defaultBad)
 			second := writeTemp(t, test.checkedBad)
 
-			code, stdout, stderr := runCapture(t, []string{
+			args := []string{
 				cmdMerge, flagType, test.profileType, flagStrategy, strategyIntersect,
-				"--validate", test.modes, first, second,
-			}, nil)
+				"--validate", test.modes,
+			}
+			if test.arch != "" {
+				args = append(args, flagArch, test.arch)
+			}
+
+			code, stdout, stderr := runCapture(t, append(args, first, second), nil)
 
 			want := "error: " + first + ": " + test.wantDefault + "\n" +
 				"error: " + second + ": " + test.wantChecked + "\n"

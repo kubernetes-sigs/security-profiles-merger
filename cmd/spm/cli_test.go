@@ -139,7 +139,10 @@ func TestHelpTexts(t *testing.T) {
 	for _, command := range []string{cmdMerge, cmdValidate, cmdDiff} {
 		_, stdout, _ := runCapture(t, []string{cmdHelp, command}, nil)
 
-		for _, want := range []string{"argument of - reads stdin", "-- ends them", "0 ", "1 ", "2 "} {
+		for _, want := range []string{
+			"argument of - reads stdin", "-- ends them", "Exit status: 0 ", "1 ", "2 ",
+			"to stdout with -",
+		} {
 			if !strings.Contains(stdout, want) {
 				t.Errorf("help %s does not mention %q", command, want)
 			}
@@ -495,11 +498,14 @@ func TestInputLimitsAtTheirBoundary(t *testing.T) {
 			t.Errorf("at the limit: exit %d, want 0 (%s)", code, stderr)
 		}
 
-		code, _, _ = runCapture(t, []string{
+		// The error names stdin, as every error about an input names it.
+		code, _, stderr = runCapture(t, []string{
 			cmdValidate, flagType, typeSeccomp, "--quiet",
 		}, strings.NewReader(profileOf(maxInputSize+1)))
-		if code != exitUsage {
-			t.Errorf("one past the limit: exit %d, want %d", code, exitUsage)
+		if want := "error: stdin: input exceeds 10485760 byte limit\n"; code != exitUsage ||
+			stderr != want {
+			t.Errorf("one past the limit: exit %d, stderr %q, want %d and %q",
+				code, stderr, exitUsage, want)
 		}
 	})
 
@@ -746,11 +752,21 @@ func TestNonObjectInputReportsAlike(t *testing.T) {
 func TestFlagErrorIsEscaped(t *testing.T) {
 	t.Parallel()
 
-	code, _, stderr := runCapture(t, []string{cmdMerge, "--\x1b[2J"}, nil)
-	if code != exitUsage || strings.Contains(stderr, "\x1b") ||
-		!strings.Contains(stderr, "flag provided but not defined") {
-		t.Errorf("exit code = %d, stderr = %q, want %d and an escaped flag error",
-			code, stderr, exitUsage)
+	// Only the argument is quoted, as a file name is, not the message
+	// around it.
+	for _, test := range []struct {
+		arg, want string
+	}{
+		{"--\x1b[2J", `error: flag provided but not defined: "--\x1b[2J"` + "\n"},
+		{"--format=\x1b[2J", ""},
+		{"---\x1b[2J", `error: bad flag syntax: "---\x1b[2J"` + "\n"},
+	} {
+		code, _, stderr := runCapture(t, []string{cmdMerge, test.arg}, nil)
+		if code != exitUsage || strings.Contains(stderr, "\x1b") ||
+			!strings.HasPrefix(stderr, test.want) {
+			t.Errorf("%q: exit code = %d, stderr = %q, want %d and %q",
+				test.arg, code, stderr, exitUsage, test.want)
+		}
 	}
 }
 
@@ -949,5 +965,40 @@ func TestSeparatorAfterBooleanFlag(t *testing.T) {
 
 	if !argsSeparated(flags, []string{"-strict", "--", "-x"}) {
 		t.Error("a \"--\" after a boolean flag was not taken for the separator")
+	}
+}
+
+// TestEmptyFlagValuesAreRefused covers --type and --output given an empty
+// value, as an unset variable in a script gives them. Leaving either out
+// has a meaning, detection and stdout, which an empty value must not take
+// on silently, so it is a usage error, as an empty file argument is.
+func TestEmptyFlagValuesAreRefused(t *testing.T) {
+	t.Parallel()
+
+	profile := writeTemp(t, seccompJSON(t, testSyscallRead))
+
+	for _, args := range [][]string{
+		{cmdValidate, flagType, "", profile},
+		{cmdValidate, "--type=", profile},
+		{cmdValidate, "--output", "", profile},
+		{cmdValidate, "--quiet", "--output", "", profile},
+		{cmdMerge, flagStrategy, strategyUnion, "--output", "", profile},
+		{cmdDiff, flagType, "", profile, profile},
+	} {
+		code, stdout, stderr := runCapture(t, args, nil)
+		if code != exitUsage || stdout != "" ||
+			!strings.HasPrefix(stderr, "error: --") || !strings.Contains(stderr, " is empty (") {
+			t.Errorf("%q: exit code = %d, stdout = %q, stderr = %q, want %d, nothing and "+
+				"the empty flag named", args, code, stdout, stderr, exitUsage)
+		}
+	}
+
+	// - still names stdout.
+	code, stdout, stderr := runCapture(t, []string{
+		cmdValidate, flagType, typeSeccomp, "--output", stdinArg, profile,
+	}, nil)
+	if code != 0 || !strings.Contains(stdout, testSyscallRead) {
+		t.Errorf("--output -: exit code = %d, stdout = %q, stderr = %q, want 0 and the profile",
+			code, stdout, stderr)
 	}
 }
