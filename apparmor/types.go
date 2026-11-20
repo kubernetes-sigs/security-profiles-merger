@@ -67,6 +67,12 @@ type FilesystemRules struct {
 
 // NetworkRules defines network access permissions. A nil field denies what
 // it covers, as false does.
+//
+// The booleans are pointers, and the protocols a pointer to a struct of
+// them, to mirror the Security Profiles Operator's CRD field for field, so
+// that a profile it records maps onto this type without conversion. The
+// pointers carry no third state: nil and false mean the same to the merges,
+// Diff and the validators, as both deny the access in AppArmor.
 type NetworkRules struct {
 	// AllowRaw permits raw sockets.
 	AllowRaw *bool `json:"allowRaw,omitempty"`
@@ -75,7 +81,7 @@ type NetworkRules struct {
 }
 
 // AllowedProtocols defines which network protocols are permitted. A nil
-// field denies the protocol, as false does.
+// field denies the protocol, as false does (see NetworkRules).
 type AllowedProtocols struct {
 	// AllowTCP permits TCP sockets.
 	AllowTCP *bool `json:"allowTcp,omitempty"`

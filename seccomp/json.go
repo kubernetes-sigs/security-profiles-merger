@@ -24,17 +24,18 @@ import (
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
-// ErrDuplicateKey, ErrUnknownField, ErrMisspelledField, ErrInvalidUTF8,
-// ErrUnexpectedData and ErrNotAnObject are returned by UnmarshalStrict for a
-// document encoding/json would decode without a word: one repeating a
-// member, holding a member no field reads, holding a member that names a
-// field only ignoring case, holding a byte the decoder replaces, followed by
-// more data, or not an object at all, such as null. See the spm package for
-// each.
+// ErrDuplicateKey, ErrUnknownField, ErrMisspelledField, ErrMissingField,
+// ErrInvalidUTF8, ErrUnexpectedData and ErrNotAnObject are returned by
+// UnmarshalStrict for a document encoding/json would decode without a word:
+// one repeating a member, holding a member no field reads, holding a member
+// that names a field only ignoring case, leaving out the index or op of an
+// argument condition, holding a byte the decoder replaces, followed by more
+// data, or not an object at all, such as null. See the spm package for each.
 var (
 	ErrDuplicateKey    = spm.ErrDuplicateKey
 	ErrUnknownField    = spm.ErrUnknownField
 	ErrMisspelledField = spm.ErrMisspelledField
+	ErrMissingField    = spm.ErrMissingField
 	ErrInvalidUTF8     = spm.ErrInvalidUTF8
 	ErrUnexpectedData  = spm.ErrUnexpectedData
 	ErrNotAnObject     = spm.ErrNotAnObject
@@ -44,10 +45,10 @@ var (
 // accepts silently: members the profile type has no field for, members that
 // name a field only ignoring case, members repeated within one object, bytes
 // that are not valid UTF-8, data behind the profile, an argument condition
-// without its index or op, or with a null one (spm.ErrMissingField),
-// and a document that is not a JSON object, such as null
-// ([ErrNotAnObject]). Its error messages are bounded in length, however long
-// the literals the document quotes.
+// without its index or op, or with a null one ([ErrMissingField]), and a
+// document that is not a JSON object, such as null ([ErrNotAnObject]). Its
+// error messages are bounded in length, however long the literals the
+// document quotes.
 //
 // Each loses something a reader of an untrusted profile must not lose. A
 // misspelled or unknown member drops the rule it was meant to carry. A
@@ -70,6 +71,10 @@ var (
 // given only when decoding succeeds: a member the document omits is zero in
 // the result, whatever the given profile held, and an error leaves it as it
 // was.
+//
+// Decoding holds many times the size of data in heap, so bound the size of
+// an untrusted document before passing it here; the Limits section of
+// docs/integration.md gives the figures.
 func UnmarshalStrict(data []byte, profile *specs.LinuxSeccomp) error {
 	if profile == nil {
 		return ErrNilProfile

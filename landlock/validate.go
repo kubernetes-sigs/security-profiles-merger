@@ -688,7 +688,8 @@ func (o Options) ValidateStrict(profile *Profile) error {
 // nothing for it, and one below ABIV1, 0 included, is reported with
 // ErrUnknownABIVersion, as the validators of Options report it. A nil
 // profile is reported with ErrNilProfile. The profile is not validated
-// otherwise and not modified.
+// otherwise and not modified, and the copy shares no memory with it, so the
+// caller may modify the copy.
 func (o Options) Downgrade(profile *Profile) (*Profile, error) {
 	err := o.checkABI()
 	if err != nil {

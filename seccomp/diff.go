@@ -203,6 +203,9 @@ type SyscallDetail struct {
 // Diff compares the fields this package reads, so two profiles that differ
 // only in a field of a newer runtime-spec compare equal; Validate rejects
 // such a field (ErrUnsupportedSpecField).
+//
+// The diff shares no memory with the profiles, so the caller may modify
+// it.
 func Diff(left, right *specs.LinuxSeccomp) (*ProfileDiff, error) {
 	return Options{Arch: NativeHost}.Diff(left, right)
 }

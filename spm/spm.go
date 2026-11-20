@@ -74,7 +74,10 @@ var (
 	// a path is longer than MaxPathLen bytes, which is longer than any
 	// Linux path. It is checked before the path is scanned, so an oversized
 	// path costs no further work; only the count limits of ValidateArtifact
-	// and ValidateStrict run before it.
+	// and ValidateStrict run before it. apparmor checks the length of every
+	// path of the profile first, and when one is too long skips the other
+	// checks of Validate; landlock checks each path's length before scanning
+	// that path.
 	ErrPathTooLong = errors.New("path exceeds " + strconv.Itoa(MaxPathLen) + " bytes")
 	// ErrMoreProblems stands in for the validation failures a report left
 	// out. A profile holds as many failures as it holds rules, and an
@@ -147,27 +150,43 @@ var (
 	ErrNotAnObject = errors.New("not a JSON object")
 )
 
-// InputError is returned by Intersect and Union of every package when one of
-// the profiles they were given is nil or fails validation, and by Diff when
-// one is nil. Index is that profile's zero-based position among the
-// arguments, so 0 is the first profile, and Err what was wrong with it.
+// InputError names the one input profile an error is about. Intersect and
+// Union of every package return one for each profile that is nil or fails
+// validation, Diff for a nil one, and landlock.LoweredRulePaths for each of
+// its inputs that is nil or fails validation; a merge also returns one for
+// an error its package documents as brought by one input, such as
+// seccomp.ErrConflictingListener. Index is that profile's zero-based
+// position among the inputs, and Err what was wrong with it. When several
+// inputs of a merge or of landlock.LoweredRulePaths fail, the InputErrors
+// are joined in input order and bounded as a validator bounds its failures: the error
+// implements Unwrap() []error, which lists at most 32 of them followed by
+// ErrMoreProblems when it left others out. A caller that names every
+// failing input walks that list rather than stopping at the first. Diff
+// reports only the first nil profile, so Diff(nil, nil) names Index 0.
 //
 // A caller merging inputs of different standing needs to know which one
 // failed, not only that one did: a runtime refusing an artifact rejects a
 // workload, while one refusing its own baseline has a node to fix. Match it
-// with errors.As; errors.Is sees through it to the sentinels of Err.
+// with errors.As, which finds the first; errors.Is sees through it to the
+// sentinels of Err.
 //
 // A merge returns some errors without an InputError, since no single input
 // caused them: ErrNoProfiles, ErrBudgetExceeded, and the errors each
 // package documents for its result, such as seccomp.ErrLostRules.
 type InputError struct {
 	// Index is the zero-based position of the failing profile among the
-	// arguments of the call: for a merge, 0 is the first profile, which a
-	// runtime passes its baseline as; for Diff, 0 is left and 1 is right.
+	// inputs: for a merge, 0 is the first profile, which a runtime passes
+	// its baseline as; for Diff, 0 is left and 1 is right; for
+	// landlock.LoweredRulePaths, inputs[i] is i, as Intersect numbers it,
+	// and the result, which is not an input, is reported without an
+	// InputError.
 	Index int
-	// Err is what was wrong with that profile: ErrNilProfile, or the error
-	// the package's Validate returned for it, which may report several
-	// failures (see the package documentation).
+	// Err is what was wrong with that profile: ErrNilProfile, the error the
+	// package's Validate returned for it, which may report several
+	// failures (see the package documentation), or another error the
+	// package documents as naming one input, such as
+	// seccomp.ErrConflictingListener. Dispatch on it with errors.Is rather
+	// than by comparing it with one of these.
 	Err error
 }
 

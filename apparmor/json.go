@@ -61,6 +61,10 @@ var (
 // replaces *profile only once every check has passed: a member the document
 // omits is left at its zero value whatever *profile held, and *profile is
 // left untouched when an error is returned.
+//
+// Decoding holds many times the size of data in heap, so bound the size of
+// an untrusted document before passing it here; the Limits section of
+// docs/integration.md gives the figures.
 func UnmarshalStrict(data []byte, profile *Profile) error {
 	if profile == nil {
 		return ErrNilProfile

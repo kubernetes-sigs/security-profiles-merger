@@ -641,6 +641,12 @@ limitations under the License.
 // anything else and reported on their own. [Validate] enforces none of the
 // limits, since a runtime loads a profile past them.
 //
+// The read budget keeps [Diff] and the merges linear in the size of a
+// profile that skipped validation, but not cheap: Diff of such a profile
+// allocates around 150 times its size in JSON, and Union far less. Both
+// are cheap on profiles that passed [ValidateArtifact], which is why a
+// runtime validates an artifact before anything else looks at it.
+//
 // # Conflicting rules
 //
 // [ValidateArtifact] rejects rules for one syscall with different results
@@ -678,4 +684,9 @@ limitations under the License.
 // arguments, except UnmarshalStrict, which replaces the profile it is given
 // with the decoded one when decoding succeeds, so concurrent calls only need
 // their profiles not to be written to at the same time from elsewhere.
+//
+// What [Intersect], [Union] and [Diff] return shares no memory with their
+// arguments, also for a single input, so it is the caller's to keep or
+// modify without affecting the inputs, and modifying an input later leaves
+// the result as it was.
 package seccomp

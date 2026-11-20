@@ -82,6 +82,9 @@ type InputError = spm.InputError
 // documentation describes, and every one that fails is reported as an
 // InputError naming the input: the error is that InputError for one, and
 // the InputErrors joined in input order for several.
+//
+// The result shares no memory with the inputs, a single input included, so
+// the caller may modify it.
 func Intersect(profiles ...*Profile) (*Profile, error) {
 	matchers := newMatcherCache()
 	exceeded := false
@@ -110,6 +113,9 @@ func Intersect(profiles ...*Profile) (*Profile, error) {
 // the budget a list keeps every path of both sides with the permissions its
 // own side grants it, which permits exactly what the reduced union permits
 // (see the Cost bounds section). Inputs are validated as for Intersect.
+//
+// The result shares no memory with the inputs, a single input included, so
+// the caller may modify it.
 func Union(profiles ...*Profile) (*Profile, error) {
 	matchers := newMatcherCache()
 

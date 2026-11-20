@@ -122,7 +122,8 @@ runtime applies to an artifact, a profile it did not author
   rulesets.
 - **[spm](docs/api.md#spm)** - What the three have in common, such as
   `SliceDiff`, `InputError` and the shared sentinel errors. Each package
-  re-exports what it uses under its own name, so no import is needed.
+  re-exports every shared sentinel it returns under its own name, so no
+  import is needed.
 
 See [Concurrency](docs/api.md#concurrency) for calling the functions from
 several goroutines at once.
@@ -166,6 +167,12 @@ runtime loads. From v1.0.0 on:
   version, which can add fields `seccomp.Validate` then reads instead of
   rejecting (`ErrUnsupportedSpecField`), or the minimum Go version, which
   follows the Go releases the Go team supports.
+- **No `context.Context`.** No function takes one, since every merge is
+  bounded by budgets of its own rather than by its caller. A cancellable
+  variant would be added beside the current functions, for example as
+  methods taking a context on an options type, so adding it breaks no
+  caller. Until then, bound how long a caller waits as
+  [Limits](docs/integration.md#limits) describes.
 
 ## Usage
 

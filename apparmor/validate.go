@@ -188,10 +188,12 @@ const MaxPathLen = spm.MaxPathLen
 // A merge matches the literal paths of one profile against the patterns of
 // the other, which costs one comparison per pair, so the work grows with the
 // product of the two counts rather than with their sum. Intersect and Union
-// bound that work themselves and fall back to a conservative result past
-// their budget, so no profile can hold a runtime in a merge; this cap
-// rejects an over-large profile up front instead, where the reason can still
-// be reported. It keeps an accepted profile inside the merge's pair budget
+// bound that work themselves, so no profile can hold a runtime in a merge:
+// past the budget Intersect fails with ErrBudgetExceeded when the result
+// may lose access, and Union keeps every path, which permits the same (see
+// the Cost bounds section of the package documentation). This cap rejects
+// an over-large profile up front instead, where the reason can still be
+// reported. It keeps an accepted profile inside the merge's pair budget
 // when it is merged with another profile of this size, and inside its work
 // budget, which weighs a comparison by the lengths of the pattern and the
 // name, when its paths are a few dozen bytes long and it is merged with a
