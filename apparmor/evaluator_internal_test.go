@@ -504,8 +504,9 @@ var evalProbes = []string{
 }
 
 // evalPatterns are the rules profiles are built from: literals, stars within
-// a component, "**" expansions at several depths, alternations (including
-// ones that match their own prefix), classes, and "?". There are at most 32
+// a component, "**" expansions at several depths, a "**" that does not start
+// a component, alternations (including ones that match their own prefix),
+// classes, and "?". There are at most 32
 // of them, as the fuzzers select them by bit.
 var evalPatterns = []string{
 	"/etc/passwd", "/etc/*", "/etc/**", "/etc/*.conf", "/etc/sub/*.conf",
@@ -514,7 +515,7 @@ var evalPatterns = []string{
 	"/etc/{,**}", "/etc/{passwd,shadow}", "/etc/[!s]hadow", "/usr/bin/?h",
 	"/etc/**foo", "/var/log/{app,sub/app}.log", "/{,etc}", "/etc/{*,sub/*}",
 	"/etc/[a-p]*", "/etc/sub/[^a]*", "/var/**/", "/{usr,var}/**",
-	"/etc/{a,}", "/usr/bin/[^z]h", "/?", "/etc/{**,}", "/etc/sub/", "/etc/",
+	"/etc/foo**", "/usr/bin/[^z]h", "/?", "/etc/{**,}", "/etc/sub/", "/etc/",
 }
 
 // fsSelectorBits is how many bits of the filesystem selector each pattern
@@ -742,9 +743,10 @@ func TestMatchGlobAgreesWithRegex(t *testing.T) {
 		}
 
 		for _, probe := range probes {
-			// A name reaches the matcher in the form its own analysis gives it, which is what
-			// resolves its escapes and collapses its slashes, so both
-			// implementations are given the name in that form.
+			// A name reaches the matcher in the form its own analysis gives
+			// it, which is what resolves its escapes and collapses its
+			// slashes, so both implementations are given the name in that
+			// form.
 			name := matchedName(probe)
 
 			want := matcher.matches(name)
@@ -1144,9 +1146,9 @@ func FuzzMatchGlobAgreesWithPort(f *testing.F) {
 			return
 		}
 
-		// A name reaches the matcher in the form its own analysis gives it, which resolves
-		// its escapes and collapses its slashes; both implementations are
-		// given the name in that form.
+		// A name reaches the matcher in the form its own analysis gives it,
+		// which resolves its escapes and collapses its slashes; both
+		// implementations are given the name in that form.
 		name := matchedName(probe)
 
 		want := matcher.matches(name)

@@ -118,13 +118,25 @@ verify-coverage: test ## Verify test coverage meets threshold
 #
 # verify-tidy and verify-golden rewrite files in place and then check that
 # nothing changed, which is why verify is not part of the default target.
+# For the same reason they must not run alongside the targets that build:
+# under make -j, go test could read a go.mod or a golden file halfway
+# through its rewrite. verify therefore runs its steps one after another in
+# a make of its own, whatever -j the outer make was given.
+VERIFY_STEPS := verify-coverage lint verify-tidy verify-mdtoc verify-golden verify-syscalls verify-dependencies govulncheck lint-actions
+
 .PHONY: verify
-verify: verify-coverage lint verify-tidy verify-mdtoc verify-golden verify-syscalls verify-dependencies govulncheck lint-actions ## Run the verifications CI runs (rewrites go.mod and the goldens in place)
+verify: ## Run the verifications CI runs (rewrites go.mod and the goldens in place)
+	$(MAKE) --no-print-directory -j1 $(VERIFY_STEPS)
 
 # Built from source rather than downloaded, so that the module checksum
 # database vouches for it the way it does for the tools in hack/tools. It
 # stays out of that module because golangci-lint asks not to be installed
 # as a dependency of another module, whose requirements would change it.
+# Its go.mod requires Go 1.26, newer than the floor in go.mod, so this needs
+# that Go on PATH or a GOTOOLCHAIN that lets the go command fetch it. The
+# lint job in ci.yml uses the release binary golangci-lint-action installs
+# instead, of the same version, which the action checks against the
+# checksums the release publishes.
 .PHONY: lint
 lint: ## Run golangci-lint (needs the libseccomp headers; the config lints the cgo bridge too)
 	$(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(GOLANGCI_LINT_VERSION) run
@@ -172,11 +184,15 @@ verify-upstream: ## Fail if a pinned version is behind its upstream release (nee
 
 # The libseccomp releases whose syscalls.csv seccomp/syscalls.go is
 # generated from, with the SHA-256 of each file. Keep the versions in step
-# with syscallTableVersions in seccomp/syscalls_gen_internal_test.go. The
+# with syscallTableVersions in seccomp/syscalls_gen_internal_test.go, which
+# fails when the files fetched here are not the ones it lists. The
 # table is generated from these files rather than from the libseccomp a
 # host links, so that it does not depend on the host, and regenerating it
 # and asking git whether anything moved keeps it in step with them.
-SYSCALL_CSVS = 2.5.5:1a268ddf08313e5982dd7ecfff52c6718cc5a24b97a87b8465ce0dfe6c5f1c72 \
+SYSCALL_CSVS = 2.5.2:3c59487fdb6cb9b0356ea0cf26f0f495d78c31e327ecb13655c484f62d55be4f \
+	2.5.4:6932eb079e5c497dd52ad0b5184f8fc7f868949891388ba2c26e99d56a3cf3d7 \
+	2.5.5:1a268ddf08313e5982dd7ecfff52c6718cc5a24b97a87b8465ce0dfe6c5f1c72 \
+	2.6.0:3fc607fffc9c3b0aca77fd6ffc3aa0f86c61b90dc255baedfc396e9a5e102fdc \
 	2.6.1:ab64e55719254d44bc279d967845568ab9940e81ed7800e9d1066f664a9f5231
 
 .PHONY: verify-syscalls
@@ -234,6 +250,6 @@ tidy: ## Run go mod tidy on go.mod and hack/tools/go.mod
 	cd hack/tools && $(GO) mod tidy
 
 .PHONY: clean
-clean: ## Remove build artifacts
-	rm -rf $(BUILD_DIR)
+clean: ## Remove build artifacts and the release snapshot
+	rm -rf $(BUILD_DIR) dist
 

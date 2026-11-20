@@ -113,6 +113,12 @@ const (
 	// limits. AppArmor may accept it, but this package matches nothing
 	// with it.
 	globTooComplex
+	// globUncompiled is a pattern the matcher models but has not compiled:
+	// one analyzed without compiling, which compileMatcher compiles next,
+	// one past its call's compile budget, or, in principle, one the regexp
+	// package refused. Until it is compiled it matches nothing, and the
+	// validators report it as they report globTooComplex.
+	globUncompiled
 	// globInvalid is a pattern apparmor_parser rejects, or accepts with a
 	// meaning this package does not model. It matches nothing.
 	globInvalid
@@ -155,9 +161,6 @@ type globMatcher struct {
 	// relative reports a translated pattern that does not start with "/";
 	// it is false for a literal and for a pattern the port cannot translate.
 	relative bool
-	// compilable reports an absolute glob within the matcher's limits,
-	// which compileMatcher compiles from fragment into expr.
-	compilable bool
 	// starStarForm reports a pattern that is its literal prefix followed
 	// by "**", which starStar reports once the pattern is compiled.
 	starStarForm bool
@@ -171,7 +174,7 @@ type globMatcher struct {
 // with ErrBudgetExceeded when the result may lose access, which is when
 // neither input is kept whole (see intersectPerms).
 func (matcher *globMatcher) verbatimOnly() bool {
-	return matcher.compilable && matcher.expr == nil
+	return matcher.status == globUncompiled
 }
 
 // usable reports whether the matcher can match anything.
@@ -239,15 +242,14 @@ func literalMatcher(path string) *globMatcher {
 		escapedNegation: false,
 		fragment:        "",
 		relative:        false,
-		compilable:      false,
 		starStarForm:    false,
 	}
 }
 
 // analyzePattern runs a path through the parser port and compiles the
 // resulting regex, unless compile is false. Without compiling, a pattern the
-// matcher would model is analyzed as past its limits, as it matches nothing
-// until compileMatcher compiles it. A path past the length limit is not
+// matcher would model is left globUncompiled, and matches nothing until
+// compileMatcher compiles it. A path past the length limit is not
 // translated either, since it never compiles.
 func analyzePattern(pattern string, compile bool) *globMatcher {
 	conv := convertPattern(filterSlashes(decodeEscapes(pattern)))
@@ -263,7 +265,6 @@ func analyzePattern(pattern string, compile bool) *globMatcher {
 		escapedNegation: conv.escapedNegation,
 		fragment:        "",
 		relative:        false,
-		compilable:      false,
 		starStarForm:    conv.starStarOnly,
 	}
 
@@ -297,7 +298,7 @@ func analyzePattern(pattern string, compile bool) *globMatcher {
 
 // translateGlob translates the regex of a glob within the length limit and
 // sets the status the translation gives it. A pattern the matcher can model
-// is left past its limits until compileMatcher compiles it.
+// is left globUncompiled until compileMatcher compiles it.
 func translateGlob(matcher *globMatcher, conv conversion, relative bool) {
 	// The fragment is kept even for a pattern that matches nothing, since
 	// it is what identifies the rule the pattern spells.
@@ -315,8 +316,7 @@ func translateGlob(matcher *globMatcher, conv conversion, relative bool) {
 	case relative:
 		matcher.status = globRelative
 	default:
-		matcher.status = globTooComplex
-		matcher.compilable = true
+		matcher.status = globUncompiled
 	}
 }
 
@@ -324,7 +324,7 @@ func translateGlob(matcher *globMatcher, conv conversion, relative bool) {
 // translated without compiling it. It modifies the matcher, so it runs only
 // on one no other goroutine can see yet.
 func compileMatcher(matcher *globMatcher) {
-	if !matcher.compilable {
+	if matcher.status != globUncompiled {
 		return
 	}
 
@@ -339,11 +339,11 @@ func compileMatcher(matcher *globMatcher) {
 }
 
 // compileCost is what compiling the pattern costs a call's budget (see
-// maxCallCompileBytes): its length, for a pattern that is compiled, and
-// nothing for one that is not. The budget is charged only for a compile that
-// succeeds (see matcherCache.matcher).
+// maxCallCompileBytes): its length, for a pattern that is compiled or still
+// to be, and nothing for one that is not. The budget is charged only for a
+// compile that succeeds (see matcherCache.matcher).
 func (matcher *globMatcher) compileCost(pattern string) int {
-	if !matcher.compilable {
+	if matcher.status != globUncompiled && matcher.expr == nil {
 		return 0
 	}
 
@@ -351,7 +351,7 @@ func (matcher *globMatcher) compileCost(pattern string) int {
 }
 
 // uncompiled returns the analysis of the pattern as it is without its
-// compiled expression: a pattern past its limits, which matches nothing. A
+// compiled expression: a globUncompiled one, which matches nothing. A
 // call past its compile budget uses it in place of an analysis the shared
 // cache holds compiled, so that what the call merges does not depend on what
 // earlier calls left in the cache.
@@ -362,7 +362,7 @@ func (matcher *globMatcher) uncompiled() *globMatcher {
 
 	stripped := *matcher
 	stripped.expr = nil
-	stripped.status = globTooComplex
+	stripped.status = globUncompiled
 	stripped.starStar = false
 
 	return &stripped
@@ -441,7 +441,13 @@ func sharedMatcher(path string) *globMatcher {
 
 // storeSharedMatcher adds an analysis to the shared cache and returns the one
 // the cache holds for the pattern, which is an earlier one when another call
-// stored it first.
+// stored it first. An analysis larger than the whole cache is returned
+// without being stored, so that it cannot empty the cache. No analysis is
+// that large today: a pattern stored here is at most maxGlobPatternLen
+// bytes, and the costliest shape of that length retains under a fifth of
+// maxGlobCacheBytes (see TestNoAnalysisOutgrowsTheSharedCache). The check
+// keeps a change to the estimate or the length limit from turning one
+// pattern into an eviction of every other.
 func storeSharedMatcher(path string, analyzed *globMatcher) *globMatcher {
 	globCacheMu.Lock()
 	defer globCacheMu.Unlock()
@@ -475,16 +481,22 @@ func storeSharedMatcher(path string, analyzed *globMatcher) *globMatcher {
 // pair and work budgets weigh matching, and compiling a pattern costs time
 // and memory in proportion to its length whether or not anything is matched
 // against it. Past maxCallCompileBytes a pattern is analyzed but not
-// compiled, and the call treats it as matching no name and no other
-// pattern, even when the shared cache holds it compiled: the call's result
-// must not depend on what earlier calls left there. Where an input holds
-// such a pattern, an intersection fails with ErrBudgetExceeded when the
-// result may lose access, which is when neither input is kept whole (see
+// compiled, and the call treats it as matching no name and no other pattern,
+// even when the shared cache holds it compiled: the call's result must not
+// depend on what earlier calls left there. Where an input holds such a
+// pattern, an intersection fails with ErrBudgetExceeded when the result may
+// lose access, which is when neither input is kept whole (see
 // intersectPerms), and a union keeps it as it keeps every pattern. A merge
 // analyzes every path of one input before it reads the next, and all of
-// them before it
-// merges anything (see foldProfiles), so which patterns are compiled
-// depends on the inputs and their order alone.
+// them before it merges anything (see foldProfiles), so which patterns are
+// compiled depends on the inputs and their order alone.
+//
+// It keeps the analyses of literal paths too, which the shared cache does
+// not hold: analyzing one costs an allocation on every read otherwise, and a
+// merge reads each path many times. What it keeps of them is bounded by
+// literalBudget, past which a literal is analyzed anew on every read, as
+// matcherFor does, so that a profile of many long literals costs the call
+// no more memory than it did before.
 //
 // A nil matcherCache reads the shared cache only, without a budget.
 type matcherCache struct {
@@ -492,27 +504,93 @@ type matcherCache struct {
 	// compileBudget is what the call may still spend compiling, in pattern
 	// bytes.
 	compileBudget int
+	// literalBudget is what the call may still keep of literal paths, in
+	// path bytes.
+	literalBudget int
+	// keysOnly marks a cache for a call that only identifies paths (see
+	// newKeyCache).
+	keysOnly bool
 }
+
+// maxCallLiteralBytes bounds the bytes of literal paths one call keeps
+// analyzed, as maxCallCompileBytes bounds the patterns it compiles: a
+// baseline of up to twice MaxArtifactPatternBytes of literal paths and two
+// artifacts of as many again are kept whole.
+const maxCallLiteralBytes = 4 * MaxArtifactPatternBytes
 
 // newMatcherCache returns an empty cache for one call.
 func newMatcherCache() *matcherCache {
 	return &matcherCache{
 		entries:       make(map[string]*globMatcher),
 		compileBudget: maxCallCompileBytes,
+		literalBudget: maxCallLiteralBytes,
+		keysOnly:      false,
 	}
+}
+
+// newKeyCache returns an empty cache for a call that only identifies paths,
+// which needs no pattern compiled, since the identity of a pattern does not
+// depend on whether it is compiled (see pathKey). It reads the analyses
+// keyAnalysis returns, as Diff does, so that Validate and Diff take the
+// same spellings for one rule. It compiles nothing and never stores into
+// or evicts from the shared cache, though it reads analyses from it.
+func newKeyCache() *matcherCache {
+	return &matcherCache{
+		entries:       make(map[string]*globMatcher),
+		compileBudget: 0,
+		literalBudget: maxCallLiteralBytes,
+		keysOnly:      true,
+	}
+}
+
+// keyAnalysis returns an analysis of a path good for its identity (see
+// pathKey) and nothing else: the analysis the shared cache holds for a
+// pattern, compiled or not, and otherwise one that is neither compiled nor
+// stored. The identity of a pattern does not depend on whether it is
+// compiled, so the two give the same key.
+func keyAnalysis(path string) *globMatcher {
+	if !strings.ContainsAny(path, patternSyntax) {
+		return literalMatcher(path)
+	}
+
+	if len(path) <= maxGlobPatternLen {
+		if cached := sharedMatcher(path); cached != nil {
+			return cached
+		}
+	}
+
+	return analyzePattern(path, false)
 }
 
 // matcher returns the analysis of a path as matcherFor does, reading it
 // from the call's own cache first and compiling only within the call's
-// budget. Literals and paths past the length limit are analyzed anew, as
-// matcherFor analyzes them, since neither is compiled.
+// budget. Paths past the length limit are analyzed anew, as matcherFor
+// analyzes them, since they are never compiled. A cache made by newKeyCache
+// returns keyAnalysis instead, which serves the identity of a path only.
 func (cache *matcherCache) matcher(path string) *globMatcher {
-	if cache == nil || !strings.ContainsAny(path, patternSyntax) || len(path) > maxGlobPatternLen {
+	if cache == nil || len(path) > maxGlobPatternLen {
 		return matcherFor(path)
 	}
 
 	if cached, ok := cache.entries[path]; ok {
 		return cached
+	}
+
+	if !strings.ContainsAny(path, patternSyntax) {
+		analyzed := literalMatcher(path)
+		if len(path) <= cache.literalBudget {
+			cache.literalBudget -= len(path)
+			cache.entries[path] = analyzed
+		}
+
+		return analyzed
+	}
+
+	if cache.keysOnly {
+		analyzed := keyAnalysis(path)
+		cache.entries[path] = analyzed
+
+		return analyzed
 	}
 
 	analyzed := sharedMatcher(path)
@@ -611,7 +689,10 @@ func evictGlobCache(incoming int) {
 // a trailing backslash. Backslash-escaped characters are literals. The
 // merge functions treat a rejected pattern as matching nothing.
 func IsGlobPattern(path string) bool {
-	return strings.ContainsAny(path, patternSyntax) && matcherFor(path).kind != kindLiteral
+	// Whether a path is a pattern is decided by the parser port alone, so
+	// the pattern is neither translated nor compiled.
+	return strings.ContainsAny(path, patternSyntax) &&
+		convertPattern(filterSlashes(decodeEscapes(path))).kind != kindLiteral
 }
 
 // pathKey identifies the rule a path spells, so that two spellings of one

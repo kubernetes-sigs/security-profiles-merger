@@ -212,6 +212,36 @@ func TestConjoinArgs(t *testing.T) {
 	}
 }
 
+// TestConjoinArgsSortsUnsortedInput covers conditions passed out of order,
+// which clause args never are: the conditions on one index must still be
+// compared as one run, or a conflict between them would go unseen and the
+// result would match more than both inputs.
+func TestConjoinArgsSortsUnsortedInput(t *testing.T) {
+	t.Parallel()
+
+	index1 := specs.LinuxSeccompArg{Index: 1, Value: 2, ValueTwo: 0, Op: specs.OpEqualTo}
+	unsorted := []specs.LinuxSeccompArg{
+		cond(specs.OpGreaterEqual, 3), index1, cond(specs.OpLessEqual, 9),
+	}
+
+	if _, joinable := conjoinArgs(unsorted, filter(specs.OpEqualTo, 5)); joinable {
+		t.Error("conjoinArgs joined a filter whose index 0 carries two conditions")
+	}
+
+	reversed := []specs.LinuxSeccompArg{index1, cond(specs.OpEqualTo, 1)}
+
+	joined, joinable := conjoinArgs(reversed, filter(specs.OpEqualTo, 1))
+
+	want := []specs.LinuxSeccompArg{cond(specs.OpEqualTo, 1), index1}
+	if !joinable || !slices.Equal(joined, want) {
+		t.Errorf("conjoinArgs of reversed conditions = %v, %v", joined, joinable)
+	}
+
+	if unsorted[0] != cond(specs.OpGreaterEqual, 3) || reversed[0] != index1 {
+		t.Error("conjoinArgs reordered its input")
+	}
+}
+
 func TestArgsCover(t *testing.T) {
 	t.Parallel()
 

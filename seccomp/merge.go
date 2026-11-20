@@ -53,29 +53,29 @@ var (
 	// a supervisor that never asked for them. Both merges wrap it in an
 	// *InputError naming the later of the two inputs, which brought the
 	// conflict, and name the listener it conflicts with by value in the
-	// message. Intersect returns it when an
-	// input after the first sets either listenerPath or listenerMetadata
-	// without setting both exactly as the first input does, including where
-	// the first sets none and where a later one repeats the path but leaves
-	// the metadata out: its first input is the trusted baseline, and a
-	// listener is a node-local socket only the baseline may name (see the
-	// Listener section of the package documentation).
+	// message. Intersect returns it when an input after the first sets
+	// either listenerPath or listenerMetadata without setting both exactly
+	// as the first input does, including where the first sets none and where
+	// a later one repeats the path but leaves the metadata out: its first
+	// input is the trusted baseline, and a listener is a node-local socket
+	// only the baseline may name (see the Listener section of the package
+	// documentation).
 	ErrConflictingListener = errors.New("conflicting listeners")
 	// ErrLostRules is returned by Union when its result would hold rules
 	// libseccomp loses on a covered architecture: the block of that
 	// architecture would test a syscall it lacks first, which libseccomp
-	// 2.5.5 and 2.6.1 compile without loading the syscall number, so every
-	// call of the architecture gets the default action. Intersect drops an
-	// architecture instead, which Union cannot do without denying what an
-	// input permits, and returns it only where it cannot drop one: where the
-	// affected architecture is native and the syscall applies there too, or
-	// where the native architecture is not known and the affected one is the
-	// last listed (see the Architectures section of the package
-	// documentation). ValidateArtifact and ValidateStrict return it for a
-	// profile whose filter has that shape as written, so that a runtime
-	// loading the profile itself loses rules. The merges settle the shapes
-	// of the rules first, which can remove it, so they may accept such a
-	// profile.
+	// 2.5.2, 2.5.4, 2.5.5, 2.6.0 and 2.6.1 compile without loading the
+	// syscall number, so every call of the architecture gets the default
+	// action. Intersect drops an architecture instead, which Union cannot do
+	// without denying what an input permits, and returns it only where it
+	// cannot drop one: where the affected architecture is native and the
+	// syscall applies there too, or where the native architecture is not
+	// known and the affected one is the last listed (see the Architectures
+	// section of the package documentation). ValidateArtifact and
+	// ValidateStrict return it for a profile whose filter has that shape as
+	// written, so that a runtime loading the profile itself loses rules. The
+	// merges settle the shapes of the rules first, which can remove it, so
+	// they may accept such a profile.
 	ErrLostRules = errors.New("libseccomp would lose the rules of an architecture")
 )
 
@@ -182,17 +182,19 @@ func foldProfiles(
 
 	result, err := merge.Fold(
 		profiles,
-		// A single profile is normalized to the form a merge result takes,
-		// which is also the form Diff compares.
-		func(only *specs.LinuxSeccomp) *specs.LinuxSeccomp {
-			return normalizeProfile(only, rules)
-		},
 		func(left, right *specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 			return mergeTwo(left, right, rules), nil
 		},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("merge: %w", err)
+	}
+
+	if len(profiles) == 1 {
+		// A single profile is normalized to the form a merge result takes,
+		// which is also the form Diff compares, and which is a copy rather
+		// than the caller's profile.
+		result = normalizeProfile(result, rules)
 	}
 
 	err = rules.settleAbsentSyscalls(result)
@@ -592,5 +594,5 @@ func regroupSyscalls(syscalls []specs.LinuxSyscall) []specs.LinuxSyscall {
 }
 
 func groupKey(entry *specs.LinuxSyscall) string {
-	return resultKey(entry.Action, entry.ErrnoRet, argsKey(entry.Args))
+	return resultKey(entry.Action, entry.ErrnoRet, sortedArgs(entry.Args))
 }

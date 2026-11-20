@@ -79,7 +79,7 @@ func TestMergesStayWithinTheirPairBudget(t *testing.T) {
 		result, err := mergeFn(budgetProfile(literals...), budgetProfile(globs...))
 
 		elapsed := time.Since(start)
-		if testutil.UninstrumentedRun() && elapsed > 2*time.Second {
+		if testutil.CheckWallClock() && elapsed > 2*time.Second {
 			t.Errorf("%s of %d paths took %v", name, 2*len(literals), elapsed)
 		}
 
@@ -331,7 +331,7 @@ func TestMergesBoundTheirRegexWork(t *testing.T) {
 		result, err := mergeFn(globs, names)
 
 		elapsed := time.Since(start)
-		if testutil.UninstrumentedRun() && elapsed > 2*time.Second {
+		if testutil.CheckWallClock() && elapsed > 2*time.Second {
 			t.Errorf("%s took %v", name, elapsed)
 		}
 

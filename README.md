@@ -90,7 +90,8 @@ cosign verify-blob \
 sha256sum --ignore-missing -c checksums.txt
 
 # Or verify build provenance directly
-gh attestation verify spm_*_linux_amd64 -R kubernetes-sigs/security-profiles-merger
+gh attestation verify spm_*_linux_amd64 -R kubernetes-sigs/security-profiles-merger \
+  --signer-workflow kubernetes-sigs/security-profiles-merger/.github/workflows/release.yml
 ```
 
 Or install from source:
@@ -107,10 +108,10 @@ make build   # produces build/spm
 
 ## Packages
 
-Each package provides `Intersect`, `Union`, `Validate`, `ValidateStrict`,
-`ValidateArtifact`, `UnmarshalStrict`, `FormatProfile`, `Diff`, and
-`FormatDiff` functions. `ValidateArtifact` runs the checks a runtime applies
-to an artifact, a profile it did not author
+Each profile package provides `Intersect`, `Union`, `Validate`,
+`ValidateStrict`, `ValidateArtifact`, `UnmarshalStrict`, `FormatProfile`,
+`Diff`, and `FormatDiff` functions. `ValidateArtifact` runs the checks a
+runtime applies to an artifact, a profile it did not author
 ([KEP-6061](https://github.com/kubernetes/enhancements/issues/6061)).
 
 - **[seccomp](docs/api.md#seccomp)** - Operates on `specs.LinuxSeccomp` from the

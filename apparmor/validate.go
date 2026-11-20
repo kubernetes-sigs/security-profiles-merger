@@ -82,10 +82,9 @@ var (
 	// ErrPathTooLong is returned by every validator and by a merge when a
 	// path is longer than MaxPathLen, the longest pattern the matcher
 	// accepts and the longest name the kernel hands AppArmor to match
-	// against (see MaxPathLen). The length is checked before
-	// any other path check, so an oversized path costs no further work;
-	// only the size limits of ValidateArtifact and ValidateStrict come
-	// first.
+	// against (see MaxPathLen). The length is checked before any other path
+	// check, so an oversized path costs no further work; only the size
+	// limits of ValidateArtifact and ValidateStrict come first.
 	ErrPathTooLong = spm.ErrPathTooLong
 
 	// ErrDotComponent is returned by ValidateStrict and ValidateArtifact
@@ -112,14 +111,14 @@ var (
 	// unescaped in a file rule: a space, a tab, a carriage return, a
 	// newline, a double quote, an exclamation mark, or a comma that does not
 	// continue the path. Each has an escaped form the parser accepts and
-	// this package resolves, so `/tmp/a\ b` names the file "/tmp/a b"
-	// while "/tmp/a b" does not load at all. Beyond not loading, such a path
-	// is how an artifact smuggles rules into a consumer that writes
-	// its paths into a profile file: a newline ends the rule the consumer
-	// renders and starts one the profile author chose. A backslash the
-	// lexer does not read as an escape is reported too: one after a comma,
-	// as in `/a,\ b`, where the space ends the path all the same, and one
-	// that ends the path, which escapes the space rendered after it.
+	// this package resolves, so `/tmp/a\ b` names the file "/tmp/a b" while
+	// "/tmp/a b" does not load at all. Beyond not loading, such a path is
+	// how an artifact smuggles rules into a consumer that writes its paths
+	// into a profile file: a newline ends the rule the consumer renders and
+	// starts one the profile author chose. A backslash the lexer does not
+	// read as an escape is reported too: one after a comma, as in `/a,\ b`,
+	// where the space ends the path all the same, and one that ends the
+	// path, which escapes the space rendered after it.
 	//
 	// So is a character that does not print as itself: a C0 control or
 	// DEL, a character strconv.IsPrint refuses, such as U+0085, U+2028 or a
@@ -204,8 +203,8 @@ const MaxArtifactPaths = 1024
 // pattern syntax count: a literal path is matched by comparison, while a
 // pattern is compiled into a program first.
 //
-// Compiling a pattern costs time and memory in proportion to its length,
-// and one call compiles each pattern it reads once. A merge bounds what it
+// Compiling a pattern costs time and memory in proportion to its length, and
+// one call compiles each pattern it reads once. A merge bounds what it
 // compiles on its own, at four times this bound per call, in the order of
 // its inputs, so a baseline of up to twice this bound and two artifacts
 // this bound admits are compiled and matched in full. A pattern past the
@@ -306,7 +305,9 @@ func Validate(profile *Profile) error {
 		return ErrNilProfile
 	}
 
-	check := newValidator(newMatcherCache())
+	// Nothing Validate checks matches a name against a pattern, so it
+	// identifies paths without compiling them.
+	check := newValidator(newKeyCache())
 	check.structure(profile, true, false)
 
 	return check.report.Err()
@@ -368,10 +369,10 @@ func newValidator(matchers *matcherCache) *validator {
 // ValidateArtifact and the merge read rather than normalizing every path
 // again, or nil when it stopped at an oversized path, which it normalizes
 // no further. Without it, as for Validate, it normalizes only the
-// filesystem rules it compares and returns nil. The pattern checks of ValidateStrict
-// and ValidateArtifact have nothing to work on once a path is oversized.
-// listDuplicates selects the checks for a path or capability listed twice
-// within one list, which a merge leaves out.
+// filesystem rules it compares and returns nil. The pattern checks of
+// ValidateStrict and ValidateArtifact have nothing to work on once a path is
+// oversized. listDuplicates selects the checks for a path or capability
+// listed twice within one list, which a merge leaves out.
 func (check *validator) structure(
 	profile *Profile, listDuplicates, copyProfile bool,
 ) *Profile {
@@ -615,18 +616,16 @@ func validatePathCount(profile *Profile) error {
 // check, given the normalized copy structure returned. Callers run it only
 // when no path is oversized, which structure has already reported.
 func (check *validator) loadablePaths(profile, normalizedProfile *Profile) {
-	// The copy has the sections of the profile, so pathLists yields the
-	// same lists of both in the same order, and they are paired by walking
-	// both. A list the copy lacks is normalized here instead.
-	type namedList struct {
-		context string
-		paths   []string
-	}
+	// The copy has the sections of the profile (see normalizeProfile), so
+	// pathLists yields the same lists of both in the same order, and they
+	// are paired by walking both. A list the copy does not pair, which only
+	// a change to normalizeProfile could bring about, is normalized here
+	// instead, so that such a change costs work rather than a panic on an
+	// untrusted profile.
+	var normalizedLists [][]string
 
-	var normalizedLists []namedList
-
-	for context, list := range pathLists(normalizedProfile) {
-		normalizedLists = append(normalizedLists, namedList{context: context, paths: *list})
+	for _, list := range pathLists(normalizedProfile) {
+		normalizedLists = append(normalizedLists, *list)
 	}
 
 	idx := 0
@@ -634,19 +633,20 @@ func (check *validator) loadablePaths(profile, normalizedProfile *Profile) {
 	for context, list := range pathLists(profile) {
 		// Normalizing never changes whether a path is absolute, which
 		// characters it holds, or which escapes it spells beyond dropping
-		// escaped slashes from a run of slashes, so those checks
-		// read the raw paths and report them as written. The pattern checks
-		// apply to the normalized form, which is what the merge matches.
+		// escaped slashes from a run of slashes, so those checks read the
+		// raw paths and report them as written. The pattern checks apply to
+		// the normalized form, which is what the merge matches.
 		paths := *list
 
 		var normalized []string
 
-		if idx < len(normalizedLists) && normalizedLists[idx].context == context {
-			normalized = normalizedLists[idx].paths
-			idx++
+		if idx < len(normalizedLists) && len(normalizedLists[idx]) == len(paths) {
+			normalized = normalizedLists[idx]
 		} else {
 			normalized = normalizePaths(paths)
 		}
+
+		idx++
 
 		check.reject(context, paths, func(path string) bool {
 			return path != "" && path[0] != '/'
@@ -863,7 +863,8 @@ var lexerPath = regexp.MustCompile(`^(?:[^ \t\r\n"!,]|,[^ \t\r\n"!,]|\\[ \t"!,])
 // path holding a newline, and a consumer rendering it writes a rule that
 // ends mid-path and a second rule of the path author's choosing. The two-
 // character forms spell the same paths safely (\n, \r, \t, or \x0a), so
-// nothing is lost by refusing this one.
+// nothing is lost by refusing this one, which hasUnprintable does along
+// with every other control byte.
 //
 // Pairing each backslash with the next byte is how the merge reads a path,
 // not how the lexer splits it, so the path also has to be one token to the
@@ -883,8 +884,8 @@ func hasUnquotableChar(path string) bool {
 }
 
 // hasUnescapedChar reports whether a path, read as the merge reads it,
-// holds one of unquotableChars unescaped, a comma that does not continue
-// the path, or a backslash followed by a control byte.
+// holds one of unquotableChars unescaped or a comma that does not continue
+// the path.
 func hasUnescapedChar(path string) bool {
 	for idx := 0; idx < len(path); idx++ {
 		char := path[idx]
@@ -892,10 +893,6 @@ func hasUnescapedChar(path string) bool {
 		switch {
 		case char == '\\':
 			idx++
-
-			if idx < len(path) && isControlByte(path[idx]) {
-				return true
-			}
 		case char == ',':
 			if idx+1 >= len(path) || unquotable(path[idx+1]) {
 				return true
@@ -929,6 +926,7 @@ func splitsLexerToken(path string) bool {
 // path writes out text of the author's choosing. It is what the package's
 // error messages escape when they quote a path, so a path they would show
 // escaped is one ValidateArtifact refuses.
+//
 // Bytes that are not valid UTF-8 are left alone: a file name is a sequence
 // of bytes, and one in another encoding is still a name the kernel can hand
 // AppArmor.
@@ -947,12 +945,6 @@ func hasUnprintable(path string) bool {
 	}
 
 	return false
-}
-
-// isControlByte reports whether a byte is one no rule can carry in the
-// clear: the C0 controls and DEL. A path names them with an escape.
-func isControlByte(char byte) bool {
-	return char < 0x20 || char == 0x7f
 }
 
 // unquotable reports whether a character has to be escaped to stay part of a
@@ -1056,7 +1048,9 @@ func (check *validator) globStatus(context string, paths []string) {
 	check.reject(context, paths, func(pattern string) bool {
 		matcher := check.matchers.matcher(pattern)
 
-		return matcher.status == globTooComplex && !matcher.misleading()
+		tooComplex := matcher.status == globTooComplex || matcher.status == globUncompiled
+
+		return tooComplex && !matcher.misleading()
 	}, ErrGlobTooComplex, false)
 }
 

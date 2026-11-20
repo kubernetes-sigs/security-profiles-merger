@@ -19,6 +19,7 @@ package apparmor
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -275,6 +276,7 @@ func TestPatternStatus(t *testing.T) {
 			"/" + strings.Repeat("{a,", maxAltDepth) + "b" + strings.Repeat("}", maxAltDepth),
 			kindInvalid, globInvalid,
 		},
+		{"/etc/{" + strings.Repeat("a,", maxGlobAlternatives-1) + "b}", kindGlob, globUsable},
 		{"/etc/{" + strings.Repeat("a,", maxGlobAlternatives) + "b}", kindGlob, globTooComplex},
 	}
 
@@ -381,7 +383,7 @@ func TestUnbalancedPatternsScanInLinearTime(t *testing.T) {
 		analyzePattern(pattern, false)
 		dotComponentIn(pattern, newMatcherCache().matcher(pattern))
 
-		if elapsed := time.Since(start); testutil.UninstrumentedRun() && elapsed > 2*time.Second {
+		if elapsed := time.Since(start); testutil.CheckWallClock() && elapsed > 2*time.Second {
 			t.Errorf("analyzing %d bytes of %q took %v", size, char, elapsed)
 		}
 	}
@@ -675,41 +677,139 @@ func TestCallCompileBudget(t *testing.T) {
 // TestCallCompileBudgetIgnoresTheSharedCache covers what a call past its
 // compile budget does with a pattern the shared cache holds compiled: it
 // treats it as uncompiled all the same, since what a merge returns must not
-// depend on what earlier calls left in the cache. The uncompiled pattern
-// covers the baseline's file, which the intersection would lose, so both
-// calls fail with ErrBudgetExceeded. It swaps the shared cache, so it does
-// not run in parallel.
+// depend on what earlier calls left in the cache. A merge filling the budget
+// would compile enough to evict the pattern from the shared cache before it
+// reads it, so the call's cache is given a budget too small for the pattern
+// directly. It swaps the shared cache, so it does not run in parallel.
 func TestCallCompileBudgetIgnoresTheSharedCache(t *testing.T) {
 	swapGlobCache(t)
 
-	const patternLen = maxGlobPatternLen - 64
+	const pattern = "/etc/{passwd,shadow}"
 
-	paths := make([]string, 0, maxCallCompileBytes/patternLen+2)
-	for idx := range cap(paths) - 1 {
-		prefix := fmt.Sprintf("/budget/%d/", idx)
-		paths = append(paths, prefix+strings.Repeat("a", patternLen-len(prefix)-1)+"*")
+	if !matcherFor(pattern).usable() {
+		t.Fatal("the pattern does not compile on its own")
 	}
 
-	// The pattern covering the baseline's file comes last and is too long
-	// for what the budget has left.
-	late := "/etc/{passwd," + strings.Repeat("b", patternLen) + "}"
-	paths = append(paths, late)
+	matchers := newMatcherCache()
+	matchers.compileBudget = len(pattern) - 1
 
-	artifact := budgetProfile(paths...)
-	baseline := budgetProfile("/etc/passwd")
-
-	_, cold := Intersect(artifact, baseline)
-	if !errors.Is(cold, ErrBudgetExceeded) {
-		t.Fatalf("Intersect = %v cold, want ErrBudgetExceeded", cold)
+	got := matchers.matcher(pattern)
+	if got.usable() || !got.verbatimOnly() || got.matches("/etc/passwd") {
+		t.Errorf("past the budget the cached pattern reads as usable %v, verbatim only %v",
+			got.usable(), got.verbatimOnly())
 	}
 
-	if !matcherFor(late).usable() {
-		t.Fatal("the late pattern does not compile on its own")
+	if matchers.compileBudget != len(pattern)-1 {
+		t.Errorf("an uncompiled pattern was charged: budget %d, want %d",
+			matchers.compileBudget, len(pattern)-1)
 	}
 
-	_, warm := Intersect(artifact, baseline)
-	if !errors.Is(warm, ErrBudgetExceeded) {
-		t.Errorf("Intersect = %v warm, want ErrBudgetExceeded as cold", warm)
+	// The call's copy is stripped, not the analysis other calls share.
+	if shared := sharedMatcher(pattern); shared == nil || !shared.usable() {
+		t.Error("stripping the call's copy changed the shared analysis")
+	}
+
+	if got := newMatcherCache().matcher(pattern); !got.usable() {
+		t.Error("a call within its budget does not use the shared analysis")
+	}
+}
+
+// TestMergesIgnoreTheSharedCache checks end to end what the test above
+// checks for one analysis: the same inputs merge alike whether the shared
+// cache is empty or already holds every pattern they name, compiled. It
+// swaps the shared cache, so it does not run in parallel.
+func TestMergesIgnoreTheSharedCache(t *testing.T) {
+	swapGlobCache(t)
+
+	left := &Profile{
+		Executable: &ExecutableRules{
+			AllowedExecutables: []string{"/bin/*", "/usr/bin/env"},
+			AllowedLibraries:   []string{"/lib/{libc,libm}.so"},
+		},
+		Filesystem: &FilesystemRules{
+			ReadOnlyPaths:  []string{"/etc/**", "/srv/[a-c]*"},
+			WriteOnlyPaths: []string{"/var/log/*.log"},
+			ReadWritePaths: []string{"/tmp/**"},
+		},
+		Network:      nil,
+		Capabilities: nil,
+	}
+	right := &Profile{
+		Executable: &ExecutableRules{
+			AllowedExecutables: []string{"/bin/sh", "/usr/bin/?nv"},
+			AllowedLibraries:   []string{"/lib/libc.so"},
+		},
+		Filesystem: &FilesystemRules{
+			ReadOnlyPaths:  []string{"/etc/passwd", "/srv/b/data"},
+			WriteOnlyPaths: []string{"/var/log/app.log"},
+			ReadWritePaths: []string{"/tmp/x/**"},
+		},
+		Network:      nil,
+		Capabilities: nil,
+	}
+
+	for name, mergeFn := range map[string]func(...*Profile) (*Profile, error){
+		"Intersect": Intersect, "Union": Union,
+	} {
+		swapGlobCache(t)
+
+		cold, err := mergeFn(left, right)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+
+		if count, _ := cacheState(); count == 0 {
+			t.Fatalf("%s left nothing in the shared cache", name)
+		}
+
+		warm, err := mergeFn(left, right)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+
+		if !reflect.DeepEqual(cold, warm) {
+			t.Errorf("%s with a cold cache = %s, with a warm one = %s", name, cold, warm)
+		}
+	}
+}
+
+// TestLoadablePathsWithoutAPairedCopy covers a normalized copy that does not
+// pair with the profile, which normalizeProfile never returns: the checks
+// normalize the lists themselves and report what they report with the
+// paired copy, rather than index past the copy's lists.
+func TestLoadablePathsWithoutAPairedCopy(t *testing.T) {
+	t.Parallel()
+
+	profile := &Profile{
+		Executable: &ExecutableRules{
+			AllowedExecutables: []string{"/bin//./sh"}, AllowedLibraries: nil,
+		},
+		Filesystem: &FilesystemRules{
+			ReadOnlyPaths:  []string{"relative", "/etc//{a"},
+			WriteOnlyPaths: nil,
+			ReadWritePaths: []string{"/srv/../x"},
+		},
+		Network:      nil,
+		Capabilities: nil,
+	}
+
+	report := func(normalized *Profile) string {
+		check := newValidator(newMatcherCache())
+		check.loadablePaths(profile, normalized)
+
+		err := check.report.Err()
+		if err == nil {
+			t.Fatal("loadablePaths reports nothing")
+		}
+
+		return err.Error()
+	}
+
+	want := report(normalizeProfile(profile))
+
+	empty := &Profile{Executable: nil, Filesystem: nil, Network: nil, Capabilities: nil}
+	if got := report(empty); got != want {
+		t.Errorf("without a paired copy loadablePaths reports %q, want %q", got, want)
 	}
 }
 
@@ -858,6 +958,192 @@ func TestRetainedBytesBoundsPrograms(t *testing.T) {
 				t.Errorf("%s of %d bytes: %d programs retain %d bytes, estimated %d",
 					name, size, count, retained, estimate)
 			}
+		}
+	}
+}
+
+// TestNoAnalysisOutgrowsTheSharedCache pins why storeSharedMatcher stores
+// every analysis it is given: a pattern is at most maxGlobPatternLen bytes,
+// the translation emits a bounded fragment per pattern byte, and the
+// costliest shapes at that length, those TestRetainedBytesBoundsPrograms
+// weighs among them, retain well under maxGlobCacheBytes.
+func TestNoAnalysisOutgrowsTheSharedCache(t *testing.T) {
+	t.Parallel()
+
+	// "*/" and "*?" are the costliest: a star per two bytes, each adding a
+	// loop, and a class of every byte but "/" and NUL between them. The
+	// estimate is a formula, not a measurement, so the bound is exact.
+	for _, unit := range []string{
+		"?", "*", "**", "*/", "*?", "?*", "a*/", "?/", "[^a]", "[!b-d]", "[a-z]",
+	} {
+		pattern := "/" + strings.Repeat(unit, (maxGlobPatternLen-1)/len(unit))
+
+		matcher := analyzePattern(pattern, true)
+		if !matcher.usable() {
+			t.Fatalf("%d bytes of %q do not compile", len(pattern), unit)
+		}
+
+		if size := matcher.retainedBytes(pattern); size > maxGlobCacheBytes/5 {
+			t.Errorf("%d bytes of %q retain %d bytes, over a fifth of the cache's %d",
+				len(pattern), unit, size, maxGlobCacheBytes)
+		}
+	}
+}
+
+// TestOversizeAnalysisIsNotStored covers the guard against an analysis
+// larger than the whole shared cache, which no pattern within the length
+// limit produces (see above): it is returned but not stored, and evicts
+// nothing. It swaps the shared cache, so it does not run in parallel.
+func TestOversizeAnalysisIsNotStored(t *testing.T) {
+	swapGlobCache(t)
+
+	matcherFor("/etc/*")
+
+	huge := analyzePattern("/huge/*", false)
+	huge.fragment = strings.Repeat("x", maxGlobCacheBytes)
+
+	if got := storeSharedMatcher("/huge/*", huge); got != huge {
+		t.Error("storeSharedMatcher returned another analysis")
+	}
+
+	if count, _ := cacheState(); count != 1 || sharedMatcher("/etc/*") == nil {
+		t.Errorf("the cache holds %d analyses, want only /etc/*", count)
+	}
+}
+
+// TestSyntacticChecksCompileNothing covers IsGlobPattern and Validate,
+// which ask nothing of a pattern a compiled expression answers: whether a
+// path is a pattern is decided by the parser port, and Validate only
+// identifies paths. Neither compiles the pattern or leaves it in the shared
+// cache. It swaps the shared cache, so it does not run in parallel.
+func TestSyntacticChecksCompileNothing(t *testing.T) {
+	swapGlobCache(t)
+
+	const pattern = "/etc/*.conf"
+
+	if !IsGlobPattern(pattern) {
+		t.Fatalf("IsGlobPattern(%q) = false", pattern)
+	}
+
+	profile := &Profile{
+		Executable: nil,
+		Filesystem: &FilesystemRules{
+			ReadOnlyPaths:  []string{pattern},
+			WriteOnlyPaths: []string{"/etc//*.conf", "/etc/{a"},
+			ReadWritePaths: nil,
+		},
+		Network:      nil,
+		Capabilities: nil,
+	}
+
+	err := Validate(profile)
+	if !errors.Is(err, ErrDuplicatePath) {
+		t.Errorf("Validate = %v, want %v", err, ErrDuplicatePath)
+	}
+
+	if count, _ := cacheState(); count != 0 {
+		t.Errorf("the shared cache holds %d analyses, want none", count)
+	}
+
+	// What the shared cache holds, Validate reads rather than analyzing
+	// the pattern again, and it reads the analysis Diff reads, so the two
+	// take the same spellings for one rule.
+	shared := matcherFor(pattern)
+
+	keys := newKeyCache()
+	if keys.matcher(pattern) != shared {
+		t.Error("the keys-only cache analyzed a pattern the shared cache holds")
+	}
+
+	for _, path := range []string{pattern, "/etc//*.conf", "/etc/{a", "/etc/passwd"} {
+		if keys.key(path) != ruleKey(path) {
+			t.Errorf("Validate and Diff identify %q differently", path)
+		}
+	}
+
+	err = Validate(profile)
+	if !errors.Is(err, ErrDuplicatePath) {
+		t.Errorf("Validate with a warm cache = %v, want %v", err, ErrDuplicatePath)
+	}
+
+	if count, _ := cacheState(); count != 1 {
+		t.Errorf("the shared cache holds %d analyses after Validate, want 1", count)
+	}
+}
+
+// TestCallKeepsLiteralsWithinItsBudget covers the literals a call keeps
+// analyzed: one read again costs nothing, and past literalBudget a literal
+// is analyzed anew on every read rather than kept. testing.AllocsPerRun
+// refuses to run in a parallel test.
+func TestCallKeepsLiteralsWithinItsBudget(t *testing.T) {
+	cache := newMatcherCache()
+
+	const kept, past = "/etc/passwd", "/etc/shadow"
+
+	cache.matcher(kept)
+
+	if allocs := testing.AllocsPerRun(10, func() { cache.matcher(kept) }); allocs != 0 {
+		t.Errorf("reading a kept literal allocates %v times", allocs)
+	}
+
+	cache.literalBudget = len(past) - 1
+	entries := len(cache.entries)
+
+	if allocs := testing.AllocsPerRun(10, func() { cache.matcher(past) }); allocs == 0 {
+		t.Error("a literal past the budget was kept")
+	}
+
+	if len(cache.entries) != entries {
+		t.Errorf("the call keeps %d analyses past its budget, want %d", len(cache.entries), entries)
+	}
+
+	if got := cache.matcher(past); got.literal != past || got.kind != kindLiteral {
+		t.Errorf("a literal past the budget is analyzed as %+v", got)
+	}
+}
+
+// TestTranslateRegexRejectsMalformedRegexes covers the regexes the port of
+// libapparmor_re's grammar refuses. convertPattern emits none of them for a
+// pattern it accepts, so only translateRegex itself reaches these paths.
+func TestTranslateRegexRejectsMalformedRegexes(t *testing.T) {
+	t.Parallel()
+
+	for _, regex := range []string{
+		"[", "[^", "[^^", "[^^a", "[]", "[a", "[a-", "[a-]", "[a-b", "[a-c-]",
+		"[ab-", `[\`, `[a\`, `[a-\`, "(", "(a", "(a|b", ")", "a)", "*", "(*)",
+		"|*", `\`,
+	} {
+		if got, ok := translateRegex(regex); ok {
+			t.Errorf("translateRegex(%q) = %q, want it refused", regex, got)
+		}
+	}
+
+	// The closest regexes the grammar accepts.
+	for _, regex := range []string{"[^^]", "[a-c]", "(a|)", "a|", "[]a]", "[-a]"} {
+		if _, ok := translateRegex(regex); !ok {
+			t.Errorf("translateRegex(%q) refused, want it accepted", regex)
+		}
+	}
+}
+
+// TestEscapesReadAtMostThreeDigits pins how far an octal, decimal or hex
+// escape reaches, as strn_escseq reads it: three digits for octal and
+// decimal, two for hex, and no digit that would take the value past a byte.
+// A digit after the escape is part of the path.
+func TestEscapesReadAtMostThreeDigits(t *testing.T) {
+	t.Parallel()
+
+	for raw, want := range map[string]string{
+		`/a\101`:   "/aA",
+		`/a\1011`:  "/aA1",
+		`/a\d0651`: "/aA1",
+		`/a\x411`:  "/aA1",
+		`/a\d2551`: "/a\xff1",
+		`/a\4000`:  "/a 00",
+		`/a\d2560`: "/a\x1960",
+	} {
+		if got := decodeEscapes(raw); got != want {
+			t.Errorf("decodeEscapes(%q) = %q, want %q", raw, got, want)
 		}
 	}
 }
@@ -1012,7 +1298,7 @@ func TestFailedCompileIsNotCharged(t *testing.T) {
 	const pattern = "/failed/*"
 
 	failed := analyzePattern(pattern, false)
-	if !failed.compilable {
+	if failed.status != globUncompiled {
 		t.Fatal("the pattern is not one the matcher compiles")
 	}
 

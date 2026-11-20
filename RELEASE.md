@@ -11,7 +11,7 @@ as follows:
 1. All [OWNERS](OWNERS) must LGTM this release.
 1. An OWNER runs `git tag -s $VERSION`, where `$VERSION` is a `v`-prefixed
    version such as `v0.4.2` (the release workflow only runs for tags matching
-   `v*`), then pushes the tag with `git push <remote> $VERSION`, where
+   `v[0-9]*`), then pushes the tag with `git push <remote> $VERSION`, where
    `<remote>` is the kubernetes-sigs repository, not a fork.
 1. Pushing the tag triggers a GitHub Actions workflow. Its first job is a
    gate that calls the pull request workflow (`.github/workflows/ci.yml`)
@@ -24,12 +24,14 @@ as follows:
    any commit, which is why the workflow runs the gate itself rather than
    assuming the commit under it was ever green.
 1. The publishing job then runs goreleaser to build the binaries, generate
-   cosign-signed checksums, SBOMs (via syft), and build provenance
-   attestations, and to publish the GitHub release. A tag with a prerelease
-   suffix, such as `v0.6.0-rc.1`, is published as a prerelease rather than as
-   the latest release. GitHub generates the release notes from the changes
-   since the previous tag; an OWNER puts the list from the release issue
-   above them, which is what says what a consumer has to do.
+   cosign-signed checksums and SBOMs (via syft) and create the GitHub
+   release as a draft, attests the build provenance, verifies the checksums
+   signature as the README tells users to, and only then publishes the
+   release. A tag with a prerelease suffix, such as `v0.6.0-rc.1`, is
+   published as a prerelease rather than as the latest release. GitHub
+   generates the release notes from the changes since the previous tag; an
+   OWNER puts the list from the release issue above them, which is what says
+   what a consumer has to do.
 1. The release issue is closed.
 
 The publishing job only runs in `kubernetes-sigs/security-profiles-merger`. A

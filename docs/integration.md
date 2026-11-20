@@ -135,10 +135,11 @@ the merge taking anything away.
    diff as a misconfigured node rather than as something to fix at merge
    time.
 
-   The defaults runtimes ship need restating before they pass. Moby,
-   containerd and CRI-O list one syscall in several entries, which
-   `ValidateStrict` reports and the merge reads exactly; the two sets below,
-   both in the CRI-O default, are the ones the merge cannot read:
+   Moby, containerd and CRI-O list one syscall in several entries in their
+   defaults, which `ValidateStrict` reports. The Moby and containerd defaults
+   pass as they are: `ValidateArtifact` accepts them and the merge reads them
+   exactly. The CRI-O default needs restating before it passes: the merge
+   reads its other repeated syscalls exactly, but not the two sets below:
 
    - `clone`: one `ALLOW` clause with a masked comparison on the flags (no
      namespace flag set) next to `ERRNO` clauses for each namespace flag.
@@ -162,9 +163,9 @@ the merge taking anything away.
      refuses the second, so `ValidateArtifact` reports the pair where the
      profile covers such an architecture, and `Intersect` drops x86 from the
      list of an x86_64 node and denies `socket` on ppc64le and s390x.
-     Containerd's default states its `socket` rules as one range and
-     single-value equalities on the first argument, all `ALLOW`, which pass
-     as they are.
+     The Moby and containerd defaults state their `socket` rules as one
+     range and single-value equalities on the first argument, all `ALLOW`,
+     which pass as they are.
 
    `ValidateArtifact` reports one more entry of the CRI-O default, `setns`:
    an unconditional `ALLOW` followed by an unconditional `ERRNO`. libseccomp
@@ -388,29 +389,32 @@ what it is given at face value.
   [Validation levels](api.md#validation-levels)), so
   name the node's architecture whenever it is known. See
   [Architectures](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Architectures).
-- **seccomp: a libseccomp defect.** libseccomp 2.5.5 and 2.6.1, sorting
-  syscalls by priority (crun always, runc up to 32 syscall names), lose
-  every rule of an architecture when the syscall a block tests first does
-  not exist there, and every call then gets the default action. That takes
-  a profile in which every rule on a syscall the architecture has is
-  conditional and a rule on one it lacks is cheaper, such as an
-  unconditional rule on `socketcall` next to a conditional one on `socket`;
-  x86_64 and x32 are affected only together, where a block of either can
-  lose the other's rules. An input can have that form, and a merge can
-  produce it from inputs that do not, so both merges check their result
-  against a table of where libseccomp 2.5.5 and 2.6.1 place each syscall: a
-  rule on a syscall no covered architecture has is dropped, `Intersect`
-  otherwise drops an architecture, and `Union`, which cannot drop one,
-  refuses with `ErrLostRules`. `ValidateArtifact` and `ValidateStrict`
-  report an input that has the form as written, whose rules a runtime
-  loading it unmerged would lose, even where the merges, which settle rule
-  shapes first, accept it. An allowlist is not
-  affected, since it names syscalls every architecture has in unconditional
-  rules. The table covers libseccomp 2.5.5 through 2.6.1, the releases
-  runtimes link today; an older release lacks syscalls the table takes it to
-  have, such as `fchmodat2` and `futex_waitv` in 2.5.2, so the check does not
-  hold on a node that links one. See
+- **seccomp: a libseccomp defect.** libseccomp 2.5.2, 2.5.4, 2.5.5, 2.6.0
+  and 2.6.1, sorting syscalls by priority (crun always, runc up to 32
+  syscall names), lose every rule of an architecture when the syscall a
+  block tests first does not exist there, and every call then gets the
+  default action. That takes a profile in which every rule on a syscall the
+  architecture has is conditional and a rule on one it lacks is cheaper,
+  such as an unconditional rule on `socketcall` next to a conditional one on
+  `socket`; x86_64 and x32 are affected only together, where a block of
+  either can lose the other's rules. An input can have that form, and a
+  merge can produce it from inputs that do not, so both merges check their
+  result against a table of where those releases place each syscall: a rule
+  on a syscall no covered architecture has is dropped, `Intersect` otherwise
+  drops an architecture, and `Union`, which cannot drop one, refuses with
+  `ErrLostRules`. `ValidateArtifact` and `ValidateStrict` report an input
+  that has the form as written, whose rules a runtime loading it unmerged
+  would lose, even where the merges, which settle rule shapes first, accept
+  it. An allowlist is not affected, since it names syscalls every
+  architecture has in unconditional rules. See
   [Architectures](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Architectures).
+- **seccomp: libseccomp releases.** The merges are checked against what
+  libseccomp 2.5.4, 2.5.5, 2.6.0 and 2.6.1 compile, and are sound for a node
+  linking one of those or a newer release. libseccomp 2.5.2 evaluates some
+  rule sets differently when it sorts them into a binary tree, so a release
+  older than 2.5.4 is not supported. The table of where each release places
+  a syscall also covers 2.5.2, which only makes the check for lost rules
+  more cautious.
 - **Landlock: refer.** The kernel allows a move or link into another
   directory only when both grant `refer` and the file gains no handled right
   at its destination, which a single ruleset cannot always express for two

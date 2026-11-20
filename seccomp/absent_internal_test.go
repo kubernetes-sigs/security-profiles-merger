@@ -120,3 +120,36 @@ func TestSettlerTalliesEachBlockOnce(t *testing.T) {
 		}
 	}
 }
+
+// TestDropRulesReadsEveryName covers entries a merge result does not hold
+// before it is regrouped: one naming several syscalls goes whole when one
+// of its names goes, and one naming none stays rather than stopping the
+// settlement.
+func TestDropRulesReadsEveryName(t *testing.T) {
+	t.Parallel()
+
+	result := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActAllow,
+		Architectures: []specs.Arch{specs.ArchX86},
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{"socketcall", "read"}, Action: specs.ActErrno},
+			{Names: nil, Action: specs.ActErrno},
+			{Names: []string{"open"}, Action: specs.ActErrno},
+		},
+	}
+
+	settler := newAbsentSettler(intersectRulesFor(specs.ArchX86), result)
+	settler.block(specs.ArchX86)
+	settler.dropRules(map[string]bool{"socketcall": true})
+
+	if len(result.Syscalls) != 2 || result.Syscalls[0].Names != nil ||
+		!slices.Equal(result.Syscalls[1].Names, []string{"open"}) {
+		t.Errorf("dropRules left %v", result.Syscalls)
+	}
+
+	// read goes with the entry, so the tally of a block it is placed in is
+	// stale.
+	if _, ok := settler.blocks[specs.ArchX86]; ok {
+		t.Error("dropRules kept the tally of a block a dropped name was placed in")
+	}
+}

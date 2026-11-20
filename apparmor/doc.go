@@ -253,14 +253,14 @@ limitations under the License.
 // or U+2028, and one that renders as nothing or as a blank, such as U+3164
 // HANGUL FILLER or U+2800, with which "/usr/bin" reads as itself while
 // naming another file. These are the characters the package's error
-// messages escape when they quote a path. A consumer rendering or logging the profile writes it out raw,
-// where a terminal acts on an escape sequence and line-based tools end a
-// line at a vertical tab, a form feed, U+0085 or U+2028. Each has an escaped
-// form (`\x1b`, `\xc2\x85`), which is accepted. Bytes that are not valid
-// UTF-8 are accepted, since a file name may be in another encoding, and
-// Validate accepts all of these, since a trusted baseline may name such a
-// file. Where two spellings of one path reach a merge, it keeps the one
-// that can be rendered.
+// messages escape when they quote a path. A consumer rendering or logging
+// the profile writes it out raw, where a terminal acts on an escape sequence
+// and line-based tools end a line at a vertical tab, a form feed, U+0085 or
+// U+2028. Each has an escaped form (`\x1b`, `\xc2\x85`), which is accepted.
+// Bytes that are not valid UTF-8 are accepted, since a file name may be in
+// another encoding, and Validate accepts all of these, since a trusted
+// baseline may name such a file. Where two spellings of one path reach a
+// merge, it keeps the one that can be rendered.
 //
 // A path holding a NUL byte, or an escape denoting one such as \000, \x00 or
 // \d000, loads but matches nothing, since no name the kernel hands AppArmor

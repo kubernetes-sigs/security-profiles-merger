@@ -27,590 +27,295 @@ import (
 	"sigs.k8s.io/security-profiles-merger/apparmor"
 )
 
+// validationProfile builds a profile from the lists the validation tables
+// vary. A nil list leaves its section out when the section's other lists
+// are nil too.
+func validationProfile(fsLists [3][]string, exec [2][]string, caps []string) *apparmor.Profile {
+	profile := &apparmor.Profile{
+		Executable: nil, Filesystem: nil, Network: nil, Capabilities: nil,
+	}
+
+	if slices.ContainsFunc(fsLists[:], func(list []string) bool { return list != nil }) {
+		profile.Filesystem = &apparmor.FilesystemRules{
+			ReadOnlyPaths: fsLists[0], WriteOnlyPaths: fsLists[1], ReadWritePaths: fsLists[2],
+		}
+	}
+
+	if slices.ContainsFunc(exec[:], func(list []string) bool { return list != nil }) {
+		profile.Executable = &apparmor.ExecutableRules{
+			AllowedExecutables: exec[0], AllowedLibraries: exec[1],
+		}
+	}
+
+	if caps != nil {
+		profile.Capabilities = &apparmor.CapabilityRules{AllowedCapabilities: caps}
+	}
+
+	return profile
+}
+
 func TestValidateNil(t *testing.T) {
 	t.Parallel()
 
-	err := apparmor.Validate(nil)
-	if err == nil {
-		t.Fatal("expected error for nil profile")
+	for name, validate := range map[string]func(*apparmor.Profile) error{
+		"Validate":         apparmor.Validate,
+		"ValidateStrict":   apparmor.ValidateStrict,
+		"ValidateArtifact": apparmor.ValidateArtifact,
+	} {
+		err := validate(nil)
+		if !errors.Is(err, apparmor.ErrNilProfile) {
+			t.Errorf("%s(nil) = %v, want %v", name, err, apparmor.ErrNilProfile)
+		}
 	}
 }
 
-func TestValidateValid(t *testing.T) {
+// TestValidateAccepts covers profiles the validators accept, among them
+// what Validate leaves to ValidateStrict: duplicate executables and
+// libraries, and capability names in any case.
+func TestValidateAccepts(t *testing.T) {
 	t.Parallel()
 
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig},
-			WriteOnlyPaths: []string{pathTmp},
-			ReadWritePaths: []string{pathVarLog},
+	for _, test := range []struct {
+		name     string
+		validate func(*apparmor.Profile) error
+		profile  *apparmor.Profile
+	}{
+		{
+			"every section", apparmor.ValidateStrict, validationProfile(
+				[3][]string{{pathEtcConfig}, {pathTmp}, {pathVarLog}},
+				[2][]string{{pathBinShell, pathBinSh}, {pathLibCStd, pathLibMStd}},
+				[]string{capNetAdmin},
+			),
 		},
-		Network: nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin},
+		{"no section", apparmor.ValidateStrict, validationProfile([3][]string{}, [2][]string{}, nil)},
+		{
+			"every known capability", apparmor.ValidateStrict,
+			validationProfile([3][]string{}, [2][]string{}, allKnownTestCaps()),
 		},
-	}
-
-	err := apparmor.Validate(profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestValidateEmpty(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	err := apparmor.Validate(profile)
-	if err != nil {
-		t.Fatalf("unexpected error for empty profile: %v", err)
-	}
-}
-
-func TestValidateDuplicateReadOnlyAndWriteOnly(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig},
-			WriteOnlyPaths: []string{pathEtcConfig},
-			ReadWritePaths: nil,
+		{
+			"lowercase capabilities", apparmor.Validate,
+			validationProfile([3][]string{}, [2][]string{}, []string{"sys_admin", "net_admin"}),
 		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	err := apparmor.Validate(profile)
-	if err == nil {
-		t.Fatal("expected error for duplicate path in ReadOnly and WriteOnly")
-	}
-}
-
-func TestValidateDuplicateReadOnlyAndReadWrite(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: []string{pathEtcConfig},
+		{
+			"mixed-case capabilities", apparmor.Validate,
+			validationProfile([3][]string{}, [2][]string{}, []string{"Sys_Admin", "net_ADMIN"}),
 		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	err := apparmor.Validate(profile)
-	if err == nil {
-		t.Fatal("expected error for duplicate path in ReadOnly and ReadWrite")
-	}
-}
-
-func TestValidateDuplicateWriteOnlyAndReadWrite(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  nil,
-			WriteOnlyPaths: []string{pathTmp},
-			ReadWritePaths: []string{pathTmp},
+		{
+			"duplicate executable", apparmor.Validate, validationProfile(
+				[3][]string{}, [2][]string{{pathBinShell, pathBinSh, pathBinShell}, nil}, nil,
+			),
 		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	err := apparmor.Validate(profile)
-	if err == nil {
-		t.Fatal("expected error for duplicate path in WriteOnly and ReadWrite")
-	}
-}
-
-// TestValidateDuplicateThroughEscapedSlash checks that an escaped slash in a
-// run of slashes counts as one of the run, as it does to apparmor_parser:
-// `///\x2fetc/config` names the file "/etc/config" names.
-func TestValidateDuplicateThroughEscapedSlash(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{`///\x2fetc/config`},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: []string{pathEtcConfig},
+		{
+			"duplicate library", apparmor.Validate, validationProfile(
+				[3][]string{}, [2][]string{nil, {pathLibCStd, pathLibCStd}}, nil,
+			),
 		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	err := apparmor.Validate(profile)
-	if !errors.Is(err, apparmor.ErrDuplicatePath) {
-		t.Errorf("expected ErrDuplicatePath, got: %v", err)
+	} {
+		err := test.validate(test.profile)
+		if err != nil {
+			t.Errorf("%s: %v", test.name, err)
+		}
 	}
 }
 
-func TestValidateMultipleDuplicates(t *testing.T) {
+// TestValidateRejects covers what Validate and ValidateStrict reject, each
+// failure by its sentinel and by where it names the entry: the list and
+// index, or for a path in two lists both of them.
+func TestValidateRejects(t *testing.T) {
 	t.Parallel()
 
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig, pathTmp},
-			WriteOnlyPaths: []string{pathEtcConfig},
-			ReadWritePaths: []string{pathTmp},
+	for _, test := range []struct {
+		name     string
+		validate func(*apparmor.Profile) error
+		profile  *apparmor.Profile
+		want     []error
+		where    []string
+		// notWant is a sentinel the failure must not match.
+		notWant error
+	}{
+		{
+			"read-only and write-only", apparmor.Validate,
+			validationProfile([3][]string{{pathEtcConfig}, {pathEtcConfig}, nil}, [2][]string{}, nil),
+			[]error{apparmor.ErrDuplicatePath},
+			[]string{"in both ReadOnlyPaths and WriteOnlyPaths"},
+			nil,
 		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	err := apparmor.Validate(profile)
-	if err == nil {
-		t.Fatal("expected error for multiple duplicate paths")
-	}
-
-	if !errors.Is(err, apparmor.ErrDuplicatePath) {
-		t.Errorf("expected ErrDuplicatePath, got: %v", err)
-	}
-
-	msg := err.Error()
-	if !strings.Contains(msg, pathEtcConfig) {
-		t.Errorf("error should mention %s: %v", pathEtcConfig, err)
-	}
-
-	if !strings.Contains(msg, pathTmp) {
-		t.Errorf("error should mention %s: %v", pathTmp, err)
-	}
-}
-
-func TestValidateEmptyPathInReadOnly(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{""},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
+		{
+			"read-only and read-write", apparmor.Validate,
+			validationProfile([3][]string{{pathEtcConfig}, nil, {pathEtcConfig}}, [2][]string{}, nil),
+			[]error{apparmor.ErrDuplicatePath},
+			[]string{"in both ReadOnlyPaths and ReadWritePaths"},
+			nil,
 		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	err := apparmor.Validate(profile)
-	if err == nil {
-		t.Fatal("expected error for empty path")
-	}
-
-	if !errors.Is(err, apparmor.ErrEmptyPath) {
-		t.Errorf("expected ErrEmptyPath, got: %v", err)
-	}
-}
-
-// TestValidateArtifactEmptyPathOnce covers an empty path, which is reported
-// as empty and not also as holding a character that must be escaped.
-func TestValidateArtifactEmptyPathOnce(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{""},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
+		{
+			"write-only and read-write", apparmor.Validate,
+			validationProfile([3][]string{nil, {pathTmp}, {pathTmp}}, [2][]string{}, nil),
+			[]error{apparmor.ErrDuplicatePath},
+			[]string{"in both WriteOnlyPaths and ReadWritePaths"},
+			nil,
 		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	err := apparmor.ValidateArtifact(profile)
-	if !errors.Is(err, apparmor.ErrEmptyPath) {
-		t.Errorf("ValidateArtifact = %v, want ErrEmptyPath", err)
-	}
-
-	if errors.Is(err, apparmor.ErrUnquotablePath) {
-		t.Errorf("ValidateArtifact = %v, want no ErrUnquotablePath", err)
-	}
-}
-
-func TestValidateEmptyPathInExecutables(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{pathBinShell, ""},
-			AllowedLibraries:   nil,
+		{
+			// An escaped slash in a run of slashes counts as one of the
+			// run, as it does to apparmor_parser.
+			"one path through an escaped slash", apparmor.Validate,
+			validationProfile(
+				[3][]string{{`///\x2fetc/config`}, nil, {pathEtcConfig}}, [2][]string{}, nil,
+			),
+			[]error{apparmor.ErrDuplicatePath},
+			[]string{"in both ReadOnlyPaths and ReadWritePaths"},
+			nil,
 		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	err := apparmor.Validate(profile)
-	if err == nil {
-		t.Fatal("expected error for empty executable path")
-	}
-
-	if !errors.Is(err, apparmor.ErrEmptyPath) {
-		t.Errorf("expected ErrEmptyPath, got: %v", err)
-	}
-}
-
-func TestValidateDuplicatePathInCategory(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig, pathEtcConfig},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	err := apparmor.Validate(profile)
-	if err == nil {
-		t.Fatal("expected error for duplicate path within category")
-	}
-
-	if !errors.Is(err, apparmor.ErrDuplicatePathInCategory) {
-		t.Errorf(
-			"expected ErrDuplicatePathInCategory, got: %v", err,
-		)
-	}
-
-	// One category listing a path twice is not a path in two categories.
-	if errors.Is(err, apparmor.ErrDuplicatePath) {
-		t.Errorf("unexpected ErrDuplicatePath: %v", err)
-	}
-}
-
-func TestValidateDuplicatePathInWriteOnlyCategory(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  nil,
-			WriteOnlyPaths: []string{pathTmp, pathTmp},
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	err := apparmor.Validate(profile)
-	if err == nil {
-		t.Fatal("expected error for duplicate path in WriteOnlyPaths")
-	}
-
-	if !errors.Is(err, apparmor.ErrDuplicatePathInCategory) {
-		t.Errorf(
-			"expected ErrDuplicatePathInCategory, got: %v", err,
-		)
-	}
-
-	// One category listing a path twice is not a path in two categories.
-	if errors.Is(err, apparmor.ErrDuplicatePath) {
-		t.Errorf("unexpected ErrDuplicatePath: %v", err)
-	}
-}
-
-func TestValidateDuplicatePathInReadWriteCategory(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  nil,
-			WriteOnlyPaths: nil,
-			ReadWritePaths: []string{pathVarLog, pathVarLog},
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	err := apparmor.Validate(profile)
-	if err == nil {
-		t.Fatal("expected error for duplicate path in ReadWritePaths")
-	}
-
-	if !errors.Is(err, apparmor.ErrDuplicatePathInCategory) {
-		t.Errorf(
-			"expected ErrDuplicatePathInCategory, got: %v", err,
-		)
-	}
-
-	// One category listing a path twice is not a path in two categories.
-	if errors.Is(err, apparmor.ErrDuplicatePath) {
-		t.Errorf("unexpected ErrDuplicatePath: %v", err)
-	}
-}
-
-func TestValidateEmptyCapability(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin, ""},
-		},
-	}
-
-	err := apparmor.Validate(profile)
-	if err == nil {
-		t.Fatal("expected error for empty capability")
-	}
-
-	if !errors.Is(err, apparmor.ErrEmptyCapability) {
-		t.Errorf("expected ErrEmptyCapability, got: %v", err)
-	}
-}
-
-func TestValidateDuplicateCapability(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{
-				capNetAdmin, capSysTime, capNetAdmin,
+		{
+			"two paths in two lists each", apparmor.Validate,
+			validationProfile(
+				[3][]string{{pathEtcConfig, pathTmp}, {pathEtcConfig}, {pathTmp}},
+				[2][]string{}, nil,
+			),
+			[]error{apparmor.ErrDuplicatePath},
+			[]string{
+				strconv.Quote(pathEtcConfig) + " in both ReadOnlyPaths and WriteOnlyPaths",
+				strconv.Quote(pathTmp) + " in both ReadOnlyPaths and ReadWritePaths",
 			},
+			nil,
 		},
-	}
-
-	err := apparmor.Validate(profile)
-	if err == nil {
-		t.Fatal("expected error for duplicate capability")
-	}
-
-	if !errors.Is(err, apparmor.ErrDuplicateCapability) {
-		t.Errorf("expected ErrDuplicateCapability, got: %v", err)
-	}
-
-	if !strings.Contains(err.Error(), capNetAdmin) {
-		t.Errorf(
-			"error should mention %s: %v", capNetAdmin, err,
-		)
-	}
-}
-
-func TestValidateStrictNil(t *testing.T) {
-	t.Parallel()
-
-	err := apparmor.ValidateStrict(nil)
-	if err == nil {
-		t.Fatal("expected error for nil profile")
-	}
-
-	if !errors.Is(err, apparmor.ErrNilProfile) {
-		t.Errorf("expected ErrNilProfile, got: %v", err)
-	}
-}
-
-func TestValidateStrictBothDuplicates(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{pathBinShell, pathBinShell},
-			AllowedLibraries:   []string{pathLibCStd, pathLibCStd},
+		{
+			"empty read-only path", apparmor.Validate,
+			validationProfile([3][]string{{""}, nil, nil}, [2][]string{}, nil),
+			[]error{apparmor.ErrEmptyPath},
+			[]string{"ReadOnlyPaths[0]"},
+			nil,
 		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	err := apparmor.ValidateStrict(profile)
-	if err == nil {
-		t.Fatal("expected error for both duplicate executables and libraries")
-	}
-
-	if !errors.Is(err, apparmor.ErrDuplicateExecutablePath) {
-		t.Errorf("expected ErrDuplicateExecutablePath, got: %v", err)
-	}
-
-	msg := err.Error()
-	if !strings.Contains(msg, pathBinShell) {
-		t.Errorf("error should mention %s: %v", pathBinShell, err)
-	}
-
-	if !strings.Contains(msg, pathLibCStd) {
-		t.Errorf("error should mention %s: %v", pathLibCStd, err)
-	}
-}
-
-func TestValidateStrictValid(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{pathBinShell, pathBinSh},
-			AllowedLibraries:   []string{pathLibCStd},
+		{
+			// An empty path is reported as empty, and not also as holding
+			// a character that must be escaped.
+			"empty path reported once", apparmor.ValidateArtifact,
+			validationProfile([3][]string{{""}, nil, nil}, [2][]string{}, nil),
+			[]error{apparmor.ErrEmptyPath},
+			[]string{"ReadOnlyPaths[0]"},
+			apparmor.ErrUnquotablePath,
 		},
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig},
-			WriteOnlyPaths: []string{pathTmp},
-			ReadWritePaths: []string{pathVarLog},
+		{
+			"empty executable", apparmor.Validate,
+			validationProfile([3][]string{}, [2][]string{{pathBinShell, ""}, nil}, nil),
+			[]error{apparmor.ErrEmptyPath},
+			[]string{"AllowedExecutables[1]"},
+			nil,
 		},
-		Network: nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin},
+		{
+			// One list naming a path twice is not a path in two lists.
+			"read-only twice", apparmor.Validate,
+			validationProfile([3][]string{{pathEtcConfig, pathEtcConfig}, nil, nil}, [2][]string{}, nil),
+			[]error{apparmor.ErrDuplicatePathInCategory},
+			[]string{"ReadOnlyPaths[1]"},
+			apparmor.ErrDuplicatePath,
 		},
-	}
-
-	err := apparmor.ValidateStrict(profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestValidateStrictCollectsAllErrors(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{pathBinShell, pathBinShell},
-			AllowedLibraries:   nil,
+		{
+			"write-only twice", apparmor.Validate,
+			validationProfile([3][]string{nil, {pathTmp, pathTmp}, nil}, [2][]string{}, nil),
+			[]error{apparmor.ErrDuplicatePathInCategory},
+			[]string{"WriteOnlyPaths[1]"},
+			apparmor.ErrDuplicatePath,
 		},
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig},
-			WriteOnlyPaths: []string{pathEtcConfig},
-			ReadWritePaths: nil,
+		{
+			"read-write twice", apparmor.Validate,
+			validationProfile([3][]string{nil, nil, {pathVarLog, pathVarLog}}, [2][]string{}, nil),
+			[]error{apparmor.ErrDuplicatePathInCategory},
+			[]string{"ReadWritePaths[1]"},
+			apparmor.ErrDuplicatePath,
 		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	err := apparmor.ValidateStrict(profile)
-	if err == nil {
-		t.Fatal("expected error from ValidateStrict")
-	}
-
-	if !errors.Is(err, apparmor.ErrDuplicatePath) {
-		t.Errorf("expected ErrDuplicatePath, got: %v", err)
-	}
-
-	if !errors.Is(err, apparmor.ErrDuplicateExecutablePath) {
-		t.Error("expected ErrDuplicateExecutablePath alongside Validate errors")
-	}
-}
-
-func TestValidateStrictDuplicateExecutable(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{pathBinShell, pathBinSh, pathBinShell},
-			AllowedLibraries:   nil,
+		{
+			"empty capability", apparmor.Validate,
+			validationProfile([3][]string{}, [2][]string{}, []string{capNetAdmin, ""}),
+			[]error{apparmor.ErrEmptyCapability},
+			[]string{"AllowedCapabilities[1]"},
+			nil,
 		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	err := apparmor.Validate(profile)
-	if err != nil {
-		t.Fatalf("Validate should permit duplicate executables: %v", err)
-	}
-
-	err = apparmor.ValidateStrict(profile)
-	if err == nil {
-		t.Fatal("expected error for duplicate executable path")
-	}
-
-	if !errors.Is(err, apparmor.ErrDuplicateExecutablePath) {
-		t.Errorf("expected ErrDuplicateExecutablePath, got: %v", err)
-	}
-
-	if !strings.Contains(err.Error(), pathBinShell) {
-		t.Errorf("error should mention %s: %v", pathBinShell, err)
-	}
-}
-
-func TestValidateStrictDuplicateLibrary(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: nil,
-			AllowedLibraries:   []string{pathLibCStd, pathLibCStd},
+		{
+			"capability twice", apparmor.Validate,
+			validationProfile([3][]string{}, [2][]string{}, []string{capNetAdmin, capSysTime, capNetAdmin}),
+			[]error{apparmor.ErrDuplicateCapability},
+			[]string{"AllowedCapabilities[2]: " + strconv.Quote(capNetAdmin)},
+			nil,
 		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	err := apparmor.Validate(profile)
-	if err != nil {
-		t.Fatalf("Validate should permit duplicate libraries: %v", err)
-	}
-
-	err = apparmor.ValidateStrict(profile)
-	if err == nil {
-		t.Fatal("expected error for duplicate library path")
-	}
-
-	if !errors.Is(err, apparmor.ErrDuplicateExecutablePath) {
-		t.Errorf("expected ErrDuplicateExecutablePath, got: %v", err)
-	}
-}
-
-func TestValidateStrictNoDuplicates(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{pathBinShell, pathBinSh},
-			AllowedLibraries:   []string{pathLibCStd, pathLibMStd},
+		{
+			"capability twice in two cases", apparmor.Validate,
+			validationProfile([3][]string{}, [2][]string{}, []string{"NET_ADMIN", "net_admin"}),
+			[]error{apparmor.ErrDuplicateCapability},
+			[]string{`AllowedCapabilities[1]: "net_admin"`},
+			nil,
 		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	err := apparmor.ValidateStrict(profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestValidateStrictUnknownCapability(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin, "BOGUS_CAP"},
+		{
+			"executable twice", apparmor.ValidateStrict,
+			validationProfile([3][]string{}, [2][]string{{pathBinShell, pathBinSh, pathBinShell}, nil}, nil),
+			[]error{apparmor.ErrDuplicateExecutablePath},
+			[]string{"AllowedExecutables[2]: " + strconv.Quote(pathBinShell)},
+			nil,
 		},
-	}
+		{
+			"library twice", apparmor.ValidateStrict,
+			validationProfile([3][]string{}, [2][]string{nil, {pathLibCStd, pathLibCStd}}, nil),
+			[]error{apparmor.ErrDuplicateExecutablePath},
+			[]string{"AllowedLibraries[1]: " + strconv.Quote(pathLibCStd)},
+			nil,
+		},
+		{
+			"executable and library twice", apparmor.ValidateStrict,
+			validationProfile(
+				[3][]string{}, [2][]string{{pathBinShell, pathBinShell}, {pathLibCStd, pathLibCStd}}, nil,
+			),
+			[]error{apparmor.ErrDuplicateExecutablePath},
+			[]string{"AllowedExecutables[1]", "AllowedLibraries[1]"},
+			nil,
+		},
+		{
+			// ValidateStrict reports what Validate reports along with its
+			// own checks.
+			"strict and structural failures together", apparmor.ValidateStrict,
+			validationProfile(
+				[3][]string{{pathEtcConfig}, {pathEtcConfig}, nil},
+				[2][]string{{pathBinShell, pathBinShell}, nil}, nil,
+			),
+			[]error{apparmor.ErrDuplicatePath, apparmor.ErrDuplicateExecutablePath},
+			[]string{"in both ReadOnlyPaths and WriteOnlyPaths", "AllowedExecutables[1]"},
+			nil,
+		},
+		{
+			// Past an oversized path nothing is normalized, and the
+			// duplicate executables are found in the lists as written.
+			"oversized path and executable twice", apparmor.ValidateStrict,
+			validationProfile(
+				[3][]string{{"/" + strings.Repeat("a", apparmor.MaxPathLen)}, nil, nil},
+				[2][]string{{pathBinShell, "/bin//bash"}, nil}, nil,
+			),
+			[]error{apparmor.ErrPathTooLong, apparmor.ErrDuplicateExecutablePath},
+			[]string{"ReadOnlyPaths[0]", `AllowedExecutables[1]: "/bin//bash"`},
+			nil,
+		},
+		{
+			"unknown capability", apparmor.ValidateStrict,
+			validationProfile([3][]string{}, [2][]string{}, []string{capNetAdmin, "BOGUS_CAP"}),
+			[]error{apparmor.ErrUnknownCapability},
+			[]string{`AllowedCapabilities[1]: "BOGUS_CAP"`},
+			nil,
+		},
+	} {
+		err := test.validate(test.profile)
 
-	err := apparmor.ValidateStrict(profile)
-	if err == nil {
-		t.Fatal("expected error for unknown capability")
-	}
+		for _, want := range test.want {
+			if !errors.Is(err, want) {
+				t.Errorf("%s: got %v, want %v", test.name, err, want)
+			}
+		}
 
-	if !errors.Is(err, apparmor.ErrUnknownCapability) {
-		t.Errorf("expected ErrUnknownCapability, got: %v", err)
-	}
+		for _, where := range test.where {
+			if err != nil && !strings.Contains(err.Error(), where) {
+				t.Errorf("%s: %q does not name %s", test.name, err, where)
+			}
+		}
 
-	if !strings.Contains(err.Error(), "BOGUS_CAP") {
-		t.Errorf("error should mention BOGUS_CAP: %v", err)
+		if test.notWant != nil && errors.Is(err, test.notWant) {
+			t.Errorf("%s: got %v, which matches %v", test.name, err, test.notWant)
+		}
 	}
 }
 
@@ -664,84 +369,6 @@ func TestValidateAllowsUnknownCapability(t *testing.T) {
 	if slices.Contains(one.Capabilities.AllowedCapabilities, "SOME_FUTURE_CAP") {
 		t.Errorf("capability granted by one profile should not survive: %v",
 			one.Capabilities.AllowedCapabilities)
-	}
-}
-
-func TestValidateAllKnownCapabilities(t *testing.T) {
-	t.Parallel()
-
-	allCaps := allKnownTestCaps()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: allCaps,
-		},
-	}
-
-	err := apparmor.Validate(profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestValidateLowercaseCapabilities(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{"sys_admin", "net_admin"},
-		},
-	}
-
-	err := apparmor.Validate(profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestValidateDuplicateCapabilityCaseInsensitive(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{"NET_ADMIN", "net_admin"},
-		},
-	}
-
-	err := apparmor.Validate(profile)
-	if err == nil {
-		t.Fatal("expected error for case-variant duplicate capability")
-	}
-
-	if !errors.Is(err, apparmor.ErrDuplicateCapability) {
-		t.Errorf("expected ErrDuplicateCapability, got: %v", err)
-	}
-}
-
-func TestValidateMixedCaseCapabilities(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{"Sys_Admin", "net_ADMIN"},
-		},
-	}
-
-	err := apparmor.Validate(profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

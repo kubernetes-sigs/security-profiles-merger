@@ -140,9 +140,10 @@ artifact and the runtime that loads it:
 Invalid UTF-8 is reported before anything else, and a value that is not an
 object before what follows it. A document that is not well-formed JSON
 otherwise gets the decoder's error. `UnmarshalStrict` reports the first kind
-of problem it finds, naming every member of that kind up to a bound. Every message is bounded
-in length, since the decoder quotes back literals whose length the document
-chooses. The profile it is given is replaced only when decoding succeeds.
+of problem it finds, naming every member of that kind up to a bound. Every
+message is bounded in length, since the decoder quotes back literals whose
+length the document chooses. The profile it is given is replaced only when
+decoding succeeds.
 Validate the result with `ValidateArtifact` afterwards: strict decoding checks
 the shape of the document, not the profile.
 

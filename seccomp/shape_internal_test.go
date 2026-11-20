@@ -92,7 +92,7 @@ func TestHasRepeatedIndexIsLinear(t *testing.T) {
 
 	// Coverage counters slow these loops several times over, so the bound
 	// is only checked without coverage.
-	if elapsed := time.Since(start); testutil.UninstrumentedRun() && elapsed > generousBudget {
+	if elapsed := time.Since(start); testutil.CheckWallClock() && elapsed > generousBudget {
 		t.Errorf("took %s for %d conditions, want well under %s", elapsed, count, generousBudget)
 	}
 }
@@ -382,7 +382,16 @@ func TestPruneDominatedOnEquivalentFilters(t *testing.T) {
 			want: []clause{le0(specs.ActErrno)},
 		},
 	} {
-		got := pruneDominated(slices.Clone(test.clauses))
+		keyed := make([]keyedClause, len(test.clauses))
+		for idx, current := range test.clauses {
+			keyed[idx] = keyedClause{key: sortedArgsKey(current.args), clause: current}
+		}
+
+		got := make([]clause, 0, len(test.clauses))
+		for _, kept := range pruneDominated(keyed) {
+			got = append(got, kept.clause)
+		}
+
 		if !reflect.DeepEqual(got, test.want) {
 			t.Errorf("%s: pruneDominated(%v) = %v, want %v", name, test.clauses, got, test.want)
 		}

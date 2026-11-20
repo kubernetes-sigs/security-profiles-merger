@@ -227,9 +227,17 @@ func archMergeCase(t *testing.T, left, right *specs.LinuxSeccomp) mergeCase {
 
 	merged := profileMergeCase(t, left, right)
 
+	// A merge for another native architecture is checked in a filter that
+	// adds this host's (see outsideSettledFilter). That leaves its calls
+	// alone only where the host's architecture needs no settling: a 32-bit
+	// or multiplexing one, such as a 386 build's, copies rules onto
+	// socketcall that the node the result is settled for never would.
+	running, _ := seccomp.NativeArchitecture()
+
 	for _, native := range archProbes() {
 		if !slices.Contains(left.Architectures, native) ||
-			!slices.Contains(right.Architectures, native) {
+			!slices.Contains(right.Architectures, native) ||
+			(native != running && !modeledNative()) {
 			continue
 		}
 
@@ -313,7 +321,7 @@ func checkArchMergeCase(t *testing.T, merged mergeCase, template []archCall) {
 
 // recordInputActions runs every call against the program of an input and
 // records the action it yields, except where libseccomp lost the input's
-// rules (see lostRules): such an answer says nothing about what the input
+// rules (see rulesLostOn): such an answer says nothing about what the input
 // permits.
 func recordInputActions(
 	t *testing.T, calls []archCall, inputIdx int, input *specs.LinuxSeccomp,
@@ -622,11 +630,12 @@ func TestModelMatchesLibseccompOnOtherArchitectures(t *testing.T) {
 
 // TestLibseccompLosesRulesBehindAnAbsentSyscall pins a defect of libseccomp
 // that the model does not follow and the package documentation warns about,
-// present in 2.5.5 and 2.6.1 alike. libseccomp emits the instruction that loads the syscall number in
-// the block of the syscall it tests first, and leaves that block out when
-// the syscall does not exist on the architecture. Every other rule of the
-// architecture then compares against a value that is no syscall number, and
-// every call gets the default action.
+// present in 2.5.2, 2.5.4, 2.5.5, 2.6.0 and 2.6.1 alike. libseccomp emits the
+// instruction that loads the syscall number in the block of the syscall it
+// tests first, and leaves that block out when the syscall does not exist on
+// the architecture. Every other rule of the architecture then compares
+// against a value that is no syscall number, and every call gets the
+// default action.
 //
 // The syscall tested first is the one with the highest priority, which is a
 // rule without conditions. Here that is socketcall, which x86_64 does not

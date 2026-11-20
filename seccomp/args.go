@@ -80,13 +80,6 @@ func compareArg(left, right specs.LinuxSeccompArg) int {
 	)
 }
 
-// argsKey returns a canonical string for a set of argument filters so that
-// filters differing only in order or in an ignored valueTwo compare equal.
-// Empty args yield "".
-func argsKey(args []specs.LinuxSeccompArg) string {
-	return sortedArgsKey(sortedArgs(args))
-}
-
 // argKeyBytes sizes the key builder for a typical condition, which runs to
 // about eighteen bytes ("0:SCMP_CMP_EQ:0:0;"). It is a hint, not a bound: a
 // longer one costs a regrowth, which is what this saves on the hot path.
@@ -111,35 +104,29 @@ func sortedArgsKey(args []specs.LinuxSeccompArg) string {
 	var builder strings.Builder
 
 	builder.Grow(len(args) * argKeyBytes)
-
-	for _, arg := range args {
-		builder.WriteString(strconv.FormatUint(uint64(arg.Index), 10))
-		builder.WriteByte(':')
-		builder.WriteString(string(arg.Op))
-		builder.WriteByte(':')
-		builder.WriteString(strconv.FormatUint(arg.Value, 10))
-		builder.WriteByte(':')
-		builder.WriteString(strconv.FormatUint(arg.ValueTwo, 10))
-		builder.WriteByte(';')
-	}
+	writeArgsKey(&builder, args)
 
 	return builder.String()
 }
 
-func groupArgsByIndex(
-	args []specs.LinuxSeccompArg,
-) map[uint][]specs.LinuxSeccompArg {
-	grouped := make(map[uint][]specs.LinuxSeccompArg)
+// decimalBase is the base keys spell numbers in.
+const decimalBase = 10
+
+// writeArgsKey writes the key sortedArgsKey returns to builder. The numbers
+// are formatted into a buffer on the stack rather than into a string each.
+func writeArgsKey(builder *strings.Builder, args []specs.LinuxSeccompArg) {
+	var digits [20]byte
 
 	for _, arg := range args {
-		grouped[arg.Index] = append(grouped[arg.Index], arg)
+		builder.Write(strconv.AppendUint(digits[:0], uint64(arg.Index), decimalBase))
+		builder.WriteByte(':')
+		builder.WriteString(string(arg.Op))
+		builder.WriteByte(':')
+		builder.Write(strconv.AppendUint(digits[:0], arg.Value, decimalBase))
+		builder.WriteByte(':')
+		builder.Write(strconv.AppendUint(digits[:0], arg.ValueTwo, decimalBase))
+		builder.WriteByte(';')
 	}
-
-	for idx := range grouped {
-		sortArgs(grouped[idx])
-	}
-
-	return grouped
 }
 
 // conjoinArgs returns a single filter matching exactly the calls matched by
@@ -149,39 +136,49 @@ func groupArgsByIndex(
 // both say: the same condition, or one of two where the one implies the
 // other (see condImplies), which is then the conjunction of the two. The
 // second return value is false when no such filter exists.
+//
+// The conditions on one index are a run in sorted input, and the runs are
+// merged in index order (see indexRuns) into a result that is sorted too.
+// Clause args are always sorted; an input that is not, which would split a
+// run and compare half of it, is sorted into a copy first, so the result
+// never depends on the order a caller passes.
 func conjoinArgs(
 	left, right []specs.LinuxSeccompArg,
 ) ([]specs.LinuxSeccompArg, bool) {
-	leftByIndex := groupArgsByIndex(left)
-	rightByIndex := groupArgsByIndex(right)
-
+	left, right = sortedForRuns(left), sortedForRuns(right)
 	result := make([]specs.LinuxSeccompArg, 0, len(left)+len(right))
 
-	for idx, leftGroup := range leftByIndex {
-		rightGroup, shared := rightByIndex[idx]
-		if !shared {
-			result = append(result, leftGroup...)
+	for leftRun, rightRun := range indexRuns(left, right) {
+		switch {
+		case len(rightRun) == 0:
+			result = append(result, leftRun...)
+		case len(leftRun) == 0:
+			result = append(result, rightRun...)
+		default:
+			stronger, ok := strongerGroup(leftRun, rightRun)
+			if !ok {
+				return nil, false
+			}
 
-			continue
-		}
-
-		stronger, ok := strongerGroup(leftGroup, rightGroup)
-		if !ok {
-			return nil, false
-		}
-
-		result = append(result, stronger...)
-	}
-
-	for idx, rightGroup := range rightByIndex {
-		if _, ok := leftByIndex[idx]; !ok {
-			result = append(result, rightGroup...)
+			result = append(result, stronger...)
 		}
 	}
-
-	sortArgs(result)
 
 	return result, true
+}
+
+// sortedForRuns returns args as they are when they are sorted, which costs
+// one pass, and a sorted copy otherwise. Unlike byIndex it orders the
+// conditions within an index too, which strongerGroup compares as lists.
+func sortedForRuns(args []specs.LinuxSeccompArg) []specs.LinuxSeccompArg {
+	if slices.IsSortedFunc(args, compareArg) {
+		return args
+	}
+
+	sorted := slices.Clone(args)
+	sortArgs(sorted)
+
+	return sorted
 }
 
 // strongerGroup returns the conditions of one argument index that match

@@ -18,7 +18,6 @@ package apparmor
 
 import (
 	"slices"
-	"strings"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 	"sigs.k8s.io/security-profiles-merger/spm"
@@ -278,18 +277,15 @@ func pathsByRule(paths []string) map[pathKey]string {
 	return rules
 }
 
-// ruleKey identifies the rule a path spells as matcherCache.key does, but
-// from an analysis that is neither compiled nor cached. Diff validates
-// nothing, so it must stay linear in what it is given, and the identity of
-// a pattern does not depend on whether it is compiled (see pathKey). That
-// identity spells a class by its members, so "[a-c]" and "[abc]" are one
-// rule here as they are to Validate and the merge.
+// ruleKey identifies the rule a path spells as matcherCache.key does, from
+// keyAnalysis, which compiles nothing: Diff validates nothing, so it must
+// stay linear in what it is given, and the identity of a pattern does not
+// depend on whether it is compiled (see pathKey). Validate reads the same
+// analyses (see newKeyCache). That identity spells a class by its members,
+// so "[a-c]" and "[abc]" are one rule here as they are to Validate and the
+// merge.
 func ruleKey(path string) pathKey {
-	if !strings.ContainsAny(path, patternSyntax) {
-		return matcherKey(path, literalMatcher(path))
-	}
-
-	return matcherKey(path, analyzePattern(path, false))
+	return matcherKey(path, keyAnalysis(path))
 }
 
 // FormatDiff returns a human-readable representation of an AppArmor

@@ -67,9 +67,10 @@ dependencies:
       - path: .github/workflows/release.yml
         match: "COSIGN_VERSION: v"
 
-  # The libseccomp versions the seccomp model is checked against are a
-  # matrix in ci.yml, not one pin, so there is no single line for a refPath
-  # to match. Carrying the newest one here is what turns "add a version here
+  # The libseccomp versions the seccomp model is checked against, 2.5.4,
+  # 2.5.5, 2.6.0 and 2.6.1, are a matrix in ci.yml, and SYSCALL_CSVS in the
+  # Makefile also lists 2.5.2 for the syscall placement table, not one pin,
+  # so there is no single line for a refPath to match. Carrying the newest one here is what turns "add a version here
   # when libseccomp releases one" into something a job can notice.
   - name: libseccomp
     version: 2.6.1

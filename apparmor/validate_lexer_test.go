@@ -78,8 +78,9 @@ func TestValidateArtifactRejectsUnquotablePaths(t *testing.T) {
 // lexer reads as part of a path but that do not print as themselves: a
 // terminal acts on an escape sequence written out raw, a vertical tab, a
 // form feed, U+0085 and U+2028 end a line for line-based tools, and a blank
-// such as U+3164 makes "/usr/bin" read as itself while naming another file. Each has an escaped
-// spelling, which is accepted, as are bytes that are not UTF-8 at all.
+// such as U+3164 makes "/usr/bin" read as itself while naming another file.
+// Each has an escaped spelling, which is accepted, as are bytes that are not
+// UTF-8 at all.
 func TestValidateArtifactRejectsUnprintablePaths(t *testing.T) {
 	t.Parallel()
 
@@ -535,6 +536,17 @@ func TestMergeMatchesAliasesAcrossProfiles(t *testing.T) {
 		}
 	}
 
+	libraries := func(paths ...string) *apparmor.Profile {
+		return &apparmor.Profile{
+			Executable: &apparmor.ExecutableRules{
+				AllowedExecutables: nil, AllowedLibraries: paths,
+			},
+			Filesystem:   nil,
+			Network:      nil,
+			Capabilities: nil,
+		}
+	}
+
 	for name, mergeFn := range map[string]mergeFunc{
 		"Intersect": apparmor.Intersect,
 		"Union":     apparmor.Union,
@@ -562,6 +574,15 @@ func TestMergeMatchesAliasesAcrossProfiles(t *testing.T) {
 
 		if got := merged.Executable.AllowedExecutables; !slices.Equal(got, []string{"/bin/sh"}) {
 			t.Errorf("%s of two spellings of /bin/sh = %q, want [/bin/sh]", name, got)
+		}
+
+		merged, err = mergeFn(libraries(`/lib/\x6cibc.so`), libraries("/lib/libc.so"))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+
+		if got := merged.Executable.AllowedLibraries; !slices.Equal(got, []string{"/lib/libc.so"}) {
+			t.Errorf("%s of two spellings of /lib/libc.so = %q, want [/lib/libc.so]", name, got)
 		}
 
 		// The spelling both sides end up with must stay renderable: the

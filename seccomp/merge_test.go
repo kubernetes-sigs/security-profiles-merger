@@ -3620,8 +3620,8 @@ func TestListenerFlagFollowsTheListener(t *testing.T) {
 func TestErrnoStaysAsWrittenInAnExactShape(t *testing.T) {
 	t.Parallel()
 	// On an architecture multiplexing socket(2), both rules end up with the
-	// same filter on socketcall(2), where libseccomp refuses them.
-	requireWideNative(t)
+	// same filter on socketcall(2), where libseccomp refuses them, so the
+	// node is one that does not.
 
 	eperm, enosys := uint(1), uint(38)
 
@@ -3640,7 +3640,9 @@ func TestErrnoStaysAsWrittenInAnExactShape(t *testing.T) {
 		},
 	}
 
-	result, err := seccomp.Intersect(exact, &specs.LinuxSeccomp{DefaultAction: specs.ActAllow})
+	result, err := seccomp.Options{Arch: specs.ArchX86_64}.Intersect(
+		exact, &specs.LinuxSeccomp{DefaultAction: specs.ActAllow},
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

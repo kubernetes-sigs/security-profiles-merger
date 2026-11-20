@@ -45,14 +45,20 @@ import (
 // finding is reported.
 type scanFrame struct {
 	// keys holds the folded names of the members seen so far in an object,
-	// mapped to whether they were already reported as repeated. It is nil
-	// for an array.
+	// mapped to whether they were already reported as repeated. It is made
+	// at the second member: most objects of a profile hold one member or
+	// none, and the name of the first is kept in first until then.
 	keys map[string]bool
+	// first is the folded name of the first member of an object.
+	first string
 	// member is the name of the object member whose value comes next, and
 	// folded the same name folded.
 	member, folded string
-	// index is the index of the next array element.
+	// index is the index of the next array element, and for an object the
+	// count of its members so far.
 	index int
+	// object reports an object rather than an array.
+	object bool
 	// wantKey reports whether the next token in an object is a member name.
 	wantKey bool
 	// typ is the type the value of the frame decodes into, where the scan
@@ -214,12 +220,8 @@ func isClosing(delim json.Delim) bool {
 // whose type is not followed where typ is nil.
 func newScanFrame(object bool, typ reflect.Type, required *Required) *scanFrame {
 	frame := &scanFrame{
-		keys: nil, member: "", folded: "", index: 0, wantKey: false,
+		keys: nil, first: "", member: "", folded: "", index: 0, object: object, wantKey: object,
 		typ: nil, named: nil, child: nil,
-	}
-	if object {
-		frame.keys = map[string]bool{}
-		frame.wantKey = true
 	}
 
 	for typ != nil && typ.Kind() == reflect.Pointer {
@@ -290,6 +292,17 @@ func (frame *scanFrame) addKey(key string) bool {
 		}
 	}
 
+	frame.index++
+
+	switch {
+	case frame.index == 1:
+		frame.first = frame.folded
+
+		return false
+	case frame.keys == nil:
+		frame.keys = map[string]bool{frame.first: false}
+	}
+
 	reported, seen := frame.keys[frame.folded]
 	if !seen {
 		frame.keys[frame.folded] = false
@@ -313,7 +326,7 @@ func (frame *scanFrame) startValue() {
 		return
 	}
 
-	if frame.keys != nil {
+	if frame.object {
 		frame.wantKey = true
 
 		return
@@ -343,7 +356,7 @@ func memberPath(stack []*scanFrame) string {
 			break
 		}
 
-		if frame.keys != nil {
+		if frame.object {
 			path = joinFieldPath(path, frame.member)
 
 			continue

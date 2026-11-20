@@ -176,10 +176,6 @@ type testProfile struct {
 	value int
 }
 
-func cloneTestProfile(p *testProfile) *testProfile {
-	return &testProfile{value: p.value}
-}
-
 func addTestProfiles(a, b *testProfile) (*testProfile, error) {
 	return &testProfile{value: a.value + b.value}, nil
 }
@@ -187,9 +183,9 @@ func addTestProfiles(a, b *testProfile) (*testProfile, error) {
 func TestFoldEmpty(t *testing.T) {
 	t.Parallel()
 
-	_, err := merge.Fold[testProfile](nil, cloneTestProfile, addTestProfiles)
-	if err == nil {
-		t.Fatal("expected error for empty profiles")
+	_, err := merge.Fold[testProfile](nil, addTestProfiles)
+	if !errors.Is(err, spm.ErrNoProfiles) {
+		t.Fatalf("Fold(nil) = %v, want ErrNoProfiles", err)
 	}
 }
 
@@ -198,17 +194,13 @@ func TestFoldSingle(t *testing.T) {
 
 	original := &testProfile{value: 42}
 
-	result, err := merge.Fold([]*testProfile{original}, cloneTestProfile, addTestProfiles)
+	result, err := merge.Fold([]*testProfile{original}, addTestProfiles)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if result.value != 42 {
-		t.Errorf("value = %d, want 42", result.value)
-	}
-
-	if result == original {
-		t.Error("result should be a clone, not the same pointer")
+	if result != original {
+		t.Error("Fold of one profile should return it as it is")
 	}
 }
 
@@ -217,7 +209,7 @@ func TestFoldTwo(t *testing.T) {
 
 	result, err := merge.Fold(
 		[]*testProfile{{value: 10}, {value: 20}},
-		cloneTestProfile, addTestProfiles,
+		addTestProfiles,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -233,7 +225,7 @@ func TestFoldThree(t *testing.T) {
 
 	result, err := merge.Fold(
 		[]*testProfile{{value: 1}, {value: 2}, {value: 3}},
-		cloneTestProfile, addTestProfiles,
+		addTestProfiles,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -263,29 +255,13 @@ func TestErrors(t *testing.T) {
 
 var errMergeFailed = errors.New("merge failed")
 
-func TestFoldMergeErrorFirstPair(t *testing.T) {
-	t.Parallel()
-
-	failMerge := func(_, _ *testProfile) (*testProfile, error) {
-		return nil, errMergeFailed
-	}
-
-	_, err := merge.Fold(
-		[]*testProfile{{value: 1}, {value: 2}},
-		cloneTestProfile, failMerge,
-	)
-	if !errors.Is(err, errMergeFailed) {
-		t.Fatalf("expected errMergeFailed, got %v", err)
-	}
-}
-
-func TestFoldMergeErrorSubsequentPair(t *testing.T) {
+func TestFoldStopsAtTheFirstError(t *testing.T) {
 	t.Parallel()
 
 	calls := 0
 	failOnSecond := func(left, right *testProfile) (*testProfile, error) {
 		calls++
-		if calls >= 2 {
+		if calls == 2 {
 			return nil, errMergeFailed
 		}
 
@@ -293,11 +269,11 @@ func TestFoldMergeErrorSubsequentPair(t *testing.T) {
 	}
 
 	_, err := merge.Fold(
-		[]*testProfile{{value: 1}, {value: 2}, {value: 3}},
-		cloneTestProfile, failOnSecond,
+		[]*testProfile{{value: 1}, {value: 2}, {value: 3}, {value: 4}},
+		failOnSecond,
 	)
-	if !errors.Is(err, errMergeFailed) {
-		t.Fatalf("expected errMergeFailed, got %v", err)
+	if !errors.Is(err, errMergeFailed) || calls != 2 {
+		t.Fatalf("Fold = %v after %d merges, want errMergeFailed after 2", err, calls)
 	}
 }
 
@@ -637,7 +613,7 @@ func BenchmarkFold(b *testing.B) {
 
 		b.Run(fmt.Sprintf("profiles=%d", count), func(b *testing.B) {
 			for range b.N {
-				_, _ = merge.Fold(profiles, cloneTestProfile, addTestProfiles)
+				_, _ = merge.Fold(profiles, addTestProfiles)
 			}
 		})
 	}
@@ -671,20 +647,6 @@ func BenchmarkDeduplicateSlice(b *testing.B) {
 				_ = merge.DeduplicateSlice(items)
 			}
 		})
-	}
-}
-
-func TestIsAbsPath(t *testing.T) {
-	t.Parallel()
-
-	if !merge.IsAbsPath("/etc") {
-		t.Error("IsAbsPath(/etc) = false, want true")
-	}
-
-	for _, rel := range []string{"etc", "./etc", "", `C:\etc`} {
-		if merge.IsAbsPath(rel) {
-			t.Errorf("IsAbsPath(%q) = true, want false", rel)
-		}
 	}
 }
 

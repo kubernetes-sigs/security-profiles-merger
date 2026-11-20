@@ -41,6 +41,7 @@ package seccomp_test
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math"
 	"math/rand/v2"
 	"os"
@@ -389,6 +390,32 @@ func requireNativeArch(t *testing.T) {
 	}
 }
 
+// modeledNative reports whether libseccomp builds the filters of this host
+// for a native architecture the evaluator models: one that compares full
+// 64-bit values and reaches the socket and SysV IPC syscalls directly, as
+// x86_64 and aarch64 do. On a 32-bit or multiplexing host, such as a 386
+// build, libseccomp compiles the native block differently, which the
+// evaluator does not read; the merges settle it, and the tests that compare
+// merge results with what libseccomp loads check them there.
+func modeledNative() bool {
+	native, _ := seccomp.NativeArchitecture()
+
+	return !seccomp.NarrowArchitecture(native) && !seccomp.MultiplexingArchitecture(native)
+}
+
+// requireModeledNative skips a test whose expectations come from the
+// evaluator unless the host's native architecture is one it models (see
+// modeledNative).
+func requireModeledNative(t *testing.T) {
+	t.Helper()
+	requireNativeArch(t)
+
+	if !modeledNative() {
+		native, _ := seccomp.NativeArchitecture()
+		t.Skipf("the evaluator does not model the native architecture %s", native)
+	}
+}
+
 func sameErrno(first, second *uint) bool {
 	if first == nil || second == nil {
 		return first == nil && second == nil
@@ -640,7 +667,7 @@ func TestLibseccompVersion(t *testing.T) {
 // any profile with itself must compile and stay within its bounds.
 func TestModelMatchesLibseccomp(t *testing.T) {
 	t.Parallel()
-	requireNativeArch(t)
+	requireModeledNative(t)
 
 	for idx, profile := range differentialProfiles() {
 		t.Run(strconv.Itoa(idx), func(t *testing.T) {
@@ -854,7 +881,7 @@ func shapeValues() []uint64 {
 // evaluator predicts. This is the data behind the safe shapes.
 func TestModelMatchesLibseccompForShapes(t *testing.T) {
 	t.Parallel()
-	requireNativeArch(t)
+	requireModeledNative(t)
 
 	conds := shapeConditions()
 	actions := []specs.LinuxSeccompAction{specs.ActAllow, specs.ActLog}
@@ -900,7 +927,7 @@ func TestModelMatchesLibseccompForShapes(t *testing.T) {
 // they give such clauses one errno.
 func TestModelMatchesLibseccompForErrnoEqualities(t *testing.T) {
 	t.Parallel()
-	requireNativeArch(t)
+	requireModeledNative(t)
 
 	profiles := errnoEqualityProfiles()
 	number := syscallNumbers(t, []string{"read"})["read"]
@@ -1408,8 +1435,46 @@ func TestModelMatchesLibseccompForMerges(t *testing.T) {
 		checkMergeCase(t, cases[idx], numbers, &stats)
 	})
 
-	t.Logf("%d merge cases; inputs refused with EEXIST: %d, hung: %d",
-		len(cases), stats.refused, stats.hung)
+	// Written whether or not the run is verbose, and in CI as a notice on
+	// the job, so that a hung count drifting on one version or
+	// architecture shows before it reaches the bound below.
+	report := fmt.Sprintf(
+		"libseccomp %s, optimization level %d: %d merge cases; "+
+			"inputs refused with EEXIST: %d, hung: %d",
+		libseccomp.Version(), libseccomp.Optimize(),
+		len(cases), stats.refused, stats.hung,
+	)
+	if os.Getenv("GITHUB_ACTIONS") == "true" {
+		report = "::notice title=libseccomp merge inputs::" + report
+	}
+
+	fmt.Fprintln(os.Stderr, report)
+
+	// An input that hangs is left out of the comparison, so many of them
+	// would quietly narrow what this test checks. A hang is a rule set
+	// libseccomp loops on, drawn at a rate that depends on the corpus
+	// rather than on the machine: the seeded corpus, when it also held as
+	// many bare syscall-list cases, held one hang in its 8000 cases on 2.5.2,
+	// 2.5.5 and 2.6.1 on amd64 and none on 2.6.1 as 386. The bound allows
+	// one per thousand cases, and at least three, so another version or
+	// architecture may loop on a few more without failing the run, while a
+	// share of hangs that cuts the comparison short still does. Compiles a
+	// loaded machine delays are retried once rather than counted (see
+	// compile), and the notice above shows the count of every run.
+	if limit := maxHungInputs(len(cases)); stats.hung > limit {
+		t.Errorf("%d of %d inputs hung, at most %d expected", stats.hung, len(cases), limit)
+	}
+}
+
+// maxHungInputs bounds how many inputs of TestModelMatchesLibseccompForMerges
+// may hang libseccomp, for a corpus of the given number of merge cases.
+func maxHungInputs(cases int) int {
+	const (
+		casesPerHang = 1000
+		minHangs     = 3
+	)
+
+	return max(minHangs, cases/casesPerHang)
 }
 
 // TestModelMatchesLibseccompForFindings merges the pairs that once produced
@@ -1503,9 +1568,14 @@ func TestModelMatchesLibseccompForUnmatchedCall(t *testing.T) {
 // argument against one value with a different operator of one class or a
 // different mask decide a call by whichever rule comes first, so the same
 // rules in the other order load a different filter, which Diff reports.
+//
+// The cases are those of a 64-bit native: a 32-bit one compares the lower
+// halves alone and orders neither the wide masks nor the mask next to an
+// equality, whose lower halves differ (see the Diff section of the package
+// documentation).
 func TestLibseccompKeepsSiblingsInAddOrder(t *testing.T) {
 	t.Parallel()
-	requireNativeArch(t)
+	requireModeledNative(t)
 
 	const wideMask = 1<<32 | 2
 

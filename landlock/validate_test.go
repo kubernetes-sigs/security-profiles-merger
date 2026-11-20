@@ -569,164 +569,83 @@ func TestValidateUnknownScopeRight(t *testing.T) {
 	}
 }
 
-func TestValidateDuplicateScopeRight(t *testing.T) {
+// TestValidateStrictReportsDuplicateRights covers a right listed twice in
+// one set. The kernel folds duplicates and so does the merge, so only the
+// strict check reports them, naming the set, the rule holding it, and the
+// right.
+func TestValidateStrictReportsDuplicateRights(t *testing.T) {
 	t.Parallel()
 
-	profile := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped: []landlock.ScopeRight{
-			landlock.ScopeSignal,
-			landlock.ScopeSignal,
-		},
-		PathRules: nil,
-		NetRules:  nil,
+	empty := func() *landlock.Profile {
+		return &landlock.Profile{
+			HandledAccessFS: nil, HandledAccessNet: nil, Scoped: nil, PathRules: nil, NetRules: nil,
+		}
 	}
 
-	// The kernel folds duplicates and so does the merge, so only the
-	// strict check reports them.
-	err := landlock.Validate(profile)
-	if err != nil {
-		t.Fatalf("Validate = %v, want nil for a duplicate scope right", err)
-	}
-
-	err = landlock.ValidateStrict(profile)
-	if err == nil {
-		t.Fatal("expected ValidateStrict to report the duplicate scope right")
-	}
-
-	if !errors.Is(err, landlock.ErrDuplicateRight) {
-		t.Errorf("expected ErrDuplicateRight, got: %v", err)
-	}
-}
-
-func TestValidateDuplicateFSRight(t *testing.T) {
-	t.Parallel()
-
-	profile := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
-			landlock.FSAccessReadFile,
-		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
-	}
-
-	// The kernel folds duplicates and so does the merge, so only the
-	// strict check reports them.
-	err := landlock.Validate(profile)
-	if err != nil {
-		t.Fatalf("Validate = %v, want nil for a duplicate FS right in handled set", err)
-	}
-
-	err = landlock.ValidateStrict(profile)
-	if err == nil {
-		t.Fatal("expected ValidateStrict to report the duplicate FS right in handled set")
-	}
-
-	if !errors.Is(err, landlock.ErrDuplicateRight) {
-		t.Errorf("expected ErrDuplicateRight, got: %v", err)
-	}
-}
-
-func TestValidateDuplicateHandledAccessNet(t *testing.T) {
-	t.Parallel()
-
-	profile := &landlock.Profile{
-		HandledAccessFS: nil,
-		HandledAccessNet: []landlock.NetAccessRight{
-			landlock.NetAccessBindTCP,
-			landlock.NetAccessBindTCP,
-		},
-		Scoped:    nil,
-		PathRules: nil,
-		NetRules:  nil,
-	}
-
-	// The kernel folds duplicates and so does the merge, so only the
-	// strict check reports them.
-	err := landlock.Validate(profile)
-	if err != nil {
-		t.Fatalf("Validate = %v, want nil for a duplicate HandledAccessNet right", err)
-	}
-
-	err = landlock.ValidateStrict(profile)
-	if err == nil {
-		t.Fatal("expected ValidateStrict to report the duplicate HandledAccessNet right")
-	}
-
-	if !errors.Is(err, landlock.ErrDuplicateRight) {
-		t.Errorf("expected ErrDuplicateRight, got: %v", err)
-	}
-}
-
-func TestValidateDuplicateNetRight(t *testing.T) {
-	t.Parallel()
-
-	profile := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules: []landlock.NetRule{{
-			Port: 80,
-			AccessNet: []landlock.NetAccessRight{
-				landlock.NetAccessBindTCP,
-				landlock.NetAccessBindTCP,
+	for _, test := range []struct {
+		name    string
+		profile func(*landlock.Profile)
+		where   string
+	}{
+		{
+			"scope", func(profile *landlock.Profile) {
+				profile.Scoped = []landlock.ScopeRight{landlock.ScopeSignal, landlock.ScopeSignal}
 			},
-		}},
-	}
-
-	// The kernel folds duplicates and so does the merge, so only the
-	// strict check reports them.
-	err := landlock.Validate(profile)
-	if err != nil {
-		t.Fatalf("Validate = %v, want nil for a duplicate net right in rule", err)
-	}
-
-	err = landlock.ValidateStrict(profile)
-	if err == nil {
-		t.Fatal("expected ValidateStrict to report the duplicate net right in rule")
-	}
-
-	if !errors.Is(err, landlock.ErrDuplicateRight) {
-		t.Errorf("expected ErrDuplicateRight, got: %v", err)
-	}
-}
-
-func TestValidateDuplicatePathRuleRight(t *testing.T) {
-	t.Parallel()
-
-	profile := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path: pathEtc,
-			AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessReadFile,
-				landlock.FSAccessReadFile,
+			`Scoped: right "signal"`,
+		},
+		{
+			"handled filesystem right", func(profile *landlock.Profile) {
+				profile.HandledAccessFS = []landlock.FSAccessRight{
+					landlock.FSAccessReadFile, landlock.FSAccessReadFile,
+				}
 			},
-		}},
-		NetRules: nil,
-	}
+			`HandledAccessFS: right "read_file"`,
+		},
+		{
+			"handled network right", func(profile *landlock.Profile) {
+				profile.HandledAccessNet = []landlock.NetAccessRight{
+					landlock.NetAccessBindTCP, landlock.NetAccessBindTCP,
+				}
+			},
+			`HandledAccessNet: right "bind_tcp"`,
+		},
+		{
+			"network rule right", func(profile *landlock.Profile) {
+				profile.NetRules = []landlock.NetRule{{
+					Port: 80,
+					AccessNet: []landlock.NetAccessRight{
+						landlock.NetAccessBindTCP, landlock.NetAccessBindTCP,
+					},
+				}}
+			},
+			`NetRules[0]: right "bind_tcp"`,
+		},
+		{
+			"path rule right", func(profile *landlock.Profile) {
+				profile.PathRules = []landlock.PathRule{{
+					Path: pathEtc,
+					AccessFS: []landlock.FSAccessRight{
+						landlock.FSAccessReadFile, landlock.FSAccessReadFile,
+					},
+				}}
+			},
+			`PathRules[0]: right "read_file"`,
+		},
+	} {
+		profile := empty()
+		test.profile(profile)
 
-	// The kernel folds duplicates and so does the merge, so only the
-	// strict check reports them.
-	err := landlock.Validate(profile)
-	if err != nil {
-		t.Fatalf("Validate = %v, want nil for a duplicate FS right in path rule", err)
-	}
+		err := landlock.Validate(profile)
+		if err != nil {
+			t.Errorf("%s: Validate = %v, want nil", test.name, err)
+		}
 
-	err = landlock.ValidateStrict(profile)
-	if err == nil {
-		t.Fatal("expected ValidateStrict to report the duplicate FS right in path rule")
-	}
-
-	if !errors.Is(err, landlock.ErrDuplicateRight) {
-		t.Errorf("expected ErrDuplicateRight, got: %v", err)
+		err = landlock.ValidateStrict(profile)
+		if !errors.Is(err, landlock.ErrDuplicateRight) {
+			t.Errorf("%s: ValidateStrict = %v, want %v", test.name, err, landlock.ErrDuplicateRight)
+		} else if !strings.Contains(err.Error(), test.where) {
+			t.Errorf("%s: ValidateStrict = %q, want it to name %s", test.name, err, test.where)
+		}
 	}
 }
 
@@ -1421,5 +1340,363 @@ func TestValidateManyErrorsAreBounded(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "more problems") {
 		t.Errorf("error does not say how many problems it left out: %q", err)
+	}
+}
+
+func TestValidateDetectsDuplicatesAfterCleaning(t *testing.T) {
+	t.Parallel()
+
+	profile := readFileProfile([]landlock.PathRule{
+		{Path: "/etc", AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile}},
+		{Path: "//etc", AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile}},
+	})
+
+	err := landlock.ValidateStrict(profile)
+	if !errors.Is(err, landlock.ErrDuplicateRule) {
+		t.Errorf("ValidateStrict = %v, want ErrDuplicateRule", err)
+	}
+
+	// Validate and ValidateArtifact fold the duplicate as the merge does.
+	err = landlock.Validate(profile)
+	if err != nil {
+		t.Errorf("Validate = %v, want nil", err)
+	}
+
+	err = landlock.ValidateArtifact(profile)
+	if err != nil {
+		t.Errorf("ValidateArtifact = %v, want nil", err)
+	}
+}
+
+func TestValidateRejectsPathsResolvingToDot(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{"./", ".", ".//./"} {
+		profile := readFileProfile([]landlock.PathRule{{
+			Path: path, AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
+		}})
+
+		err := landlock.Validate(profile)
+		if !errors.Is(err, landlock.ErrEmptyPath) {
+			t.Errorf("Validate(%q) = %v, want ErrEmptyPath", path, err)
+		}
+
+		_, err = landlock.Intersect(profile)
+		if !errors.Is(err, landlock.ErrEmptyPath) {
+			t.Errorf("Intersect(%q) = %v, want ErrEmptyPath", path, err)
+		}
+	}
+}
+
+func TestValidateRejectsNulByte(t *testing.T) {
+	t.Parallel()
+
+	profile := readFileProfile([]landlock.PathRule{{
+		Path: "/etc\x00x", AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
+	}})
+
+	err := landlock.Validate(profile)
+	if !errors.Is(err, landlock.ErrNulInPath) {
+		t.Errorf("Validate = %v, want ErrNulInPath", err)
+	}
+
+	err = landlock.ValidateStrict(profile)
+	if !errors.Is(err, landlock.ErrNulInPath) {
+		t.Errorf("ValidateStrict = %v, want ErrNulInPath", err)
+	}
+}
+
+func TestValidateArtifactAndStrictDiffer(t *testing.T) {
+	t.Parallel()
+
+	read := fsRights{landlock.FSAccessReadFile}
+	duplicated := fsProfile(read,
+		landlock.PathRule{Path: "/etc", AccessFS: read},
+		landlock.PathRule{Path: "/./etc", AccessFS: read},
+	)
+
+	err := landlock.ValidateArtifact(duplicated)
+	if err != nil {
+		t.Errorf("ValidateArtifact(duplicates) = %v, want nil", err)
+	}
+
+	err = landlock.ValidateStrict(duplicated)
+	if !errors.Is(err, landlock.ErrDuplicateRule) {
+		t.Errorf("ValidateStrict(duplicates) = %v, want ErrDuplicateRule", err)
+	}
+
+	scopedOnly := &landlock.Profile{
+		HandledAccessFS:  nil,
+		HandledAccessNet: nil,
+		Scoped:           []landlock.ScopeRight{landlock.ScopeSignal},
+		PathRules:        nil,
+		NetRules:         nil,
+	}
+	bind := []landlock.NetAccessRight{landlock.NetAccessBindTCP}
+
+	for name, validate := range map[string]func(*landlock.Profile) error{
+		"ValidateStrict":   landlock.ValidateStrict,
+		"ValidateArtifact": landlock.ValidateArtifact,
+	} {
+		err := validate(scopedOnly)
+		if err != nil {
+			t.Errorf("%s(scoped only) = %v, want nil", name, err)
+		}
+
+		err = validate(fsProfile(nil))
+		if !errors.Is(err, landlock.ErrEmptyRuleset) {
+			t.Errorf("%s(empty) = %v, want ErrEmptyRuleset", name, err)
+		}
+
+		err = validate(fsProfile(read, landlock.PathRule{Path: "/etc", AccessFS: nil}))
+		if !errors.Is(err, landlock.ErrEmptyRule) {
+			t.Errorf("%s(empty path rule) = %v, want ErrEmptyRule", name, err)
+		}
+
+		err = validate(netProfile(bind, landlock.NetRule{Port: 80, AccessNet: nil}))
+		if !errors.Is(err, landlock.ErrEmptyRule) {
+			t.Errorf("%s(empty net rule) = %v, want ErrEmptyRule", name, err)
+		}
+	}
+
+	// Validate checks the shape only, so it accepts what a kernel refuses.
+	err = landlock.Validate(fsProfile(nil))
+	if err != nil {
+		t.Errorf("Validate(empty) = %v, want nil", err)
+	}
+}
+
+func TestOptionsRejectUnknownVersions(t *testing.T) {
+	t.Parallel()
+
+	profile := fsProfile(fsRights{landlock.FSAccessReadFile})
+
+	for _, abi := range []landlock.ABIVersion{-1, 0} {
+		for name, validate := range map[string]func(landlock.Options, *landlock.Profile) error{
+			"Validate":         landlock.Options.Validate,
+			"ValidateArtifact": landlock.Options.ValidateArtifact,
+			"ValidateStrict":   landlock.Options.ValidateStrict,
+		} {
+			err := validate(landlock.Options{ABI: abi}, profile)
+			if !errors.Is(err, landlock.ErrUnknownABIVersion) {
+				t.Errorf("Options{v%d}.%s() = %v, want ErrUnknownABIVersion", abi, name, err)
+			}
+		}
+	}
+
+	_, err := landlock.Options{ABI: 0}.Downgrade(profile)
+	if !errors.Is(err, landlock.ErrUnknownABIVersion) {
+		t.Errorf("Options{v0}.Downgrade() = %v, want ErrUnknownABIVersion", err)
+	}
+}
+
+// A node may report an ABI version newer than this library knows rights
+// for. Landlock versions are cumulative, so such a kernel supports every
+// right here and validation must not fail for it.
+func TestOptionsValidateClampsNewerVersions(t *testing.T) {
+	t.Parallel()
+
+	all := &landlock.Profile{
+		HandledAccessFS:  knownRights(landlock.FSAccessRights()),
+		HandledAccessNet: knownRights(landlock.NetAccessRights()),
+		Scoped:           knownRights(landlock.ScopeRights()),
+		PathRules:        nil,
+		NetRules:         nil,
+	}
+
+	for _, abi := range []landlock.ABIVersion{
+		landlock.LatestABIVersion, landlock.LatestABIVersion + 1, 99,
+	} {
+		err := landlock.Options{ABI: abi}.Validate(all)
+		if err != nil {
+			t.Errorf("Options{v%d}.Validate() = %v, want nil", abi, err)
+		}
+	}
+
+	// Clamping reports no ABI problem, but the other checks still run.
+	unknown := fsProfile(fsRights{"bogus_right"})
+
+	err := landlock.Options{ABI: 99}.Validate(unknown)
+	if !errors.Is(err, landlock.ErrUnknownRight) {
+		t.Errorf("Options{v99}.Validate(unknown right) = %v, want ErrUnknownRight", err)
+	}
+
+	if errors.Is(err, landlock.ErrUnknownABIVersion) {
+		t.Errorf("Options{v99}.Validate() reported the version: %v", err)
+	}
+}
+
+// TestValidateArtifactRejectsTrailingSlashes covers paths the kernel opens
+// only as directories. The merge and Diff clean the suffix away, so without
+// the check a rule that cannot load would pass and come out of a merge as
+// one that can.
+func TestValidateArtifactRejectsTrailingSlashes(t *testing.T) {
+	t.Parallel()
+
+	read := fsRights{landlock.FSAccessReadFile}
+
+	for path, rejected := range map[string]bool{
+		"/srv/f/":   true,
+		"/srv/f/.":  true,
+		"/srv/f//":  true,
+		"/srv/f/./": true,
+		"/.../":     true,
+		"/srv/f":    false,
+		"/srv/./f":  false,
+		"//srv/f":   false,
+		"/":         false,
+		"//":        false,
+		"/.":        false,
+	} {
+		profile := fsProfile(read, landlock.PathRule{Path: path, AccessFS: read})
+
+		err := landlock.Validate(profile)
+		if err != nil {
+			t.Errorf("Validate(%q) = %v, want nil", path, err)
+		}
+
+		for name, validate := range map[string]func(*landlock.Profile) error{
+			"ValidateArtifact": landlock.ValidateArtifact,
+			"ValidateStrict":   landlock.ValidateStrict,
+		} {
+			err := validate(profile)
+			if got := errors.Is(err, landlock.ErrTrailingSlash); got != rejected {
+				t.Errorf("%s(%q) = %v, want ErrTrailingSlash %v", name, path, err, rejected)
+			}
+		}
+	}
+
+	// A relative path is reported as relative, not also for its slash.
+	err := landlock.ValidateArtifact(
+		fsProfile(read, landlock.PathRule{Path: "srv/f/", AccessFS: read}),
+	)
+	if !errors.Is(err, landlock.ErrRelativePath) || errors.Is(err, landlock.ErrTrailingSlash) {
+		t.Errorf("ValidateArtifact(%q) = %v, want ErrRelativePath alone", "srv/f/", err)
+	}
+
+	err = landlock.ValidateArtifact(
+		fsProfile(read, landlock.PathRule{Path: "/srv/f/", AccessFS: read}),
+	)
+	if want := `PathRules[0]: "/srv/f/": path ends in "/" or "/."`; err == nil ||
+		err.Error() != want {
+		t.Errorf("ValidateArtifact = %v, want %q", err, want)
+	}
+}
+
+// TestTrailingSlashOnlyOnValidPaths covers paths Validate rejects for a
+// ".." component or a NUL byte: they are reported for that alone, not also
+// for a trailing slash.
+func TestTrailingSlashOnlyOnValidPaths(t *testing.T) {
+	t.Parallel()
+
+	read := fsRights{landlock.FSAccessReadFile}
+
+	for _, path := range []string{"/a/../", "/a\x00/"} {
+		err := landlock.ValidateArtifact(
+			fsProfile(read, landlock.PathRule{Path: path, AccessFS: read}),
+		)
+		if err == nil || errors.Is(err, landlock.ErrTrailingSlash) {
+			t.Errorf("ValidateArtifact(%q) = %v, want Validate's error alone", path, err)
+		}
+	}
+}
+
+// TestValidateArtifactRejectsInvalidUTF8Paths covers a path JSON cannot
+// carry. Validate accepts it, since the merge compares paths as bytes and a
+// profile built in Go can name such a file; the tiers for a profile that
+// travels as JSON refuse it.
+func TestValidateArtifactRejectsInvalidUTF8Paths(t *testing.T) {
+	t.Parallel()
+
+	read := fsRights{landlock.FSAccessReadFile}
+	profile := fsProfile(read, landlock.PathRule{Path: "/srv/caf\xe9", AccessFS: read})
+
+	err := landlock.Validate(profile)
+	if err != nil {
+		t.Errorf("Validate = %v, want nil", err)
+	}
+
+	for name, validate := range map[string]func(*landlock.Profile) error{
+		"ValidateArtifact": landlock.ValidateArtifact,
+		"ValidateStrict":   landlock.ValidateStrict,
+	} {
+		err := validate(profile)
+		if !errors.Is(err, landlock.ErrInvalidUTF8Path) {
+			t.Errorf("%s = %v, want ErrInvalidUTF8Path", name, err)
+		} else if want := `PathRules[0]: "/srv/caf\xe9": path is not valid UTF-8`; err.Error() != want {
+			t.Errorf("%s = %q, want %q", name, err, want)
+		}
+	}
+
+	err = landlock.ValidateArtifact(
+		fsProfile(read, landlock.PathRule{Path: "/srv/café", AccessFS: read}),
+	)
+	if err != nil {
+		t.Errorf("ValidateArtifact of a UTF-8 path = %v, want nil", err)
+	}
+}
+
+// TestOptionsAddTheABICheckToEveryLevel checks that a named version adds
+// its check to every level, in one report with the level's own failures,
+// and that a profile past MaxArtifactRules is reported on its own, as the
+// plain validators report it.
+func TestOptionsAddTheABICheckToEveryLevel(t *testing.T) {
+	t.Parallel()
+
+	udp := &landlock.Profile{
+		HandledAccessFS:  nil,
+		HandledAccessNet: []landlock.NetAccessRight{landlock.NetAccessBindUDP},
+		Scoped:           nil,
+		PathRules:        nil,
+		NetRules:         nil,
+	}
+
+	for name, validate := range map[string]func(landlock.Options, *landlock.Profile) error{
+		"Validate":         landlock.Options.Validate,
+		"ValidateArtifact": landlock.Options.ValidateArtifact,
+		"ValidateStrict":   landlock.Options.ValidateStrict,
+	} {
+		err := validate(landlock.Options{ABI: landlock.LatestABIVersion}, udp)
+		if err != nil {
+			t.Errorf("Options{latest}.%s = %v, want nil", name, err)
+		}
+
+		err = validate(landlock.Options{ABI: landlock.ABIV4}, udp)
+		if !errors.Is(err, landlock.ErrUnsupportedABIRight) {
+			t.Errorf("Options{v4}.%s = %v, want ErrUnsupportedABIRight", name, err)
+		}
+	}
+
+	err := landlock.Options{ABI: landlock.ABIV4}.ValidateStrict(&landlock.Profile{
+		HandledAccessFS: nil,
+		HandledAccessNet: []landlock.NetAccessRight{
+			landlock.NetAccessBindUDP, landlock.NetAccessBindUDP,
+		},
+		Scoped:    nil,
+		PathRules: nil,
+		NetRules:  nil,
+	})
+	if !errors.Is(err, landlock.ErrDuplicateRight) ||
+		!errors.Is(err, landlock.ErrUnsupportedABIRight) {
+		t.Errorf("Options{v4}.ValidateStrict = %v, want both failures", err)
+	}
+
+	large := &landlock.Profile{
+		HandledAccessFS:  nil,
+		HandledAccessNet: []landlock.NetAccessRight{landlock.NetAccessBindUDP},
+		Scoped:           nil,
+		PathRules:        nil,
+		NetRules:         make([]landlock.NetRule, landlock.MaxArtifactRules+1),
+	}
+
+	for name, validate := range map[string]func(landlock.Options, *landlock.Profile) error{
+		"ValidateArtifact": landlock.Options.ValidateArtifact,
+		"ValidateStrict":   landlock.Options.ValidateStrict,
+	} {
+		err := validate(landlock.Options{ABI: landlock.ABIV4}, large)
+		if !errors.Is(err, landlock.ErrTooManyRules) ||
+			errors.Is(err, landlock.ErrUnsupportedABIRight) {
+			t.Errorf("Options{v4}.%s past the limit = %v, want ErrTooManyRules alone", name, err)
+		}
 	}
 }
