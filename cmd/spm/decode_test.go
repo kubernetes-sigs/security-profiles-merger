@@ -80,6 +80,72 @@ func TestDecodeErrorsPointIntoTheDocument(t *testing.T) {
 	}
 }
 
+// TestSyntaxErrorsPointAtTheCharacter covers a character the decoder
+// refuses: it is reported where it starts, whether it takes one byte or
+// several, which Go releases count differently in the offset they report,
+// and whether or not it is the last byte of the document. The message
+// quotes the character differently from one release to the next, so only
+// the position is pinned.
+func TestSyntaxErrorsPointAtTheCharacter(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name  string
+		stdin string
+		want  string
+	}{
+		{"a byte order mark", "\xef\xbb\xbf{}", "line 1, column 1: "},
+		{"a multi-byte character in a line", "{\n  é}", "line 2, column 3: "},
+		{"a character at the very end", "{} x", "line 1, column 4: "},
+		{"a multi-byte character at the very end", "{} é", "line 1, column 4: "},
+		{"data after a stdin array", "[{}]\nx", "line 2, column 1: "},
+		{"a stdin array cut short", "[{},\n {}\n", "line 2, column 4: "},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			code, _, stderr := runCapture(t,
+				[]string{cmdValidate, flagType, typeSeccomp}, strings.NewReader(test.stdin))
+
+			want := "error: stdin: " + test.want
+			if code != 1 || !strings.HasPrefix(stderr, want) || strings.Count(stderr, "\n") != 1 {
+				t.Errorf("exit code = %d, stderr = %q, want 1 and one line starting %q",
+					code, stderr, want)
+			}
+		})
+	}
+}
+
+// TestInvalidStdinArrayIsNotReadAsOneProfile covers a stdin array that does
+// not parse: it is reported at what the decoder refused, rather than read as
+// a single profile, which diff would count as one.
+func TestInvalidStdinArrayIsNotReadAsOneProfile(t *testing.T) {
+	t.Parallel()
+
+	const array = `[{"defaultAction":"SCMP_ACT_ALLOW"},{"defaultAction":"SCMP_ACT_ALLOW",}]`
+
+	want := "error: stdin: line 1, column 71: " +
+		"invalid character '}' looking for beginning of object key string\n"
+
+	for _, args := range [][]string{
+		{cmdDiff, flagType, typeSeccomp},
+		{cmdValidate, flagType, typeSeccomp},
+		{cmdMerge, flagType, typeSeccomp, flagStrategy, strategyUnion},
+	} {
+		code, stdout, stderr := runCapture(t, args, strings.NewReader(array))
+
+		wantCode := 1
+		if args[0] == cmdDiff {
+			wantCode = exitUsage
+		}
+
+		if code != wantCode || stdout != "" || stderr != want {
+			t.Errorf("%q: exit code = %d, stdout = %q, stderr = %q, want %d, nothing and %q",
+				args, code, stdout, stderr, wantCode, want)
+		}
+	}
+}
+
 // TestUnmarshalAllReportsEveryInput covers a run of several inputs that
 // cannot be decoded: each is reported, not only the first.
 func TestUnmarshalAllReportsEveryInput(t *testing.T) {

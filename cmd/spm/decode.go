@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
@@ -152,12 +153,23 @@ type reportLine struct {
 	err   error
 }
 
+// newInputReport returns the report of the inputs, holding the failure of
+// each that could not be read, so that every later pass leaves it out as it
+// leaves out one that failed an earlier pass.
 func newInputReport(inputs []profileInput) *inputReport {
-	return &inputReport{
+	report := &inputReport{
 		inputs: inputs,
 		lines:  make([][]reportLine, len(inputs)),
 		failed: make([]bool, len(inputs)),
 	}
+
+	for idx, input := range inputs {
+		if input.err != nil {
+			report.fail(idx, input.err)
+		}
+	}
+
+	return report
 }
 
 // warn records a warning about the input at idx.
@@ -224,11 +236,19 @@ func decodeError(input *profileInput, err error) error {
 
 	switch {
 	case errors.As(err, &syntaxErr):
-		// The offset is just past the byte the decoder refused. A document
-		// that ends too early has none: it is reported just past its last
-		// byte that is not whitespace, on a line an editor shows.
-		at := syntaxErr.Offset - 1
-		if syntaxErr.Offset >= int64(len(input.data)) {
+		// The offset is just past the character the decoder refused, which
+		// is reported where that character starts: Go 1.27 counts the
+		// whole of a multi-byte one, where earlier releases count its first
+		// byte only. A document that ends too early has none: it is
+		// reported just past its last byte that is not whitespace, on a
+		// line an editor shows. Its offset is the length of the document,
+		// as it is for a character refused at its very end, which is told
+		// apart by the message.
+		end := min(max(syntaxErr.Offset, 0), int64(len(input.data)))
+		_, size := utf8.DecodeLastRune(input.data[:end])
+
+		at := end - int64(size)
+		if syntaxErr.Offset >= int64(len(input.data)) && syntaxErr.Error() == unexpectedEnd {
 			at = int64(len(bytes.TrimRight(input.data, " \t\r\n")))
 		}
 
@@ -239,6 +259,10 @@ func decodeError(input *profileInput, err error) error {
 		return merge.BoundedError(err)
 	}
 }
+
+// unexpectedEnd is how encoding/json words the syntax error of a document
+// that ends too early.
+const unexpectedEnd = "unexpected end of JSON input"
 
 // documentError is a decoder failure described in the terms of the
 // document. errors.As still finds the decoder's own error behind it.

@@ -3,7 +3,8 @@
 The `spm` command-line tool provides profile merging and validation without
 writing Go code. Flags must precede file arguments, and `--` ends them, so
 that every argument after it is a file name even when it starts with `-`.
-Without file arguments, commands read from stdin, unless stdin is a terminal.
+Without file arguments, commands read from stdin, unless stdin is a terminal;
+outside Windows, any character device but the null device counts as one.
 `spm help <command>` is the reference for the flags of a command; this page
 explains what the commands do with them.
 
@@ -32,15 +33,21 @@ Usage errors, which exit `2`:
 - a missing `--strategy`, or flags that cannot be combined;
 - an unexpected argument, such as `spm version extra` or
   `spm help merge extra`, or an empty file argument;
-- a `--validate` list whose length does not match the inputs;
+- a `--validate` list whose length does not match the inputs, unless stdin
+  could not be read, which leaves the number of inputs unknown;
+- for `diff`, another number of profiles than two; stdin that could not be
+  read counts as one profile at least, so only too many are refused then;
 - `--arch` for a profile type that has no architectures, or for `validate`
   without `--artifact` or `--strict`, whose checks it does not change;
 - a flag after the file arguments;
-- no file arguments while stdin is a terminal;
+- no file arguments while stdin is a terminal, or outside Windows another
+  character device but the null device, such as `/dev/zero`;
 - an input past the limits: a file over 10 MiB, inputs over 64 MiB in total,
   more than 1000 file arguments, a stdin array of more than 1000 profiles, or
   more than 1000 profiles in total (each element of a stdin array counts, and
-  so does each file beside it);
+  so does each file beside it); a stdin array that does not parse is a bad
+  profile instead, wherever its syntax error sits, since its syntax is
+  checked before its elements are counted;
 - stdin named twice (`spm merge - -`);
 - inputs that disagree on the profile type, each holding the members of
   another one, which blames none of them; an input holding the members of
@@ -51,14 +58,33 @@ Usage errors, which exit `2`:
 The split is between "you invoked it wrong", which no profile can cause, and
 "the profile is wrong", which is the answer the command was asked for. An
 input past the limits is discovered while reading, but exits `2`: the profile
-was never read, so nothing about it is known to be wrong.
+was never read, so nothing about it is known to be wrong. It ends the run
+there, before any input is checked, so it exits `2` whatever the other
+inputs hold and nothing is reported about them, and the exit code does not
+depend on which of them were read before it. The flags, an empty file
+argument and stdin named twice are checked before any input is read.
 
 A bad profile fails on its own: the other inputs are still read, checked and
-reported, and the run exits `1` at the end. When both come up in one run,
-the profile wins: once an input has failed, `merge` and `validate` exit `1`
-even if a usage error follows, such as an `--arch` the type does not take or
-inputs that disagree on the type, so the exit code of a bad input does not
-depend on the inputs beside it. `diff` exits `2` for both.
+reported, and the run exits `1` at the end. A file that cannot be read or is
+empty fails the same way, named by its path. A usage error that only comes
+up once the inputs are read, such as an `--arch` the type does not take, a
+`--validate` list of the wrong length or, for `diff`, another number of
+profiles than two, is reported after every input has been decoded and
+checked, each that applies. With a list of the wrong length each input is
+checked under the weakest mode the list names (`default`, then `artifact`,
+then `strict`), which every mode it names includes, so a list of `strict`
+alone still refuses what `strict` refuses. When both come up in one run,
+the profile wins: once an input has failed, however it failed, `merge` and
+`validate` exit `1`, so the exit code of a bad input does not depend on the
+usage errors beside it. A warning is not a failure: what the mode an input
+is checked under only warns about leaves the exit code to the usage error.
+Inputs that disagree on the type leave the run without one, so each input
+that shows the members of exactly one type is decoded and checked as a
+profile of that type, under its own mode, before the mix is reported: a
+seccomp profile with an unknown action beside an AppArmor one fails as
+itself, and the run exits `1`, while a mix of profiles that are each fine
+exits `2`. An input that shows no type, or several, is not checked further.
+`diff` exits `2` for both.
 
 ## Merge profiles
 
@@ -82,7 +108,8 @@ when it holds no member at all: one holding only members another format
 knows, such as a profile wrapped in an object, would decode into an empty
 profile of the type the others reveal, and is rejected as it is under
 `--type` (`error: <input>: holds no member of an apparmor profile`). Every
-input that fails detection is reported.
+input that fails detection is reported, and so is every input that is bad
+as the type it shows when the inputs disagree (see [Exit codes](#exit-codes)).
 
 Input order decides the seccomp tie-breaks: `errnoRet` follows the earlier
 input where the actions tie, and an intersection takes the listener from the
@@ -150,7 +177,10 @@ profile lists. The flag takes the values `diff --arch` takes and sets the
 otherwise. It is a usage error for an AppArmor or Landlock merge.
 
 Profiles can also be read from stdin, as a single profile or a JSON array of
-profiles, and `-` reads stdin alongside file arguments:
+profiles, and `-` reads stdin alongside file arguments. A document that
+starts with `[` is read as an array, and one that does not parse is reported
+at the line and column where it goes wrong, as a single profile is, rather
+than read as one profile:
 
 ```sh
 cat profiles.json | spm merge --type landlock --strategy intersect
@@ -166,9 +196,15 @@ for an input:
   the same directory, which is synced and renamed over the old one, so a
   failed run, even one that fails while writing, leaves the previous file
   whole. That needs write access to the directory, and the new file does not
-  keep the old one's owner or hard links.
+  keep the old one's owner or hard links. On Unix the directory is synced
+  after the rename too, so that the new name outlasts a crash. That is best
+  effort, since the file holds the new content by then: a failure is a
+  warning on stderr, not a failed run, and a file system that cannot sync a
+  directory, or a directory the caller cannot read, gets no warning.
 - A device or FIFO is written in place and keeps its mode, so
-  `--output /dev/null` leaves that node alone.
+  `--output /dev/null` leaves that node alone. One that is replaced by a
+  regular file between the check and the open is refused, since writing
+  that file in place would leave the end of its old content behind.
 - A file that is a mount point cannot be replaced, which is what a file
   bind-mounted into a container is (`docker run -v ./out.json:/out.json`, or
   a Kubernetes `subPath` mount). It is written in place and keeps its mode
@@ -268,10 +304,12 @@ Every validation mode names the input this way, the default one included: a
 failure the merge functions would report as "profile 1" is reported here as
 the file, or as `stdin[i]` for an element of an array on stdin, since a
 position is not something a caller can act on. Every input is checked, so
-one run names every input that fails, whether it cannot be parsed, decoded
-or validated, and the inputs that can be are still checked. A document that
-cannot be decoded is reported at its line and byte column, counted in the
-file or, for an element of a stdin array, in the array.
+one run names every input that fails, whether it cannot be read, parsed,
+decoded or validated, and the inputs that can be are still checked. A
+document that cannot be decoded is reported at its line and byte column,
+counted in the file or, for an element of a stdin array, in the array; a
+character the decoder refuses is reported where it starts, however many
+bytes it takes.
 
 Problems are named by the field path of the member they are about, as the
 JSON document spells it. A field path names each member as `object.member`

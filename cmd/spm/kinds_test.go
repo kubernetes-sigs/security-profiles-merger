@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -76,8 +77,10 @@ func TestDetectionIgnoresCase(t *testing.T) {
 	)
 	apparmorFile := writeTemp(t, apparmorJSON(t, "CHOWN"))
 
-	// An input that fails detection exits as a bad profile does; inputs
-	// that disagree blame none of them, which is a usage error.
+	// An input that fails detection exits as a bad profile does. Inputs
+	// that disagree blame none of them, but each is checked as what it
+	// shows itself to be, and a seccomp profile without a defaultAction is
+	// a bad one.
 	for _, testCase := range []struct {
 		args []string
 		want string
@@ -91,7 +94,7 @@ func TestDetectionIgnoresCase(t *testing.T) {
 		{
 			[]string{cmdMerge, flagStrategy, strategyUnion, seccompBare, apparmorFile},
 			"inputs mix profile types (seccomp and apparmor)",
-			exitUsage,
+			1,
 		},
 		{
 			[]string{cmdValidate, mixed},
@@ -111,6 +114,85 @@ func TestDetectionIgnoresCase(t *testing.T) {
 
 		if !strings.Contains(stderr, testCase.want) {
 			t.Errorf("%v: stderr = %q, want %q", testCase.args, stderr, testCase.want)
+		}
+	}
+}
+
+// TestInputsThatDisagreeAreEachChecked covers inputs that disagree on the
+// profile type: no type can be resolved for the run, but each input is
+// checked as what it shows itself to be, under its own mode, so a bad one
+// is reported and the run exits 1 in either order. When every input is
+// fine on its own, the mix alone is reported, as a usage error.
+func TestInputsThatDisagreeAreEachChecked(t *testing.T) {
+	t.Parallel()
+
+	badAction := writeTemp(t, `{"defaultAction":"SCMP_ACT_BOGUS"}`)
+	unknownMember := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO","comment":"x"}`)
+	seccompFile := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO"}`)
+	apparmorFile := writeTemp(t, apparmorJSON(t, "CHOWN"))
+
+	mix := func(first, second string) string {
+		return "error: inputs mix profile types (" + first + " and " + second + "), use --type\n"
+	}
+
+	actionError := "error: " + badAction + ": defaultAction: \"SCMP_ACT_BOGUS\": unknown seccomp action\n"
+	merge := []string{cmdMerge, flagStrategy, strategyUnion}
+
+	for _, test := range []struct {
+		name string
+		args []string
+		code int
+		want string
+	}{
+		{
+			name: "validate, bad seccomp first",
+			args: []string{cmdValidate, badAction, apparmorFile},
+			code: 1,
+			want: actionError + mix(typeSeccomp, typeAppArmor),
+		},
+		{
+			name: "validate, bad seccomp second",
+			args: []string{cmdValidate, apparmorFile, badAction},
+			code: 1,
+			want: actionError + mix(typeAppArmor, typeSeccomp),
+		},
+		{
+			name: "merge, bad seccomp first",
+			args: append(slices.Clone(merge), badAction, apparmorFile),
+			code: 1,
+			want: actionError + mix(typeSeccomp, typeAppArmor),
+		},
+		{
+			name: "merge, bad seccomp second",
+			args: append(slices.Clone(merge), apparmorFile, badAction),
+			code: 1,
+			want: actionError + mix(typeAppArmor, typeSeccomp),
+		},
+		{
+			name: "merge, an input under its own mode",
+			args: append(slices.Clone(merge),
+				"--validate", "strict,default", unknownMember, apparmorFile),
+			code: 1,
+			want: "error: " + unknownMember + ": unknown field \"comment\"\n" +
+				mix(typeSeccomp, typeAppArmor),
+		},
+		{
+			name: "validate, a valid mix",
+			args: []string{cmdValidate, seccompFile, apparmorFile},
+			code: exitUsage,
+			want: mix(typeSeccomp, typeAppArmor),
+		},
+		{
+			name: "merge, a valid mix",
+			args: append(slices.Clone(merge), apparmorFile, seccompFile),
+			code: exitUsage,
+			want: mix(typeAppArmor, typeSeccomp),
+		},
+	} {
+		code, stdout, stderr := runCapture(t, test.args, nil)
+		if code != test.code || stdout != "" || stderr != test.want {
+			t.Errorf("%s: exit code = %d, stdout = %q, stderr = %q, want %d, nothing and %q",
+				test.name, code, stdout, stderr, test.code, test.want)
 		}
 	}
 }

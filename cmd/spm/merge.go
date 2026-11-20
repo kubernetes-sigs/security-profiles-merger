@@ -17,7 +17,6 @@ limitations under the License.
 package main
 
 import (
-	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -68,7 +67,6 @@ type mergeOptions struct {
 
 	strategy string
 	validate string
-	arch     string
 }
 
 // bindMergeFlags declares the merge flags on the set and returns the struct
@@ -76,7 +74,7 @@ type mergeOptions struct {
 func bindMergeFlags(flags *flag.FlagSet) *mergeOptions {
 	opts := new(mergeOptions)
 
-	opts.bind(flags, "the merged profile", "stdout")
+	opts.bind(flags, "the merged profile", "stdout", "of the node that loads the result")
 	flags.StringVar(
 		&opts.strategy, "strategy", "", "merge strategy: intersect, union (required)",
 	)
@@ -85,7 +83,6 @@ func bindMergeFlags(flags *flag.FlagSet) *mergeOptions {
 		"checks to run on the inputs before merging: default, strict, artifact; "+
 			"or one mode per input, comma separated",
 	)
-	bindArchFlag(flags, &opts.arch, "of the node that loads the result")
 
 	return opts
 }
@@ -94,63 +91,40 @@ func runMerge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := newFlagSet(cmdMerge)
 	opts := bindMergeFlags(flags)
 
-	if done, code := parseFlags(flags, mergeUsage, args, stdout, stderr); done {
+	inv, code := startCommand(flags, opts, mergeUsage, args, stdin, stdout, stderr)
+	if inv == nil {
 		return code
 	}
 
-	if code := checkFlagOrder(flags.Args(), argsSeparated(flags, args), stderr); code != 0 {
-		return code
-	}
-
-	if code := validateMergeFlags(opts, flags, stderr); code != 0 {
-		return code
-	}
-
-	arch, code := parseArchFlag(flags, opts.arch, stderr)
-	if code != 0 {
-		return code
-	}
-
-	if code := checkStdin(flags, mergeUsage, stdin, stderr); code != 0 {
-		return code
-	}
-
-	inputs, err := readInputs(flags.Args(), stdin)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
-
-		return readErrorExit(err)
-	}
-
-	return mergeInputs(opts, arch, inputs, stdout, stderr)
+	return mergeInputs(opts, inv)
 }
 
 // mergeInputs validates, merges and writes the profiles that were read.
-func mergeInputs(
-	opts *mergeOptions, arch archOption, inputs []profileInput, stdout, stderr io.Writer,
-) int {
+func mergeInputs(opts *mergeOptions, inv *invocation) int {
 	// The mode count is checked against the inputs, which a "-" argument
-	// may expand into several, so this waits until they are read.
-	modes, err := parseValidateModes(opts.validate, len(inputs))
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
-
-		return exitUsage
+	// may expand into several, so this waits until they are read. A count
+	// that does not match is refused once the inputs are checked, under the
+	// weakest mode listed (see parseValidateModes). Stdin that could not be
+	// read held no number of profiles anyone knows, so the count is not
+	// refused then: its failure is the answer.
+	modes, err := parseValidateModes(opts.validate, len(inv.inputs))
+	if err != nil && !inv.stdinUnread {
+		inv.refusals = append(inv.refusals, err)
 	}
 
-	kind, report, code := resolveKind(opts.profileType, inputs, 1, opts.noDetectNote, stderr)
+	inv.checks = &inputChecks{modes: modes, strategy: opts.strategy}
+
+	code := resolveKind(inv, opts.profileType, 1, opts.noDetectNote)
 	if code != 0 {
 		return code
 	}
 
-	var out bytes.Buffer
-
-	code = kind.merge(inputs, report, opts.strategy, modes, arch, opts.format, &out, stderr)
+	code = inv.kind.mergeCommand(inv, opts.strategy, modes)
 	if code != 0 {
 		return code
 	}
 
-	return flushOutput(opts.output, out.Bytes(), stdout, stderr)
+	return inv.flushOutput(opts.output)
 }
 
 var (
@@ -159,7 +133,10 @@ var (
 )
 
 // parseValidateModes turns a --validate value into one mode per input:
-// either a single mode for all of them, or exactly one each.
+// either a single mode for all of them, or exactly one each. For a list of
+// another length it returns the error together with the weakest mode listed
+// for every input, which the inputs are checked under before the run is
+// refused.
 func parseValidateModes(value string, inputs int) ([]validateMode, error) {
 	names := strings.Split(value, ",")
 
@@ -185,7 +162,14 @@ func parseValidateModes(value string, inputs int) ([]validateMode, error) {
 	}
 
 	if len(parsed) != inputs {
-		return nil, fmt.Errorf(
+		// The weakest mode listed is the one every input is known to be
+		// meant for at least: each mode accepts only what the weaker ones
+		// accept, so an input that fails it fails whatever mode was meant.
+		weakest := slices.MinFunc(parsed, func(left, right validateMode) int {
+			return left.strength() - right.strength()
+		})
+
+		return slices.Repeat([]validateMode{weakest}, inputs), fmt.Errorf(
 			"%w: got %d for %d %s",
 			errValidateModeCount, len(parsed), inputs, plural(inputs, "profile"),
 		)
@@ -194,9 +178,8 @@ func parseValidateModes(value string, inputs int) ([]validateMode, error) {
 	return parsed, nil
 }
 
-func validateMergeFlags(
-	opts *mergeOptions, flags *flag.FlagSet, stderr io.Writer,
-) int {
+// checkFlags checks the merge flags (see commandOptions).
+func (opts *mergeOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) int {
 	// The modes are parsed again once the inputs are known; this reports a
 	// misspelled one before anything is read.
 	_, err := parseValidateModes(opts.validate, 1)
@@ -227,14 +210,11 @@ func validateMergeFlags(
 	return opts.check(stderr)
 }
 
-// mergeRequest carries everything one merge run needs, so that the per-input
-// validation modes do not turn mergeProfiles into a long parameter list.
+// mergeRequest carries what one merge run needs besides its invocation, so
+// that the per-input validation modes do not turn mergeProfiles into a long
+// parameter list.
 type mergeRequest[T any] struct {
-	inputs []profileInput
-	// report holds what was found about the inputs so far.
-	report   *inputReport
 	strategy string
-	format   string
 	// checks holds the check of each input, nil for one the merge checks,
 	// and strict whether each is decoded strictly, in the order of inputs.
 	checks []func(*T) error
@@ -247,7 +227,7 @@ type mergeRequest[T any] struct {
 	formatFn   func(*T) string
 }
 
-func mergeProfiles[T any](request mergeRequest[T], stdout, stderr io.Writer) int {
+func mergeProfiles[T any](inv *invocation, request mergeRequest[T]) int {
 	var mergeFn func(...*T) (*T, error)
 
 	switch request.strategy {
@@ -257,13 +237,13 @@ func mergeProfiles[T any](request mergeRequest[T], stdout, stderr io.Writer) int
 		mergeFn = request.union
 	default:
 		// runMerge checks the strategy before reading any input.
-		_, _ = fmt.Fprintf(stderr, "error: unknown strategy %q\n", request.strategy)
+		_, _ = fmt.Fprintf(inv.stderr, "error: unknown strategy %q\n", request.strategy)
 
 		return exitUsage
 	}
 
-	report := request.report
-	profiles := unmarshalAll[T](request.inputs, request.strict, report)
+	report := inv.report
+	profiles := unmarshalAll[T](inv.inputs, request.strict, report)
 
 	for idx, profile := range profiles {
 		if check := request.checks[idx]; check != nil && profile != nil {
@@ -274,45 +254,36 @@ func mergeProfiles[T any](request mergeRequest[T], stdout, stderr io.Writer) int
 		}
 	}
 
-	if report.anyFailed() {
-		checkLeftInputs(request, mergeFn, profiles)
-		report.flush(stderr)
+	if inv.halted() {
+		checkLeftInputs(request, mergeFn, profiles, report)
 
-		return 1
+		return inv.stop(1)
 	}
 
 	result, err := mergeFn(profiles...)
 	if err != nil {
-		reportMergeFailure(err, len(profiles), report, stderr)
+		reportMergeFailure(err, len(profiles), report, inv.stderr)
 
 		return 1
 	}
 
-	report.flush(stderr)
+	report.flush(inv.stderr)
 
-	return writeOutput(result, request.formatFn(result), request.format, stdout, stderr)
+	return inv.write(result, request.formatFn(result))
 }
 
 // checkLeftInputs runs the check the merge runs on each input on the ones
-// that decoded and asked for no check of their own, when another input has
-// failed and the merge does not run, so that one run names every bad input,
-// as the other validation modes do. Each is checked on its own, so that a
-// failure between two inputs, such as a conflict between their listeners,
-// is neither reported nor blamed on either: the merge was not going to run.
-// Where the package exports no such check, a merge of the input alone runs
-// it, and only a failure it blames on the input counts.
+// that decoded and asked for no check of their own, when the merge does not
+// run, because another input has failed or the run is refused, so that one
+// run names every bad input, as the other validation modes do. Each is
+// checked on its own, so that a failure between two inputs, such as a
+// conflict between their listeners, is neither reported nor blamed on
+// either: the merge was not going to run (see mergeInputCheck).
 func checkLeftInputs[T any](
 	request mergeRequest[T], mergeFn func(...*T) (*T, error), profiles []*T,
+	report *inputReport,
 ) {
-	check := request.inputCheck
-	if check == nil {
-		check = func(profile *T) error {
-			_, err := mergeFn(profile)
-			_, inputErr := inputFailure(err, 1)
-
-			return inputErr
-		}
-	}
+	check := mergeInputCheck(request.inputCheck, mergeFn)
 
 	for idx, profile := range profiles {
 		if profile == nil || request.checks[idx] != nil {
@@ -321,8 +292,27 @@ func checkLeftInputs[T any](
 
 		err := check(profile)
 		if err != nil {
-			request.report.fail(idx, err)
+			report.fail(idx, err)
 		}
+	}
+}
+
+// mergeInputCheck returns the check the merge functions run on one input on
+// its own: inputCheck, or where the package exports none, a merge of the
+// input alone with mergeFn, of which only a failure it blames on the input
+// counts.
+func mergeInputCheck[T any](
+	inputCheck func(*T) error, mergeFn func(...*T) (*T, error),
+) func(*T) error {
+	if inputCheck != nil {
+		return inputCheck
+	}
+
+	return func(profile *T) error {
+		_, err := mergeFn(profile)
+		_, inputErr := inputFailure(err, 1)
+
+		return inputErr
 	}
 }
 

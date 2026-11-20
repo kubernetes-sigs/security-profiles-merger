@@ -23,6 +23,10 @@ import (
 	"os"
 )
 
+// terminalStdin says what isTerminal found stdin to be. It cannot tell a
+// terminal from another character device, so it names both.
+const terminalStdin = "stdin is a terminal or another character device"
+
 // isTerminal reports whether the file is a terminal. Any character device
 // other than the null device is taken for one: reading /dev/null is a valid
 // way to provide empty input.

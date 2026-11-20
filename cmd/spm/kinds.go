@@ -17,7 +17,6 @@ limitations under the License.
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -80,24 +79,35 @@ func (mode validateMode) strictDecode() bool {
 	return mode == modeStrict || mode == modeArtifact
 }
 
+// strength orders the modes by what they accept: each accepts only what
+// the weaker ones accept, as the library's validators do, default the most
+// and strict the least.
+func (mode validateMode) strength() int {
+	return slices.Index([]validateMode{modeDefault, modeArtifact, modeStrict}, mode)
+}
+
 // profileKind wires one profile type into the merge, diff, and validate
-// commands. The merge takes one mode per input, so a baseline and an
-// artifact can be checked the way each deserves in a single run. Each
-// command takes the architecture --arch names, which only a profile type
-// with architectures accepts.
-type profileKind struct {
-	merge func(
-		inputs []profileInput, report *inputReport, strategy string, modes []validateMode,
-		arch archOption, format string, stdout, stderr io.Writer,
-	) int
-	diff func(
-		inputs []profileInput, report *inputReport, arch archOption, format string,
-		stdout, stderr io.Writer,
-	) int
-	validate func(
-		inputs []profileInput, report *inputReport, mode validateMode, arch archOption,
-		format string, stdout, stderr io.Writer,
-	) int
+// commands; kindOps implements it. The merge takes one mode per input, so a
+// baseline and an artifact can be checked the way each deserves in a single
+// run. Each command takes the architecture --arch names, which only a
+// profile type with architectures accepts.
+type profileKind interface {
+	mergeCommand(inv *invocation, strategy string, modes []validateMode) int
+	diffCommand(inv *invocation) int
+	validateCommand(inv *invocation, mode validateMode) int
+	// hasArch reports whether the profile type has architectures.
+	hasArch() bool
+	// checkAlone checks the input at idx on its own, as a profile of this
+	// kind (see checkEachAlone).
+	checkAlone(inv *invocation, idx int)
+}
+
+// inputChecks says how a command checks each input: under its mode, and
+// for merge, with the merge strategy, whose functions run the default
+// checks. A nil one, which diff has, decodes the inputs and checks nothing.
+type inputChecks struct {
+	modes    []validateMode
+	strategy string
 }
 
 // kindOps holds the package functions of one profile type.
@@ -123,21 +133,103 @@ type kindOps[T any, D any] struct {
 	forArch func(native specs.Arch) kindOps[T, D]
 }
 
-// atArch returns the functions to run for the architecture --arch names.
-// It reports false, after saying why, when --arch was named for a profile
-// type that has no architectures: a run that names one for a profile type
-// that cannot have one asked for something the answer would silently
-// ignore. A profile type without architectures keeps its functions.
-func (ops kindOps[T, D]) atArch(arch archOption, stderr io.Writer) (kindOps[T, D], bool) {
-	if rejectArch(arch, ops.forArch != nil, stderr) {
-		return ops, false
-	}
+// errArchNotApplicable reports --arch named for a profile type that has no
+// architectures.
+var errArchNotApplicable = fmt.Errorf("--arch only applies to %s profiles", typeSeccomp)
 
+// atArch returns the functions as a node of the architecture --arch names
+// runs them. A profile type without architectures keeps its own; a run that
+// names --arch for one is refused (see checkArch).
+func (ops kindOps[T, D]) atArch(inv *invocation) kindOps[T, D] {
 	if ops.forArch == nil {
-		return ops, true
+		return ops
 	}
 
-	return ops.forArch(arch.value), true
+	return ops.forArch(inv.arch.value)
+}
+
+func (ops kindOps[T, D]) hasArch() bool { return ops.forArch != nil }
+
+// checkAlone decodes the input at idx as a profile of this kind and checks
+// it as the command would (see inputChecks), recording what it finds in the
+// report. A merge in the default mode runs the check its functions run on
+// one input (see mergeInputCheck).
+func (ops kindOps[T, D]) checkAlone(inv *invocation, idx int) {
+	ops = ops.atArch(inv)
+	checks, report := inv.checks, inv.report
+
+	mode := modeDefault
+	if checks != nil {
+		mode = checks.modes[idx]
+	}
+
+	profile, err := unmarshalOne[T](&inv.inputs[idx], mode.strictDecode(), func(warning error) {
+		report.warn(idx, warning)
+	})
+	if err != nil || checks == nil {
+		if err != nil {
+			report.fail(idx, err)
+		}
+
+		return
+	}
+
+	check := ops.checker(mode)
+
+	if checks.strategy != "" && mode == modeDefault {
+		mergeFn := ops.union
+		if checks.strategy == strategyIntersect {
+			mergeFn = ops.intersect
+		}
+
+		check = mergeInputCheck(ops.inputCheck, mergeFn)
+	}
+
+	err = check(profile)
+	if err != nil {
+		report.fail(idx, err)
+	}
+}
+
+// checkEachAlone checks every input that parsed and shows the members of
+// exactly one profile type on its own, as a profile of that type, for a run
+// whose inputs disagree on the type: no type can be resolved for the run,
+// but an input that is bad as what it shows itself to be is reported, so
+// that the run exits as one with a bad input does. An input that shows no
+// type, or several, is left as it is.
+func checkEachAlone(inv *invocation) {
+	for idx := range inv.inputs {
+		if inv.report.failedAt(idx) {
+			continue
+		}
+
+		types := detectOneProfileType(inv.inputs[idx].data)
+		if len(types) != 1 {
+			continue
+		}
+
+		// The run has no kind, and stops once the inputs are checked, so
+		// the kind of each input is set on it only while that input is
+		// checked.
+		if inv.useKind(types[0]) {
+			inv.kind.checkAlone(inv, idx)
+		}
+	}
+
+	inv.kind = nil
+}
+
+// checkArch refuses a run that names --arch for a profile type without
+// architectures, which asked for something the answer would silently
+// ignore, once its inputs are checked (see invocation.stop). That turns on
+// whether --arch was named at all, not on whether its value changes
+// anything: "--arch native" asks for what the flag's absence already
+// implies, but naming it for such a type is the same mistake the other
+// values are, rather than a flag that quietly does nothing.
+func (inv *invocation) checkArch() {
+	if inv.arch.named && !inv.kind.hasArch() {
+		inv.refusals = append(inv.refusals, errArchNotApplicable)
+	}
 }
 
 // seccompOps returns the functions of the seccomp package for the node the
@@ -160,60 +252,18 @@ func seccompOps(opts seccomp.Options) kindOps[specs.LinuxSeccomp, seccomp.Profil
 	}
 }
 
-// atArchFor is atArch for a command that has checked its inputs into report
-// already: when --arch is refused, what report holds is written first, so
-// that a failure found before is not lost, and the refusal after it.
-func (ops kindOps[T, D]) atArchFor(
-	arch archOption, report *inputReport, stderr io.Writer,
-) (kindOps[T, D], bool) {
-	var refusal bytes.Buffer
-
-	ops, accepted := ops.atArch(arch, &refusal)
-	if !accepted {
-		report.flush(stderr)
-
-		_, _ = stderr.Write(refusal.Bytes())
-	}
-
-	return ops, accepted
-}
-
-// exitAfter returns the exit code of a usage error found after the inputs
-// were checked into report: failedExit when an input has failed already,
-// since a bad input is the answer the command was asked for, and the usage
-// exit code otherwise.
-func exitAfter(report *inputReport, failedExit int) int {
-	if report.anyFailed() {
-		return failedExit
-	}
-
-	return exitUsage
-}
-
 // diffCommand compares two profiles.
-func (ops kindOps[T, D]) diffCommand(
-	inputs []profileInput, report *inputReport, arch archOption, format string,
-	stdout, stderr io.Writer,
-) int {
-	ops, ok := ops.atArchFor(arch, report, stderr)
-	if !ok {
-		return exitUsage
-	}
+func (ops kindOps[T, D]) diffCommand(inv *invocation) int {
+	ops = ops.atArch(inv)
 
-	return diffProfiles(
-		inputs, report, format, ops.diff, ops.formatDiff, ops.equal, stdout, stderr,
-	)
+	return diffProfiles(inv, ops.diff, ops.formatDiff, ops.equal)
 }
 
 // mergeCommand checks every input under its own mode and merges them.
 func (ops kindOps[T, D]) mergeCommand(
-	inputs []profileInput, report *inputReport, strategy string, modes []validateMode,
-	arch archOption, format string, stdout, stderr io.Writer,
+	inv *invocation, strategy string, modes []validateMode,
 ) int {
-	ops, ok := ops.atArchFor(arch, report, stderr)
-	if !ok {
-		return exitAfter(report, 1)
-	}
+	ops = ops.atArch(inv)
 
 	checks := make([]func(*T) error, len(modes))
 	strict := make([]bool, len(modes))
@@ -230,37 +280,22 @@ func (ops kindOps[T, D]) mergeCommand(
 		strict[idx] = mode.strictDecode()
 	}
 
-	return mergeProfiles(
-		mergeRequest[T]{
-			inputs:     inputs,
-			report:     report,
-			strategy:   strategy,
-			format:     format,
-			checks:     checks,
-			strict:     strict,
-			inputCheck: ops.inputCheck,
-			intersect:  ops.intersect,
-			union:      ops.union,
-			formatFn:   ops.format,
-		},
-		stdout, stderr,
-	)
+	return mergeProfiles(inv, mergeRequest[T]{
+		strategy:   strategy,
+		checks:     checks,
+		strict:     strict,
+		inputCheck: ops.inputCheck,
+		intersect:  ops.intersect,
+		union:      ops.union,
+		formatFn:   ops.format,
+	})
 }
 
 // validateCommand checks every input under one mode.
-func (ops kindOps[T, D]) validateCommand(
-	inputs []profileInput, report *inputReport, mode validateMode, arch archOption,
-	format string, stdout, stderr io.Writer,
-) int {
-	ops, ok := ops.atArchFor(arch, report, stderr)
-	if !ok {
-		return exitAfter(report, 1)
-	}
+func (ops kindOps[T, D]) validateCommand(inv *invocation, mode validateMode) int {
+	ops = ops.atArch(inv)
 
-	return validateProfiles(
-		inputs, report, ops.checker(mode), mode.strictDecode(), format, ops.format,
-		stdout, stderr,
-	)
+	return validateProfiles(inv, ops.checker(mode), mode.strictDecode(), ops.format)
 }
 
 // checker returns the validation function for a mode.
@@ -277,21 +312,25 @@ func (ops kindOps[T, D]) checker(mode validateMode) func(*T) error {
 	return ops.validate
 }
 
-func newKind[T any, D any](ops kindOps[T, D]) profileKind {
-	return profileKind{
-		merge:    ops.mergeCommand,
-		diff:     ops.diffCommand,
-		validate: ops.validateCommand,
+// knownType reports whether a profile type of the given name exists.
+func knownType(name string) bool {
+	switch name {
+	case typeSeccomp, typeAppArmor, typeLandlock:
+		return true
+	default:
+		return false
 	}
 }
 
-// kindByName returns the profile kind registered under the given type name.
-func kindByName(name string) (profileKind, bool) {
+// useKind sets the profile kind the run uses to the one registered under
+// the given type name, and reports false for a name none is registered
+// under.
+func (inv *invocation) useKind(name string) bool {
 	switch name {
 	case typeSeccomp:
-		return newKind(seccompOps(seccomp.Options{Arch: seccomp.NativeHost})), true
+		inv.kind = seccompOps(seccomp.Options{Arch: seccomp.NativeHost})
 	case typeAppArmor:
-		return newKind(kindOps[apparmor.Profile, apparmor.ProfileDiff]{
+		inv.kind = kindOps[apparmor.Profile, apparmor.ProfileDiff]{
 			intersect:        apparmor.Intersect,
 			union:            apparmor.Union,
 			validate:         apparmor.Validate,
@@ -303,9 +342,9 @@ func kindByName(name string) (profileKind, bool) {
 			formatDiff:       apparmor.FormatDiff,
 			equal:            (*apparmor.ProfileDiff).IsEqual,
 			forArch:          nil,
-		}), true
+		}
 	case typeLandlock:
-		return newKind(kindOps[landlock.Profile, landlock.ProfileDiff]{
+		inv.kind = kindOps[landlock.Profile, landlock.ProfileDiff]{
 			intersect:        landlock.Intersect,
 			union:            landlock.Union,
 			validate:         landlock.Validate,
@@ -317,23 +356,25 @@ func kindByName(name string) (profileKind, bool) {
 			formatDiff:       landlock.FormatDiff,
 			equal:            (*landlock.ProfileDiff).IsEqual,
 			forArch:          nil,
-		}), true
+		}
 	default:
-		var none profileKind
-
-		return none, false
+		return false
 	}
+
+	return true
 }
 
-// resolveKind returns the profile kind named by --type, or the one detected
-// from the inputs when the flag is empty, and the report the inputs are
-// checked into (see inputReport). Input that is not a JSON object is no
-// profile of any type and cannot be detected: it is recorded in the report,
-// the same way with and without --type, and the type is resolved from the
-// other inputs, so that a run still checks those. When no input parses, the
-// report is written and the code is parseExit. A detected type is noted on
-// stderr unless noDetectNote is set, so that a command in a pipeline can
-// stay silent about what it inferred.
+// resolveKind sets the profile kind of the run (see invocation.kind) to the
+// one named by --type, or the one detected from the inputs when the flag is
+// empty, and creates the report the inputs are checked into (see
+// inputReport), which holds the inputs that could not be read. Input that is
+// not a JSON object is no profile of any type and cannot be detected: it is
+// recorded in the report, the same way with and without --type, and the
+// type is resolved from the other inputs, so that a run still checks those.
+// It returns 0 once the kind is set. When no input parses, the run stops (see
+// invocation.stop) with parseExit. A detected type is noted on stderr
+// unless noDetectNote is set, so that a command in a pipeline can stay
+// silent about what it inferred.
 //
 // The type is checked against the inputs as well, whether named or
 // detected, rather than taken on faith: only the members of that type are
@@ -342,44 +383,38 @@ func kindByName(name string) (profileKind, bool) {
 // reads as equal to anything. Both would otherwise succeed, with an
 // unknown-field warning as the only sign. An input that does not match the
 // type fails as one that does not parse does, and the others are checked
-// all the same. When no type can be resolved, the report is written, and
-// the code is parseExit when an input failed, and the usage exit code for
-// inputs that disagree on the type without any of them failing.
-func resolveKind(
-	profileType string, inputs []profileInput, parseExit int, noDetectNote bool,
-	stderr io.Writer,
-) (profileKind, *inputReport, int) {
+// all the same. When no type can be resolved, the run stops with parseExit
+// when an input failed, and with the usage exit code for inputs that
+// disagree on the type without any of them failing.
+func resolveKind(inv *invocation, profileType string, parseExit int, noDetectNote bool) int {
+	inputs := inv.inputs
 	report := newInputReport(inputs)
+	inv.report = report
 
-	var none profileKind
-
-	parsed := 0
-
-	for idx := range inputs {
-		err := parseObject(&inputs[idx])
-		if err != nil {
-			report.fail(idx, err)
-
-			continue
-		}
-
-		parsed++
-	}
-
-	if parsed == 0 {
-		report.flush(stderr)
-
-		return none, report, parseExit
-	}
-
+	// A type --type names is known before any input is, so that what it
+	// refuses is reported even when no input parses.
 	named := profileType != ""
+	if named && !inv.resolveTo(profileType) {
+		return inv.stop(parseExit)
+	}
+
+	if !parseInputs(inputs, report) {
+		return inv.stop(parseExit)
+	}
 
 	if !named {
-		detected, ok := detectKind(inputs, report, stderr)
+		detected, ok := detectKind(inv)
 		if !ok {
 			// A disagreement between inputs blames none of them and is a
-			// usage error, unless an input failed already (see exitAfter).
-			return none, report, exitAfter(report, parseExit)
+			// usage error, unless an input failed already, which each input
+			// is checked for as what it shows itself to be.
+			checkEachAlone(inv)
+
+			return inv.stop(parseExit)
+		}
+
+		if !inv.resolveTo(detected) {
+			return inv.stop(parseExit)
 		}
 
 		profileType = detected
@@ -394,26 +429,61 @@ func resolveKind(
 	checkTypeMatchesInputs(profileType, inputs, report)
 
 	if !named && !noDetectNote {
-		_, _ = fmt.Fprintf(stderr, "auto-detected profile type: %s\n", profileType)
+		_, _ = fmt.Fprintf(inv.stderr, "auto-detected profile type: %s\n", profileType)
 	}
 
-	kind, ok := kindByName(profileType)
-	if !ok {
-		report.flush(stderr)
+	return 0
+}
 
-		return kind, report, unknownType(stderr, profileType)
+// parseInputs parses every input that was read as a JSON object (see
+// parseObject), recording each that is not one in report, and reports
+// whether any is.
+func parseInputs(inputs []profileInput, report *inputReport) bool {
+	parsed := false
+
+	for idx := range inputs {
+		if report.failedAt(idx) {
+			continue
+		}
+
+		err := parseObject(&inputs[idx])
+		if err != nil {
+			report.fail(idx, err)
+
+			continue
+		}
+
+		parsed = true
 	}
 
-	return kind, report, 0
+	return parsed
+}
+
+// resolveTo sets the profile kind of the run to the named one and refuses
+// an --arch it does not take (see checkArch). It reports false, after
+// recording why, for a name no kind has: the flags were checked to name a
+// known type, and detection finds only known ones, so that is a guard
+// rather than a path a run takes.
+func (inv *invocation) resolveTo(profileType string) bool {
+	if !inv.useKind(profileType) {
+		inv.refusals = append(inv.refusals, unknownTypeError(profileType))
+
+		return false
+	}
+
+	inv.checkArch()
+
+	return true
 }
 
 // detectKind detects the profile type of the inputs that parse. An input
 // carrying the members of two types fails, and the type is detected from
 // the others. When it cannot be, because the inputs disagree or none
 // reveals a type, detectKind records why against each input it can blame,
-// writes the report, explains a disagreement between inputs, which blames
-// none, and reports false.
-func detectKind(inputs []profileInput, report *inputReport, stderr io.Writer) (string, bool) {
+// records a disagreement between inputs, which blames none, as a usage
+// error of the run, and reports false.
+func detectKind(inv *invocation) (string, bool) {
+	inputs, report := inv.inputs, inv.report
 	detected, conflicts := detectProfileType(inputs, report)
 
 	var between *typeConflict
@@ -432,12 +502,9 @@ func detectKind(inputs []profileInput, report *inputReport, stderr io.Writer) (s
 	}
 
 	if between != nil {
-		report.flush(stderr)
-
-		_, _ = fmt.Fprintf(
-			stderr, "error: inputs mix profile types (%s and %s), use --type\n",
-			between.first, between.second,
-		)
+		inv.refusals = append(inv.refusals, &detectionError{text: fmt.Sprintf(
+			"inputs mix profile types (%s and %s), use --type", between.first, between.second,
+		)})
 
 		return "", false
 	}
@@ -448,8 +515,6 @@ func detectKind(inputs []profileInput, report *inputReport, stderr io.Writer) (s
 				report.fail(idx, &detectionError{text: "could not detect profile type, use --type"})
 			}
 		}
-
-		report.flush(stderr)
 
 		return "", false
 	}
@@ -500,12 +565,16 @@ func checkTypeMatchesInputs(profileType string, inputs []profileInput, report *i
 // unknownType reports an unknown profile type and returns the usage exit
 // code.
 func unknownType(stderr io.Writer, name string) int {
-	_, _ = fmt.Fprintf(
-		stderr, "error: unknown type %q (use %s, %s, or %s)\n",
-		name, typeSeccomp, typeAppArmor, typeLandlock,
-	)
+	_, _ = fmt.Fprintf(stderr, "error: %v\n", unknownTypeError(name))
 
 	return exitUsage
+}
+
+// unknownTypeError says that no profile type has the given name.
+func unknownTypeError(name string) error {
+	return &detectionError{text: fmt.Sprintf(
+		"unknown type %q (use %s, %s, or %s)", name, typeSeccomp, typeAppArmor, typeLandlock,
+	)}
 }
 
 // typeConflict names two profile types that cannot both be right for the

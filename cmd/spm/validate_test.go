@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1116,5 +1117,140 @@ func TestUsageErrorsAfterABadInput(t *testing.T) {
 	code, _, _ = runCapture(t, []string{cmdValidate, empty}, nil)
 	if code != 1 {
 		t.Errorf("undetectable type alone: exit code = %d, want 1", code)
+	}
+}
+
+// TestUsageErrorsAfterEveryKindOfBadInput covers a usage error that only
+// comes up once the inputs are read, an --arch the profile type does not
+// take or a --validate list of the wrong length, beside an input that is bad
+// in each way an input can be: every input is read, decoded and checked
+// before the run is refused, so the bad one is reported and the run exits
+// 1, however it is bad.
+func TestUsageErrorsAfterEveryKindOfBadInput(t *testing.T) {
+	t.Parallel()
+
+	good := writeTemp(t, `{"handledAccessFs":["read_file"]}`)
+
+	const (
+		archRefusal  = "error: --arch only applies to seccomp profiles\n"
+		countRefusal = "error: wrong number of validation modes: got 2 for 3 profiles\n"
+	)
+
+	for _, bad := range []struct {
+		name string
+		path string
+	}{
+		{"a syntax error", writeTemp(t, `{"handledAccessFs":`)},
+		{"a value of the wrong type", writeTemp(t, `{"handledAccessFs":"read_file"}`)},
+		{"a repeated member", writeTemp(t,
+			`{"handledAccessFs":["read_file"],"handledAccessFs":["read_file"]}`)},
+		{"an unknown right", writeTemp(t, `{"handledAccessFs":["read_bogus"]}`)},
+		{"an empty file", writeTemp(t, " \n")},
+		{"a missing file", filepath.Join(t.TempDir(), "missing.json")},
+	} {
+		for _, run := range []struct {
+			name    string
+			flags   []string
+			others  []string
+			refusal string
+		}{
+			{
+				name:    "validate --arch",
+				flags:   []string{cmdValidate, flagStrict, flagArch, "SCMP_ARCH_X86_64"},
+				others:  []string{good},
+				refusal: archRefusal,
+			},
+			{
+				name:    "merge --arch",
+				flags:   []string{cmdMerge, flagStrategy, strategyUnion, flagArch, archNone},
+				others:  []string{good},
+				refusal: archRefusal,
+			},
+			{
+				name:    "merge --validate",
+				flags:   []string{cmdMerge, flagStrategy, strategyUnion, "--validate", "default,artifact"},
+				others:  []string{good, good},
+				refusal: countRefusal,
+			},
+		} {
+			t.Run(bad.name+"/"+run.name, func(t *testing.T) {
+				t.Parallel()
+
+				flags := append(slices.Clone(run.flags), flagType, typeLandlock)
+
+				code, stdout, stderr := runCapture(t,
+					slices.Concat(flags, []string{bad.path}, run.others), nil)
+				if code != 1 || stdout != "" ||
+					!strings.HasPrefix(stderr, "error: "+bad.path+": ") ||
+					!strings.HasSuffix(stderr, "\n"+run.refusal) {
+					t.Errorf("exit code = %d, stdout = %q, stderr = %q, "+
+						"want 1, nothing, the bad input and then %q",
+						code, stdout, stderr, run.refusal)
+				}
+
+				// Without the bad input the refusal is a usage error.
+				code, _, stderr = runCapture(t,
+					slices.Concat(flags, []string{good}, run.others), nil)
+				if code != exitUsage || stderr != run.refusal {
+					t.Errorf("good inputs: exit code = %d, stderr = %q, want %d and %q",
+						code, stderr, exitUsage, run.refusal)
+				}
+			})
+		}
+	}
+}
+
+// TestEveryRefusalIsReported covers usage errors that only come up once the
+// inputs are read, beside an input that does not parse: each applicable one
+// is reported after the inputs, an --arch the type --type names does not
+// take included, which is known before any input parses.
+func TestEveryRefusalIsReported(t *testing.T) {
+	t.Parallel()
+
+	bad := writeTemp(t, "nope")
+
+	code, _, stderr := runCapture(t, []string{
+		cmdMerge, flagType, typeAppArmor, flagStrategy, strategyUnion,
+		flagArch, "SCMP_ARCH_X86_64", "--validate", "strict,strict,strict", bad,
+	}, nil)
+
+	want := "error: " + bad + ": line 1, column 2: invalid character 'o' in literal null " +
+		"(expecting 'u')\n" +
+		"error: wrong number of validation modes: got 3 for 1 profile\n" +
+		"error: --arch only applies to seccomp profiles\n"
+	if code != 1 || stderr != want {
+		t.Errorf("exit code = %d, stderr = %q, want 1 and %q", code, stderr, want)
+	}
+}
+
+// TestValidateListOfTheWrongLengthUsesItsWeakestMode covers a --validate
+// list whose length does not match the inputs: each input is checked under
+// the weakest mode listed, which every listed mode includes, so that what
+// strict refuses is not let through as a warning when strict is all the
+// list names.
+func TestValidateListOfTheWrongLengthUsesItsWeakestMode(t *testing.T) {
+	t.Parallel()
+
+	unknown := writeTemp(t, `{"filesystem":{"readOnlyPaths":["/a"]},"bogus":1}`)
+	count := "error: wrong number of validation modes: got 3 for 1 profile\n"
+	failure := "error: " + unknown + ": unknown field \"bogus\"\n"
+
+	for _, test := range []struct {
+		modes string
+		code  int
+		want  string
+	}{
+		{"strict,strict,strict", 1, failure + count},
+		{"artifact,strict,artifact", 1, failure + count},
+		{"strict,default,strict", exitUsage, "warning: " + unknown + ": unknown field \"bogus\"\n" + count},
+	} {
+		code, _, stderr := runCapture(t, []string{
+			cmdMerge, flagType, typeAppArmor, flagStrategy, strategyUnion,
+			"--validate", test.modes, unknown,
+		}, nil)
+		if code != test.code || stderr != test.want {
+			t.Errorf("--validate %s: exit code = %d, stderr = %q, want %d and %q",
+				test.modes, code, stderr, test.code, test.want)
+		}
 	}
 }

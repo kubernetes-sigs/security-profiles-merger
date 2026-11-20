@@ -21,6 +21,9 @@ import (
 	"syscall"
 )
 
+// terminalStdin says what isTerminal found stdin to be.
+const terminalStdin = "stdin is a console"
+
 // isTerminal reports whether the file is a console, which is the case
 // exactly when it has a console mode. The check other platforms use cannot
 // tell a console from the null device here: both are character devices, and

@@ -28,26 +28,6 @@ import (
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
-func writeOutput(
-	result any, humanStr, format string, stdout, stderr io.Writer,
-) int {
-	switch format {
-	case formatHuman:
-		_, _ = fmt.Fprintln(stdout, humanStr)
-
-		warnTruncated(stderr, humanStr)
-	default:
-		err := encodeJSON(stdout, result)
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
-
-			return 1
-		}
-	}
-
-	return 0
-}
-
 // flushOutput writes a command's result to stdout, or to the output file when
 // a path is given. Commands buffer their result and flush it only once they
 // have succeeded, so a failed run never truncates an existing file.
@@ -71,9 +51,23 @@ func flushOutput(path string, content []byte, stdout, stderr io.Writer) int {
 		err = writeOutputFile(path, content)
 	}
 
-	// The failure names the path, which the errors below leave out: it is
-	// spelled here once, as the caller wrote it, rather than by os in a
-	// cleaned form or as the temporary file's name.
+	return reportWrite(path, err, stderr)
+}
+
+// reportWrite reports how writing the output file path went and returns the
+// exit code. The failure names the path, which the errors below leave out:
+// it is spelled here once, as the caller wrote it, rather than by os in a
+// cleaned form or as the temporary file's name. A file written whose
+// directory could not be synced holds the new content, so the run has
+// succeeded and only warns.
+func reportWrite(path string, err error, stderr io.Writer) int {
+	var unsynced *writtenUnsyncedError
+	if errors.As(err, &unsynced) {
+		_, _ = fmt.Fprintf(stderr, "warning: writing %s: %v\n", merge.SafeName(path), err)
+
+		return 0
+	}
+
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "error: writing %s: %v\n", merge.SafeName(path), err)
 
@@ -82,6 +76,19 @@ func flushOutput(path string, content []byte, stdout, stderr io.Writer) int {
 
 	return 0
 }
+
+// writtenUnsyncedError reports an output file that was replaced, and holds
+// the new content, but whose directory could not be synced afterwards, so
+// that the replacement may not outlast a crash.
+type writtenUnsyncedError struct {
+	err error
+}
+
+func (e *writtenUnsyncedError) Error() string {
+	return "written, but it may not outlast a crash: " + e.err.Error()
+}
+
+func (e *writtenUnsyncedError) Unwrap() error { return e.err }
 
 // errSymlinkOutput reports an --output path that is a symbolic link, which
 // is refused rather than followed.
@@ -262,6 +269,44 @@ func openRegular(path string, flags int) (*os.File, error) {
 	return file, nil
 }
 
+// errBecameRegular reports an output file that was a device or a FIFO when
+// it was checked and is a regular file by the time it is opened.
+var errBecameRegular = errors.New("is now a regular file, not the device or FIFO it was")
+
+// openSpecial opens for writing an output file that was found to be neither
+// a regular file nor a symlink, such as a device or a FIFO, as a shell
+// redirection opens it, so that a FIFO waits for its reader, but without
+// following a symlink. It refuses a regular file put at path since it was
+// checked: that is opened without truncating it, so writing it in place
+// would leave whatever of its old content lies past the new.
+func openSpecial(path string) (*os.File, error) {
+	// The path is the --output value, which is the caller's own choice;
+	// what needs guarding is that it is not followed through a symlink.
+	file, err := os.OpenFile( //nolint:gosec // the caller named this path
+		path, os.O_WRONLY|oNoFollow, 0,
+	)
+	if err != nil {
+		if isSymlinkRefusal(err) {
+			return nil, errSymlinkRefused
+		}
+
+		return nil, bareFileError(err)
+	}
+
+	info, err := file.Stat()
+	if err == nil && info.Mode().IsRegular() {
+		err = errBecameRegular
+	}
+
+	if err != nil {
+		_ = file.Close()
+
+		return nil, bareFileError(err)
+	}
+
+	return file, nil
+}
+
 // errSymlinkRefused reports an --output path that is a symbolic link, with
 // what to do instead. The caller names the path.
 var errSymlinkRefused = fmt.Errorf(
@@ -279,10 +324,16 @@ const tempPattern = ".spm-output-*.tmp"
 // anything fails. Rename replaces a symlink that appeared at path since it
 // was checked rather than following it.
 func replaceOutputFile(path string, content []byte) error {
-	return replaceOutputFileWith(path, content, os.Rename)
+	return replaceOutputFileWith(path, content, os.Rename, syncDir)
 }
 
-// replaceOutputFileWith is replaceOutputFile with the rename to use.
+// replaceOutputFileWith is replaceOutputFile with the rename and the
+// directory sync to use. Once the rename has succeeded, the directory is
+// synced as well where the platform can (see syncDir), so that the new name
+// outlasts a crash as the data it points at does. That is best effort: the
+// file holds the new content by then, so a failure is returned as a
+// writtenUnsyncedError, which reportWrite reports as a warning rather than
+// as a failed write.
 //
 // A file that is a mount point cannot be renamed over. writeOutputFile
 // writes one in place where the platform can tell it is one (see
@@ -290,7 +341,8 @@ func replaceOutputFile(path string, content []byte) error {
 // written in place then, once the new file has shown that the content can
 // be written at all.
 func replaceOutputFileWith(
-	path string, content []byte, rename func(oldPath, newPath string) error,
+	path string, content []byte,
+	rename func(oldPath, newPath string) error, sync func(dir string) error,
 ) error {
 	dir := parentDir(path)
 
@@ -316,6 +368,11 @@ func replaceOutputFileWith(
 
 	err = rename(tempPath, path)
 	if err == nil {
+		syncErr := sync(dir)
+		if syncErr != nil {
+			return &writtenUnsyncedError{err: syncErr}
+		}
+
 		return nil
 	}
 
@@ -370,8 +427,8 @@ func writeTempFile(temp *os.File, content []byte) error {
 // device, a FIFO or a mount point, without changing its mode. It is opened
 // without following a symlink, so that one put at path since it was checked
 // is refused too. A regular file, which is truncated, is opened as
-// openRegular opens it. A device or a FIFO the caller named is opened as a
-// shell redirection opens it, so a FIFO waits for its reader.
+// openRegular opens it. A device or a FIFO the caller named is opened as
+// openSpecial opens it.
 func writeInPlace(path string, content []byte, regular bool) error {
 	var (
 		file *os.File
@@ -381,15 +438,7 @@ func writeInPlace(path string, content []byte, regular bool) error {
 	if regular {
 		file, err = openRegular(path, os.O_TRUNC)
 	} else {
-		// The path is the --output value, which is the caller's own
-		// choice; what needs guarding is that it is not followed through
-		// a symlink.
-		file, err = os.OpenFile( //nolint:gosec // the caller named this path
-			path, os.O_WRONLY|oNoFollow, 0,
-		)
-		if err != nil && isSymlinkRefusal(err) {
-			err = errSymlinkRefused
-		}
+		file, err = openSpecial(path)
 	}
 
 	if err != nil {

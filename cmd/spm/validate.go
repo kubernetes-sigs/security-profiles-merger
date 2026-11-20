@@ -17,7 +17,6 @@ limitations under the License.
 package main
 
 import (
-	"bytes"
 	"flag"
 	"fmt"
 	"io"
@@ -61,7 +60,6 @@ type validateOptions struct {
 	strict   bool
 	artifact bool
 	quiet    bool
-	arch     string
 }
 
 // bindValidateFlags declares the validate flags on the set and returns the
@@ -69,7 +67,10 @@ type validateOptions struct {
 func bindValidateFlags(flags *flag.FlagSet) *validateOptions {
 	opts := new(validateOptions)
 
-	opts.bind(flags, "the validated profiles", "stdout, not with --quiet")
+	opts.bind(
+		flags, "the validated profiles", "stdout, not with --quiet",
+		"of the node that loads the profiles, for --artifact or --strict",
+	)
 	flags.BoolVar(
 		&opts.strict, "strict", false,
 		"use strict validation, which also rejects unknown and "+
@@ -85,9 +86,6 @@ func bindValidateFlags(flags *flag.FlagSet) *validateOptions {
 		"write no profile on success and note no auto-detected type; errors and "+
 			"warnings still go to stderr (not with --output or --format)",
 	)
-	bindArchFlag(
-		flags, &opts.arch, "of the node that loads the profiles, for --artifact or --strict",
-	)
 
 	return opts
 }
@@ -96,58 +94,39 @@ func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := newFlagSet(cmdValidate)
 	opts := bindValidateFlags(flags)
 
-	if done, code := parseFlags(flags, validateUsage, args, stdout, stderr); done {
+	inv, code := startCommand(
+		flags, opts, validateUsage, args, stdin, stdout, stderr,
+	)
+	if inv == nil {
 		return code
 	}
 
-	if code := checkFlagOrder(flags.Args(), argsSeparated(flags, args), stderr); code != 0 {
-		return code
-	}
+	return validateInputs(opts, inv)
+}
 
-	code := validateValidateFlags(opts, validateFlagsNamed{
+// checkFlags checks the validate flags (see commandOptions).
+func (opts *validateOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) int {
+	return validateValidateFlags(opts, validateFlagsNamed{
 		format: flagNamed(flags, "format"),
 		arch:   flagNamed(flags, flagNameArch),
 	}, stderr)
-	if code != 0 {
-		return code
-	}
-
-	arch, code := parseArchFlag(flags, opts.arch, stderr)
-	if code != 0 {
-		return code
-	}
-
-	if code := checkStdin(flags, validateUsage, stdin, stderr); code != 0 {
-		return code
-	}
-
-	inputs, err := readInputs(flags.Args(), stdin)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
-
-		return readErrorExit(err)
-	}
-
-	return validateInputs(opts, arch, inputs, stdout, stderr)
 }
 
 // validateInputs validates the profiles that were read, and writes them
 // back.
-func validateInputs(
-	opts *validateOptions, arch archOption, inputs []profileInput, stdout, stderr io.Writer,
-) int {
+func validateInputs(opts *validateOptions, inv *invocation) int {
+	inv.checks = &inputChecks{
+		modes: slices.Repeat([]validateMode{opts.mode()}, len(inv.inputs)), strategy: "",
+	}
+
 	// --quiet promises a silent stderr on success, so it implies
 	// --no-detect-note.
-	kind, report, code := resolveKind(
-		opts.profileType, inputs, 1, opts.quiet || opts.noDetectNote, stderr,
-	)
+	code := resolveKind(inv, opts.profileType, 1, opts.quiet || opts.noDetectNote)
 	if code != 0 {
 		return code
 	}
 
-	var out bytes.Buffer
-
-	code = kind.validate(inputs, report, opts.mode(), arch, opts.format, &out, stderr)
+	code = inv.kind.validateCommand(inv, opts.mode())
 	if code != 0 {
 		return code
 	}
@@ -156,7 +135,7 @@ func validateInputs(
 		return 0
 	}
 
-	return flushOutput(opts.output, out.Bytes(), stdout, stderr)
+	return inv.flushOutput(opts.output)
 }
 
 // mode maps the validate flags to a mode; the flags have already been
@@ -236,31 +215,26 @@ func checkModeFlags(opts *validateOptions, archNamed bool, stderr io.Writer) int
 	return 0
 }
 
-// validateProfiles decodes and checks every profile that report holds no
-// failure for, and writes them when none failed, the ones report holds
-// included. strict makes the JSON ambiguities unmarshalAll looks for, such
-// as members the profile type does not know, errors rather than warnings.
+// validateProfiles decodes and checks every profile that the report holds
+// no failure for, and writes them when none failed, the ones the report
+// holds included. strict makes the JSON ambiguities unmarshalAll looks for,
+// such as members the profile type does not know, errors rather than
+// warnings.
 func validateProfiles[T any](
-	inputs []profileInput,
-	report *inputReport,
-	check func(*T) error,
-	strict bool,
-	format string,
-	formatFn func(*T) string,
-	stdout, stderr io.Writer,
+	inv *invocation, check func(*T) error, strict bool, formatFn func(*T) string,
 ) int {
+	inputs, report := inv.inputs, inv.report
 	profiles := unmarshalAll[T](inputs, slices.Repeat([]bool{strict}, len(inputs)), report)
 
 	checkInputs(profiles, check, report)
-	report.flush(stderr)
 
-	if report.anyFailed() {
-		return 1
+	if inv.halted() {
+		return inv.stop(1)
 	}
 
-	return writeValidated(
-		profiles, formatAll(profiles, formatFn), asArray(inputs), format, stdout, stderr,
-	)
+	report.flush(inv.stderr)
+
+	return writeValidated(inv, profiles, formatAll(profiles, formatFn))
 }
 
 // asArray reports whether validate writes the profiles of the inputs as an
@@ -272,31 +246,29 @@ func asArray(inputs []profileInput) bool {
 	return len(inputs) != 1 || inputs[0].inArray
 }
 
-// writeValidated writes the validated profiles, as one object or, with
-// array, as an array (see asArray). The human format has no array: it
-// writes the profiles one after the other, separated by "---" lines.
-func writeValidated[T any](
-	profiles []*T, humanStrs []string, array bool, format string, stdout, stderr io.Writer,
-) int {
-	if !array {
-		return writeOutput(profiles[0], humanStrs[0], format, stdout, stderr)
+// writeValidated writes the validated profiles, as one object or as an
+// array (see asArray). The human format has no array: it writes the
+// profiles one after the other, separated by "---" lines.
+func writeValidated[T any](inv *invocation, profiles []*T, humanStrs []string) int {
+	if !asArray(inv.inputs) {
+		return inv.write(profiles[0], humanStrs[0])
 	}
 
-	switch format {
+	switch inv.format {
 	case formatHuman:
 		for idx, str := range humanStrs {
 			if idx > 0 {
-				_, _ = fmt.Fprintln(stdout, "---")
+				_, _ = fmt.Fprintln(&inv.out, "---")
 			}
 
-			_, _ = fmt.Fprintln(stdout, str)
+			_, _ = fmt.Fprintln(&inv.out, str)
 		}
 
-		warnTruncated(stderr, humanStrs...)
+		warnTruncated(inv.stderr, humanStrs...)
 	default:
-		err := encodeJSON(stdout, profiles)
+		err := encodeJSON(&inv.out, profiles)
 		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+			_, _ = fmt.Fprintf(inv.stderr, "error: %v\n", err)
 
 			return 1
 		}
