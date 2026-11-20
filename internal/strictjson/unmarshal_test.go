@@ -19,6 +19,7 @@ package strictjson_test
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -220,6 +221,31 @@ func TestUnmarshalStrictRefusesNull(t *testing.T) {
 	err := decodeSeccomp([]byte(" {} "))
 	if err != nil {
 		t.Errorf("an empty object = %v, want nil", err)
+	}
+}
+
+// TestUnmarshalStrictEndOfDocument covers a document that ends before its
+// value does: empty, only whitespace, or cut short. It is a syntax error,
+// as json.Unmarshal reports it, and never matches io.EOF or
+// io.ErrUnexpectedEOF, which a caller would read as a stream that ran dry.
+func TestUnmarshalStrictEndOfDocument(t *testing.T) {
+	t.Parallel()
+
+	for _, document := range []string{"", "  \n", "{", ` {"defaultAction":`, `{"syscalls":[`, `"x`} {
+		err := decodeSeccomp([]byte(document))
+
+		var syntaxErr *json.SyntaxError
+		if !errors.As(err, &syntaxErr) {
+			t.Errorf("%q = %v, want a *json.SyntaxError", document, err)
+		}
+
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Errorf("%q = %v, which matches the end of a stream", document, err)
+		}
+
+		if err != nil && !strings.Contains(err.Error(), "unexpected end of JSON input") {
+			t.Errorf("%q = %v, want it to say the document ends too early", document, err)
+		}
 	}
 }
 

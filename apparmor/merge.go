@@ -119,10 +119,11 @@ func Union(profiles ...*Profile) (*Profile, error) {
 // configuration: Validate, then QuotePath of every path, then Intersect of
 // the baseline alone, then Diff of the baseline against that intersection.
 //
-// A path QuotePath refuses (ErrUnquotablePath, ErrRelativePath) would reach
-// a merge result the runtime cannot render, so a misconfigured node would
-// otherwise surface as the failure of every workload; each is reported with
-// its list and index. The intersection is equal to the baseline exactly
+// A path QuotePath refuses (ErrUnquotablePath) would reach a merge result
+// the runtime cannot render, so a misconfigured node would otherwise
+// surface as the failure of every workload; each is reported with its list
+// and index. A relative path, which QuotePath refuses as well, is reported
+// once, by Validate. The intersection is equal to the baseline exactly
 // when the merge reads every rule of it, so an unequal diff, reported with
 // ErrInexactBaseline and the diff in the message, names what every merge
 // with that baseline takes away whatever the artifact says, such as a

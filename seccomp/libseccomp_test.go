@@ -870,10 +870,12 @@ func shapeValues() []uint64 {
 }
 
 // TestModelMatchesLibseccompForShapes enumerates pairs of single-condition
-// entries, and samples triples, with shared and different actions, and
-// checks for each that the package and the evaluator classify it alike and
-// that libseccomp compiles every shape they call exact to exactly what the
-// evaluator predicts. This is the data behind the safe shapes.
+// entries, and samples triples, with shared and different actions, adds
+// hand-picked pairs whose first rule applies another action than
+// SCMP_ACT_ALLOW, and checks for each that the package and the evaluator
+// classify it alike and that libseccomp compiles every shape they call
+// exact to exactly what the evaluator predicts. This is the data behind the
+// safe shapes.
 func TestModelMatchesLibseccompForShapes(t *testing.T) {
 	t.Parallel()
 	requireModeledNative(t)
@@ -910,6 +912,43 @@ func TestModelMatchesLibseccompForShapes(t *testing.T) {
 
 		profiles = append(profiles, profileOf(specs.ActErrno, entries...))
 	}
+
+	// The first rule with another action than SCMP_ACT_ALLOW, hand-picked:
+	// the shapes above always open with one.
+	profiles = append(profiles,
+		profileOf(specs.ActErrno,
+			filtered("read", specs.ActLog, arg(0, specs.OpEqualTo, 2)),
+			filtered("read", specs.ActAllow, arg(1, specs.OpGreaterThan, math.MaxUint32)),
+		),
+		profileOf(specs.ActErrno,
+			filtered("read", specs.ActTrap, arg(0, specs.OpLessEqual, 2)),
+			filtered("read", specs.ActAllow, arg(0, specs.OpGreaterEqual, wide)),
+		),
+		profileOf(specs.ActErrno,
+			filtered("read", specs.ActKillProcess, masked(1, 3, 2)),
+			filtered("read", specs.ActLog, arg(0, specs.OpNotEqual, 0)),
+		),
+		profileOf(specs.ActErrno,
+			filtered("read", specs.ActLog, arg(0, specs.OpGreaterEqual, wide)),
+			filtered("read", specs.ActLog, arg(1, specs.OpLessThan, 2)),
+		),
+		profileOf(specs.ActErrno,
+			filtered("read", specs.ActKill, arg(1, specs.OpEqualTo, 0)),
+			filtered("read", specs.ActAllow, arg(1, specs.OpEqualTo, 2)),
+		),
+		profileOf(specs.ActErrno,
+			filtered("read", specs.ActTrace, arg(0, specs.OpLessThan, math.MaxUint32)),
+			filtered("read", specs.ActAllow, arg(0, specs.OpEqualTo, 2)),
+		),
+		profileOf(specs.ActErrno,
+			filtered("read", specs.ActTrap,
+				arg(0, specs.OpEqualTo, 2), arg(1, specs.OpNotEqual, 0)),
+		),
+		profileOf(specs.ActAllow,
+			filtered("read", specs.ActErrno, arg(0, specs.OpEqualTo, 2)),
+			filtered("read", specs.ActLog, arg(1, specs.OpEqualTo, 2)),
+		),
+	)
 
 	checkShapes(t, profiles)
 }

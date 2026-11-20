@@ -101,10 +101,11 @@ var (
 	// expands variables, so `\x40{HOME}` is reported as well.
 	ErrUnsupportedVariable = errors.New("AppArmor variables are not supported")
 
-	// ErrRelativePath is returned by ValidateStrict and ValidateArtifact
-	// when a path does not start with "/", also where an escape such as
-	// `\x2f` spells its first "/". AppArmor file rules must use absolute
-	// paths, and the merges read such a path as naming no file.
+	// ErrRelativePath is returned by every validator and by a merge when a
+	// path does not start with "/", also where an escape such as `\x2f`
+	// spells its first "/". AppArmor file rules must use absolute paths, and
+	// apparmor_parser's lexer rejects a path that does not start with a raw
+	// "/".
 	ErrRelativePath = spm.ErrRelativePath
 
 	// ErrUnquotablePath is returned by ValidateStrict and ValidateArtifact
@@ -276,6 +277,8 @@ func isKnownCapability(name string) bool {
 //   - paths longer than MaxPathLen (ErrPathTooLong), on their own and
 //     before anything else;
 //   - empty paths (ErrEmptyPath);
+//   - paths that do not start with "/" as written, also where an escape
+//     such as `\x2f` spells the first "/" (ErrRelativePath);
 //   - paths referencing AppArmor variables, which the merge cannot
 //     interpret (ErrUnsupportedVariable);
 //   - a path listed in more than one filesystem category (ErrDuplicatePath)
@@ -411,6 +414,11 @@ func (check *validator) structure(
 		check.reject(context, *paths, func(path string) bool {
 			return path == ""
 		}, ErrEmptyPath, showNothing)
+		// A path that references a variable is reported as such alone:
+		// "@{HOME}/x" does not start with "/" before the parser expands it.
+		check.reject(context, *paths, func(path string) bool {
+			return relativePath(path) && !referencesVariable(path)
+		}, ErrRelativePath, showQuoted)
 		check.reject(context, *paths, referencesVariable, ErrUnsupportedVariable, showQuoted)
 	}
 
@@ -507,7 +515,7 @@ func ValidateStrict(profile *Profile) error {
 // ValidateArtifact validates an artifact: a profile the caller did not
 // write, such as one a container runtime pulled from a registry. It runs
 // every check of Validate and adds what a runtime could not load or would
-// silently drop: relative paths (ErrRelativePath), patterns apparmor_parser
+// silently drop: patterns apparmor_parser
 // rejects or loads with another meaning than they spell (ErrInvalidGlob),
 // patterns past the matcher's limits (ErrGlobTooComplex), which would vanish
 // from an intersection without a trace, "." or ".." components
@@ -650,7 +658,6 @@ func (check *validator) loadablePaths(profile, normalizedProfile *Profile) {
 
 		idx++
 
-		check.reject(context, paths, relativePath, ErrRelativePath, showQuoted)
 		check.reject(context, paths, hasUnquotableChar, ErrUnquotablePath, showQuoted)
 		check.reject(context, paths, hasNul, ErrNulInPath, showQuoted)
 		check.globStatus(context, normalized)

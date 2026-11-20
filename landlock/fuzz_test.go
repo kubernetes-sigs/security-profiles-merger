@@ -224,6 +224,22 @@ func addLandlockFuzzSeeds(f *testing.F) {
 		uint8(0x03), uint8(0x01),
 	)
 
+	// Refer alone against ioctl_dev, which needs ABI v5, and bind_tcp: the
+	// intersection must keep refer listed, or a downgrade below v5 leaves
+	// it handling no filesystem right.
+	f.Add(
+		uint32(0x800), uint8(0x00), uint8(0x00),
+		"/a", "/b",
+		uint32(0x00), uint32(0x00),
+		uint16(0), uint16(0),
+		uint8(0x00), uint8(0x00),
+		uint32(0x02), uint8(0x01), uint8(0x00),
+		"/a", "/b",
+		uint32(0x00), uint32(0x00),
+		uint16(0), uint16(0),
+		uint8(0x00), uint8(0x00),
+	)
+
 	// Identical profiles.
 	f.Add(
 		uint32(0x03), uint8(0x01), uint8(0x02),
@@ -623,6 +639,38 @@ func assertHandledCoversInputs(
 
 	assertHandledCoversInputsFS(t, result, left, right)
 	assertHandledCoversInputsNet(t, result, left, right)
+	assertDenialOutlastsDowngrade(t, result, left, right)
+}
+
+// assertDenialOutlastsDowngrade checks the intersection result against each
+// input after Options.Downgrade to every ABI version: where the downgraded
+// input still handles a filesystem right, and so denies refer, the
+// downgraded result handles one too. A result that left refer implicit
+// beside rights a downgrade drops would handle none and allow the moves and
+// links the input denies.
+func assertDenialOutlastsDowngrade(t *testing.T, result, left, right *landlock.Profile) {
+	t.Helper()
+
+	for abi := landlock.ABIV1; abi <= landlock.LatestABIVersion; abi++ {
+		options := landlock.Options{ABI: abi}
+
+		downgraded, err := options.Downgrade(result)
+		if err != nil {
+			t.Fatalf("Downgrade(result) to v%d: %v", abi, err)
+		}
+
+		for name, input := range map[string]*landlock.Profile{"left": left, "right": right} {
+			downgradedInput, err := options.Downgrade(input)
+			if err != nil {
+				t.Fatalf("Downgrade(%s) to v%d: %v", name, abi, err)
+			}
+
+			if len(downgradedInput.HandledAccessFS) > 0 && len(downgraded.HandledAccessFS) == 0 {
+				t.Errorf("at v%d the %s input handles %v and the result no filesystem right",
+					abi, name, downgradedInput.HandledAccessFS)
+			}
+		}
+	}
 }
 
 func assertHandledCoversInputsFS(
@@ -632,6 +680,17 @@ func assertHandledCoversInputsFS(
 	t.Helper()
 
 	resultFS := fsRightSet(result.HandledAccessFS)
+
+	// A result handling a filesystem right denies refer without listing
+	// it, so it may leave refer out where no rule of it grants refer, but
+	// only beside a right ABI v1 knows, which every downgrade keeps.
+	abis := landlock.FSAccessRights()
+
+	if slices.ContainsFunc(result.HandledAccessFS, func(right landlock.FSAccessRight) bool {
+		return right != landlock.FSAccessRefer && abis[right] == landlock.ABIV1
+	}) {
+		resultFS[landlock.FSAccessRefer] = struct{}{}
+	}
 
 	for _, r := range left.HandledAccessFS {
 		if _, ok := resultFS[r]; !ok {

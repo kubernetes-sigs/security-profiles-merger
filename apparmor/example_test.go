@@ -213,8 +213,10 @@ func ExampleValidateArtifact() {
 		Filesystem: &apparmor.FilesystemRules{
 			// A newline would end the rule a consumer renders and start
 			// one the artifact's author chose.
-			ReadOnlyPaths:  []string{"/etc/hosts\n/** rw"},
-			ReadWritePaths: []string{"tmp/cache"},
+			ReadOnlyPaths: []string{"/etc/hosts\n/** rw"},
+			// A "." or ".." component matches nothing, since the kernel
+			// hands AppArmor canonical paths.
+			ReadWritePaths: []string{"/tmp/../cache"},
 		},
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{"chown"},
@@ -225,7 +227,7 @@ func ExampleValidateArtifact() {
 
 	err := apparmor.ValidateArtifact(artifact)
 	fmt.Println(errors.Is(err, apparmor.ErrUnquotablePath))
-	fmt.Println(errors.Is(err, apparmor.ErrRelativePath))
+	fmt.Println(errors.Is(err, apparmor.ErrDotComponent))
 
 	// Output:
 	// <nil>

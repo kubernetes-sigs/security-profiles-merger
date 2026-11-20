@@ -61,6 +61,17 @@ func TestDecodeErrorsPointIntoTheDocument(t *testing.T) {
 			want:  "error: stdin: line 2, column 36: unexpected end of JSON input\n",
 		},
 		{
+			// A decoder of Go 1.27 leaves leading whitespace out of the
+			// offset of a type error, which would name the member before.
+			name: "a document after blank lines",
+			args: []string{cmdValidate, flagType, typeSeccomp},
+			stdin: strings.Repeat("\n", 20) + `{"defaultAction": "SCMP_ACT_ERRNO", "syscalls": [` +
+				`{"names": ["read"], "action": "SCMP_ACT_ALLOW", "args": ` +
+				`[{"index": 0, "op": "SCMP_CMP_EQ", "value": 1, "valueTwo": true}]}]}`,
+			want: "error: stdin: line 21, column 165: syscalls[0].args[0].valueTwo: " +
+				"want an integer from 0 to 18446744073709551615, got bool\n",
+		},
+		{
 			name:  "an object for a list",
 			args:  []string{cmdValidate, flagType, typeSeccomp},
 			stdin: `{"defaultAction": "SCMP_ACT_ERRNO", "syscalls": {}}`,

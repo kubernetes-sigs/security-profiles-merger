@@ -459,7 +459,10 @@ func TestValidateRejectsEscapedVariables(t *testing.T) {
 	}
 }
 
-func TestValidateStrictRejectsRelativePaths(t *testing.T) {
+// TestValidatorsRejectRelativePaths covers paths whose text does not start
+// with "/": every validator rejects them, the escaped spellings of a
+// leading "/" included, which apparmor_parser's lexer rejects as well.
+func TestValidatorsRejectRelativePaths(t *testing.T) {
 	t.Parallel()
 
 	profile := &apparmor.Profile{
@@ -467,40 +470,77 @@ func TestValidateStrictRejectsRelativePaths(t *testing.T) {
 			AllowedExecutables: []string{"bin/sh", "/bin/sh"}, AllowedLibraries: nil,
 		},
 		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths: []string{"etc/**", "/etc/**", "{/usr,/opt}/**", "./etc/x"},
+			ReadOnlyPaths: []string{
+				"etc/**", "/etc/**", "{/usr,/opt}/**", "./etc/x", `\x2fetc/passwd`, `\57etc/shadow`,
+			},
 		},
 	}
 
-	err := apparmor.Validate(profile)
-	if err != nil {
-		t.Fatalf("Validate must accept relative paths, got: %v", err)
-	}
-
-	err = apparmor.ValidateStrict(profile)
-	if !errors.Is(err, apparmor.ErrRelativePath) {
-		t.Fatalf("expected ErrRelativePath, got: %v", err)
-	}
-
-	msg := err.Error()
-
-	// apparmor_parser only accepts file rules starting with "/", so a
-	// leading alternation is relative too, and paths are reported as
-	// written rather than cleaned.
-	for _, want := range []string{
-		`executable.allowedExecutables[0]: "bin/sh"`,
-		`filesystem.readOnlyPaths[0]: "etc/**"`,
-		`filesystem.readOnlyPaths[2]: "{/usr,/opt}/**"`,
-		`filesystem.readOnlyPaths[3]: "./etc/x"`,
+	for name, validate := range map[string]func(*apparmor.Profile) error{
+		"Validate":         apparmor.Validate,
+		"ValidateArtifact": apparmor.ValidateArtifact,
+		"ValidateStrict":   apparmor.ValidateStrict,
 	} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("error %q does not name %s", msg, want)
+		err := validate(profile)
+		if !errors.Is(err, apparmor.ErrRelativePath) {
+			t.Fatalf("%s: expected ErrRelativePath, got: %v", name, err)
+		}
+
+		msg := err.Error()
+
+		// apparmor_parser only accepts file rules starting with "/", so a
+		// leading alternation is relative too, and paths are reported as
+		// written rather than cleaned.
+		for _, want := range []string{
+			`executable.allowedExecutables[0]: "bin/sh"`,
+			`filesystem.readOnlyPaths[0]: "etc/**"`,
+			`filesystem.readOnlyPaths[2]: "{/usr,/opt}/**"`,
+			`filesystem.readOnlyPaths[3]: "./etc/x"`,
+			`filesystem.readOnlyPaths[4]: "\\x2fetc/passwd"`,
+			`filesystem.readOnlyPaths[5]: "\\57etc/shadow"`,
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("%s: error %q does not name %s", name, msg, want)
+			}
+		}
+
+		for _, unwanted := range []string{`"/bin/sh"`, "filesystem.readOnlyPaths[1]"} {
+			if strings.Contains(msg, unwanted) {
+				t.Errorf("%s: error %q must not flag absolute path %s", name, msg, unwanted)
+			}
+		}
+
+		// Each path is reported once, however many checks read it.
+		if count := strings.Count(msg, `"bin/sh"`); count != 1 {
+			t.Errorf("%s: error %q names bin/sh %d times, want once", name, msg, count)
+		}
+
+		// A path referencing a variable is reported as that alone.
+		err = validate(&apparmor.Profile{
+			Filesystem: &apparmor.FilesystemRules{ReadOnlyPaths: []string{"@{HOME}/x"}},
+		})
+		if !errors.Is(err, apparmor.ErrUnsupportedVariable) ||
+			errors.Is(err, apparmor.ErrRelativePath) {
+			t.Errorf("%s(@{HOME}/x) = %v, want ErrUnsupportedVariable alone", name, err)
 		}
 	}
+}
 
-	for _, unwanted := range []string{`"/bin/sh"`, "filesystem.readOnlyPaths[1]"} {
-		if strings.Contains(msg, unwanted) {
-			t.Errorf("error %q must not flag absolute path %s", msg, unwanted)
-		}
+// TestValidateBaselineReportsARelativePathOnce covers a baseline holding a
+// relative path, which Validate refuses and QuotePath, which
+// ValidateBaseline runs next, would refuse as well: it is reported once.
+func TestValidateBaselineReportsARelativePathOnce(t *testing.T) {
+	t.Parallel()
+
+	err := apparmor.ValidateBaseline(&apparmor.Profile{
+		Filesystem: &apparmor.FilesystemRules{ReadOnlyPaths: []string{"ptrace", "/etc"}},
+	})
+	if !errors.Is(err, apparmor.ErrRelativePath) {
+		t.Fatalf("ValidateBaseline = %v, want %v", err, apparmor.ErrRelativePath)
+	}
+
+	if count := strings.Count(err.Error(), "readOnlyPaths[0]"); count != 1 {
+		t.Errorf("ValidateBaseline = %q names the path %d times, want once", err, count)
 	}
 }
 

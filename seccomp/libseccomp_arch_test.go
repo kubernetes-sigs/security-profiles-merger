@@ -107,6 +107,23 @@ func archValues() []uint64 {
 func archCalls(t *testing.T) []archCall {
 	t.Helper()
 
+	args := make([][]uint64, 0, len(archValues())*len(archValues()))
+
+	for _, first := range archValues() {
+		for _, second := range archValues() {
+			args = append(args, []uint64{first, second})
+		}
+	}
+
+	return archCallsWith(t, archNames(), args)
+}
+
+// archCallsWith returns a call of every name on the native architecture and
+// on each foreign one that has it, with each of the argument lists, under
+// the number a call of the architecture carries (see archCallNumber).
+func archCallsWith(t *testing.T, names []string, args [][]uint64) []archCall {
+	t.Helper()
+
 	native, ok := seccomp.NativeArchitecture()
 	if !ok {
 		t.Skip("no seccomp architecture for this platform")
@@ -120,33 +137,85 @@ func archCalls(t *testing.T) []archCall {
 			t.Fatalf("resolve %s: %v", arch, err)
 		}
 
-		for _, name := range archNames() {
-			number, err := libseccomp.SyscallNumberArch(name, arch)
-			if errors.Is(err, libseccomp.ErrUnknownSyscall) {
-				// A syscall a newer libseccomp knows: runtimes skip it.
+		for _, name := range names {
+			number, has := archCallNumber(t, name, arch)
+			if !has {
 				continue
 			}
 
-			if err != nil {
-				t.Fatalf("resolve %s on %s: %v", name, arch, err)
-			}
-
-			if number < 0 {
-				continue
-			}
-
-			for _, first := range archValues() {
-				for _, second := range archValues() {
-					calls = append(calls, archCall{
-						arch: arch, audit: audit, name: name, number: number,
-						args: []uint64{first, second}, inputs: nil,
-					})
-				}
+			for _, values := range args {
+				calls = append(calls, archCall{
+					arch: arch, audit: audit, name: name, number: number,
+					args: values, inputs: nil,
+				})
 			}
 		}
 	}
 
 	return calls
+}
+
+// directSocketNumbers are the numbers of the socket syscalls the probed
+// multiplexing architectures also have as syscalls of their own, from the
+// kernel's syscall tables, which libseccomp's syscalls.csv copies. For
+// these libseccomp resolves the name to a number it makes up (socket is
+// -101 on each of them) and places a rule on the syscall under this number
+// as well as on socketcall(2), as the direct bits of the placement table
+// say. x86 has no accept(2) of its own, only accept4(2).
+var directSocketNumbers = map[specs.Arch]map[string]int32{
+	specs.ArchX86:     {"socket": 359, "connect": 362},
+	specs.ArchPPC64LE: {"socket": 326, "connect": 328, "accept": 330},
+	specs.ArchMIPSEL:  {"socket": 4183, "connect": 4170, "accept": 4168},
+	specs.ArchSH:      {"socket": 340, "connect": 342, "accept": 344},
+}
+
+// archCallNumber returns the number a call of the syscall carries on the
+// architecture, and false where the architecture has no such syscall or
+// the linked libseccomp does not know it, as runtimes then skip a rule on
+// it. That is the number libseccomp resolves the name to, unless it makes
+// one up for a socket syscall a multiplexing architecture reaches through
+// socketcall(2) and has as a syscall of its own too: the call then carries
+// the number of directSocketNumbers, which the placement table must place
+// the rule under as well.
+func archCallNumber(t *testing.T, name string, arch specs.Arch) (int32, bool) {
+	t.Helper()
+
+	number, err := libseccomp.SyscallNumberArch(name, arch)
+	if errors.Is(err, libseccomp.ErrUnknownSyscall) {
+		// A syscall a newer libseccomp knows: runtimes skip it.
+		return 0, false
+	}
+
+	if err != nil {
+		t.Fatalf("resolve %s on %s: %v", name, arch, err)
+	}
+
+	if number >= 0 {
+		return number, true
+	}
+
+	direct, has := directSocketNumbers[arch][name]
+	if has != placedDirectly(t, name, arch) {
+		t.Fatalf("directSocketNumbers has %s on %s = %t, the placement table says %t",
+			name, arch, has, !has)
+	}
+
+	return direct, has
+}
+
+// placedDirectly reports whether the placement table places a rule on the
+// syscall under a number of its own on the architecture in every release.
+func placedDirectly(t *testing.T, name string, arch specs.Arch) bool {
+	t.Helper()
+
+	archs, table := seccomp.SyscallTable()
+
+	idx := slices.Index(archs, arch)
+	if idx < 0 {
+		t.Fatalf("the placement table does not describe %s", arch)
+	}
+
+	return table[name][0]&(1<<idx) != 0
 }
 
 // randomArchProfile draws a small profile over archNames that lists some of
@@ -851,6 +920,176 @@ func TestModelMatchesLibseccompForArchitectureFindings(t *testing.T) {
 	}
 }
 
+// TestDirectSocketNumbersAgainstLibseccomp checks directSocketNumbers
+// against the filters libseccomp compiles: on each multiplexing
+// architecture, a rule on a socket syscall applies to a call under its own
+// number, on the argument it names, and to no other syscall.
+func TestDirectSocketNumbersAgainstLibseccomp(t *testing.T) {
+	t.Parallel()
+	requireNativeArch(t)
+
+	for _, arch := range archProbes() {
+		numbers, multiplexing := directSocketNumbers[arch]
+		if !multiplexing {
+			continue
+		}
+
+		audit, err := callAuditArch(arch)
+		if err != nil {
+			t.Fatalf("resolve %s: %v", arch, err)
+		}
+
+		other, has := archCallNumber(t, "personality", arch)
+		if !has {
+			t.Fatalf("no personality on %s", arch)
+		}
+
+		for name, number := range numbers {
+			profile := profileOf(specs.ActAllow,
+				filtered(name, specs.ActErrno, arg(2, specs.OpEqualTo, 6)))
+			profile.Architectures = []specs.Arch{arch}
+
+			prog, err := compilers.compile(profile)
+			if err != nil {
+				t.Fatalf("compile %s on %s: %v", name, arch, err)
+			}
+
+			for _, call := range []struct {
+				number int32
+				args   []uint64
+				want   specs.LinuxSeccompAction
+			}{
+				{number, []uint64{0, 0, 6}, specs.ActErrno},
+				{number, []uint64{0, 0, 7}, specs.ActAllow},
+				{other, []uint64{0, 0, 6}, specs.ActAllow},
+			} {
+				got, _ := runProgramArch(t, prog, audit, call.number, call.args)
+				if got != call.want {
+					t.Errorf("%s on %s: call %d%v yields %s, want %s",
+						name, arch, call.number, call.args, got, call.want)
+				}
+			}
+		}
+	}
+}
+
+// TestMergesOnOtherArgumentIndicesAgainstLibseccomp merges hand-picked
+// pairs whose conditions test arguments 2 and 5 of the multiplexed socket
+// syscalls and of socketcall(2), whose copy on the multiplexer keeps every
+// condition but one on argument 0, and checks every result against what
+// libseccomp compiles for each architecture, on calls that vary those
+// arguments.
+func TestMergesOnOtherArgumentIndicesAgainstLibseccomp(t *testing.T) {
+	t.Parallel()
+	requireNativeArch(t)
+
+	onArchs := func(profile *specs.LinuxSeccomp, archs ...specs.Arch) *specs.LinuxSeccomp {
+		profile.Architectures = archs
+
+		return profile
+	}
+
+	multiplexing := []specs.Arch{specs.ArchX86, specs.ArchPPC64LE}
+
+	acceptPair := func(arch specs.Arch) [2]*specs.LinuxSeccomp {
+		return [2]*specs.LinuxSeccomp{
+			onArchs(profileOf(specs.ActAllow,
+				filtered("accept", specs.ActErrno, arg(2, specs.OpNotEqual, 6)),
+			), arch),
+			onArchs(profileOf(specs.ActAllow,
+				filtered("accept", specs.ActTrap, arg(5, specs.OpLessThan, wide)),
+				filtered("socket", specs.ActErrno, arg(2, specs.OpEqualTo, 0)),
+			), arch),
+		}
+	}
+
+	pairs := [][2]*specs.LinuxSeccomp{
+		{
+			onArchs(profileOf(specs.ActErrno,
+				filtered("socket", specs.ActAllow, arg(2, specs.OpEqualTo, 6)),
+			), multiplexing...),
+			onArchs(profileOf(specs.ActErrno,
+				filtered("socket", specs.ActAllow, arg(5, specs.OpLessThan, 2)),
+			), multiplexing...),
+		},
+		{
+			onArchs(profileOf(specs.ActAllow,
+				filtered("connect", specs.ActErrno, arg(2, specs.OpGreaterThan, 6)),
+				filtered("accept", specs.ActLog, arg(5, specs.OpNotEqual, 0)),
+			), multiplexing...),
+			onArchs(profileOf(specs.ActAllow,
+				filtered("connect", specs.ActErrno, arg(5, specs.OpEqualTo, wide)),
+			), multiplexing...),
+		},
+		{
+			// Two conditions on the high indices of one rule, beside a
+			// rule on the multiplexer itself.
+			onArchs(profileOf(specs.ActErrno,
+				filtered("socket", specs.ActAllow,
+					arg(2, specs.OpLessEqual, 6), arg(5, specs.OpGreaterEqual, 2)),
+				filtered("socketcall", specs.ActAllow, arg(0, specs.OpEqualTo, 3)),
+			), specs.ArchX86),
+			onArchs(profileOf(specs.ActErrno,
+				filtered("socket", specs.ActAllow, masked(2, 0xff, 6)),
+				filtered("connect", specs.ActAllow, arg(2, specs.OpEqualTo, 0)),
+			), specs.ArchX86),
+		},
+		{
+			// A value above 32 bits on argument 5, which x86 compares by
+			// its lower half.
+			onArchs(profileOf(specs.ActKillProcess,
+				filtered("socket", specs.ActAllow, arg(5, specs.OpEqualTo, 1<<32|2)),
+				filtered("personality", specs.ActAllow),
+			), specs.ArchX86, specs.ArchPPC64LE, specs.ArchMIPSEL),
+			onArchs(profileOf(specs.ActKillProcess,
+				filtered("socket", specs.ActAllow, arg(5, specs.OpEqualTo, 2)),
+				filtered("personality", specs.ActAllow),
+			), specs.ArchX86, specs.ArchPPC64LE, specs.ArchMIPSEL),
+		},
+		// accept, which ppc64le and sh have as syscalls of their own and
+		// x86 does not, on each of them alone, so that the pair on ppc64le
+		// still runs against a libseccomp before 2.6, which does not know
+		// sh.
+		acceptPair(specs.ArchPPC64LE),
+		acceptPair(specs.ArchSH),
+	}
+
+	// Argument 0 holds a socketcall sub-call (1 for socket, 3 for connect,
+	// 5 for accept) or no sub-call at all, and arguments 2 and 5 the values
+	// the conditions tell apart.
+	firsts := []uint64{1, 3, 5, 40}
+	thirds := []uint64{0, 6, 7, 1<<32 | 6}
+	sixths := []uint64{0, 1, 2, 1<<32 | 2, wide}
+	args := make([][]uint64, 0, len(firsts)*len(thirds)*len(sixths))
+
+	for _, first := range firsts {
+		for _, third := range thirds {
+			for _, sixth := range sixths {
+				args = append(args, []uint64{first, 0, third, 0, 0, sixth})
+			}
+		}
+	}
+
+	calls := archCallsWith(t,
+		[]string{"socket", "connect", "accept", "socketcall", "personality"}, args)
+
+	for _, pair := range pairs {
+		// A pair listing an architecture the linked libseccomp does not
+		// know, as sh before 2.6, cannot be compiled; archProbes leaves
+		// such an architecture out the same way.
+		if !knownArchs(pair[0]) || !knownArchs(pair[1]) {
+			continue
+		}
+
+		for _, merged := range []mergeCase{
+			archMergeCase(t, pair[0], pair[1]),
+			archMergeCase(t, pair[1], pair[0]),
+		} {
+			checkArchMergeCase(t, merged, calls)
+		}
+	}
+}
+
 // TestMergeResultsKeepRulesBehindAnAbsentSyscall compiles the cases of
 // TestMergesKeepRulesBehindAnAbsentSyscall: a baseline denying socket(40)
 // and an artifact whose rule on a syscall the architecture lacks would come
@@ -1014,4 +1253,14 @@ func TestMergesDropX86_64WhereX32IsNativeAgainstLibseccomp(t *testing.T) {
 			)
 		}
 	}
+}
+
+// knownArchs reports whether the linked libseccomp knows every architecture
+// the profile lists.
+func knownArchs(profile *specs.LinuxSeccomp) bool {
+	return !slices.ContainsFunc(profile.Architectures, func(arch specs.Arch) bool {
+		_, err := libseccomp.AuditArch(arch)
+
+		return err != nil
+	})
 }

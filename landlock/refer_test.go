@@ -35,7 +35,9 @@ func TestIntersectReferDeniedByDefault(t *testing.T) {
 	base := fsProfile(read, landlock.PathRule{Path: "/a", AccessFS: read})
 	artifact := fsProfile(refer, landlock.PathRule{Path: "/", AccessFS: refer})
 
-	want := "Profile{fs:read_file,refer /a(read_file)}"
+	// No rule of the result grants refer, so it stays implicit and the
+	// result keeps ABI v1.
+	want := "Profile{fs:read_file /a(read_file)}"
 	assertMergeFormat(t, "Intersect", landlock.Intersect, want, base, artifact)
 	assertMergeFormat(t, "Intersect", landlock.Intersect, want, artifact, base)
 
@@ -50,6 +52,109 @@ func TestIntersectReferDeniedByDefault(t *testing.T) {
 		Path: "/a", AccessFS: fsRights{landlock.FSAccessReadFile, landlock.FSAccessRefer},
 	})
 	assertMergeFormat(t, "Intersect", landlock.Intersect, want, unlisted, artifact)
+}
+
+// An intersection lists refer only where listing it changes what the
+// kernel enforces: when a rule of the result grants it, or when it is the
+// only filesystem right the result handles. Otherwise the kernel denies it
+// implicitly, and listing it would only make the result need ABI v2.
+func TestIntersectListsReferOnlyWhereItMatters(t *testing.T) {
+	t.Parallel()
+
+	read := fsRights{landlock.FSAccessReadFile}
+	readRefer := fsRights{landlock.FSAccessReadFile, landlock.FSAccessRefer}
+	left := fsProfile(read, landlock.PathRule{Path: "/", AccessFS: read})
+	right := fsProfile(readRefer, landlock.PathRule{Path: "/", AccessFS: read})
+
+	// Union agrees, for two inputs; it returns a single one as written.
+	for _, merge := range []struct {
+		name   string
+		fn     func(...*landlock.Profile) (*landlock.Profile, error)
+		inputs [][]*landlock.Profile
+	}{
+		{"Intersect", landlock.Intersect, [][]*landlock.Profile{{left, right}, {right, left}, {right}}},
+		{"Union", landlock.Union, [][]*landlock.Profile{{left, right}, {right, left}}},
+	} {
+		for _, inputs := range merge.inputs {
+			result := assertMergeFormat(t, merge.name, merge.fn,
+				"Profile{fs:read_file /(read_file)}", inputs...)
+			if abi := requiredABI(t, result); abi != landlock.ABIV1 {
+				t.Errorf("%s: RequiredABIVersion = %d, want %d", merge.name, abi, landlock.ABIV1)
+			}
+		}
+	}
+
+	// A rule granting refer needs it listed.
+	granted := fsProfile(readRefer, landlock.PathRule{Path: "/", AccessFS: readRefer})
+	assertMergeFormat(t, "Intersect", landlock.Intersect,
+		"Profile{fs:read_file,refer /(read_file,refer)}", granted, granted)
+
+	// Refer alone is what makes the ruleset handle filesystem rights, which
+	// denies moves and links the other input, handling none, allows.
+	referOnly := fsProfile(fsRights{landlock.FSAccessRefer})
+	netOnly := netProfile([]landlock.NetAccessRight{landlock.NetAccessBindTCP})
+	assertMergeFormat(t, "Intersect", landlock.Intersect,
+		"Profile{fs:refer net:bind_tcp}", referOnly, netOnly)
+
+	// Diff compares the handled sets as written: the two inputs are
+	// enforced alike, but only one of them needs ABI v2.
+	diff, err := landlock.Diff(left, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if diff.Equal || diff.HandledAccessFS == nil ||
+		!slices.Equal(diff.HandledAccessFS.Added, fsRights{landlock.FSAccessRefer}) {
+		t.Errorf("Diff = %s, want refer added to the handled set", diff)
+	}
+}
+
+// An intersection keeps refer listed beside a filesystem right newer than
+// ABIV1: Options.Downgrade drops that right below its version, and the
+// result would then handle no filesystem right and allow the moves an input
+// denies, where the listed refer survives every version from ABIV2 on.
+func TestIntersectKeepsReferThroughDowngrade(t *testing.T) {
+	t.Parallel()
+
+	referOnly := fsProfile(fsRights{landlock.FSAccessRefer})
+	newerOnly := &landlock.Profile{
+		HandledAccessFS:  fsRights{landlock.FSAccessIOCTLDev},
+		HandledAccessNet: []landlock.NetAccessRight{landlock.NetAccessBindTCP},
+	}
+
+	for _, input := range []*landlock.Profile{referOnly, newerOnly} {
+		err := landlock.ValidateArtifact(input)
+		if err != nil {
+			t.Fatalf("ValidateArtifact(%s) = %v", input, err)
+		}
+	}
+
+	result := assertMergeFormat(t, "Intersect", landlock.Intersect,
+		"Profile{fs:ioctl_dev,refer net:bind_tcp}", referOnly, newerOnly)
+
+	// ioctl_dev needs ABIV5 and bind_tcp ABIV4.
+	for abi, want := range map[landlock.ABIVersion]string{
+		landlock.ABIV2: "Profile{fs:refer}",
+		landlock.ABIV3: "Profile{fs:refer}",
+		landlock.ABIV4: "Profile{fs:refer net:bind_tcp}",
+		landlock.ABIV5: "Profile{fs:ioctl_dev,refer net:bind_tcp}",
+	} {
+		downgraded, err := landlock.Options{ABI: abi}.Downgrade(result)
+		if err != nil {
+			t.Fatalf("Downgrade to v%d: %v", abi, err)
+		}
+
+		if got := downgraded.String(); got != want {
+			t.Errorf("Downgrade to v%d = %s, want %s", abi, got, want)
+		}
+	}
+
+	// With a right ABIV1 knows beside it, refer stays implicit through
+	// every downgrade.
+	assertMergeFormat(t, "Intersect", landlock.Intersect,
+		"Profile{fs:ioctl_dev,read_file}",
+		fsProfile(fsRights{landlock.FSAccessRefer, landlock.FSAccessReadFile}),
+		fsProfile(fsRights{landlock.FSAccessIOCTLDev}))
 }
 
 // A union must keep a refer grant that one input has when the other input
@@ -128,7 +233,7 @@ func TestIntersectReferGainsNoRight(t *testing.T) {
 		landlock.PathRule{Path: "/dst", AccessFS: writeRefer},
 	)
 	assertMergeFormat(t, "Intersect", landlock.Intersect,
-		"Profile{fs:refer,write_file}", root,
+		"Profile{fs:write_file}", root,
 		fsProfile(writeRefer, landlock.PathRule{Path: "/", AccessFS: refer}))
 
 	// A refer grant above a mount point covers moves inside the mount, so
@@ -165,7 +270,7 @@ func TestIntersectDropsLoweredRefer(t *testing.T) {
 		landlock.PathRule{Path: "/etc", AccessFS: write},
 	)
 
-	want := "Profile{fs:read_file,refer,write_file /etc/passwd(read_file,write_file)}"
+	want := "Profile{fs:read_file,write_file /etc/passwd(read_file,write_file)}"
 	result := assertMergeFormat(t, "Intersect", landlock.Intersect, want, left, right)
 	assertMergeFormat(t, "Intersect", landlock.Intersect, want, right, left)
 

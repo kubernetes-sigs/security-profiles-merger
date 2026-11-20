@@ -102,6 +102,51 @@ func TestDuplicateKeys(t *testing.T) {
 	}
 }
 
+// TestBracketedPathsAreQuotedOnce covers the message naming a member whose
+// name cannot be a plain path segment. The path quotes that name itself, so
+// the message quotes the plain runs of the path and leaves the bracketed
+// name as it is, rather than quoting the whole path again into
+// "[\"a.b\"]". Every part is quoted once, so a list of paths reads one way
+// even where a plain name holds a comma or a space. A plain path is quoted
+// as before, and a long one, or one whose brackets do not parse, is quoted
+// whole and cut.
+func TestBracketedPathsAreQuotedOnce(t *testing.T) {
+	t.Parallel()
+
+	long := `["` + strings.Repeat("a.", 40) + `"]`
+
+	for _, test := range []struct {
+		paths []string
+		want  string
+	}{
+		{[]string{`["a.b"]`}, `unknown field ["a.b"]`},
+		{[]string{`[""]`}, `unknown field [""]`},
+		{[]string{`["a.b"].c`}, `unknown field ["a.b"]".c"`},
+		{
+			[]string{"rules[0].x", `rules[0]["x\ny"]`},
+			`unknown fields "rules[0].x", "rules[0]"["x\ny"]`,
+		},
+		// Plain names may hold ", ", which stays inside the quotes.
+		{
+			[]string{"x", `a, b["c.d"]`, `["e, f"]`},
+			`unknown fields "x", "a, b"["c.d"], ["e, f"]`,
+		},
+		{[]string{long}, "unknown field " + merge.QuoteBounded(long)},
+		{[]string{`a["b`}, "unknown field " + merge.QuoteBounded(`a["b`)},
+	} {
+		got := pathsError(spm.ErrUnknownField, test.paths, nil, 0).Error()
+		if got != test.want {
+			t.Errorf("pathsError(%q) = %s, want %s", test.paths, got, test.want)
+		}
+	}
+
+	// The paths a document holds, end to end.
+	err := Unmarshal([]byte(`{"a.b":1,"c, d":2}`), new(walkEmbedded), nil)
+	if want := `unknown fields ["a.b"], "c, d"`; err == nil || err.Error() != want {
+		t.Errorf("Unmarshal = %v, want %s", err, want)
+	}
+}
+
 // walkEmbedded and walkTarget exercise the parts of the unknown-field walker
 // the profile types do not use: promoted fields and map values.
 type walkEmbedded struct {
@@ -728,6 +773,64 @@ func TestDecodeFailsAsUnmarshal(t *testing.T) {
 		if hint.found != test.unknown {
 			t.Errorf("%s: unknown member found = %v, want %v", test.raw, hint.found, test.unknown)
 		}
+	}
+}
+
+// TestErrorOffsetsCountLeadingWhitespace covers a document that starts
+// with whitespace. A decoder of Go 1.27 leaves it out of the offset of a
+// type error, where json.Unmarshal counts it, and PathAt reads the offset
+// as a position in the document, so Decode and Unmarshal must report the
+// offset json.Unmarshal reports on every release, and PathAt must name the
+// value that offset is about.
+func TestErrorOffsetsCountLeadingWhitespace(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		raw  string
+		path string
+	}{
+		{"  {\"rules\":[{\"name\":[1]}]}", "rules[0].name"},
+		{"\n\n\t {\"rules\":[{\"port\":1,\"name\":true}]}", "rules[0].name"},
+		{"\r\n{\"one\":{\"port\":\"x\"}}", "one.port"},
+		// An unknown member makes Decode decode the document twice.
+		{"   {\"bogus\":1,\"one\":{\"port\":-1}}", "one.port"},
+	} {
+		var want *json.UnmarshalTypeError
+		if !errors.As(json.Unmarshal([]byte(test.raw), new(requiredTarget)), &want) {
+			t.Fatalf("%q decodes without a type error", test.raw)
+		}
+
+		_, decodeErr := Decode([]byte(test.raw), new(requiredTarget))
+		unmarshalErr := Unmarshal([]byte(test.raw), new(requiredTarget), nil)
+
+		for name, err := range map[string]error{"Decode": decodeErr, "Unmarshal": unmarshalErr} {
+			var got *json.UnmarshalTypeError
+			if !errors.As(err, &got) || got.Offset != want.Offset {
+				t.Errorf("%s(%q) = %v, want a type error at offset %d",
+					name, test.raw, err, want.Offset)
+
+				continue
+			}
+
+			if path, _ := PathAt([]byte(test.raw), got.Offset); path != test.path {
+				t.Errorf("%s(%q): PathAt = %q, want %q", name, test.raw, path, test.path)
+			}
+		}
+	}
+
+	// Unmarshal reads a document that does not parse with the decoder too.
+	raw := " \n {\"rules\" x"
+
+	var want *json.SyntaxError
+	if !errors.As(json.Unmarshal([]byte(raw), new(requiredTarget)), &want) {
+		t.Fatalf("%q decodes without a syntax error", raw)
+	}
+
+	var got *json.SyntaxError
+
+	err := Unmarshal([]byte(raw), new(requiredTarget), nil)
+	if !errors.As(err, &got) || got.Offset != want.Offset {
+		t.Errorf("Unmarshal(%q) = %v, want a syntax error at offset %d", raw, err, want.Offset)
 	}
 }
 

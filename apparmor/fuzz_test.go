@@ -99,6 +99,16 @@ func sanitizeFuzzPath(fuzzPath, fallback string) string {
 	return path.Clean(fuzzPath)
 }
 
+// absoluteFuzzPath puts a "/" in front of a path that does not start with
+// one, and leaves an empty path, which sanitizeFuzzPath replaces, as it is.
+func absoluteFuzzPath(fuzzPath string) string {
+	if fuzzPath == "" || strings.HasPrefix(fuzzPath, "/") {
+		return fuzzPath
+	}
+
+	return "/" + fuzzPath
+}
+
 func addAppArmorFuzzSeeds(f *testing.F) {
 	f.Helper()
 
@@ -218,8 +228,13 @@ func fuzzAppArmorMerge(
 ) {
 	t.Helper()
 
-	left := fuzzAppArmorProfile(capMaskL, path1L, path2L, rawL, tcpL, udpL)
-	right := fuzzAppArmorProfile(capMaskR, path1R, path2R, rawR, tcpR, udpR)
+	// The merges refuse a relative path, so the paths are made absolute,
+	// for the mutated inputs to keep reaching the merge rather than its
+	// validation; FuzzAppArmorValidateArtifact covers relative paths.
+	left := fuzzAppArmorProfile(capMaskL, absoluteFuzzPath(path1L), absoluteFuzzPath(path2L),
+		rawL, tcpL, udpL)
+	right := fuzzAppArmorProfile(capMaskR, absoluteFuzzPath(path1R), absoluteFuzzPath(path2R),
+		rawR, tcpR, udpR)
 
 	result, err := cfg.merge(left, right)
 	if err != nil {
@@ -719,7 +734,8 @@ func assertStrictOrdering(t *testing.T, profile *apparmor.Profile, artifactErr e
 
 // FuzzAppArmorValidateArtifact fuzzes the check a runtime applies to a
 // profile it did not author. Beyond crashes and hangs it pins the contract:
-// a profile ValidateArtifact accepts is one Validate accepts, holds only
+// Validate and ValidateArtifact agree on relative paths, a profile
+// ValidateArtifact accepts is one Validate accepts, holds only
 // absolute paths and patterns the matcher can use, and merges into a result
 // the runtime can load; and a profile ValidateStrict accepts is one
 // ValidateArtifact accepts, since the strict checks add to the artifact
@@ -734,6 +750,7 @@ func FuzzAppArmorValidateArtifact(f *testing.F) {
 	f.Add(uint64(0x80), "/x", "/y", true, false, true)
 	f.Add(uint64(0x80), "/tmp/a b", "/tmp/c,", false, false, false)
 	f.Add(uint64(0x80), `/tmp/\000`, "/tmp/[!a]", false, false, false)
+	f.Add(uint64(0x80), `\x2fetc/passwd`, `\57etc/shadow`, false, false, false)
 
 	f.Fuzz(func(
 		t *testing.T,
@@ -747,6 +764,14 @@ func FuzzAppArmorValidateArtifact(f *testing.F) {
 
 		err := apparmor.ValidateArtifact(profile)
 		assertStrictOrdering(t, profile, err)
+
+		// Validate checks relative paths itself, so it agrees with
+		// ValidateArtifact on them, and the merges refuse what neither
+		// would let through.
+		if errors.Is(err, apparmor.ErrRelativePath) !=
+			errors.Is(apparmor.Validate(profile), apparmor.ErrRelativePath) {
+			t.Fatalf("Validate and ValidateArtifact disagree on a relative path: %v", err)
+		}
 
 		if err != nil {
 			return

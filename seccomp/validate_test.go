@@ -355,8 +355,10 @@ func notifyCases() []validatorCase {
 			want:    []error{seccomp.ErrListenerNotAllowed},
 		},
 		{
-			// The portability rule ValidateStrict adds for the flag: the flag
-			// by its position, its name, the sentinel, and why.
+			// The listener flag without a notifying entry, which runc passes
+			// without the listener the kernel requires for it, is refused as
+			// a listener setting, once: ValidateStrict adds no second line
+			// for it.
 			name: "listener flag without a notifying entry",
 			profile: &specs.LinuxSeccomp{
 				DefaultAction: specs.ActErrno,
@@ -365,12 +367,26 @@ func notifyCases() []validatorCase {
 				},
 			},
 			arch:    specs.ArchX86_64,
-			rejects: byStrict,
-			want:    []error{seccomp.ErrNotifyUnsupported},
-			where: []string{
-				`flags[1]: "SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV": ` +
-					`SCMP_ACT_NOTIFY is not supported here (no entry applies SCMP_ACT_NOTIFY)`,
+			accepts: byValidate,
+			rejects: byArtifact | byStrict,
+			want:    []error{seccomp.ErrListenerNotAllowed},
+			exact: `flags[1]: "SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV": ` +
+				`listener settings are not allowed`,
+		},
+		{
+			// TSYNC next to a listenerPath, which crun refuses, is refused
+			// by the listenerPath alone.
+			name: "tsync next to a listener path",
+			profile: &specs.LinuxSeccomp{
+				DefaultAction: specs.ActErrno,
+				ListenerPath:  listenerSock,
+				Flags:         []specs.LinuxSeccompFlag{"SECCOMP_FILTER_FLAG_TSYNC"},
 			},
+			arch:    specs.ArchX86_64,
+			accepts: byValidate,
+			rejects: byArtifact | byStrict,
+			want:    []error{seccomp.ErrListenerNotAllowed},
+			exact:   `listenerPath: listener settings are not allowed`,
 		},
 	}
 }

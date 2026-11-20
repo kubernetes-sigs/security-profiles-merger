@@ -235,6 +235,18 @@ func (set fieldSet) lookup(key string) (jsonField, bool, bool) {
 	return field, ok, false
 }
 
+// lookupFolded is lookup for a member whose folded name (see foldName) the
+// caller holds already, which it does not fold again.
+func (set fieldSet) lookupFolded(key, folded string) (jsonField, bool, bool) {
+	if fieldType, ok := set.exact[key]; ok {
+		return jsonField{name: key, typ: fieldType}, true, true
+	}
+
+	field, ok := set.folded[folded]
+
+	return field, ok, false
+}
+
 // fieldSets holds the field set of every struct type asked for, by type. A
 // walk asks once per object of a document and type detection once per
 // member, and a document chooses how many of both it has, while the types

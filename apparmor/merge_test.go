@@ -486,30 +486,6 @@ func TestMergeFilesystem(t *testing.T) {
 			inputs: []*apparmor.Profile{withGlob(), withoutGlob()},
 			want:   readOnly("/etc/*", "/etc/foo", "/x"),
 		},
-		{
-			// A pattern that does not start with "/" is no file rule to
-			// apparmor_parser, so it grants nothing, whatever names its
-			// expression covers: an intersection drops it.
-			name:   "intersect of one profile drops a relative glob",
-			merge:  apparmor.Intersect,
-			inputs: []*apparmor.Profile{readOnly("**/*.log")},
-			want:   explicit(&apparmor.Profile{}),
-		},
-		{
-			// It keeps no literal on the relative glob's account either.
-			name:   "intersect keeps no literal a relative glob covers",
-			merge:  apparmor.Intersect,
-			inputs: []*apparmor.Profile{readOnly("**"), readOnly("/etc/passwd", "/etc/*")},
-			want:   explicit(&apparmor.Profile{}),
-		},
-		{
-			// A union keeps the relative glob as written without dropping
-			// the literals its expression covers.
-			name:   "union keeps the literal a relative glob covers",
-			merge:  apparmor.Union,
-			inputs: []*apparmor.Profile{readOnly("/etc/passwd"), readOnly("**")},
-			want:   readOnly("**", "/etc/passwd"),
-		},
 	})
 }
 
@@ -726,25 +702,6 @@ func TestMergeEscapedSlashRuns(t *testing.T) {
 			right: []string{"/etc/passwd"},
 			union: []string{`/\x2fetc/passwd`, "/etc/passwd"}, both: nil,
 		},
-		// A path whose text does not start with "/" is relative to the
-		// parser, which rejects it, even where its escapes decode to an
-		// absolute name: it names no file, as a relative pattern matches
-		// none.
-		{
-			name: "hex escape as the leading slash", left: []string{`\x2fetc/passwd`},
-			right: []string{"/etc/passwd"},
-			union: []string{"/etc/passwd", `\x2fetc/passwd`}, both: nil,
-		},
-		{
-			name: "escaped leading slash", left: []string{`\/etc/passwd`},
-			right: []string{"/etc/passwd"},
-			union: []string{"/etc/passwd", `\/etc/passwd`}, both: nil,
-		},
-		{
-			name: "escaped leading slash under a glob", left: []string{`\/etc/passwd`},
-			right: []string{"/etc/*"},
-			union: []string{"/etc/*", `\/etc/passwd`}, both: nil,
-		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
@@ -775,9 +732,9 @@ func TestMergeEscapedSlashRuns(t *testing.T) {
 }
 
 // TestRelativeGlobKeepsItsIdentity covers two spellings of one relative
-// pattern. It matches nothing, but it still spells one rule, so Validate,
-// the merge and Diff identify it by its expression as they do an absolute
-// pattern, and agree with each other.
+// pattern. It matches nothing, but it still spells one rule, so Validate
+// and Diff identify it by its expression as they do an absolute pattern,
+// and agree with each other.
 func TestRelativeGlobKeepsItsIdentity(t *testing.T) {
 	t.Parallel()
 
@@ -792,15 +749,6 @@ func TestRelativeGlobKeepsItsIdentity(t *testing.T) {
 	err := apparmor.Validate(readOnly("x[bc]", "x[cb]"))
 	if !errors.Is(err, apparmor.ErrDuplicatePathInCategory) {
 		t.Errorf("Validate: expected ErrDuplicatePathInCategory, got: %v", err)
-	}
-
-	united, err := apparmor.Union(readOnly("x[bc]"), readOnly("x[cb]"))
-	if err != nil {
-		t.Fatalf("Union: %v", err)
-	}
-
-	if got := united.Filesystem.ReadOnlyPaths; len(got) != 1 {
-		t.Errorf("Union keeps %v, want one spelling", got)
 	}
 
 	diff, err := apparmor.Diff(readOnly("x[bc]"), readOnly("x[cb]"))
@@ -820,6 +768,50 @@ func TestRelativeGlobKeepsItsIdentity(t *testing.T) {
 
 	if diff.Equal {
 		t.Error("Diff of a relative and an absolute pattern is equal")
+	}
+}
+
+// TestMergesRefuseRelativePaths covers paths whose text does not start
+// with "/", which apparmor_parser rejects even where an escape decodes to
+// "/". The merges refuse them as Validate does, so that a Union cannot
+// return `\x2fetc/passwd` beside "/etc/passwd", a result ValidateArtifact
+// rejects.
+func TestMergesRefuseRelativePaths(t *testing.T) {
+	t.Parallel()
+
+	readOnly := func(paths ...string) *apparmor.Profile {
+		return &apparmor.Profile{
+			Filesystem: &apparmor.FilesystemRules{
+				ReadOnlyPaths: paths,
+			},
+		}
+	}
+
+	for _, path := range []string{
+		`\x2fetc/passwd`, `\57etc/passwd`, `\057etc/passwd`, `\d047etc/passwd`,
+		`\/etc/passwd`, "etc/passwd", "**", "**/*.log", "x[bc]", "{/usr,/opt}/**",
+	} {
+		for name, merge := range map[string]mergeFunc{
+			"Intersect": apparmor.Intersect, "Union": apparmor.Union,
+		} {
+			for _, inputs := range [][]*apparmor.Profile{
+				{readOnly(path), readOnly("/etc/passwd")},
+				{readOnly("/etc/*"), readOnly(path)},
+				{readOnly(path)},
+			} {
+				_, err := merge(inputs...)
+				if !errors.Is(err, apparmor.ErrRelativePath) {
+					t.Errorf("%s with %q = %v, want %v", name, path, err, apparmor.ErrRelativePath)
+				}
+			}
+		}
+	}
+
+	// The case the check is for: two spellings of /etc/passwd, one of
+	// them raw-relative.
+	_, err := apparmor.Union(readOnly(`/etc/\x70asswd`), readOnly(`\57etc/passwd`))
+	if !errors.Is(err, apparmor.ErrRelativePath) {
+		t.Errorf("Union = %v, want %v", err, apparmor.ErrRelativePath)
 	}
 }
 

@@ -1310,8 +1310,8 @@ func TestFailedCompileIsNotCharged(t *testing.T) {
 // expression another pattern translates to. A pattern is identified by that
 // expression and a path the port cannot translate by its text, so the two
 // would be taken for one rule if the kind of the identity were not part of
-// it: Diff would call them equal, Validate would report them as one path
-// listed twice, and a merge would fold one into the other.
+// it: Diff would call them equal and Validate would report them as one path
+// listed twice. The expression is relative, so the merges refuse it.
 func TestPathKeysDoNotCollideAcrossKinds(t *testing.T) {
 	t.Parallel()
 
@@ -1346,13 +1346,11 @@ func TestPathKeysDoNotCollideAcrossKinds(t *testing.T) {
 			t.Errorf("Validate = %v, want %q and its expression apart", err, pattern)
 		}
 
-		union, err := Union(budgetProfile(pattern, expression))
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		if got := len(union.Filesystem.ReadOnlyPaths); got != 2 {
-			t.Errorf("Union kept %d paths of %q and its expression, want both", got, pattern)
+		// The expression does not start with "/", so the merges refuse it
+		// as relative rather than fold it into the pattern.
+		_, err = Union(budgetProfile(pattern, expression))
+		if !errors.Is(err, ErrRelativePath) {
+			t.Errorf("Union of %q and its expression = %v, want %v", pattern, err, ErrRelativePath)
 		}
 	}
 }

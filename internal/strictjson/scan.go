@@ -294,7 +294,8 @@ func (state *scanState) member(frame *scanFrame, key string) {
 	case frame.typ.Kind() == reflect.Map:
 		frame.child = frame.typ.Elem()
 	case frame.typ.Kind() == reflect.Struct:
-		field, known, exact := fieldsOf(frame.typ).lookup(key)
+		// addKey folded the name already.
+		field, known, exact := fieldsOf(frame.typ).lookupFolded(key, frame.folded)
 
 		switch {
 		case !known:
@@ -576,6 +577,56 @@ func foldRune(char rune) rune {
 	}
 }
 
+// quotePath renders a field path for a message. A path holding a bracketed
+// segment (see joinFieldPath) has quoted the name in it already, so quoting
+// the whole path again would escape those quotes and turn ["a.b"] into
+// "[\"a.b\"]". Such a path is written with its plain runs quoted and its
+// bracketed names as they are, as in ["a.b"] or "rules[0]"["x.y"]: every
+// part is quoted once, so a list of paths reads one way even where a plain
+// name holds a comma or a space. Every other path is quoted whole by
+// merge.QuoteBounded, and so is one longer than merge.MaxQuotedBytes, which
+// that cuts, or one whose brackets do not parse, such as a name the decoder
+// reported.
+func quotePath(path string) string {
+	if !strings.Contains(path, `["`) || len(path) > merge.MaxQuotedBytes {
+		return merge.QuoteBounded(path)
+	}
+
+	var rendered strings.Builder
+
+	for rest := path; rest != ""; {
+		start := strings.Index(rest, `["`)
+		if start < 0 {
+			start = len(rest)
+		}
+
+		if start > 0 {
+			rendered.WriteString(merge.QuoteBounded(rest[:start]))
+		}
+
+		rest = rest[start:]
+		if rest == "" {
+			break
+		}
+
+		literal, err := strconv.QuotedPrefix(rest[1:])
+		if err != nil || !strings.HasPrefix(rest[1+len(literal):], "]") {
+			return merge.QuoteBounded(path)
+		}
+
+		name, err := strconv.Unquote(literal)
+		if err != nil {
+			return merge.QuoteBounded(path)
+		}
+
+		rendered.WriteString("[" + merge.QuoteBounded(name) + "]")
+
+		rest = rest[len(literal)+2:]
+	}
+
+	return rendered.String()
+}
+
 // pathsError wraps kind with the quoted paths, pluralizing the kind when
 // there are several, as in `unknown fields "a", "b"`, or returns nil when
 // there are none. Each path is quoted with a length bound and omitted counts
@@ -590,7 +641,7 @@ func pathsError(kind error, paths, wants []string, omitted int) error {
 
 	quoted := make([]string, len(paths))
 	for idx, field := range paths {
-		quoted[idx] = merge.QuoteBounded(field)
+		quoted[idx] = quotePath(field)
 
 		if idx < len(wants) && wants[idx] != "" {
 			quoted[idx] += " (want " + merge.QuoteBounded(wants[idx]) + ")"

@@ -153,7 +153,7 @@ from any of the three packages.
 | `ErrBudgetExceeded` | `apparmor.Intersect`; `landlock.Intersect` and `landlock.Union` | The merge ran past a bound on its own work, not wrapped in an `InputError`; see [Limits](integration.md#limits) |
 | `ErrEmptyPath` | `apparmor`, `landlock`: every validator and merge | A path is the empty string, or for `landlock` one that cleans to `.`, such as `.` or `./` |
 | `ErrNulInPath` | `apparmor`: `ValidateArtifact` and `ValidateStrict`; `landlock`: every validator and merge | A path holds a NUL byte, or in `apparmor` an escape denoting one |
-| `ErrRelativePath` | `apparmor`, `landlock`: `ValidateArtifact` and `ValidateStrict`; `apparmor.QuotePath` | A path does not start with `/` |
+| `ErrRelativePath` | `apparmor`: every validator and merge, and `QuotePath`; `landlock`: `ValidateArtifact` and `ValidateStrict` | A path does not start with `/`, for `apparmor` as written, so an escape spelling the first `/` is relative too |
 | `ErrPathTooLong` | `apparmor`, `landlock`: every validator and merge | A path is longer than `MaxPathLen`. It is checked before the path is scanned, and only the count limits of `ValidateArtifact` and `ValidateStrict` run before it. `apparmor` checks every path's length first and, when one is too long, skips the other checks of `Validate` |
 | `ErrDuplicateKey`, `ErrUnknownField`, `ErrMisspelledField`, `ErrInvalidUTF8`, `ErrUnexpectedData`, `ErrNotAnObject` | `UnmarshalStrict` of every package | See [Strict decoding](#strict-decoding) |
 | `ErrMissingField` | `seccomp.UnmarshalStrict` and `landlock.UnmarshalStrict` | See [Strict decoding](#strict-decoding) |
@@ -182,7 +182,10 @@ of each sentinel says how.
 
 Invalid UTF-8 is reported before anything else, and a value that is not an
 object before what follows it. A document that is not well-formed JSON
-otherwise gets the decoder's error. `UnmarshalStrict` reports the first kind
+otherwise gets the decoder's error, with its offset counted in the document
+as `json.Unmarshal` counts it; one that is empty or ends early gets the
+`*json.SyntaxError` `json.Unmarshal` returns for it, which does not match
+`io.EOF` or `io.ErrUnexpectedEOF`. `UnmarshalStrict` reports the first kind
 of problem it finds, naming every member of that kind up to a bound. Every
 message is bounded in length, since the decoder quotes back literals whose
 length the document chooses. The profile it is given is replaced only when
@@ -214,7 +217,7 @@ import "sigs.k8s.io/security-profiles-merger/seccomp"
 | `Validate` | What a runtime needs to load the profile at all; what the merges run on every input |
 | `ValidateBaseline` | The check of a baseline at config load: `Validate`, `Intersect` of the baseline alone and `Diff` against it, `ErrInexactBaseline` when the diff is unequal. Errors of the merge come without an `InputError` |
 | `ValidateArtifact` | `Validate` plus what an artifact needs to load on every runtime: the [limits](#limits), no notify or listener settings, no rules of one syscall with different results outside a safe shape, on the syscall or on a multiplexer that carries it, and no filter in which libseccomp loses the rules of an architecture as written. It does not promise an exact merge: same-result rules outside a safe shape pass it and are still settled (see [Conflicting rules](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Conflicting_rules)) |
-| `ValidateStrict` | `ValidateArtifact` plus duplicate syscall names, `valueTwo` on operators that ignore it, and the listener flags some runtime refuses (`ErrNotifyUnsupported`) |
+| `ValidateStrict` | `ValidateArtifact` plus duplicate syscall names and `valueTwo` on operators that ignore it |
 | `UnmarshalStrict` | Decode a profile, refusing what `encoding/json` accepts silently (see [Strict decoding](#strict-decoding)) |
 | `DecodeArtifact` | `UnmarshalStrict` then `ValidateArtifact`, returning the profile only when both pass |
 | `Marshal` | Encode a profile as `json.Marshal` does, except that an empty `Flags` list is written as `"flags": []`, which a runtime reads differently from no list ([Flags](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Flags)) |
@@ -250,7 +253,7 @@ error is nil.
 | `ErrUnknownArch`, `ErrUnknownFlag` | `Validate` and up; `ErrUnknownArch` also every method that returns an error of an `Options` from `ForArch`, for the architecture it names, without an `InputError` | An architecture or flag this package does not know |
 | `ErrInvalidOptions` | Every `Options` method that returns an error, without an `InputError` | The zero `Options`, which no constructor returns |
 | `ErrUnsupportedSpecField` | `Validate` and up, `Marshal` | A field of the runtime-spec types this package does not read, which a program built against a newer runtime-spec can set and the merge would drop |
-| `ErrNotifyUnsupported` | `Validate` and up | `SCMP_ACT_NOTIFY` as the default action or on `write`, which runc refuses. `ValidateStrict` also returns it, as a portability rule, for `SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV` without an entry that notifies and for `SECCOMP_FILTER_FLAG_TSYNC` next to a `listenerPath`, which crun refuses; the merges accept both and drop the flag from a result that cannot load it |
+| `ErrNotifyUnsupported` | `Validate` and up | `SCMP_ACT_NOTIFY` as the default action or on `write`, which runc refuses |
 | `ErrInvalidUTF8Listener` | `Validate` and up | A `listenerPath` or `listenerMetadata` that is not valid UTF-8, which JSON carries to the runtime as U+FFFD, naming another socket |
 | `ErrNotifyWithoutListener` | `Validate` and up; `Intersect`, `Union` on their result | `SCMP_ACT_NOTIFY` without a `listenerPath`, which runc refuses |
 | `ErrLostRules` | `Union`; `Intersect` where it cannot drop an architecture; `ValidateArtifact`, `ValidateStrict` | The result, or for the validators the profile as a runtime loads it unmerged, would hold rules libseccomp loses on a covered architecture, testing a syscall the architecture lacks first ([Architectures](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Architectures)) |
@@ -342,8 +345,8 @@ import "sigs.k8s.io/security-profiles-merger/apparmor"
 |----------|-------------|
 | `Intersect` | Merge via intersection: capabilities and paths intersected, network AND. For a runtime combining an artifact with its baseline. Fails with `ErrBudgetExceeded` past its budget for matching or compiling patterns when the result may lose access, which is when neither input is kept whole |
 | `Union` | Merge via union: capabilities and paths combined, network OR. For combining recorded profiles |
-| `Validate` | Empty and oversized paths, AppArmor variables, paths listed twice within or across filesystem categories (compared with repeated slashes collapsed and escapes resolved), empty or duplicate capability names. What the merge runs on each input as written, except the duplicates within one list, which it folds |
-| `ValidateArtifact` | `Validate` plus the [limits](#limits-1), checked first and on their own, and what a runtime could not load or would silently drop: relative paths, patterns apparmor_parser rejects, loads with another meaning than they spell, or the matcher cannot use, `.` or `..` components, NUL bytes, characters the lexer does not accept unescaped or that are not printable, capability names outside `[A-Za-z0-9_]` |
+| `Validate` | Empty, oversized and relative paths, AppArmor variables, paths listed twice within or across filesystem categories (compared with repeated slashes collapsed and escapes resolved), empty or duplicate capability names. What the merge runs on each input as written, except the duplicates within one list, which it folds |
+| `ValidateArtifact` | `Validate` plus the [limits](#limits-1), checked first and on their own, and what a runtime could not load or would silently drop: patterns apparmor_parser rejects, loads with another meaning than they spell, or the matcher cannot use, `.` or `..` components, NUL bytes, characters the lexer does not accept unescaped or that are not printable, capability names outside `[A-Za-z0-9_]` |
 | `ValidateStrict` | `ValidateArtifact` plus capability names outside the known set and duplicate executable or library paths |
 | `ValidateBaseline` | The check of a baseline at config load: `Validate`, `QuotePath` of every path, each one it refuses reported with its list and index, then `Intersect` of the baseline alone and `Diff` against it, `ErrInexactBaseline` when the diff is unequal, as for a pattern apparmor_parser rejects, which the intersection drops |
 | `UnmarshalStrict` | Decode a profile, refusing what `encoding/json` accepts silently; see [strict decoding](#strict-decoding) |
@@ -373,8 +376,8 @@ a deep copy, or nil for a nil profile.
 `UnmarshalStrict` sentinels are shared and listed under [spm](#spm). A merge
 fails with `ErrNoProfiles` when given nothing, `Intersect` with
 `ErrBudgetExceeded` past its budget, and otherwise only on the rows that
-name it and on `ErrNilProfile`, `ErrEmptyPath`, `ErrPathTooLong` and
-`ErrMoreProblems`, wrapped in an `InputError`.
+name it and on `ErrNilProfile`, `ErrEmptyPath`, `ErrRelativePath`,
+`ErrPathTooLong` and `ErrMoreProblems`, wrapped in an `InputError`.
 
 | Sentinel | Raised by | Meaning |
 |----------|-----------|---------|

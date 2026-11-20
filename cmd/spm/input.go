@@ -44,6 +44,9 @@ var (
 	errEmptyInput     = errors.New("no input provided")
 	errEmptyFile      = errors.New("file is empty")
 	errEmptyArgument  = errors.New("empty file argument (use - for stdin)")
+	errDirectoryInput = errors.New("is a directory")
+	errNotRegularFile = errors.New("not a regular file or a pipe")
+	errNoWriter       = errors.New("FIFO has no writer (nothing was written)")
 )
 
 // The inputs past the limits (see limitError).
@@ -271,17 +274,35 @@ func readStdinArgument(stdin io.Reader, others int) ([]profileInput, error) {
 	return items, nil
 }
 
-// readFileWithLimit reads a file of at most maxInputSize bytes. The failure
-// it returns carries the reason alone: the caller names the input as the
-// caller wrote it, and the decorations os adds would otherwise spell the
-// path a second time, cleaned into one the caller never typed.
+// readFileWithLimit reads a regular file of at most maxInputSize bytes. The
+// failure it returns carries the reason alone: the caller names the input
+// as the caller wrote it, and the decorations os adds would otherwise spell
+// the path a second time, cleaned into one the caller never typed.
+//
+// It reads a regular file or a pipe, a symlink being followed to what it
+// names, so that a process substitution such as <(cmd), and /dev/stdin
+// where it leads to a pipe, still work. The file is opened without
+// blocking, where the platform has the flag (see oNonBlock), since opening
+// a FIFO for reading otherwise waits for a writer, which a FIFO planted in
+// an untrusted tree of profiles never gets. A FIFO is therefore read only
+// if a writer has it open already; one that opens it later finds no reader.
+// How a FIFO without a writer reads differs between the platforms. On
+// Linux the read returns end of file at once, without blocking or with,
+// and Go reads a FIFO with a writer through its poller, which waits for
+// what the writer has yet to write until it closes its end. Go reads no
+// FIFO through its poller on darwin, so setBlocking switches the pipe to
+// blocking reads there, and a blocking read of a FIFO without a writer
+// returns end of file at once. On FreeBSD the first reader clears the end
+// of file of a FIFO, so a FIFO without a writer may still wait for one
+// there, and possibly on the other BSDs. Anything else is refused once it
+// is open, before it is read: a directory, a socket, and a device, whose
+// read may never end, as /dev/zero's does, or wait without a writer to
+// close, as a terminal's does even without blocking. /dev/null is refused
+// with them, rather than read as an empty file.
 func readFileWithLimit(path string) ([]byte, error) {
-	// The path is opened as written: cleaning it would resolve
-	// "link/../x" lexically rather than through the directory link points
-	// to, and open another file than the one the caller named.
-	file, err := os.Open(path) //nolint:gosec // the caller named this path
+	file, pipe, err := openInput(path)
 	if err != nil {
-		return nil, bareFileError(err)
+		return nil, err
 	}
 
 	defer func() { _ = file.Close() }()
@@ -296,12 +317,59 @@ func readFileWithLimit(path string) ([]byte, error) {
 	}
 
 	// An empty file is reported as such, as empty stdin is, rather than
-	// left to the decoder, which would call it a truncated document.
-	if len(bytes.TrimSpace(data)) == 0 {
+	// left to the decoder, which would call it a truncated document. A pipe
+	// that gave nothing at all had no writer by the time it was read, or
+	// one that wrote nothing.
+	switch {
+	case pipe && len(data) == 0:
+		return nil, errNoWriter
+	case len(bytes.TrimSpace(data)) == 0:
 		return nil, errEmptyFile
 	}
 
 	return data, nil
+}
+
+// openInput opens a file argument for readFileWithLimit and reports whether
+// it is a pipe, which it has switched to blocking reads. It refuses, and
+// closes again, anything but a regular file or a pipe.
+func openInput(path string) (*os.File, bool, error) {
+	// The path is opened as written: cleaning it would resolve
+	// "link/../x" lexically rather than through the directory link points
+	// to, and open another file than the one the caller named.
+	file, err := os.OpenFile( //nolint:gosec // the caller named this path
+		path, os.O_RDONLY|oNonBlock, 0,
+	)
+	if err != nil {
+		return nil, false, bareFileError(err)
+	}
+
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+
+		return nil, false, bareFileError(err)
+	}
+
+	pipe := info.Mode()&fs.ModeNamedPipe != 0
+
+	switch {
+	case info.Mode().IsRegular():
+	case pipe:
+		err = setBlocking(file)
+	case info.IsDir():
+		err = errDirectoryInput
+	default:
+		err = errNotRegularFile
+	}
+
+	if err != nil {
+		_ = file.Close()
+
+		return nil, false, err
+	}
+
+	return file, pipe, nil
 }
 
 // bareFileError strips the path and the operation an *fs.PathError carries,

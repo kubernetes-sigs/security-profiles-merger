@@ -68,14 +68,17 @@ type InputError = spm.InputError
 // is the merge KEP-6061 defines for a CRI runtime combining an artifact
 // with its baseline.
 //
-// The handled access and scoped sets are unioned, and a right is granted
-// for a path or port only where every input permits it, by not handling it
-// or through a rule; the result carries the narrower of two rule paths, and
-// a rule loses the rights its ancestors in the result already grant. The
-// result drops FSAccessRefer where it would allow a move an input denies,
-// so it may deny moves and links that every input allows. Inside a mount
-// other than the root mount it can allow a move an input denies for a
-// right that input's rule on "/" grants as well (see the Refer section).
+// The handled access and scoped sets are unioned, except that
+// FSAccessRefer is left out where no rule of the result grants it and the
+// result handles another filesystem right ABIV1 knows, since the kernel
+// denies it there anyway. A right is granted for a path or port only where
+// every input permits it, by not handling it or through a rule; the result
+// carries the narrower of two rule paths, and a rule loses the rights its
+// ancestors in the result already grant. The result drops FSAccessRefer
+// where it would allow a move an input denies, so it may deny moves and
+// links that every input allows. Inside a mount other than the root mount
+// it can allow a move an input denies for a right that input's rule on "/"
+// grants as well (see the Refer section).
 // See the Handled access, Refer and Rule paths sections of the package
 // documentation.
 //
@@ -241,8 +244,39 @@ func pathLookups(path string, limit uint64) uint64 {
 // input denies, then drops the rights that ancestor rules already grant.
 // Only intersection may minimize: it assumes no rule path is a symlink, and
 // where one is, dropping its rights removes access rather than adding it.
+// Last, it stops listing refer where that changes nothing (see
+// dropImplicitRefer).
 func finishIntersect(result *Profile, inputs []*Profile) {
 	result.PathRules = minimizePathRules(dropUnsafeRefer(result.PathRules, inputs))
+	dropImplicitRefer(result)
+}
+
+// dropImplicitRefer removes FSAccessRefer from the handled filesystem rights
+// of an intersection result where no rule grants it and the result handles
+// another filesystem right that ABIV1 knows. The kernel denies refer in
+// every ruleset handling a filesystem right, listed or not (see
+// effectiveHandledFS), so listing it with no rule granting it denies
+// nothing more, and only makes the result need ABIV2. The other right must
+// be one ABIV1 knows, since Options.Downgrade keeps such a right at every
+// version and drops a newer one: a result handling refer and only
+// ioctl_dev besides would handle no filesystem right once downgraded to a
+// version without ioctl_dev, and allow the moves refer denied, where the
+// listed refer survives every version from ABIV2 on. Where refer is the only
+// handled filesystem right, listing it is what makes the ruleset handle
+// filesystem rights at all, so it stays as well.
+func dropImplicitRefer(result *Profile) {
+	if !slices.Contains(result.HandledAccessFS, FSAccessRefer) ||
+		rulesGrant(result.PathRules, FSAccessRefer) ||
+		!slices.ContainsFunc(result.HandledAccessFS, func(right FSAccessRight) bool {
+			return right != FSAccessRefer && fsAccessABI[right] == ABIV1
+		}) {
+		return
+	}
+
+	result.HandledAccessFS = slices.DeleteFunc(
+		result.HandledAccessFS,
+		func(right FSAccessRight) bool { return right == FSAccessRefer },
+	)
 }
 
 // finishUnion stops handling the rights that would deny a move or link an
@@ -415,8 +449,8 @@ func intersectRules[Rule any, Key, Right cmp.Ordered](
 	kind ruleKind[Rule, Key, Right], numbered rightBits[Right],
 	effective func(map[Key]uint32) func(Key) uint32,
 ) []Rule {
-	leftMasks := ruleMasks(numbered, kind.ruleMap(leftRules))
-	rightMasks := ruleMasks(numbered, kind.ruleMap(rightRules))
+	leftMasks := ruleMasks(numbered, kind, leftRules)
+	rightMasks := ruleMasks(numbered, kind, rightRules)
 	leftEffective, rightEffective := effective(leftMasks), effective(rightMasks)
 
 	keys := slices.Collect(maps.Keys(leftMasks))
@@ -533,17 +567,19 @@ func (b rightBits[Right]) rights(mask uint32) []Right {
 	return rights
 }
 
-// ruleMasks maps every rule key to the mask of the rights its rule grants.
-// Ancestor lookups then combine masks rather than lists: a profile whose
-// rules nest has every rule as an ancestor of the ones beneath it, and
-// gathering their rights as a list per rule allocated in the square of the
-// rules, six gigabytes for a thousand nested rules ValidateArtifact accepts.
-func ruleMasks[Key comparable, Right cmp.Ordered](
-	numbered rightBits[Right], rules map[Key][]Right,
+// ruleMasks maps every rule key to the mask of the rights its rule grants,
+// the last rule of a key winning, as in ruleMap. Ancestor lookups then
+// combine masks rather than lists: a profile whose rules nest has every
+// rule as an ancestor of the ones beneath it, and gathering their rights as
+// a list per rule allocated in the square of the rules, six gigabytes for a
+// thousand nested rules ValidateArtifact accepts. The masks are built from
+// the rules directly, with no map of rights in between.
+func ruleMasks[Rule any, Key, Right cmp.Ordered](
+	numbered rightBits[Right], kind ruleKind[Rule, Key, Right], rules []Rule,
 ) map[Key]uint32 {
 	masks := make(map[Key]uint32, len(rules))
-	for key, access := range rules {
-		masks[key] = numbered.mask(access)
+	for _, rule := range rules {
+		masks[kind.key(rule)] = numbered.mask(kind.access(rule))
 	}
 
 	return masks
@@ -867,7 +903,7 @@ func (k ruleKind[Rule, Key, Right]) ruleMap(rules []Rule) map[Key][]Right {
 // pathRuleMasks maps every rule path to the mask of the rights its rule
 // grants.
 func pathRuleMasks(rules []PathRule) map[string]uint32 {
-	return ruleMasks(fsBits, pathKind().ruleMap(rules))
+	return ruleMasks(fsBits, pathKind(), rules)
 }
 
 // Rule accessor and builder functions for PathRule.
@@ -932,11 +968,13 @@ func cleanPaths(rules []PathRule) []string {
 // the one given, which for a path rule is its cleaned path rather than the
 // path the kind reads. The result shares no slices with the input.
 //
-// The rights of a key are appended and deduplicated once at the end, so
-// that each rule costs its own rights: concatenating every rule into the
-// rights gathered so far cost an unvalidated profile, which Diff and
-// LoweredRulePaths read, time and memory in the square of its rules for one
-// path.
+// The rights of a key that more rules share are gathered with a set of the
+// ones seen, made on the first repeat of the key, so that each key holds
+// its distinct rights only and each rule costs its own: concatenating every
+// rule into the rights gathered so far cost an unvalidated profile, which
+// Diff and LoweredRulePaths read, time and memory in the square of its rules
+// for one path, and gathering every right of a key before deduplicating
+// them holds all of them at once.
 func mergeDuplicateRules[Rule any, Key cmp.Ordered, Right comparable](
 	rules []Rule, kind ruleKind[Rule, Key, Right], key func(int, Rule) Key,
 ) []Rule {
@@ -948,23 +986,39 @@ func mergeDuplicateRules[Rule any, Key cmp.Ordered, Right comparable](
 	keys := make([]Key, 0, len(rules))
 	rights := make([][]Right, 0, len(rules))
 
+	// The rights seen for each key, made on the first repeat of the key.
+	sets := make(map[int]map[Right]struct{})
+
 	for idx, rule := range rules {
 		ruleKey := key(idx, rule)
 
 		pos, found := seen[ruleKey]
 		if !found {
-			pos = len(keys)
-			seen[ruleKey] = pos
+			seen[ruleKey] = len(keys)
 			keys = append(keys, ruleKey)
-			rights = append(rights, nil)
+			rights = append(rights, merge.DeduplicateSlice(kind.access(rule)))
+
+			continue
 		}
 
-		rights[pos] = append(rights[pos], kind.access(rule)...)
+		set, found := sets[pos]
+		if !found {
+			set = toSet(rights[pos])
+			sets[pos] = set
+		}
+
+		for _, right := range kind.access(rule) {
+			if _, dup := set[right]; !dup {
+				set[right] = struct{}{}
+
+				rights[pos] = append(rights[pos], right)
+			}
+		}
 	}
 
 	result := make([]Rule, len(keys))
 	for idx, ruleKey := range keys {
-		result[idx] = kind.build(ruleKey, merge.DeduplicateSlice(rights[idx]))
+		result[idx] = kind.build(ruleKey, rights[idx])
 	}
 
 	return result

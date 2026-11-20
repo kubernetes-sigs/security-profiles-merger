@@ -243,7 +243,7 @@ func openRegular(path string, flags int) (*os.File, error) {
 	)
 	if err != nil {
 		if isSymlinkRefusal(err) {
-			return nil, errSymlinkRefused
+			return nil, symlinkOpenError(path, err)
 		}
 
 		if isNoDevice(err) {
@@ -285,7 +285,7 @@ func openSpecial(path string) (*os.File, error) {
 	)
 	if err != nil {
 		if isSymlinkRefusal(err) {
-			return nil, errSymlinkRefused
+			return nil, symlinkOpenError(path, err)
 		}
 
 		return nil, bareFileError(err)
@@ -310,6 +310,26 @@ func openSpecial(path string) (*os.File, error) {
 var errSymlinkRefused = fmt.Errorf(
 	"%w; write to its target, to stdout with -, or redirect stdout", errSymlinkOutput,
 )
+
+// symlinkOpenError returns the failure of an open with oNoFollow whose
+// error is one that flag reports for a symlink at path (see
+// isSymlinkRefusal). On Linux, macOS and OpenBSD that is ELOOP, which also
+// stands for a loop among the symlinks on the way to path, such as a
+// directory of the path that links to itself; that is no symlink being
+// refused, and is reported as the loop it is. path is looked at again to
+// tell the two apart, and only a symlink found there is refused as one.
+func symlinkOpenError(path string, err error) error {
+	info, statErr := os.Lstat(path)
+
+	switch {
+	case statErr == nil && info.Mode()&fs.ModeSymlink != 0:
+		return errSymlinkRefused
+	case statErr != nil:
+		return bareFileError(statErr)
+	default:
+		return bareFileError(err)
+	}
+}
 
 // tempPattern names the new file an output file is replaced through. It
 // does not carry the name of the output file: a name close to the longest

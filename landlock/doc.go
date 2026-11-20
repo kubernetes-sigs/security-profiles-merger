@@ -101,7 +101,12 @@ limitations under the License.
 // union handles refer whenever every input handles a filesystem right. The
 // union lists refer only when every input lists it, when a rule grants it,
 // or when the inputs share no other handled filesystem right; otherwise it
-// stays implicit, so the result needs no newer ABI than necessary.
+// stays implicit, so the result needs no newer ABI than necessary. An
+// intersection, which unions the handled sets, leaves refer out for the
+// same reason, but only where no rule of the result grants it and the
+// result handles another filesystem right that ABIV1 knows, which
+// [Options.Downgrade] keeps at every version, so that the denial outlasts a
+// downgrade.
 //
 // Refer inherits down the hierarchy like every other right, across mount
 // points too: the kernel collects the rights of both directories of a move
@@ -274,7 +279,8 @@ limitations under the License.
 // [ScopeRights] list every right this package knows with its version.
 //
 // An Intersect result can require up to the highest ABI version any input
-// needs, since it unions the handled sets and invents no right. Union can
+// needs, since it unions the handled sets and invents no right, and it
+// leaves refer out where listing it changes nothing (see Refer). Union can
 // raise the requirement to [ABIV2] in one case: every input handles
 // filesystem rights, but they share none, so listing refer is the only way
 // to keep it denied. Kernels with ABI version 1 know no refer right and

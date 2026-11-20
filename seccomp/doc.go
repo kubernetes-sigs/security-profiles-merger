@@ -510,11 +510,12 @@ limitations under the License.
 // and it refuses SECCOMP_FILTER_FLAG_TSYNC next to that flag, which crun
 // sets for any listenerPath while runc does not. [Validate] accepts both,
 // since runc loads TSYNC next to a listenerPath and the merges settle the
-// listener flag, and [ValidateStrict] names them as a portability rule
-// ([ErrNotifyUnsupported]). A result in which no entry notifies drops the
-// listener flag, which a merge can produce even from inputs that notify,
-// for example where another input denies the syscall by default, and a
-// result with a listener drops TSYNC (see the Flags section).
+// listener flag, and [ValidateArtifact] and [ValidateStrict] refuse both,
+// as they refuse every listener setting ([ErrListenerNotAllowed]). A
+// result in which no entry notifies drops the listener flag, which a merge
+// can produce even from inputs that notify, for example where another
+// input denies the syscall by default, and a result with a listener drops
+// TSYNC (see the Flags section).
 //
 // # Single profiles
 //

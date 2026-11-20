@@ -827,13 +827,43 @@ func assertStrictOrdering(t *testing.T, profile *specs.LinuxSeccomp, artifactErr
 	}
 }
 
+// assertMixedByteOrder runs ValidateArtifact and ValidateStrict on a profile
+// whose architectures are left as drawn: the ordering assertStrictOrdering
+// checks holds, and where the list holds an architecture of another byte
+// order than the native one, both report it with ErrMixedByteOrder, unless
+// the report left failures out.
+func assertMixedByteOrder(t *testing.T, profile *specs.LinuxSeccomp) {
+	t.Helper()
+
+	artifactErr := seccomp.ValidateArtifact(profile)
+	assertStrictOrdering(t, profile, artifactErr)
+
+	native, known := seccomp.NativeArchitecture()
+	if !known || !slices.ContainsFunc(profile.Architectures, func(arch specs.Arch) bool {
+		return seccomp.BigEndian(arch) != seccomp.BigEndian(native)
+	}) {
+		return
+	}
+
+	for name, err := range map[string]error{
+		"ValidateArtifact": artifactErr,
+		"ValidateStrict":   seccomp.ValidateStrict(profile),
+	} {
+		if !errors.Is(err, seccomp.ErrMixedByteOrder) && !errors.Is(err, seccomp.ErrMoreProblems) {
+			t.Fatalf("%s of %v = %v, want ErrMixedByteOrder", name, profile.Architectures, err)
+		}
+	}
+}
+
 // FuzzValidateArtifact fuzzes the check a runtime applies to a profile it
 // did not author, which is the entry point KEP-6061 points at untrusted
 // input. Beyond crashes and hangs it pins the contract callers rely on: a
 // profile ValidateArtifact accepts is one Validate accepts, carries no
 // listener settings and no SCMP_ACT_NOTIFY, and merges without error into a
 // result a runtime can load; and a profile ValidateStrict accepts is one
-// ValidateArtifact accepts, since the strict checks add to the artifact ones.
+// ValidateArtifact accepts, since the strict checks add to the artifact ones,
+// for the architectures as drawn as well as for those of the native byte
+// order alone.
 func FuzzValidateArtifact(f *testing.F) {
 	f.Add(
 		uint8(4), uint8(8), uint8(8),
@@ -884,6 +914,31 @@ func FuzzValidateArtifact(f *testing.F) {
 		uint32(0), uint8(0),
 		uint16(1), uint16(13), uint16(42),
 	)
+	// x86_64 beside s390x, of the other byte order, with bit 31 left clear,
+	// so that the merge path drops s390x, and set, so that it keeps it.
+	f.Add(
+		uint8(4), uint8(8), uint8(8),
+		"read", "write",
+		false, false, uint64(0), uint64(0),
+		uint32(0x8002), uint8(0),
+		uint16(0), uint16(0), uint16(0),
+	)
+	f.Add(
+		uint8(4), uint8(8), uint8(3),
+		"read", "read",
+		true, false, uint64(1<<40), uint64(0),
+		uint32(0x80008003), uint8(0x01),
+		uint16(0), uint16(0), uint16(0),
+	)
+	// ppc64 and ppc64le, one of each byte order, so that one of them is
+	// the other byte order whichever the node has.
+	f.Add(
+		uint8(4), uint8(8), uint8(8),
+		"read", "write",
+		false, false, uint64(0), uint64(0),
+		uint32(0x3000), uint8(0),
+		uint16(0), uint16(0), uint16(0),
+	)
 
 	f.Fuzz(func(
 		t *testing.T,
@@ -901,6 +956,12 @@ func FuzzValidateArtifact(f *testing.F) {
 			archMask, flagMask,
 			defErrno, errno1, errno2,
 		)
+
+		// The strict checks see the architectures as drawn too, before
+		// those of the other byte order are dropped, so that the fuzzer
+		// reaches ErrMixedByteOrder and the checks ValidateStrict runs next
+		// to it however the mask is drawn.
+		assertMixedByteOrder(t, profile)
 
 		profile.Architectures = nativeByteOrder(profile.Architectures, archMask)
 
