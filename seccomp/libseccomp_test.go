@@ -1497,3 +1497,81 @@ func TestModelMatchesLibseccompForUnmatchedCall(t *testing.T) {
 			got, specs.ActAllow, pfc(t, profile))
 	}
 }
+
+// TestLibseccompKeepsSiblingsInAddOrder pins the reading behind Diff
+// comparing the order of rules libseccomp keeps as added: conditions on one
+// argument against one value with a different operator of one class or a
+// different mask decide a call by whichever rule comes first, so the same
+// rules in the other order load a different filter, which Diff reports.
+func TestLibseccompKeepsSiblingsInAddOrder(t *testing.T) {
+	t.Parallel()
+	requireNativeArch(t)
+
+	const wideMask = 1<<32 | 2
+
+	number := syscallNumbers(t, []string{"read"})["read"]
+
+	for name, testCase := range map[string]struct {
+		entries []specs.LinuxSyscall
+		call    []uint64
+	}{
+		"wide masks": {
+			entries: []specs.LinuxSyscall{
+				filtered("read", specs.ActLog,
+					arg(1, specs.OpNotEqual, wideMask), masked(0, wideMask, 0)),
+				filtered("read", specs.ActKill, masked(0, 1, 1)),
+			},
+			call: []uint64{1, 0},
+		},
+		"masked next to an equality": {
+			entries: []specs.LinuxSyscall{
+				filtered("read", specs.ActLog, masked(0, 0xF0, 0x10)),
+				filtered("read", specs.ActKill, arg(0, specs.OpEqualTo, 0x11)),
+			},
+			call: []uint64{0x11},
+		},
+		"less than next to less or equal": {
+			entries: []specs.LinuxSyscall{
+				filtered("read", specs.ActKill, arg(0, specs.OpLessThan, 5)),
+				filtered("read", specs.ActLog, arg(0, specs.OpLessEqual, 5)),
+			},
+			call: []uint64{3},
+		},
+		"greater than next to greater or equal": {
+			entries: []specs.LinuxSyscall{
+				filtered("read", specs.ActKill, arg(0, specs.OpGreaterThan, 5)),
+				filtered("read", specs.ActLog, arg(0, specs.OpGreaterEqual, 5)),
+			},
+			call: []uint64{6},
+		},
+	} {
+		reversed := slices.Clone(testCase.entries)
+		slices.Reverse(reversed)
+
+		forward := profileOf(specs.ActErrno, testCase.entries...)
+		backward := profileOf(specs.ActErrno, reversed...)
+
+		forwardProg, err := compilers.compile(forward)
+		if err != nil {
+			t.Fatalf("%s: compile: %v", name, err)
+		}
+
+		backwardProg, err := compilers.compile(backward)
+		if err != nil {
+			t.Fatalf("%s: compile reversed: %v", name, err)
+		}
+
+		forwardAction, _ := runProgram(t, forwardProg, number, testCase.call)
+		backwardAction, _ := runProgram(t, backwardProg, number, testCase.call)
+
+		if forwardAction == backwardAction {
+			t.Errorf("%s: read%v is %s in either order, want the order to decide it",
+				name, testCase.call, forwardAction)
+		}
+
+		diff, err := seccomp.Diff(forward, backward)
+		if err != nil || diff.Equal {
+			t.Errorf("%s: Diff = %v, %v, want a change", name, diff, err)
+		}
+	}
+}

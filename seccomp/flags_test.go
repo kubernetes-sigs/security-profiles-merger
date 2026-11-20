@@ -155,6 +155,17 @@ func TestMergeFlagsByPolarity(t *testing.T) {
 			left := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno, Flags: testCase.left}
 			right := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno, Flags: testCase.right}
 
+			// The listener flag needs a listener and a rule that notifies,
+			// and Intersect a listener named by its first input.
+			if slices.Contains(testCase.left, wait) || slices.Contains(testCase.right, wait) {
+				for _, profile := range []*specs.LinuxSeccomp{left, right} {
+					profile.ListenerPath = listenerSock
+					profile.Syscalls = []specs.LinuxSyscall{
+						{Names: []string{"ioctl"}, Action: specs.ActNotify},
+					}
+				}
+			}
+
 			intersected, err := seccomp.Intersect(left, right)
 			if err != nil {
 				t.Fatalf("intersect: %v", err)
@@ -218,46 +229,94 @@ func loadedWithoutListener(flags []specs.LinuxSeccompFlag) []specs.LinuxSeccompF
 	})
 }
 
+// tsyncFlag is SECCOMP_FILTER_FLAG_TSYNC, which specs-go has no constant
+// for.
+const tsyncFlag = specs.LinuxSeccompFlag("SECCOMP_FILTER_FLAG_TSYNC")
+
+// flagProfiles returns two profiles setting the flag lists. One setting the
+// listener flag notifies, and both then name the listener, since Intersect
+// takes the listener from its first input only.
+func flagProfiles(left, right []specs.LinuxSeccompFlag) (*specs.LinuxSeccomp, *specs.LinuxSeccomp) {
+	listener := slices.Contains(left, specs.LinuxSeccompFlagWaitKillableRecv) ||
+		slices.Contains(right, specs.LinuxSeccompFlagWaitKillableRecv)
+
+	profileFor := func(flags []specs.LinuxSeccompFlag) *specs.LinuxSeccomp {
+		profile := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno, Flags: flags}
+
+		if slices.Contains(flags, specs.LinuxSeccompFlagWaitKillableRecv) {
+			profile.Syscalls = []specs.LinuxSyscall{
+				{Names: []string{"ioctl"}, Action: specs.ActNotify},
+			}
+		}
+
+		if listener {
+			profile.ListenerPath = listenerSock
+		}
+
+		return profile
+	}
+
+	return profileFor(left), profileFor(right)
+}
+
 // TestMergeFlagsCommuteAsLoaded merges every pair of flag lists in both
 // orders and compares the flags a runtime sets for the two results. Only
 // the listener flag may differ, since it follows the first profile. A rule
 // that spells the runtime default by what else the result holds would let
-// that flag decide SECCOMP_FILTER_FLAG_SPEC_ALLOW as well.
+// that flag decide SECCOMP_FILTER_FLAG_SPEC_ALLOW as well. Every result
+// must load, which takes dropping SECCOMP_FILTER_FLAG_TSYNC next to the
+// listener.
 func TestMergeFlagsCommuteAsLoaded(t *testing.T) {
 	t.Parallel()
 
-	mergedFlags := func(
-		mergeFn func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error),
-		left, right []specs.LinuxSeccompFlag,
-	) []specs.LinuxSeccompFlag {
-		result, err := mergeFn(
-			&specs.LinuxSeccomp{DefaultAction: specs.ActErrno, Flags: left},
-			&specs.LinuxSeccomp{DefaultAction: specs.ActErrno, Flags: right},
-		)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		return result.Flags
-	}
-
 	lists := everyFlagList()
 
-	for _, mergeFn := range []func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error){
-		seccomp.Intersect, seccomp.Union,
+	for name, mergeFn := range map[string]func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error){
+		"Intersect": seccomp.Intersect, "Union": seccomp.Union,
 	} {
 		for _, left := range lists {
 			for _, right := range lists {
-				forward := mergedFlags(mergeFn, left, right)
-				backward := mergedFlags(mergeFn, right, left)
-
-				if !slices.Equal(loadedWithoutListener(forward), loadedWithoutListener(backward)) {
-					t.Errorf(
-						"%#v and %#v merge to %#v one way and %#v the other",
-						left, right, forward, backward,
-					)
-				}
+				checkFlagsCommute(t, name, mergeFn, left, right)
 			}
+		}
+	}
+}
+
+// checkFlagsCommute merges profiles setting two flag lists in both orders
+// (see flagProfiles), compares the flags a runtime sets for the results,
+// and checks that neither result holds a flag next to the listener settings
+// that a runtime refuses (see seccomp.ValidateStrict).
+func checkFlagsCommute(
+	t *testing.T, name string,
+	mergeFn func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error),
+	left, right []specs.LinuxSeccompFlag,
+) {
+	t.Helper()
+
+	forward, err := mergeFn(flagProfiles(left, right))
+	if err != nil {
+		t.Fatalf("%s of %#v and %#v: %v", name, left, right, err)
+	}
+
+	backward, err := mergeFn(flagProfiles(right, left))
+	if err != nil {
+		t.Fatalf("%s of %#v and %#v: %v", name, right, left, err)
+	}
+
+	if !slices.Equal(loadedWithoutListener(forward.Flags), loadedWithoutListener(backward.Flags)) {
+		t.Errorf("%s: %#v and %#v merge to %#v one way and %#v the other",
+			name, left, right, forward.Flags, backward.Flags)
+	}
+
+	for _, result := range []*specs.LinuxSeccomp{forward, backward} {
+		notifies := slices.ContainsFunc(result.Syscalls, func(entry specs.LinuxSyscall) bool {
+			return entry.Action == specs.ActNotify
+		})
+
+		if result.ListenerPath != "" && slices.Contains(result.Flags, tsyncFlag) ||
+			!notifies && slices.Contains(result.Flags, specs.LinuxSeccompFlagWaitKillableRecv) {
+			t.Errorf("%s of %#v and %#v merges into %s, which a runtime refuses",
+				name, left, right, seccomp.FormatProfile(result))
 		}
 	}
 }
@@ -277,14 +336,6 @@ func TestMergeDropsTsyncNextToListener(t *testing.T) {
 		DefaultAction: specs.ActErrno,
 		Flags:         flags{tsync},
 	}
-	// Intersect takes the listener from its first input only, so where the
-	// flag comes first, that input names the listener too, while the other
-	// one notifies.
-	withTsyncAndListener := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Flags:         flags{tsync},
-		ListenerPath:  listenerSock,
-	}
 	withListener := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
 		ListenerPath:  listenerSock,
@@ -292,6 +343,7 @@ func TestMergeDropsTsyncNextToListener(t *testing.T) {
 			{Names: []string{"ioctl"}, Action: specs.ActNotify},
 		},
 	}
+
 	withBoth := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
 		Flags:         flags{specs.LinuxSeccompFlagLog, tsync},
@@ -300,25 +352,39 @@ func TestMergeDropsTsyncNextToListener(t *testing.T) {
 
 	for _, testCase := range []struct {
 		name   string
+		merge  func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error)
 		inputs []*specs.LinuxSeccomp
 		want   flags
 	}{
 		// The list the flag was alone in stays set, so that the result
 		// does not turn SPEC_ALLOW on.
 		{
-			name:   "flag first",
-			inputs: []*specs.LinuxSeccomp{withTsyncAndListener, withListener},
+			name:   "listener first",
+			merge:  seccomp.Intersect,
+			inputs: []*specs.LinuxSeccomp{withListener, withTsync},
 			want:   flags{},
 		},
-		{name: "listener first", inputs: []*specs.LinuxSeccomp{withListener, withTsync}, want: flags{}},
+		{
+			// Union keeps the flag only where every input sets it.
+			name:   "both set it, one names the listener",
+			merge:  seccomp.Union,
+			inputs: []*specs.LinuxSeccomp{withTsync, withBoth},
+			want:   flags{},
+		},
 		{
 			name:   "one profile with both",
+			merge:  seccomp.Intersect,
 			inputs: []*specs.LinuxSeccomp{withBoth},
 			want:   flags{specs.LinuxSeccompFlagLog},
 		},
-		{name: "no listener", inputs: []*specs.LinuxSeccomp{withTsync}, want: flags{tsync}},
+		{
+			name:   "no listener",
+			merge:  seccomp.Intersect,
+			inputs: []*specs.LinuxSeccomp{withTsync},
+			want:   flags{tsync},
+		},
 	} {
-		result, err := seccomp.Intersect(testCase.inputs...)
+		result, err := testCase.merge(testCase.inputs...)
 		if err != nil {
 			t.Fatalf("%s: unexpected error: %v", testCase.name, err)
 		}
@@ -326,6 +392,91 @@ func TestMergeDropsTsyncNextToListener(t *testing.T) {
 		if !sameFlags(result.Flags, testCase.want) {
 			t.Errorf("%s: flags = %#v, want %#v", testCase.name, result.Flags, testCase.want)
 		}
+	}
+
+	// runc loads a profile setting both, crun does not, so only the
+	// portability rule of ValidateStrict names it.
+	err := seccomp.Validate(withBoth)
+	if err != nil {
+		t.Errorf("Validate(TSYNC and a listener) = %v, want nil", err)
+	}
+
+	err = seccomp.ValidateStrict(withBoth)
+	if !errors.Is(err, seccomp.ErrNotifyUnsupported) {
+		t.Errorf("ValidateStrict(TSYNC and a listener) = %v, want ErrNotifyUnsupported", err)
+	}
+}
+
+// TestMergeDropsListenerFlagWithoutNotify covers a result in which no entry
+// notifies although the input the listener came from did: runc passes
+// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV without creating the listener the
+// kernel requires for it, so the result would not load.
+func TestMergeDropsListenerFlagWithoutNotify(t *testing.T) {
+	t.Parallel()
+
+	baseline := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActAllow,
+		ListenerPath:  "/run/l.sock",
+		Flags:         []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagWaitKillableRecv},
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{"mount"}, Action: specs.ActNotify},
+		},
+	}
+	artifact := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{"exit_group", "read", "write"}, Action: specs.ActAllow},
+		},
+	}
+
+	result, err := seccomp.Intersect(baseline, artifact)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if slices.Contains(result.Flags, specs.LinuxSeccompFlagWaitKillableRecv) {
+		t.Errorf("flags = %#v, want no listener flag without a notify rule", result.Flags)
+	}
+
+	// The list the flag was alone in stays set, so that the result does not
+	// turn SPEC_ALLOW on.
+	if !sameFlags(result.Flags, []specs.LinuxSeccompFlag{}) {
+		t.Errorf("flags = %#v, want an empty list", result.Flags)
+	}
+
+	err = seccomp.Validate(result)
+	if err != nil {
+		t.Errorf("Validate(result) = %v", err)
+	}
+
+	// Where a notify rule survives, so does the flag.
+	result, err = seccomp.Union(baseline, artifact)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !slices.Contains(result.Flags, specs.LinuxSeccompFlagWaitKillableRecv) {
+		t.Errorf("union flags = %#v, want the listener flag", result.Flags)
+	}
+
+	// An input setting the flag without a notify rule merges, into a
+	// result without the flag, and only the portability rule of
+	// ValidateStrict names it.
+	withoutNotify := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		ListenerPath:  "/run/l.sock",
+		Flags:         []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagWaitKillableRecv},
+	}
+
+	result, err = seccomp.Intersect(withoutNotify)
+	if err != nil || slices.Contains(result.Flags, specs.LinuxSeccompFlagWaitKillableRecv) {
+		t.Errorf("Intersect(flag without notify) = %v, %v, want no listener flag",
+			seccomp.FormatProfile(result), err)
+	}
+
+	err = seccomp.ValidateStrict(withoutNotify)
+	if !errors.Is(err, seccomp.ErrNotifyUnsupported) {
+		t.Errorf("ValidateStrict(flag without notify) = %v, want ErrNotifyUnsupported", err)
 	}
 }
 

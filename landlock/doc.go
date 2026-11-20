@@ -34,9 +34,10 @@ limitations under the License.
 //
 // [UnmarshalStrict] decodes a profile and refuses what encoding/json accepts
 // silently: members no field reads, members that name a field only ignoring
-// case, members repeated within one object, invalid UTF-8 and data behind
-// the profile. Decode an artifact with it and validate the result with
-// [ValidateArtifact].
+// case, members repeated within one object, a network rule without its port
+// or a path rule without its path, invalid UTF-8, data behind the profile,
+// and a document that is not a JSON object. Decode an artifact with it and
+// validate the result with [ValidateArtifact].
 //
 // # Validation
 //
@@ -232,6 +233,21 @@ limitations under the License.
 // that has any, or skip the merge and enforce the rulesets as separate
 // Landlock layers (one landlock_restrict_self call each), which the kernel
 // checks on the resolved files rather than on path strings.
+//
+// Refusing a result with lowered rule paths makes the textual assumption
+// safe for the access a rule grants, but not for moves and links, which the
+// kernel decides by comparing the rights of two directories. The merge
+// decides where refer is safe by comparing path strings (see the Refer
+// section), so two rule paths it reads as unrelated can be one directory to
+// the kernel. With a baseline handling refer, write_file and make_reg and
+// granting /p and /q refer and make_reg and /y write_file, and an artifact
+// granting /p and /q refer and make_reg, Intersect grants /p and /q refer
+// and make_reg, and LoweredRulePaths reports nothing. Where /q is a
+// symlink or a bind mount to /y, the baseline denies moving a file from /p
+// to /q, since the file would gain write_file there, and the result allows
+// it. A caller that cannot rule out such paths should open the rule paths
+// of a result granting refer without following symlinks or crossing mounts,
+// or enforce the inputs as separate layers.
 //
 // Stacked layers are not quite the intersection, though: they can deny
 // more. Once some layer of the stack handles a filesystem right, the kernel

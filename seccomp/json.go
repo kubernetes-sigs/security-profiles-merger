@@ -19,6 +19,7 @@ package seccomp
 import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"sigs.k8s.io/security-profiles-merger/internal/seccompjson"
 	"sigs.k8s.io/security-profiles-merger/internal/strictjson"
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
@@ -42,18 +43,28 @@ var (
 // UnmarshalStrict decodes a seccomp profile and rejects what encoding/json
 // accepts silently: members the profile type has no field for, members that
 // name a field only ignoring case, members repeated within one object, bytes
-// that are not valid UTF-8, data behind the profile, and a document that is
-// not a JSON object, such as null ([ErrNotAnObject]). Its error messages are
-// bounded in length, however long the literals the document quotes.
+// that are not valid UTF-8, data behind the profile, an argument condition
+// without its index or op, or with a null one (spm.ErrMissingField),
+// and a document that is not a JSON object, such as null
+// ([ErrNotAnObject]). Its error messages are bounded in length, however long
+// the literals the document quotes.
 //
 // Each loses something a reader of an untrusted profile must not lose. A
 // misspelled or unknown member drops the rule it was meant to carry. A
-// repeated member is read as its last occurrence here and as its first
-// elsewhere, so a scanner and the runtime can read one document as two
-// profiles. A byte that is not valid UTF-8 is replaced with U+FFFD, so
-// names that differ only there decode alike and merge into one rule. Use
-// this instead of json.Unmarshal for an artifact, and validate the result
-// with ValidateArtifact afterwards.
+// repeated member is decoded by json.Unmarshal into what its earlier
+// occurrence filled, so a later scalar or array replaces the earlier one
+// while a later object merges into it, keeping the members of both; other
+// parsers keep the first or the last occurrence, so a scanner and the
+// runtime can read one document as two profiles, and the merged reading
+// can allow more than either. A byte that is not valid UTF-8 is replaced
+// with U+FFFD, so names that differ only there decode alike and merge into
+// one rule. A condition without its index or op decodes as a condition on
+// argument 0 or without an operator, which the document never named:
+// {"value":5,"op":"SCMP_CMP_EQ"} reads as a0 == 5. Its value and valueTwo
+// may be left out, as producers writing them with omitempty do, since 0 is
+// what they would say. Use this
+// instead of json.Unmarshal for an artifact, and validate the result with
+// ValidateArtifact afterwards.
 //
 // The document is decoded into a fresh profile, which replaces the one
 // given only when decoding succeeds: a member the document omits is zero in
@@ -64,5 +75,5 @@ func UnmarshalStrict(data []byte, profile *specs.LinuxSeccomp) error {
 		return ErrNilProfile
 	}
 
-	return strictjson.Unmarshal(data, profile)
+	return strictjson.Unmarshal(data, profile, seccompjson.Required)
 }

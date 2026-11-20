@@ -42,7 +42,7 @@ also passes `Validate`.
 
 | Level | For whom | Called by |
 |-------|----------|-----------|
-| `Validate` | Any merge input: what a runtime needs to load the profile at all. The runtime defaults fail the other two levels, and both reject a seccomp notification listener. A baseline needs `Diff(baseline, Intersect(baseline))` as well, see [the runtime flow](integration.md#the-runtime-flow) | The runtime at config load; every `Intersect` and `Union`, on each input; `spm validate`; `spm merge --validate default` |
+| `Validate` | Any merge input: what a runtime needs to load the profile at all. The runtime defaults fail the other two levels, and both reject a seccomp notification listener. A seccomp or AppArmor baseline needs `Diff(baseline, Intersect(baseline))` as well, see [the runtime flow](integration.md#the-runtime-flow); a Landlock one does not, since `Intersect` of one Landlock profile drops rights an ancestor rule grants | The runtime at config load; every `Intersect` and `Union`, on each input; `spm validate`; `spm merge --validate default` |
 | `ValidateArtifact` | The artifact: `Validate` plus the limits and what an untrusted author must not control | The runtime at pull time, after `UnmarshalStrict`; `spm validate --artifact`; `spm merge --validate artifact` |
 | `ValidateStrict` | A profile a person writes by hand, as a lint: `ValidateArtifact` plus what is likely a mistake, such as a duplicate | Tooling and review of hand-written profiles; `spm validate --strict`; `spm merge --validate strict` |
 
@@ -57,9 +57,13 @@ and bounds its own work instead; see [Limits](integration.md#limits).
 for, whose methods are the functions of the same name for that node.
 `seccomp.Options` names the native architecture, which the merges, `Diff`
 and the two stricter levels depend on. Its zero value is a node whose
-architecture is not known, for which only the architectures a profile lists
-count, so it is not what the plain functions assume: `seccomp.NativeHost`
-is. Name the node's architecture whenever it is known.
+architecture is not known, which the merges and the stricter levels read as
+possibly any architecture Go runs on, 32-bit and multiplexing ones included:
+the safe choice for an unknown node, whose result loads safely wherever it
+runs at the cost of rules a known 64-bit node would keep. `Diff` implies no
+architecture then and compares the lists as written. The zero value is not
+what the plain functions assume: `seccomp.NativeHost` is. Name the node's
+architecture whenever it is known.
 `landlock.Options` names the kernel's ABI version and adds its check to
 every level; it has no zero value to use, since 0 names no version.
 
@@ -109,12 +113,12 @@ from any of the three packages.
 | `ErrNilProfile` | Every function that takes a profile and returns an error | A nil profile was given; a merge or `Diff` wraps it in an `InputError` |
 | `ErrMoreProblems` | Every validator, and every merge through its `InputError` | The report left failures out; see [reading a validation error](integration.md#reading-a-validation-error) |
 | `ErrBudgetExceeded` | `apparmor.Intersect`; `landlock.Intersect` and `landlock.Union` | The merge ran past a bound on its own work, not wrapped in an `InputError`; see [Limits](integration.md#limits) |
-| `ErrEmptyPath` | `apparmor`, `landlock`: every validator and merge | A path is the empty string |
+| `ErrEmptyPath` | `apparmor`, `landlock`: every validator and merge | A path is the empty string, or for `landlock` one that cleans to `.`, such as `.` or `./` |
 | `ErrNulInPath` | `apparmor`: `ValidateArtifact` and `ValidateStrict`; `landlock`: every validator and merge | A path holds a NUL byte, or in `apparmor` an escape denoting one |
 | `ErrRelativePath` | `apparmor`, `landlock`: `ValidateArtifact` and `ValidateStrict` | A path does not start with `/` |
 | `ErrPathTooLong` | `apparmor`, `landlock`: every validator and merge | A path is longer than `MaxPathLen`. It is checked before the path is scanned; only the empty-path check and the artifact limits of `ValidateArtifact` and `ValidateStrict` run before it |
 | `ErrDuplicateKey`, `ErrUnknownField`, `ErrMisspelledField`, `ErrInvalidUTF8`, `ErrUnexpectedData`, `ErrNotAnObject` | `UnmarshalStrict` of every package | See [Strict decoding](#strict-decoding) |
-| `ErrMissingField` | `landlock.UnmarshalStrict` | See [Strict decoding](#strict-decoding) |
+| `ErrMissingField` | `seccomp.UnmarshalStrict` and `landlock.UnmarshalStrict` | See [Strict decoding](#strict-decoding) |
 
 ### Strict decoding
 
@@ -125,10 +129,10 @@ artifact and the runtime that loads it:
 
 | Sentinel | The document holds | Why it is refused |
 |----------|--------------------|-------------------|
-| `ErrDuplicateKey` | A member repeated within one object, compared ignoring case as `encoding/json` matches members to fields | `encoding/json` keeps the last occurrence, other parsers the first |
+| `ErrDuplicateKey` | A member repeated within one object, compared ignoring case as `encoding/json` matches members to fields | `encoding/json` decodes each occurrence into what the one before it filled: a later scalar or array replaces the earlier one, a later object merges into it member by member, so the result can allow more than either occurrence. Other parsers keep the first or the last occurrence |
 | `ErrUnknownField` | A member the profile type has no field for | `encoding/json` drops it, so a misspelled member loses its rule and a member of a newer format is lost in the permissive direction |
 | `ErrMisspelledField` | A member that names a field only ignoring case, such as `"Syscalls"` or `"ſyscalls"` (U+017F) for `syscalls` | `encoding/json` fills the field from it, a reader comparing names exactly drops it |
-| `ErrMissingField` | No `port` in a Landlock network rule, or a null one | `encoding/json` decodes port 0, the port a socket binds to for an ephemeral one, so the rule would grant that. `json.Unmarshal` keeps reading it that way, which a producer writing the port with `omitempty` relies on |
+| `ErrMissingField` | No `index` or `op` in a seccomp argument condition (its `value` and `valueTwo` may be left out, as producers writing them with `omitempty` do), no `path` in a Landlock path rule or no `port` in a Landlock network rule, or a null one, and a null condition or rule | `encoding/json` decodes the zero value, which is a value of its own: `{"value":5,"op":"SCMP_CMP_EQ"}` reads as `a0 == 5`, and port 0 is the port a socket binds to for an ephemeral one, so the rule would grant that. `json.Unmarshal` keeps reading it that way, which a producer writing the port with `omitempty` relies on |
 | `ErrInvalidUTF8` | A byte that is not valid UTF-8, or a `\u` escape spelling half a surrogate pair | `encoding/json` replaces both with U+FFFD, so names that differ only there decode alike and merge into one rule |
 | `ErrUnexpectedData` | Anything but whitespace after the profile | A second value would be dropped |
 | `ErrNotAnObject` | A document whose value is not a JSON object: `null`, an array, a string, a number or a boolean | `encoding/json` decodes `null` as nothing at all, an empty profile, and refuses the others with a type error that names no sentinel |
@@ -162,7 +166,7 @@ import "sigs.k8s.io/security-profiles-merger/seccomp"
 | `Diff` | Structured diff by the rules a runtime loads, with the running program's architecture implied |
 | `Options.Intersect`, `Options.Union`, `Options.Diff`, `Options.ValidateArtifact`, `Options.ValidateStrict` | The functions of the same name for the node `Options.Arch` names: one whose architecture is not known for the zero value, the running program's for `NativeHost`, which the plain functions assume, or another node's. An unknown `Arch` is `ErrUnknownArch` |
 | `Validate` | What a runtime needs to load the profile at all; what the merges run on every input |
-| `ValidateArtifact` | `Validate` plus what an artifact needs to load on every runtime: the [limits](#limits), no notify or listener settings, no rules of one syscall with different results outside a safe shape, on the syscall or on a multiplexer that carries it. It does not promise an exact merge: same-result rules outside a safe shape pass it and are still settled (see [Conflicting rules](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Conflicting_rules)) |
+| `ValidateArtifact` | `Validate` plus what an artifact needs to load on every runtime: the [limits](#limits), no notify or listener settings, no rules of one syscall with different results outside a safe shape, on the syscall or on a multiplexer that carries it, and no filter in which libseccomp loses the rules of an architecture as written. It does not promise an exact merge: same-result rules outside a safe shape pass it and are still settled (see [Conflicting rules](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Conflicting_rules)) |
 | `ValidateStrict` | `ValidateArtifact` plus duplicate syscall names and `valueTwo` on operators that ignore it |
 | `UnmarshalStrict` | Decode a profile, refusing what `encoding/json` accepts silently (see [Strict decoding](#strict-decoding)) |
 | `Marshal` | Encode a profile as `json.Marshal` does, except that an empty `Flags` list is written as `"flags": []`, which a runtime reads differently from no list ([Flags](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Flags)) |
@@ -198,9 +202,9 @@ returns a non-nil diff whenever its error is nil.
 | `ErrArgIndexOutOfRange` | `Validate` and up | An argument index above 5 |
 | `ErrUnknownArch`, `ErrUnknownFlag` | `Validate` and up; `ErrUnknownArch` also every `Options` method, for `Options.Arch`, without an `InputError` | An architecture or flag this package does not know |
 | `ErrUnsupportedSpecField` | `Validate` and up, `Marshal` | A field of the runtime-spec types this package does not read, which a program built against a newer runtime-spec can set and the merge would drop |
-| `ErrNotifyUnsupported` | `Validate` and up | `SCMP_ACT_NOTIFY` as the default action or on `write`, which runc refuses |
+| `ErrNotifyUnsupported` | `Validate` and up | `SCMP_ACT_NOTIFY` as the default action or on `write`, which runc refuses. `ValidateStrict` also returns it, as a portability rule, for `SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV` without an entry that notifies and for `SECCOMP_FILTER_FLAG_TSYNC` next to a `listenerPath`, which crun refuses; the merges accept both and drop the flag from a result that cannot load it |
 | `ErrNotifyWithoutListener` | `Validate` and up; `Intersect`, `Union` on their result | `SCMP_ACT_NOTIFY` without a `listenerPath`, which runc refuses |
-| `ErrLostRules` | `Union`; `Intersect` where it cannot drop an architecture | The result would hold rules libseccomp loses on a covered architecture, testing a syscall the architecture lacks first ([Architectures](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Architectures)) |
+| `ErrLostRules` | `Union`; `Intersect` where it cannot drop an architecture; `ValidateArtifact`, `ValidateStrict` | The result, or for the validators the profile as a runtime loads it unmerged, would hold rules libseccomp loses on a covered architecture, testing a syscall the architecture lacks first ([Architectures](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Architectures)) |
 | `ErrConflictingListener` | `Intersect`, `Union` | Two inputs name listeners the merge cannot reconcile; see [seccomp: the listener](integration.md#seccomp-the-listener). Wrapped in an `InputError` naming the later input |
 | `ErrDuplicateArch`, `ErrDuplicateFlag` | `ValidateArtifact`, `ValidateStrict` | An architecture or flag listed twice |
 | `ErrErrnoOutOfRange` | `ValidateArtifact`, `ValidateStrict` | An errno above 4095 on `SCMP_ACT_ERRNO` or `SCMP_ACT_TRACE` |
@@ -431,9 +435,12 @@ detail.
   `Diff` compares both alike, so `Diff(p, Intersect(p))` is equal unless `p`
   holds patterns that match nothing.
   ([Nil and empty sections](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#hdr-Nil_and_empty_sections))
-- Matching paths against patterns has a pair budget and a work budget. Past
-  either, `Intersect` fails with `ErrBudgetExceeded` when the result may lose
-  access, which is when neither input is kept whole, and `Union` keeps every
+- Matching paths against patterns has a pair budget and a work budget, which
+  count, as matching goes, the comparisons the prefix index lets through and
+  only those each merge makes, so patterns rooted in many directories cost
+  far less than patterns sharing one prefix. Past either, `Intersect` fails
+  with `ErrBudgetExceeded` when the result may lose access, which is when
+  neither input is kept whole, and `Union` keeps every
   path with its own permissions, which permits the same. One call compiles at
   most four times `MaxArtifactPatternBytes` of patterns, in the order of its
   inputs, so a baseline of up to twice that limit and two accepted artifacts
@@ -511,7 +518,7 @@ its budget, and otherwise only on the rows that name it and on
 | `ErrDuplicateRight` | `ValidateStrict` | A right is repeated in a handled set, scoped set or rule |
 | `ErrUnsupportedABIRight` | The `Options` validators | A right the ABI version they name does not know (`EINVAL`) |
 | `ErrUnknownABIVersion` | Every `Options` method | A version below `ABIV1`, 0 included, which names no kernel |
-| `ErrMissingField` | `UnmarshalStrict` | A network rule without a `port`, or with a null one; see [Strict decoding](#strict-decoding) |
+| `ErrMissingField` | `UnmarshalStrict` | A network rule without a `port` or a path rule without a `path`, or with a null one, or a null rule; see [Strict decoding](#strict-decoding) |
 
 ### Limits
 

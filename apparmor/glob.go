@@ -83,7 +83,8 @@ const (
 	// thousand literals of four kilobytes, well inside every artifact limit
 	// and the pair bound, took over a minute and a half to intersect, some
 	// 85 milliseconds a comparison. The budget is that product summed over
-	// every pair, which is the product of the bytes the two sides hold (see
+	// the pairs the prefix index lets through, which is at most the product
+	// of the bytes the two sides hold (see matchBudget and
 	// exceedsPairBudget), and it admits a profile of MaxArtifactPaths paths
 	// of typicalPathLen bytes against a node baseline of baselinePathBytes.
 	// At the budget the costliest comparisons take about a second and a half
@@ -710,6 +711,44 @@ func exceedsPairBudget(left, right sideSize) bool {
 	return work > maxMergePathWork
 }
 
+// matchBudget counts what matching two sides against each other costs, as
+// it goes, past the point where their totals no longer bound it (see
+// exceedsPairBudget): every bucket of a prefix index probed, whether it
+// holds patterns or not, counts as a comparison, and every pattern compared
+// as a comparison and the product of the two lengths as work. Matching
+// stops once either count is past its budget, and the merge then falls back
+// as it does for totals past the budget. Counting what matching does rather
+// than estimating it beforehand charges each strategy only for the
+// comparisons it makes, keeps profiles rooted in many directories, such as
+// a baseline of "/usr/lib/<name>/**" patterns against an artifact of long
+// library paths, well inside the budgets, and still bounds patterns sharing
+// one prefix, which all land in one bucket.
+type matchBudget struct {
+	pairs, work uint64
+	// limited is false where the totals of the two sides are inside the
+	// budgets already, so that nothing need be counted.
+	limited bool
+}
+
+// newMatchBudget returns the budget for matching two sides against each
+// other: unlimited where their totals are inside the budgets.
+func newMatchBudget(left, right *fsSide) *matchBudget {
+	return &matchBudget{pairs: 0, work: 0, limited: exceedsPairBudget(left.size(), right.size())}
+}
+
+// charge counts comparisons and work, and reports whether the budget still
+// holds.
+func (budget *matchBudget) charge(pairs, work uint64) bool {
+	if !budget.limited {
+		return true
+	}
+
+	budget.pairs += pairs
+	budget.work += work
+
+	return budget.pairs <= maxMergePathPairs && budget.work <= maxMergePathWork
+}
+
 // pathCount widens a count of paths or bytes for the arithmetic above. Every
 // count it is given is the length of a slice, a map or a string, or a sum of
 // such lengths, so the conversion cannot wrap.
@@ -731,13 +770,18 @@ func pathCount(count int) uint64 {
 // lookup, whatever the index holds.
 type prefixIndex struct {
 	patterns map[string][]string
+	// bytes holds the total length of the patterns under each prefix, which
+	// a probe of the prefix charges to the work budget (see matchBudget).
+	bytes map[string]int
 	// lengths holds the distinct lengths of the prefixes in patterns, in
 	// ascending order.
 	lengths []int
 }
 
 func newPrefixIndex() prefixIndex {
-	return prefixIndex{patterns: make(map[string][]string), lengths: nil}
+	return prefixIndex{
+		patterns: make(map[string][]string), bytes: make(map[string]int), lengths: nil,
+	}
 }
 
 func (index *prefixIndex) add(prefix, pattern string) {
@@ -748,6 +792,7 @@ func (index *prefixIndex) add(prefix, pattern string) {
 	}
 
 	index.patterns[prefix] = append(index.patterns[prefix], pattern)
+	index.bytes[prefix] += len(pattern)
 }
 
 // candidates calls visit for every pattern whose prefix name starts with,
@@ -755,21 +800,43 @@ func (index *prefixIndex) add(prefix, pattern string) {
 // in "/" (see globMatcher.prefix), since a pattern that starts with a glob
 // token is relative and matches nothing, so the prefixes a pattern can be
 // filed under and still match name are the directory prefixes of name, of
-// which only those of a recorded length are probed.
-func (index *prefixIndex) candidates(name string, visit func(pattern string) bool) {
+// which only those of a recorded length are probed. Each length looked at
+// is charged to budget as a comparison, and a bucket probed as one per
+// pattern it holds and the work of comparing name with all of them, before
+// any is visited, so that the charge does not depend on the order the
+// bucket holds its patterns in, or on where visit stops. candidates reports
+// false, having stopped, once the budget no longer holds.
+func (index *prefixIndex) candidates(
+	name string, budget *matchBudget, visit func(pattern string) bool,
+) bool {
 	for _, length := range index.lengths {
 		if length > len(name) {
-			return
+			return true
+		}
+
+		if !budget.charge(1, 0) {
+			return false
 		}
 
 		if length == 0 || name[length-1] != '/' {
 			continue
 		}
 
-		if slices.ContainsFunc(index.patterns[name[:length]], visit) {
-			return
+		prefix := name[:length]
+
+		patterns := index.patterns[prefix]
+
+		work := pathCount(len(name)) * pathCount(index.bytes[prefix])
+		if !budget.charge(pathCount(len(patterns)), work) {
+			return false
+		}
+
+		if slices.ContainsFunc(patterns, visit) {
+			return true
 		}
 	}
+
+	return true
 }
 
 // addStarStar files a "**" pattern under its prefix, if it is one.
@@ -818,11 +885,12 @@ func (side *fsSide) size() sideSize {
 	}
 }
 
-// grants returns the permissions the globs of the side grant the literal.
-func (side *fsSide) grants(literal fsPathEntry) fsPermission {
+// grants returns the permissions the globs of the side grant the literal,
+// and false where matching stopped past the budget.
+func (side *fsSide) grants(literal fsPathEntry, budget *matchBudget) (fsPermission, bool) {
 	var granted fsPermission
 
-	side.byPrefix.candidates(literal.matcher.literal, func(pattern string) bool {
+	within := side.byPrefix.candidates(literal.matcher.literal, budget, func(pattern string) bool {
 		entry := side.globs[pattern]
 		if entry.matcher.matchesMapped(literal.mapped) {
 			granted = granted.union(entry.perm)
@@ -831,7 +899,7 @@ func (side *fsSide) grants(literal fsPathEntry) fsPermission {
 		return granted.read && granted.write
 	})
 
-	return granted
+	return granted, within
 }
 
 func buildFsSide(perms map[string]fsPermission, matchers *matcherCache) fsSide {

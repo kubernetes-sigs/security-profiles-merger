@@ -526,3 +526,62 @@ func TestValidateArtifactRejectsMultiNameExpansion(t *testing.T) {
 		}
 	}
 }
+
+// TestMultiplexerPathKeepsTheReadBudget covers the multiplexer path of a
+// merge covering x86, which reads the socket and SysV IPC syscalls of every
+// input a second time: past the read budget it reads them in summarized
+// form, as collectRules does on the direct path, rather than recording each
+// rule of each of the 34 names. One entry naming all of them with thousands
+// of conditions on one index passes Validate and fits in a few hundred
+// kilobytes; read rule by rule its cost grows with the conditions, while
+// the budget keeps it within a small multiple of the merge for x86_64,
+// which reads no multiplexer path.
+//
+//nolint:paralleltest // AllocatedBytes reads the counters of the whole process
+func TestMultiplexerPathKeepsTheReadBudget(t *testing.T) {
+	const conditions = 8000
+
+	names := []string{
+		"socketcall", "accept", "accept4", "bind", "connect", "getpeername",
+		"getsockname", "getsockopt", "listen", "recv", "recvfrom", "recvmmsg",
+		"recvmsg", "send", "sendmmsg", "sendmsg", "sendto", "setsockopt",
+		"shutdown", "socket", "socketpair",
+		"ipc", "msgctl", "msgget", "msgrcv", "msgsnd", "semctl", "semget",
+		"semop", "semtimedop", "shmat", "shmctl", "shmdt", "shmget",
+	}
+
+	args := make([]specs.LinuxSeccompArg, conditions)
+	for idx := range args {
+		args[idx] = specs.LinuxSeccompArg{
+			Index: 1, Value: uint64(idx), ValueTwo: 0, Op: specs.OpEqualTo,
+		}
+	}
+
+	profile := profileOf(specs.ActErrno, specs.LinuxSyscall{
+		Names: names, Action: specs.ActAllow, ErrnoRet: nil, Args: args,
+	})
+
+	err := seccomp.Validate(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	allocated := func(native specs.Arch) uint64 {
+		return testutil.AllocatedBytes(func() {
+			_, err := seccomp.Options{Arch: native}.Intersect(profile, profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	direct := allocated(specs.ArchX86_64)
+	multiplexed := allocated(specs.ArchX86)
+
+	// Read rule by rule, the x86 merge allocated six times the x86_64 one
+	// here, and more with every further condition.
+	if multiplexed > 3*direct {
+		t.Errorf("x86 merge allocated %d MiB, want at most three times the %d MiB of x86_64",
+			multiplexed>>20, direct>>20)
+	}
+}

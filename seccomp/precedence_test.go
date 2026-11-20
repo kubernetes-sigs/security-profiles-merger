@@ -295,7 +295,8 @@ func TestListsResolveMixedEntries(t *testing.T) {
 func formatSyscalls(syscalls []specs.LinuxSyscall) string {
 	formatted := seccomp.FormatProfile(&specs.LinuxSeccomp{Syscalls: syscalls})
 
-	return formatted[len("Profile{default: ") : len(formatted)-1]
+	// The empty default action is quoted, as every empty value is.
+	return formatted[len(`Profile{default:"" `) : len(formatted)-1]
 }
 
 func TestDiffListsIgnoresArgOrder(t *testing.T) {

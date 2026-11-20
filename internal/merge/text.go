@@ -29,7 +29,9 @@ import (
 // quoted, which spells those bytes out, and so is one that holds whitespace
 // or the punctuation the formatters build their output from (see
 // formatPunctuation); every other value is returned as it is, so that the
-// usual rendering of a profile is unchanged.
+// usual rendering of a profile is unchanged. The empty value is quoted too:
+// written as nothing, a Landlock path "" added by a diff would read as
+// "fs:+" and a seccomp entry naming "" as "->SCMP_ACT_ALLOW".
 //
 // The formatters write into a runtime's log and onto an operator's terminal.
 // A path or a syscall name of an artifact is chosen by its author, and a
@@ -73,10 +75,11 @@ func SafeName(name string) string {
 // uses them also puts one of these characters beside them.
 const formatPunctuation = `,"{}()<>:`
 
-// plainText reports whether a value can be written as it is: printable (see
-// printableText) and free of whitespace and formatPunctuation.
+// plainText reports whether a value can be written as it is: not empty,
+// printable (see printableText) and free of whitespace and
+// formatPunctuation.
 func plainText(value string) bool {
-	return printableText(value) &&
+	return value != "" && printableText(value) &&
 		!strings.ContainsAny(value, formatPunctuation) &&
 		strings.IndexFunc(value, unicode.IsSpace) < 0
 }

@@ -18,6 +18,7 @@ package seccomp
 
 import (
 	"cmp"
+	"iter"
 	"math"
 	"slices"
 	"strconv"
@@ -208,16 +209,80 @@ func strongerGroup(left, right []specs.LinuxSeccompArg) ([]specs.LinuxSeccompArg
 // puts on the same argument. A filter whose conditions all appear in the
 // other covers it, as does one whose conditions say less: "a0 != 40" covers
 // "a0 == 2". It is conservative: false means wide may still cover narrow.
+//
+// The filters of a clause are sorted by argument index (see loadedArgs), so
+// the two are walked side by side and only conditions on one index are
+// compared, which keeps a bare list whose clauses carry thousands of
+// conditions linear rather than quadratic. A filter in another order is
+// sorted first.
 func argsCover(wide, narrow []specs.LinuxSeccompArg) bool {
-	for _, loose := range wide {
-		if !slices.ContainsFunc(narrow, func(strict specs.LinuxSeccompArg) bool {
-			return strict.Index == loose.Index && condImplies(strict, loose)
-		}) {
-			return false
+	for wideRun, narrowRun := range indexRuns(byIndex(wide), byIndex(narrow)) {
+		for _, loose := range wideRun {
+			if !slices.ContainsFunc(narrowRun, func(strict specs.LinuxSeccompArg) bool {
+				return condImplies(strict, loose)
+			}) {
+				return false
+			}
 		}
 	}
 
 	return true
+}
+
+// byIndex returns the conditions sorted by argument index: as they are,
+// which is how a clause holds them (see loadedArgs), or else a sorted copy.
+func byIndex(args []specs.LinuxSeccompArg) []specs.LinuxSeccompArg {
+	compare := func(left, right specs.LinuxSeccompArg) int {
+		return cmp.Compare(left.Index, right.Index)
+	}
+
+	if slices.IsSortedFunc(args, compare) {
+		return args
+	}
+
+	sorted := slices.Clone(args)
+	slices.SortStableFunc(sorted, compare)
+
+	return sorted
+}
+
+// indexRuns walks two filters sorted by argument index side by side and
+// yields, for every index either one tests, the conditions each puts on it,
+// one of which is empty where only the other tests the index.
+func indexRuns(
+	left, right []specs.LinuxSeccompArg,
+) iter.Seq2[[]specs.LinuxSeccompArg, []specs.LinuxSeccompArg] {
+	return func(yield func(left, right []specs.LinuxSeccompArg) bool) {
+		for len(left) > 0 || len(right) > 0 {
+			var index uint
+
+			switch {
+			case len(left) == 0:
+				index = right[0].Index
+			case len(right) == 0:
+				index = left[0].Index
+			default:
+				index = min(left[0].Index, right[0].Index)
+			}
+
+			leftRun, rightRun := runOf(left, index), runOf(right, index)
+			left, right = left[len(leftRun):], right[len(rightRun):]
+
+			if !yield(leftRun, rightRun) {
+				return
+			}
+		}
+	}
+}
+
+// runOf returns the conditions at the start of args that test index.
+func runOf(args []specs.LinuxSeccompArg, index uint) []specs.LinuxSeccompArg {
+	end := 0
+	for end < len(args) && args[end].Index == index {
+		end++
+	}
+
+	return args[:end]
 }
 
 // condImplies reports whether every value the condition strong matches is
@@ -288,11 +353,14 @@ func maskImplies(strong, weak specs.LinuxSeccompArg) bool {
 }
 
 // argsDisjoint reports whether two filters provably never match the same
-// call. It is conservative: false means the filters may overlap.
+// call. It is conservative: false means the filters may overlap. It walks
+// the filters side by side, as argsCover does.
 func argsDisjoint(left, right []specs.LinuxSeccompArg) bool {
-	for _, leftArg := range left {
-		for _, rightArg := range right {
-			if leftArg.Index == rightArg.Index && condsDisjoint(leftArg, rightArg) {
+	for leftRun, rightRun := range indexRuns(byIndex(left), byIndex(right)) {
+		for _, leftArg := range leftRun {
+			if slices.ContainsFunc(rightRun, func(rightArg specs.LinuxSeccompArg) bool {
+				return condsDisjoint(leftArg, rightArg)
+			}) {
 				return true
 			}
 		}

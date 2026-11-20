@@ -235,39 +235,50 @@ func TestResolveVersion(t *testing.T) {
 	}
 }
 
-func TestDuplicateKeysWarnAndReject(t *testing.T) {
+// TestDuplicateKeysAreRejected covers a member repeated within one object,
+// which is an error in every mode: encoding/json merges a repeated object
+// into the earlier one, so the profile it reads can allow more than either
+// occurrence does.
+func TestDuplicateKeysAreRejected(t *testing.T) {
 	t.Parallel()
 
 	file := writeTemp(t, testDuplicateProfile)
-	// The warning names the file, so that one of a thousand arguments can
-	// be found without counting.
-	warning := `warning: ` + file + `: duplicate key "defaultAction"`
+	// The error names the file, so that one of a thousand arguments can be
+	// found without counting.
+	want := `error: parsing ` + file + `: duplicate key "defaultAction"`
 
-	for _, args := range [][]string{
-		{cmdValidate, file},
-		{cmdMerge, flagStrategy, strategyUnion, file},
-		{cmdDiff, file, file},
+	// diff exits 1 for profiles that differ, and 2 for an error.
+	for _, testCase := range []struct {
+		args []string
+		code int
+	}{
+		{[]string{cmdValidate, file}, 1},
+		{[]string{cmdValidate, flagStrict, file}, 1},
+		{[]string{cmdValidate, "--artifact", file}, 1},
+		{[]string{cmdMerge, flagStrategy, strategyUnion, file}, 1},
+		{[]string{cmdDiff, file, file}, 2},
 	} {
-		code, _, stderr := runCapture(t, args, nil)
-		if code != 0 {
-			t.Fatalf("%v: exit code = %d, want 0: %s", args, code, stderr)
+		args := testCase.args
+
+		code, stdout, stderr := runCapture(t, args, nil)
+		if code != testCase.code {
+			t.Fatalf("%v: exit code = %d, want %d: %s", args, code, testCase.code, stderr)
 		}
 
-		if !strings.Contains(stderr, warning) {
-			t.Errorf("%v: stderr = %q, want %q", args, stderr, warning)
+		if !strings.Contains(stderr, want) || stdout != "" {
+			t.Errorf("%v: stdout = %q, stderr = %q, want %q", args, stdout, stderr, want)
 		}
 	}
 
-	for _, flag := range []string{flagStrict, "--artifact"} {
-		code, stdout, stderr := runCapture(t, []string{cmdValidate, flag, file}, nil)
-		if code != 1 {
-			t.Fatalf("%s: exit code = %d, want 1: %s", flag, code, stderr)
-		}
+	// Read as encoding/json reads it, this allows both raw sockets and TCP,
+	// which neither occurrence of "network" does alone.
+	merged := writeTemp(t,
+		`{"network":{"allowRaw":true},"network":{"allowedProtocols":{"allowTcp":true}}}`)
 
-		want := `error: parsing ` + file + `: duplicate key "defaultAction"`
-		if !strings.Contains(stderr, want) || stdout != "" {
-			t.Errorf("%s: stdout = %q, stderr = %q, want %q", flag, stdout, stderr, want)
-		}
+	code, _, stderr := runCapture(t, []string{cmdValidate, flagType, "apparmor", merged}, nil)
+	if code != 1 || !strings.Contains(stderr, `duplicate key "network"`) {
+		t.Errorf("merged network: exit code = %d, stderr = %q, want 1 and a duplicate key",
+			code, stderr)
 	}
 }
 

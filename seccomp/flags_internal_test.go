@@ -17,6 +17,8 @@ limitations under the License.
 package seccomp
 
 import (
+	"errors"
+	"slices"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -129,5 +131,56 @@ func TestKeepFlagListenerFollowsTheListener(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestResolveListenerRefusesNotifyWithoutListener covers the check behind
+// the reasoning that no result notifies without a listener: no pair of
+// inputs Validate accepts reaches it, so it is called on such a result
+// directly.
+func TestResolveListenerRefusesNotifyWithoutListener(t *testing.T) {
+	t.Parallel()
+
+	notify := []specs.LinuxSyscall{{Names: []string{"ioctl"}, Action: specs.ActNotify}}
+
+	err := resolveListener(&specs.LinuxSeccomp{DefaultAction: specs.ActErrno, Syscalls: notify})
+	if !errors.Is(err, ErrNotifyWithoutListener) {
+		t.Errorf("resolveListener(no listener) = %v, want ErrNotifyWithoutListener", err)
+	}
+
+	err = resolveListener(&specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno, ListenerPath: "/run/l.sock", Syscalls: notify,
+	})
+	if err != nil {
+		t.Errorf("resolveListener(listener) = %v, want nil", err)
+	}
+}
+
+// TestFlagsForListener pins which flags a result loses to its listener: the
+// listener flag where no entry notifies and TSYNC next to a listener.
+func TestFlagsForListener(t *testing.T) {
+	t.Parallel()
+
+	wait := specs.LinuxSeccompFlagWaitKillableRecv
+	all := func() []specs.LinuxSeccompFlag {
+		return []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagLog, flagTsync, wait}
+	}
+
+	for _, testCase := range []struct {
+		listener string
+		notifies bool
+		want     []specs.LinuxSeccompFlag
+	}{
+		{"", false, []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagLog, flagTsync}},
+		{"/run/l.sock", false, []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagLog}},
+		{"/run/l.sock", true, []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagLog, wait}},
+	} {
+		got := flagsForListener(all(), testCase.listener, testCase.notifies)
+		if !slices.Equal(got, testCase.want) {
+			t.Errorf(
+				"flagsForListener(%q, notifies=%t) = %v, want %v",
+				testCase.listener, testCase.notifies, got, testCase.want,
+			)
+		}
 	}
 }

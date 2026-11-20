@@ -586,8 +586,10 @@ func TestLiteralIsMappedOnce(t *testing.T) {
 
 	var granted fsPermission
 
+	unlimited := &matchBudget{pairs: 0, work: 0, limited: false}
+
 	allocs := testing.AllocsPerRun(10, func() {
-		granted = side.grants(literal)
+		granted, _ = side.grants(literal, unlimited)
 	})
 
 	if !granted.read || granted.write {
@@ -617,7 +619,9 @@ func TestPrefixIndexCandidates(t *testing.T) {
 	} {
 		var got []string
 
-		index.candidates(name, func(pattern string) bool {
+		unlimited := &matchBudget{pairs: 0, work: 0, limited: false}
+
+		index.candidates(name, unlimited, func(pattern string) bool {
 			got = append(got, pattern)
 
 			return false

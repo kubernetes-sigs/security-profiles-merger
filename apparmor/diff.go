@@ -232,7 +232,9 @@ func diffCapabilities(diff *ProfileDiff, left, right *Profile) {
 // by its text, as Validate and the merge do: "/etc/passwd" and an escaped
 // spelling of it are one rule, so a profile and its merge result, which
 // keeps one spelling per rule, do not differ in it. A path only one side
-// holds is reported in that side's spelling.
+// holds is reported in that side's spelling once Diff has collapsed its
+// repeated slashes (see normalizePath), so "//etc//passwd" is reported as
+// "/etc/passwd".
 func diffPaths(left, right []string) *SliceDiff[string] {
 	leftKeys := pathsByRule(left)
 	rightKeys := pathsByRule(right)

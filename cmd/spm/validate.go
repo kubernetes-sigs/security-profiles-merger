@@ -43,8 +43,9 @@ profiles, which decides what --artifact and --strict accept: a value above
 32 bits is refused where that node covers a 32-bit architecture. It
 defaults to the architecture this program runs on, so the same profile can
 pass here and fail on another machine; pass a name such as SCMP_ARCH_X86_64
-for the target node, or --arch none to imply no architecture. The default
-checks do not depend on it, so it needs --artifact or --strict.
+for the target node, or --arch none for a node of unknown architecture,
+which refuses such a value whatever the profile lists. The default checks do
+not depend on it, so it needs --artifact or --strict.
 
 Options:
 `
@@ -67,7 +68,7 @@ func bindValidateFlags(flags *flag.FlagSet) *validateOptions {
 	opts.bind(flags, "the validated profiles", "stdout, not with --quiet")
 	flags.BoolVar(
 		&opts.strict, "strict", false,
-		"use strict validation, which also rejects unknown, repeated and "+
+		"use strict validation, which also rejects unknown and "+
 			"misspelled fields and invalid UTF-8 (not with --artifact)",
 	)
 	flags.BoolVar(

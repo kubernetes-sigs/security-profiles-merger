@@ -20,11 +20,13 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
 
@@ -1638,5 +1640,187 @@ func TestValidateArtifactPassesWhatIntersectSettles(t *testing.T) {
 		return slices.Contains(entry.Names, "read")
 	}) {
 		t.Errorf("expected read to fall to the default, got %s", seccomp.FormatProfile(settled))
+	}
+}
+
+// TestValidateArtifactMemoryAtTheLimits covers the conflict check on an
+// artifact at MaxArtifactRules, every rule with six conditions against
+// values above 32 bits, so that each is filed under 63 wider filters, as
+// written and as libseccomp adds it for a 32-bit architecture. Filed under
+// a string per filter, held for every syscall until the check returned,
+// this allocated over 700 MiB.
+//
+//nolint:paralleltest // AllocatedBytes reads the counters of the whole process
+func TestValidateArtifactMemoryAtTheLimits(t *testing.T) {
+	const (
+		syscalls = seccomp.MaxArtifactRules / seccomp.MaxArtifactEntriesPerSyscall
+		maxBytes = 256 << 20
+	)
+
+	profile := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
+
+	for name := range syscalls {
+		for entry := range seccomp.MaxArtifactEntriesPerSyscall {
+			args := make([]specs.LinuxSeccompArg, 0, 6)
+			for index := range uint(6) {
+				args = append(args, specs.LinuxSeccompArg{
+					Index: index, Value: uint64(entry*7) + uint64(index) | 1<<40,
+					ValueTwo: 0, Op: specs.OpEqualTo,
+				})
+			}
+
+			profile.Syscalls = append(profile.Syscalls, specs.LinuxSyscall{
+				Names: []string{"sys" + strconv.Itoa(name)}, Action: specs.ActAllow,
+				ErrnoRet: nil, Args: args,
+			})
+		}
+	}
+
+	var err error
+
+	allocated := testutil.AllocatedBytes(func() {
+		err = seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(profile)
+	})
+
+	if err != nil {
+		t.Fatalf("Options{x86_64}.ValidateArtifact = %v, want nil", err)
+	}
+
+	if allocated > maxBytes {
+		t.Errorf("Options{x86_64}.ValidateArtifact allocated %d MiB, want at most %d MiB",
+			allocated>>20, maxBytes>>20)
+	}
+}
+
+// TestValidateArtifactReportsLostRules covers a profile whose filter
+// libseccomp compiles without the load of the syscall number on aarch64:
+// the block tests open first, which aarch64 lacks, since its rule needs no
+// comparison while the one on socket needs two, so every call of the
+// architecture gets the default action when a runtime loads the profile as
+// written, which the strict validators report. Here the merges keep the
+// shape, so Union of it alone refuses it as well.
+func TestValidateArtifactReportsLostRules(t *testing.T) {
+	t.Parallel()
+
+	aarch64 := seccomp.Options{Arch: specs.ArchAARCH64}
+
+	profile := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Architectures: []specs.Arch{specs.ArchAARCH64, specs.ArchARM},
+		Syscalls: []specs.LinuxSyscall{
+			{
+				Names: []string{"socket"}, Action: specs.ActAllow,
+				Args: []specs.LinuxSeccompArg{{Index: 0, Value: 40, Op: specs.OpEqualTo}},
+			},
+			{Names: []string{"open"}, Action: specs.ActAllow},
+		},
+	}
+
+	_, err := aarch64.Union(profile)
+	if !errors.Is(err, seccomp.ErrLostRules) {
+		t.Fatalf("Options{aarch64}.Union = %v, want ErrLostRules", err)
+	}
+
+	for name, validate := range map[string]func(seccomp.Options, *specs.LinuxSeccomp) error{
+		"ValidateArtifact": seccomp.Options.ValidateArtifact,
+		"ValidateStrict":   seccomp.Options.ValidateStrict,
+	} {
+		err := validate(aarch64, profile)
+		if !errors.Is(err, seccomp.ErrLostRules) {
+			t.Errorf("%s = %v, want ErrLostRules", name, err)
+		}
+	}
+
+	// The default checks do not look for it: a runtime loads its baseline
+	// through Validate, and Intersect settles the shape there.
+	err = seccomp.Validate(profile)
+	if err != nil {
+		t.Errorf("Validate = %v, want nil", err)
+	}
+
+	// Without arm, the rule on open applies to no call and goes.
+	profile.Architectures = []specs.Arch{specs.ArchAARCH64}
+
+	err = aarch64.ValidateArtifact(profile)
+	if err != nil {
+		t.Errorf("Options{aarch64}.ValidateArtifact(aarch64 only) = %v, want nil", err)
+	}
+}
+
+// TestValidateArtifactJudgesLostRulesAsWritten pins where the validators
+// and the merges part: the two rules on socket share a result but form no
+// safe shape, so the merges collapse them to one unconditional rule, which
+// libseccomp tests first, and keep every architecture. Loaded as written,
+// the rule on open costs nothing and the ones on socket cost comparisons,
+// so aarch64 tests open first, which it lacks.
+func TestValidateArtifactJudgesLostRulesAsWritten(t *testing.T) {
+	t.Parallel()
+
+	aarch64 := seccomp.Options{Arch: specs.ArchAARCH64}
+
+	profile := profileOf(specs.ActErrno,
+		filtered("socket", specs.ActAllow, arg(0, specs.OpEqualTo, 2), arg(1, specs.OpEqualTo, 1)),
+		filtered("socket", specs.ActAllow, arg(0, specs.OpEqualTo, 10)),
+		filtered("open", specs.ActAllow),
+	)
+	profile.Architectures = []specs.Arch{specs.ArchAARCH64, specs.ArchARM}
+
+	for name, mergeFor := range map[string]func(
+		seccomp.Options, ...*specs.LinuxSeccomp,
+	) (*specs.LinuxSeccomp, error){
+		"Intersect": seccomp.Options.Intersect,
+		"Union":     seccomp.Options.Union,
+	} {
+		result, err := mergeFor(aarch64, profile)
+		if err != nil {
+			t.Fatalf("%s = %v, want a result", name, err)
+		}
+
+		if len(result.Architectures) != len(profile.Architectures) {
+			t.Errorf("%s = %s, want both architectures kept", name, seccomp.FormatProfile(result))
+		}
+	}
+
+	err := aarch64.ValidateArtifact(profile)
+	if !errors.Is(err, seccomp.ErrLostRules) {
+		t.Errorf("Options{aarch64}.ValidateArtifact = %v, want ErrLostRules", err)
+	}
+}
+
+// TestValidateArtifactReportsLostRulesOfRepeatedIndices covers an entry
+// that repeats an argument index, which a runtime adds as one rule per
+// condition: libseccomp costs each rule on open at two comparisons, below
+// the three of the range comparison on socket, so open is tested first. Read
+// as one rule with both conditions it would cost four and hide the shape,
+// which the same rules split over two entries show.
+func TestValidateArtifactReportsLostRulesOfRepeatedIndices(t *testing.T) {
+	t.Parallel()
+
+	aarch64 := seccomp.Options{Arch: specs.ArchAARCH64}
+
+	socket := filtered("socket", specs.ActAllow, arg(0, specs.OpGreaterEqual, 40))
+
+	for name, opens := range map[string][]specs.LinuxSyscall{
+		"one entry": {
+			filtered("open", specs.ActAllow,
+				arg(0, specs.OpEqualTo, 1), arg(0, specs.OpEqualTo, 2)),
+		},
+		"two entries": {
+			filtered("open", specs.ActAllow, arg(0, specs.OpEqualTo, 1)),
+			filtered("open", specs.ActAllow, arg(0, specs.OpEqualTo, 2)),
+		},
+	} {
+		profile := profileOf(specs.ActErrno, append([]specs.LinuxSyscall{socket}, opens...)...)
+		profile.Architectures = []specs.Arch{specs.ArchAARCH64, specs.ArchARM}
+
+		_, err := aarch64.Union(profile)
+		if !errors.Is(err, seccomp.ErrLostRules) {
+			t.Fatalf("%s: Options{aarch64}.Union = %v, want ErrLostRules", name, err)
+		}
+
+		err = aarch64.ValidateArtifact(profile)
+		if !errors.Is(err, seccomp.ErrLostRules) {
+			t.Errorf("%s: Options{aarch64}.ValidateArtifact = %v, want ErrLostRules", name, err)
+		}
 	}
 }

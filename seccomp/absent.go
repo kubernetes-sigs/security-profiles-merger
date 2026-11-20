@@ -523,7 +523,7 @@ func (s *absentSettler) settle() error {
 		if !s.m.intersect || len(remaining) == len(listed) ||
 			len(remaining) == 0 && s.m.native == "" {
 			return fmt.Errorf(
-				"merge: %w: %s would test %s first, which it lacks",
+				"%w: %s would test %s first, which it lacks",
 				ErrLostRules, arch, offending[0],
 			)
 		}

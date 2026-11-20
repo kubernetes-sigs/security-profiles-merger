@@ -108,10 +108,16 @@ if diff, err := seccomp.Diff(baseline, effective); err == nil && diff.Architectu
 ```
 
 The same calls exist in `apparmor` and `landlock`, which need the
-[extra steps](#extra-steps-after-intersect) below before step 4.
+[extra steps](#extra-steps-after-intersect) below before step 4, except
+the self-check of step 0, which applies to `seccomp` and `apparmor`. A
+Landlock baseline is checked with `Validate`, or `ValidateStrict` for one a
+person wrote: `Intersect` of one Landlock profile drops the rights a rule on
+an ancestor already grants, so a valid baseline granting `read_file` on `/`
+and `read_file` and `execute` on `/usr` diffs unequal against it without
+the merge taking anything away.
 
 0. **Check the baseline once, at config load: `Validate`, then
-   `Diff(baseline, Intersect(baseline))`.** `Validate` is what the merge
+   `Diff(baseline, Intersect(baseline))`** (seccomp and AppArmor). `Validate` is what the merge
    needs to load the profile at all. The diff is the check that matters: an
    intersection of the baseline with itself is equal to it exactly when the
    merge reads every rule of it, so a diff that is not equal names what
@@ -377,8 +383,10 @@ what it is given at face value.
   run: call them on the node that loads the result. Where they cannot run
   there, the methods of `seccomp.Options` take that node's architecture
   instead. The zero `seccomp.Options` stand for a node whose architecture is
-  not known and count only the architectures a profile lists, so name the
-  node's architecture whenever it is known. See
+  not known and read it as possibly any architecture Go runs on, which is
+  the safe choice for an unknown node (see
+  [Validation levels](api.md#validation-levels)), so
+  name the node's architecture whenever it is known. See
   [Architectures](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Architectures).
 - **seccomp: a libseccomp defect.** libseccomp 2.5.5 and 2.6.1, sorting
   syscalls by priority (crun always, runc up to 32 syscall names), lose
@@ -393,8 +401,15 @@ what it is given at face value.
   against a table of where libseccomp 2.5.5 and 2.6.1 place each syscall: a
   rule on a syscall no covered architecture has is dropped, `Intersect`
   otherwise drops an architecture, and `Union`, which cannot drop one,
-  refuses with `ErrLostRules`. An allowlist is not affected, since it names
-  syscalls every architecture has in unconditional rules. See
+  refuses with `ErrLostRules`. `ValidateArtifact` and `ValidateStrict`
+  report an input that has the form as written, whose rules a runtime
+  loading it unmerged would lose, even where the merges, which settle rule
+  shapes first, accept it. An allowlist is not
+  affected, since it names syscalls every architecture has in unconditional
+  rules. The table covers libseccomp 2.5.5 through 2.6.1, the releases
+  runtimes link today; an older release lacks syscalls the table takes it to
+  have, such as `fchmodat2` and `futex_waitv` in 2.5.2, so the check does not
+  hold on a node that links one. See
   [Architectures](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Architectures).
 - **Landlock: refer.** The kernel allows a move or link into another
   directory only when both grant `refer` and the file gains no handled right
@@ -493,7 +508,10 @@ exactly as the baseline does, also where the baseline names none, with
 the workload's calls. `Union` takes the listener from whichever input names
 one and refuses two inputs naming different ones. Neither rewrites an
 action to do without a listener: a result that would notify without one is
-refused with `ErrNotifyWithoutListener`. See
+refused with `ErrNotifyWithoutListener`. A result in which no entry
+notifies drops `SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV`, and one with a
+listener drops `SECCOMP_FILTER_FLAG_TSYNC`, since a runtime refuses either
+there; `ValidateStrict` names both as a portability rule. See
 [Listener](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Listener).
 
 ## Combining recordings (Union)

@@ -271,3 +271,31 @@ func TestUnmarshalStrictRequiresPort(t *testing.T) {
 		t.Errorf("json.Unmarshal = %v, %+v, want the second rule on port 0", err, profile.NetRules)
 	}
 }
+
+// TestUnmarshalStrictRequiresPath covers a path rule without its path, null
+// included, which is refused as a network rule without its port is: both
+// lists hold objects, and a null one names neither member.
+func TestUnmarshalStrictRequiresPath(t *testing.T) {
+	t.Parallel()
+
+	for document, want := range map[string]string{
+		`{"pathRules":[null]}`:                       `"pathRules[0].path"`,
+		`{"pathRules":[{"accessFs":["read_file"]}]}`: `"pathRules[0].path"`,
+		`{"netRules":[null]}`:                        `"netRules[0].port"`,
+	} {
+		var profile landlock.Profile
+
+		err := landlock.UnmarshalStrict([]byte(document), &profile)
+		if !errors.Is(err, landlock.ErrMissingField) || !strings.Contains(err.Error(), want) {
+			t.Errorf("UnmarshalStrict(%s) = %v, want ErrMissingField naming %s",
+				document, err, want)
+		}
+	}
+
+	var profile landlock.Profile
+
+	err := landlock.UnmarshalStrict([]byte(`{"pathRules":[{"path":"/usr"}]}`), &profile)
+	if err != nil {
+		t.Errorf("UnmarshalStrict of a rule with its path = %v", err)
+	}
+}

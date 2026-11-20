@@ -1343,16 +1343,18 @@ func (m ruleMerger) finishRules(
 // merge in direction m reads them (see settleInputs), in the form a merge
 // result takes: one name per entry, conditional clauses sorted. def is the
 // profile default; entries equal to it are elided.
-// With a nil merger the syscalls are not settled, which is the form Diff
-// compares.
 func settledSyscalls(
-	m *ruleMerger, syscalls []specs.LinuxSyscall, def *clause,
+	m ruleMerger, syscalls []specs.LinuxSyscall, def *clause,
 ) []specs.LinuxSyscall {
 	rules := collectRules(syscalls, def)
-	if m != nil {
-		m.settleInputs(rules, def)
-	}
+	m.settleInputs(rules, def)
 
+	return syscallsOfRules(rules, def)
+}
+
+// syscallsOfRules emits the rules collectRules read, by syscall name, as
+// one-name entries.
+func syscallsOfRules(rules map[string]*syscallRules, def *clause) []specs.LinuxSyscall {
 	var result []specs.LinuxSyscall
 
 	for _, name := range slices.Sorted(maps.Keys(rules)) {

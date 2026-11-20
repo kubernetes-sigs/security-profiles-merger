@@ -175,7 +175,10 @@ const (
 // PathRule defines the access rights allowed for a specific path hierarchy.
 type PathRule struct {
 	// Path is the filesystem path hierarchy this rule applies to.
-	Path string `json:"path"`
+	// UnmarshalStrict requires the member (ErrMissingField), so that a rule
+	// left out or null, such as {"pathRules":[null]}, is refused as a
+	// network rule without a port is.
+	Path string `json:"path" strict:"required"`
 
 	// AccessFS is the set of filesystem access rights allowed under this path.
 	AccessFS []FSAccessRight `json:"accessFs,omitempty"`

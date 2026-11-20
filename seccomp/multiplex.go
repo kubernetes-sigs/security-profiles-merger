@@ -140,8 +140,10 @@ type multiplexRules struct {
 	// wholeSubcall reports whether a rule tests no argument but the first,
 	// so that its multiplexed rule matches every call of its sub-call.
 	wholeSubcall bool
-	// mixed reports whether the rules have different results.
+	// mixed reports whether the rules have different results, and first
+	// is the result of the first rule, which tells.
 	mixed bool
+	first clause
 	// multiplexed holds the distinct multiplexed rules, without the
 	// sub-call test, and seen their clauseKey.
 	multiplexed []clause
@@ -151,6 +153,12 @@ type multiplexRules struct {
 	// out: a call gets the same action from the same rules whatever errno
 	// they report, and the merge judges safety by action.
 	keys map[string]struct{}
+	// summarized reports whether the syscall is past the read budget (see
+	// summarizedNames), which collectRules reads in summarized form. Its
+	// rules are folded into the fields above that cost nothing per rule,
+	// and neither multiplexed nor keys is recorded, so refused assumes the
+	// worst of rules with different results and sameRules never matches.
+	summarized bool
 	// entry is the index of the first entry that loads a rule of the
 	// syscall, where a report points.
 	entry int
@@ -158,26 +166,31 @@ type multiplexRules struct {
 
 // add records one rule of the syscall.
 func (r *multiplexRules) add(next clause) {
-	if len(r.multiplexed) > 0 && !next.sameResult(r.multiplexed[0]) {
+	if r.results == nil {
+		r.first = clause{action: next.action, errnoRet: merge.ClonePtr(next.errnoRet), args: nil}
+	} else if !next.sameResult(r.first) {
 		r.mixed = true
 	}
 
 	r.results = r.results.fold(next)
-	r.keys[actionKey(next)] = struct{}{}
 
-	multiplexed := next
-	multiplexed.args = slices.DeleteFunc(
-		slices.Clone(next.args),
-		func(arg specs.LinuxSeccompArg) bool { return arg.Index == 0 },
-	)
-	multiplexed.errnoRet = merge.ClonePtr(next.errnoRet)
+	firstArg := func(arg specs.LinuxSeccompArg) bool { return arg.Index == 0 }
+	otherArg := func(arg specs.LinuxSeccompArg) bool { return arg.Index != 0 }
 
-	r.firstArg = r.firstArg || len(multiplexed.args) < len(next.args)
-	r.wholeSubcall = r.wholeSubcall || multiplexed.unconditional()
+	r.firstArg = r.firstArg || slices.ContainsFunc(next.args, firstArg)
+	r.wholeSubcall = r.wholeSubcall || !slices.ContainsFunc(next.args, otherArg)
 
-	if key := clauseKey(multiplexed); !hasKey(r.seen, key) {
-		r.seen[key] = struct{}{}
-		r.multiplexed = append(r.multiplexed, multiplexed)
+	if !r.summarized {
+		r.keys[actionKey(next)] = struct{}{}
+
+		multiplexed := next
+		multiplexed.args = slices.DeleteFunc(slices.Clone(next.args), firstArg)
+		multiplexed.errnoRet = merge.ClonePtr(next.errnoRet)
+
+		if key := clauseKey(multiplexed); !hasKey(r.seen, key) {
+			r.seen[key] = struct{}{}
+			r.multiplexed = append(r.multiplexed, multiplexed)
+		}
 	}
 
 	if next.unconditional() {
@@ -202,19 +215,25 @@ func hasKey(set map[string]struct{}, key string) bool {
 // refused reports whether libseccomp may refuse the multiplexed rules or
 // drop one of them depending on the order they are added in: rules with
 // different results where one of them matches the whole sub-call, or that
-// do not form a safe shape without the sub-call test. Otherwise it builds
-// them as it builds the rules of a syscall in that shape.
+// do not form a safe shape without the sub-call test, which a summarized
+// syscall is taken not to. Otherwise it builds them as it builds the rules
+// of a syscall in that shape.
 func (r *multiplexRules) refused() bool {
-	return r.mixed && (r.wholeSubcall || !safeShape(r.multiplexed))
+	return r.mixed && (r.wholeSubcall || r.summarized || !safeShape(r.multiplexed))
 }
 
 // collectMultiplexRules reads the rules a profile loads for the multiplexers
 // and the syscalls they carry, skipping entries equal to the default as
-// runtimes do.
+// runtimes do. A syscall past the read budget, which collectRules reads in
+// summarized form, is read in summarized form here too (see
+// multiplexRules.summarized): recording each of its rules would cost the
+// memory the budget is there to bound, on every input of a merge covering
+// a multiplexing architecture.
 func collectMultiplexRules(
 	syscalls []specs.LinuxSyscall, def *clause,
 ) map[string]*multiplexRules {
 	rules := make(map[string]*multiplexRules)
+	summarized := summarizedNames(syscalls, def)
 
 	relevant := func(name string) bool {
 		_, multiplexed := multiplexedSyscalls[name]
@@ -232,11 +251,19 @@ func collectMultiplexRules(
 				firstArg:      false,
 				wholeSubcall:  false,
 				mixed:         false,
+				first:         clause{action: "", errnoRet: nil, args: nil},
 				multiplexed:   nil,
-				seen:          make(map[string]struct{}),
-				keys:          make(map[string]struct{}),
+				seen:          nil,
+				keys:          nil,
+				summarized:    summarized[name],
 				entry:         idx,
 			}
+
+			if !current.summarized {
+				current.seen = make(map[string]struct{})
+				current.keys = make(map[string]struct{})
+			}
+
 			rules[name] = current
 		}
 
@@ -392,7 +419,7 @@ func (in multiplexInput) sameRules(other multiplexInput, name string) bool {
 		return own == nil && others == nil
 	}
 
-	return maps.Equal(own.keys, others.keys)
+	return !own.summarized && !others.summarized && maps.Equal(own.keys, others.keys)
 }
 
 // within reports whether a result is on the safe side of bound for the
@@ -604,9 +631,11 @@ func (in multiplexInput) replace(name string, rule clause, replaced map[string]*
 		firstArg:      false,
 		wholeSubcall:  true,
 		mixed:         false,
+		first:         rule,
 		multiplexed:   []clause{rule},
 		seen:          map[string]struct{}{clauseKey(rule): {}},
 		keys:          map[string]struct{}{actionKey(rule): {}},
+		summarized:    false,
 		entry:         entry,
 	}
 }

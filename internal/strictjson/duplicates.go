@@ -25,7 +25,10 @@ package strictjson
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"reflect"
 	"strconv"
 	"strings"
 	"unicode"
@@ -34,29 +37,47 @@ import (
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
-// scanFrame is an open object or array during DuplicateKeys. It holds the
+// scanFrame is an open object or array during scanDocument. It holds the
 // name or index of the value it is at rather than that value's path: a path
 // carries its whole ancestry, so keeping one per open frame, or building one
 // per value, costs memory quadratic in a document that nests deeply or puts
 // many values under a long name. A path is built from the stack only when a
-// repeated member is reported.
+// finding is reported.
 type scanFrame struct {
 	// keys holds the folded names of the members seen so far in an object,
 	// mapped to whether they were already reported as repeated. It is nil
 	// for an array.
 	keys map[string]bool
-	// member is the name of the object member whose value comes next.
-	member string
+	// member is the name of the object member whose value comes next, and
+	// folded the same name folded.
+	member, folded string
 	// index is the index of the next array element.
 	index int
 	// wantKey reports whether the next token in an object is a member name.
 	wantKey bool
+	// typ is the type the value of the frame decodes into, where the scan
+	// looks for missing members and that type has required fields; nil
+	// otherwise, which leaves every value inside it unchecked.
+	typ reflect.Type
+	// named holds the folded names of the members of an object of a struct
+	// type given a value other than null, and child the type of the value
+	// of the member or element that comes next.
+	named map[string]bool
+	child reflect.Type
+}
+
+// documentScan holds what scanDocument found: the members repeated within
+// one object, and the required members left out or null.
+type documentScan struct {
+	duplicates, missing pathCollector
 }
 
 // DuplicateKeys returns the paths of object members that occur more than
 // once in the same object, at any depth, in document order and each once.
-// encoding/json keeps the last of them silently, while other parsers may
-// keep the first, so a profile with repeated members can mean different
+// encoding/json decodes each occurrence into what the one before it filled,
+// so a later scalar or array replaces the earlier one while a later object
+// merges into it field by field, and other parsers keep the first or the
+// last occurrence, so a profile with repeated members can mean different
 // things to different readers. Names are compared the way encoding/json
 // matches them to struct fields, ignoring case, because a case-sensitive
 // parser reads "defaultAction" and "DefaultAction" as different members
@@ -64,59 +85,185 @@ type scanFrame struct {
 // decodes into a struct, so the comparison applies at every depth. raw must
 // be valid JSON; the scan stops at the first syntax error.
 func DuplicateKeys(raw []byte) ([]string, int) {
+	return scanDocument(raw, nil, nil).duplicates.result()
+}
+
+// scanDocument reads a document token by token, once, and collects the
+// members repeated within one object (see DuplicateKeys) and, where target
+// is not nil, the required members of target, marked by their tag or by
+// required, that the document leaves out or sets to null (see
+// MissingFieldsOf). It follows the type each value decodes into only below
+// a value whose type has required fields, so the rest of a document costs
+// the missing-member check nothing.
+func scanDocument(raw []byte, target reflect.Type, required *Required) *documentScan {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	// Numbers are kept as text: they only need to be skipped, and a value
 	// out of the float64 range must not stop the scan.
 	decoder.UseNumber()
 
-	var (
-		stack []*scanFrame
-		found pathCollector
-	)
+	state := scanState{
+		stack:    nil,
+		target:   target,
+		required: required,
+		scan: documentScan{
+			duplicates: pathCollector{paths: nil, omitted: 0},
+			missing:    pathCollector{paths: nil, omitted: 0},
+		},
+	}
 
 	for {
 		token, err := decoder.Token()
 		if err != nil {
-			return found.paths, found.omitted
-		}
-
-		var top *scanFrame
-		if len(stack) > 0 {
-			top = stack[len(stack)-1]
-		}
-
-		delim, isDelim := token.(json.Delim)
-
-		switch {
-		case isClosing(delim):
-			stack = stack[:len(stack)-1]
-		case top.expectsKey():
-			key, _ := token.(string)
-			if top.addKey(key) {
-				found.addLazily(func() string { return memberPath(stack) })
+			// A document the decoder read must not read as one without
+			// missing members because the scan could not finish it.
+			if target != nil && !errors.Is(err, io.EOF) {
+				state.scan.missing.add(unreadableDocument)
 			}
-		case isDelim:
-			top.startValue()
 
-			stack = append(stack, newScanFrame(delim == '{'))
-		default:
-			top.startValue()
+			return &state.scan
 		}
+
+		state.next(token)
 	}
+}
+
+// scanState is scanDocument under way: the open objects and arrays, the
+// type the document decodes into, the table of required fields, and what
+// it found so far.
+type scanState struct {
+	stack    []*scanFrame
+	target   reflect.Type
+	required *Required
+	scan     documentScan
+}
+
+// next reads one token.
+func (state *scanState) next(token json.Token) {
+	var top *scanFrame
+	if len(state.stack) > 0 {
+		top = state.stack[len(state.stack)-1]
+	}
+
+	delim, isDelim := token.(json.Delim)
+
+	switch {
+	case isClosing(delim):
+		state.stack = state.stack[:len(state.stack)-1]
+
+		if top.named != nil {
+			state.required.reportMissing(
+				top.typ,
+				memberPath(state.stack),
+				top.named,
+				&state.scan.missing,
+			)
+		}
+	case top.expectsKey():
+		key, _ := token.(string)
+		if top.addKey(key) {
+			state.scan.duplicates.addLazily(func() string { return memberPath(state.stack) })
+		}
+	case isDelim:
+		child := top.valueType(state.target)
+
+		top.startValue()
+		top.markNamed()
+
+		state.stack = append(state.stack, newScanFrame(delim == '{', child, state.required))
+	default:
+		state.scalar(top, token)
+	}
+}
+
+// scalar reads a value that is neither an object nor an array.
+func (state *scanState) scalar(top *scanFrame, token json.Token) {
+	child := top.valueType(state.target)
+
+	top.startValue()
+
+	switch {
+	case token != nil:
+		top.markNamed()
+	case top == nil || top.named == nil:
+		state.required.reportNull(
+			child, func() string { return memberPath(state.stack) }, &state.scan.missing,
+		)
+	default:
+		// A member of an object read as null is missing where the object
+		// closes, as one left out is.
+	}
+}
+
+// reportNull collects the required members of a value of type typ that the
+// document sets to null where nothing else names them, as an element of a
+// list or a value of a map: encoding/json leaves a struct there zero. A
+// pointer stays nil and holds nothing to miss.
+func (required *Required) reportNull(typ reflect.Type, path func() string, found *pathCollector) {
+	if typ == nil || typ.Kind() != reflect.Struct || !required.requiresFields(typ) {
+		return
+	}
+
+	required.reportMissing(typ, path(), nil, found)
 }
 
 func isClosing(delim json.Delim) bool {
 	return delim == '}' || delim == ']'
 }
 
-func newScanFrame(object bool) *scanFrame {
-	frame := &scanFrame{keys: nil, member: "", index: 0, wantKey: false}
+// newScanFrame opens an object or array whose value decodes into typ, or
+// whose type is not followed where typ is nil.
+func newScanFrame(object bool, typ reflect.Type, required *Required) *scanFrame {
+	frame := &scanFrame{
+		keys: nil, member: "", folded: "", index: 0, wantKey: false,
+		typ: nil, named: nil, child: nil,
+	}
 	if object {
 		frame.keys = map[string]bool{}
 		frame.wantKey = true
 	}
 
+	for typ != nil && typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+
+	if typ == nil || !required.requiresFields(typ) {
+		return frame
+	}
+
+	frame.typ = typ
+
+	if object && typ.Kind() == reflect.Struct {
+		frame.named = map[string]bool{}
+	}
+
 	return frame
+}
+
+// valueType returns the type the value that comes next decodes into, or nil
+// where the frame does not follow types. A nil frame is the document root,
+// whose value decodes into target.
+func (frame *scanFrame) valueType(target reflect.Type) reflect.Type {
+	if frame == nil {
+		return target
+	}
+
+	if frame.typ == nil {
+		return nil
+	}
+
+	kind := frame.typ.Kind()
+	if kind == reflect.Slice || kind == reflect.Array {
+		return frame.typ.Elem()
+	}
+
+	return frame.child
+}
+
+// markNamed records that the member whose value starts next is given one.
+func (frame *scanFrame) markNamed() {
+	if frame != nil && frame.named != nil {
+		frame.named[frame.folded] = true
+	}
 }
 
 // expectsKey reports whether the next token is a member name. A nil frame
@@ -126,16 +273,26 @@ func (frame *scanFrame) expectsKey() bool {
 }
 
 // addKey records a member name and reports whether this is the first time
-// the name repeats, which is when its path is collected.
+// the name repeats, which is when its path is collected. Where the frame
+// follows types, it also notes the type of the member's value.
 func (frame *scanFrame) addKey(key string) bool {
 	frame.member = key
 	frame.wantKey = false
+	frame.folded = foldName(key)
 
-	folded := foldName(key)
+	if frame.typ != nil {
+		frame.child = nil
 
-	reported, seen := frame.keys[folded]
+		if frame.typ.Kind() == reflect.Map {
+			frame.child = frame.typ.Elem()
+		} else if fieldType, ok, _ := fieldsOf(frame.typ).lookup(key); ok {
+			frame.child = fieldType
+		}
+	}
+
+	reported, seen := frame.keys[frame.folded]
 	if !seen {
-		frame.keys[folded] = false
+		frame.keys[frame.folded] = false
 
 		return false
 	}
@@ -144,7 +301,7 @@ func (frame *scanFrame) addKey(key string) bool {
 		return false
 	}
 
-	frame.keys[folded] = true
+	frame.keys[frame.folded] = true
 
 	return true
 }
@@ -211,6 +368,11 @@ const MaxReportedPaths = merge.MaxJoinedErrors
 type pathCollector struct {
 	paths   []string
 	omitted int
+}
+
+// result returns the paths collected and how many were left out.
+func (c *pathCollector) result() ([]string, int) {
+	return c.paths, c.omitted
 }
 
 func (c *pathCollector) add(path string) {

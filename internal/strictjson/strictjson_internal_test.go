@@ -555,7 +555,7 @@ func TestMissingFieldsOf(t *testing.T) {
 			t.Fatalf("%s: %v", test.raw, err)
 		}
 
-		got, omitted := MissingFieldsOf([]byte(test.raw), &decoded)
+		got, omitted := MissingFieldsOf([]byte(test.raw), &decoded, nil)
 		if !slices.Equal(got, test.want) || omitted != 0 {
 			t.Errorf("%s: MissingFieldsOf = %v (%d omitted), want %v",
 				test.raw, got, omitted, test.want)
@@ -565,12 +565,57 @@ func TestMissingFieldsOf(t *testing.T) {
 	// A type without a required field is never walked for one.
 	var profile specs.LinuxSeccomp
 
-	if got, omitted := MissingFieldsOf([]byte(`{}`), &profile); got != nil || omitted != 0 {
+	if got, omitted := MissingFieldsOf([]byte(`{}`), &profile, nil); got != nil || omitted != 0 {
 		t.Errorf("a type without required fields: MissingFieldsOf = %v (%d omitted)", got, omitted)
 	}
 
-	if !requiresFields(reflect.TypeFor[requiredOuter]()) {
+	if !(*Required)(nil).requiresFields(reflect.TypeFor[requiredOuter]()) {
 		t.Error("a required field of an embedded struct is not seen")
+	}
+}
+
+// TestMissingFieldsOfWithATable covers fields a Required table marks, for a
+// type whose declaration carries no tag: they are reported as a tagged
+// field is, and a type the table does not name is not walked for one.
+func TestMissingFieldsOfWithATable(t *testing.T) {
+	t.Parallel()
+
+	table := NewRequired(map[reflect.Type][]string{reflect.TypeFor[unrequiredRule](): {"Port"}})
+
+	for _, test := range []struct {
+		raw  string
+		want []string
+	}{
+		{`{"plain":[{"port":0}]}`, nil},
+		{`{"plain":[{}]}`, []string{"plain[0].port"}},
+		{`{"plain":[null]}`, []string{"plain[0].port"}},
+		// The tags still count next to the table.
+		{`{"rules":[{}],"plain":[{"port":1}]}`, []string{"rules[0].port"}},
+	} {
+		var decoded requiredTarget
+
+		err := json.Unmarshal([]byte(test.raw), &decoded)
+		if err != nil {
+			t.Fatalf("%s: %v", test.raw, err)
+		}
+
+		got, omitted := MissingFieldsOf([]byte(test.raw), &decoded, table)
+		if !slices.Equal(got, test.want) || omitted != 0 {
+			t.Errorf("%s: MissingFieldsOf = %v (%d omitted), want %v",
+				test.raw, got, omitted, test.want)
+		}
+	}
+
+	var plain struct {
+		Plain []unrequiredRule `json:"plain"`
+	}
+
+	if !table.requiresFields(reflect.TypeOf(plain)) {
+		t.Error("a field the table marks is not seen")
+	}
+
+	if (*Required)(nil).requiresFields(reflect.TypeOf(plain)) {
+		t.Error("a field only the table marks is seen without it")
 	}
 }
 
@@ -592,11 +637,12 @@ func TestOutOfRangeNumberKeepsChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, _ := MissingFieldsOf(raw, &decoded); !slices.Equal(got, []string{"rules[0].port"}) {
+	got, _ := MissingFieldsOf(raw, &decoded, nil)
+	if !slices.Equal(got, []string{"rules[0].port"}) {
 		t.Errorf("MissingFieldsOf = %v, want the port", got)
 	}
 
-	got, _ := MisspelledFieldsOf[walkSpelledA]([]byte(`{` + huge + `"NAME":"y"}`))
+	got, _ = MisspelledFieldsOf[walkSpelledA]([]byte(`{` + huge + `"NAME":"y"}`))
 	if !slices.Equal(got, []string{"NAME"}) {
 		t.Errorf("MisspelledFieldsOf = %v, want NAME", got)
 	}
@@ -693,7 +739,8 @@ type requiredMaps struct {
 type ruleName string
 
 // TestMissingFieldsOfInMaps covers a required member of a map value: it is
-// reported with the member name as the path segment, in sorted order.
+// reported with the member name as the path segment, in document order, as
+// every finding of a read of the document's tokens is.
 func TestMissingFieldsOfInMaps(t *testing.T) {
 	t.Parallel()
 
@@ -703,7 +750,7 @@ func TestMissingFieldsOfInMaps(t *testing.T) {
 	}{
 		{`{"named":{"a":{"port":0}}}`, nil},
 		{`{"named":{"b":{"port":1},"a":{}}}`, []string{"named.a.port"}},
-		{`{"named":{"c":null,"a":{"name":"x"}}}`, []string{"named.a.port", "named.c.port"}},
+		{`{"named":{"c":null,"a":{"name":"x"}}}`, []string{"named.c.port", "named.a.port"}},
 		{`{"keyed":{"x":{}},"named":{}}`, []string{"keyed.x.port"}},
 	} {
 		var decoded requiredMaps
@@ -713,7 +760,7 @@ func TestMissingFieldsOfInMaps(t *testing.T) {
 			t.Fatalf("%s: %v", test.raw, err)
 		}
 
-		got, omitted := MissingFieldsOf([]byte(test.raw), &decoded)
+		got, omitted := MissingFieldsOf([]byte(test.raw), &decoded, nil)
 		if !slices.Equal(got, test.want) || omitted != 0 {
 			t.Errorf("%s: MissingFieldsOf = %v (%d omitted), want %v",
 				test.raw, got, omitted, test.want)

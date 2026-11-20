@@ -206,8 +206,11 @@ func TestUnmarshalStrictRefusesNull(t *testing.T) {
 		}
 	}
 
-	// null decodes, and is refused with the sentinel.
-	for _, document := range []string{"null", " \n null \t"} {
+	// null decodes, and is refused with the sentinel, also with data
+	// behind it, as every other value that is not an object is.
+	for _, document := range []string{
+		"null", " \n null \t", "null x", "null {}", "null]", "[] x", "1 {}",
+	} {
 		err := decodeSeccomp([]byte(document))
 		if !errors.Is(err, spm.ErrNotAnObject) {
 			t.Errorf("%q = %v, want %v", document, err, spm.ErrNotAnObject)
@@ -265,7 +268,7 @@ func TestFindingsComeInOrderAndOnDemand(t *testing.T) {
 
 	var kinds []error
 
-	for finding := range strictjson.Findings(raw, &decoded, hint) {
+	for finding := range strictjson.Findings(raw, &decoded, hint, nil) {
 		if !errors.Is(finding.Err, finding.Kind) {
 			t.Errorf("finding %v does not wrap its kind %v", finding.Err, finding.Kind)
 		}
@@ -280,11 +283,60 @@ func TestFindingsComeInOrderAndOnDemand(t *testing.T) {
 		t.Errorf("kinds = %v, want %v", kinds, want)
 	}
 
-	for finding := range strictjson.Findings(raw, &decoded, hint) {
+	for finding := range strictjson.Findings(raw, &decoded, hint, nil) {
 		if !errors.Is(finding.Kind, spm.ErrDuplicateKey) {
 			t.Errorf("first finding = %v, want the repeated member", finding.Kind)
 		}
 
 		break
+	}
+}
+
+// TestUnmarshalStrictRequiresSeccompArgMembers covers a seccomp argument
+// condition that leaves out its index or operator. specs-go declares the
+// type, so no tag can mark the fields, and encoding/json decodes
+// {"value":5,"op":"SCMP_CMP_EQ"} as a0 == 5, which the document never said.
+// The value may be left out, as the Security Profiles Operator does for 0.
+func TestUnmarshalStrictRequiresSeccompArgMembers(t *testing.T) {
+	t.Parallel()
+
+	withArgs := func(args string) []byte {
+		return []byte(`{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[` +
+			`{"names":["read"],"action":"SCMP_ACT_ALLOW","args":[` + args + `]}]}`)
+	}
+
+	for args, want := range map[string][]string{
+		`{"value":5,"op":"SCMP_CMP_EQ"}`:              {`"syscalls[0].args[0].index"`},
+		`{"index":1,"value":2}`:                       {`"syscalls[0].args[0].op"`},
+		`{"index":null,"value":2,"op":"SCMP_CMP_EQ"}`: {`"syscalls[0].args[0].index"`},
+		`null`: {`"syscalls[0].args[0].index"`, `"syscalls[0].args[0].op"`},
+		`{"index":0,"value":0,"op":"SCMP_CMP_EQ"},{}`: {`"syscalls[0].args[1].op"`},
+	} {
+		err := decodeSeccomp(withArgs(args))
+		if !errors.Is(err, spm.ErrMissingField) {
+			t.Errorf("args %s = %v, want %v", args, err, spm.ErrMissingField)
+
+			continue
+		}
+
+		for _, path := range want {
+			if !strings.Contains(err.Error(), path) {
+				t.Errorf("args %s = %v, want it to name %s", args, err, path)
+			}
+		}
+	}
+
+	// Zero values the document names are values of their own, and value
+	// and valueTwo may be left out, as producers writing them with
+	// omitempty leave a0 == 0.
+	for _, args := range []string{
+		`{"index":0,"value":0,"op":"SCMP_CMP_EQ"}`,
+		`{"index":0,"op":"SCMP_CMP_EQ"}`,
+		`{"index":1,"value":null,"valueTwo":null,"op":"SCMP_CMP_MASKED_EQ"}`,
+	} {
+		err := decodeSeccomp(withArgs(args))
+		if err != nil {
+			t.Errorf("args %s = %v, want nil", args, err)
+		}
 	}
 }
