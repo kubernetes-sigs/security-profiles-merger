@@ -19,7 +19,6 @@ package strictjson
 import (
 	"reflect"
 	"slices"
-	"strings"
 	"sync"
 )
 
@@ -175,8 +174,10 @@ type layoutMember struct {
 
 // structLayout returns the members of a struct type, those of an embedded
 // struct included, which sit in the object of the struct embedding it, in
-// declaration order. An embedded pointer is left out: it stays nil, and
-// holds nothing to miss, unless the document names one of its members.
+// field order, as encoding/json resolves them (see visibleFields). A member
+// of a struct embedded through a pointer is left out: the pointer stays
+// nil, and holds nothing to miss, unless the document names one of its
+// members.
 func (required *Required) structLayout(typ reflect.Type) []layoutMember {
 	table := required.orTags()
 
@@ -186,73 +187,49 @@ func (required *Required) structLayout(typ reflect.Type) []layoutMember {
 		return members
 	}
 
-	members := table.appendLayout(nil, typ)
+	var members []layoutMember
+
+	fields := visibleFields(typ)
+
+	for idx := range fields {
+		field := &fields[idx]
+		if field.viaPointer {
+			continue
+		}
+
+		members = append(members, layoutMember{
+			name:     field.name,
+			folded:   foldName(field.name),
+			typ:      field.field.Type,
+			required: table.has(field.owner, &field.field),
+		})
+	}
+
 	table.layouts.Store(typ, members)
 
 	return members
 }
 
-func (required *Required) appendLayout(members []layoutMember, typ reflect.Type) []layoutMember {
-	for idx := range typ.NumField() {
-		field := typ.Field(idx)
-
-		name, embedded, visible := memberName(&field)
-		if !visible {
-			continue
-		}
-
-		if embedded {
-			if field.Type.Kind() == reflect.Struct {
-				members = required.appendLayout(members, field.Type)
-			}
-
-			continue
-		}
-
-		members = append(members, layoutMember{
-			name:     name,
-			folded:   foldName(name),
-			typ:      field.Type,
-			required: required.has(typ, &field),
-		})
-	}
-
-	return members
-}
-
-// memberName returns the name of the member that fills a struct field, as
-// jsonFields reads it: whether the field is an embedded struct, whose
-// members sit in the object of the struct embedding it, and whether the
-// decoder sees the field at all.
-func memberName(field *reflect.StructField) (string, bool, bool) {
-	name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
-
-	switch {
-	case name == "-" || !field.IsExported() && !field.Anonymous:
-		return "", false, false
-	case field.Anonymous && name == "":
-		return "", true, true
-	case name == "":
-		return field.Name, false, true
-	default:
-		return name, false, true
-	}
-}
-
 // reportMissing collects the required members of an object of a struct
 // type at path that named holds no value for, and those of a struct member
-// it holds no object for, whose fields are all zero then.
+// it holds no object for, whose fields are all zero then. A path is only
+// built for a member the collector keeps, since an object closes with
+// nothing missing far more often than not.
 func (required *Required) reportMissing(
-	typ reflect.Type, path string, named map[string]bool, found *pathCollector,
+	typ reflect.Type, path pathOf, named map[string]bool, found *pathCollector,
 ) {
 	for _, member := range required.structLayout(typ) {
 		if named[member.folded] {
 			continue
 		}
 
-		memberPath := joinFieldPath(path, member.name)
+		memberPath := func() (string, bool) {
+			outer, cut := path()
+
+			return joinFieldPath(outer, member.name), cut
+		}
 		if member.required {
-			found.add(memberPath)
+			found.addLazily(memberPath)
 		}
 
 		if member.typ.Kind() == reflect.Struct && required.requiresFields(member.typ) {

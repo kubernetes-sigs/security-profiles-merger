@@ -98,7 +98,10 @@ var (
 	// parser from definitions this package does not have, so it cannot tell
 	// which files such a path covers and would match it as a literal "@"
 	// followed by an alternation. The parser resolves escapes before it
-	// expands variables, so `\x40{HOME}` is reported as well.
+	// expands variables, so `\x40{HOME}` is reported as well. What the
+	// parser reads as no variable is not: an escaped "@" (`\@{a}`), an "@{"
+	// without a closing "}", and "@{a,b}", an alternation after a literal
+	// "@".
 	ErrUnsupportedVariable = errors.New("AppArmor variables are not supported")
 
 	// ErrRelativePath is returned by every validator and by a merge when a
@@ -146,11 +149,15 @@ var (
 	// package returns as well.
 	ErrNulInPath = spm.ErrNulInPath
 
-	// ErrInvalidCapabilityName is returned by ValidateArtifact and
-	// ValidateStrict when a capability name holds a character that cannot
-	// spell one. A capability is a word of letters, digits and "_", so a
-	// name holding anything else does not load, and, like a path, is how an
-	// artifact smuggles rules into a consumer that renders it.
+	// ErrInvalidCapabilityName is returned by ValidateArtifact,
+	// ValidateStrict and ValidateBaseline when a capability name holds a
+	// character that cannot spell one, or starts with "cap_" in any case. A
+	// capability is a word of letters, digits and "_", so a name holding
+	// anything else does not load, and, like a path, is how an artifact
+	// smuggles rules into a consumer that renders it. apparmor_parser names
+	// a capability without the prefix of the kernel's constant, as "chown"
+	// for CAP_CHOWN, so a name with it does not load either: Union would
+	// keep it, and Intersect with the name spelled without it drop it.
 	//
 	// ValidateArtifact checks the spelling but not the name: a name this
 	// package does not know may be one a newer kernel does. ValidateStrict
@@ -852,12 +859,114 @@ func (check *validator) reject(
 	rejectPaths(&check.report, context, paths, reject, sentinel, show)
 }
 
-// referencesVariable reports whether a path references an AppArmor
-// variable. The parser resolves escapes before it expands variables, so
-// `\x40{HOME}` references one as much as "@{HOME}" does: the check looks at
-// the path with its escapes resolved too.
+// referencesVariable reports whether apparmor_parser reads a path as
+// referencing a variable, as extract_variable finds one. The parser resolves
+// escapes before it expands variables, so the check reads the path with its
+// escapes resolved (see decodeEscapes): `\x40{HOME}` references one as much
+// as "@{HOME}" does, while `\@{HOME}`, whose "@" is escaped, and
+// `\x40\x7bHOME}`, whose "{" stays escaped, do not.
+//
+// A reference is an "@{" without a backslash escaping its "@", up to the
+// first "}" no backslash escapes. apparmor_parser 5 reads one whose name
+// is a letter followed by letters, digits and "_" up to a comma, such as
+// "@{a,b}", as an alternation after a literal "@" (VAR_INVAL_COMMA), and
+// refuses to load any other name that is not a letter followed by letters,
+// digits and "_", one with a comma after another character, such as
+// "@{,a}" or "@{a-b,c}", included. An "@{" without a closing "}" is no
+// reference.
+// The check reports every reference other than the comma form, also one
+// the parser refuses, and also one a parser scanning past an earlier comma
+// form would skip, so it reports at least what any parser release expands.
+// An empty name "@{}", which apparmor_parser 5 skips but earlier releases
+// refuse, is reported as well.
 func referencesVariable(path string) bool {
-	return strings.Contains(path, "@{") || strings.Contains(decodeEscapes(path), "@{")
+	text := decodeEscapes(path)
+	escaped := false
+
+	for idx := 0; idx < len(text); idx++ {
+		switch text[idx] {
+		case '\\':
+			escaped = !escaped
+		case '@':
+			if escaped || !strings.HasPrefix(text[idx:], "@{") {
+				escaped = false
+
+				continue
+			}
+
+			if variableName(text, idx+len("@{")) {
+				return true
+			}
+
+			// Like extract_variable, go on after the "{" and the character
+			// behind it, which it reads as part of the name, not as an
+			// escape or an "@".
+			idx += len("@{")
+		default:
+			escaped = false
+		}
+	}
+
+	return false
+}
+
+// variableName reports whether the text after an "@{", which starts at
+// start, closes a variable reference the parser expands or refuses: an
+// empty name, or a name up to the first unescaped "}" other than the comma
+// form (see commaForm).
+// Like extract_variable, it does not read the character at start for the
+// closing brace or an escape.
+func variableName(text string, start int) bool {
+	if start >= len(text) {
+		return false
+	}
+
+	if text[start] == '}' {
+		return true
+	}
+
+	escaped := false
+
+	for idx := start + 1; idx < len(text); idx++ {
+		switch text[idx] {
+		case '\\':
+			escaped = !escaped
+		case '}':
+			if !escaped {
+				return !commaForm(text[start:idx])
+			}
+
+			escaped = false
+		default:
+			escaped = false
+		}
+	}
+
+	return false
+}
+
+// commaForm reports whether apparmor_parser 5 skips a variable name as an
+// alternation rather than refusing it (VAR_INVAL_COMMA in variable.cc): a
+// letter, then letters, digits and "_" up to the first comma.
+func commaForm(name string) bool {
+	before, _, found := strings.Cut(name, ",")
+	if !found || before == "" || !isASCIILetter(before[0]) {
+		return false
+	}
+
+	for idx := range len(before) {
+		char := before[idx]
+		if !isASCIILetter(char) && (char < '0' || char > '9') && char != '_' {
+			return false
+		}
+	}
+
+	return true
+}
+
+// isASCIILetter reports whether the byte is an ASCII letter.
+func isASCIILetter(char byte) bool {
+	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z'
 }
 
 // unquotableChars are the characters apparmor_parser's lexer does not accept
@@ -894,13 +1003,13 @@ var lexerPath = regexp.MustCompile(`^(?:[^ \t\r\n"!,]|,[^ \t\r\n"!,]|\\[ \t"!,])
 //
 // A backslash protects the character after it only where that character can
 // be written in a rule at all. The parser resolves no escape whose second
-// byte is a control character (see escapeSequence), so the backslash and the
-// byte both survive into the rule: `/tmp/a\` followed by a raw newline is a
-// path holding a newline, and a consumer rendering it writes a rule that
-// ends mid-path and a second rule of the path author's choosing. The two-
-// character forms spell the same paths safely (\n, \r, \t, or \x0a), so
-// nothing is lost by refusing this one, which hasUnprintable does along
-// with every other control byte.
+// byte is a control character (see escapeSequence) and drops the backslash
+// when it translates the pattern, keeping the byte: `/tmp/a\` followed by a
+// raw newline is a path holding a newline, and a consumer rendering it
+// writes a rule that ends mid-path and a second rule of the path author's
+// choosing. The two-character forms spell the same paths safely (\n, \r,
+// \t, or \x0a), so nothing is lost by refusing this one, which
+// hasUnprintable does along with every other control byte.
 //
 // Pairing each backslash with the next byte is how the merge reads a path,
 // not how the lexer splits it, so the path also has to be one token to the
@@ -1021,32 +1130,49 @@ func hasNul(path string) bool {
 }
 
 // capabilitySpelling reports the capability names holding a character that
-// cannot spell one. An empty name is left to emptyCapabilities, which
-// reports it as ErrEmptyCapability. For ValidateStrict such a name is also
-// one outside the known set, and the one failure reporting it matches
+// cannot spell one, or the "cap_" prefix (see capabilitySpelled). An empty
+// name is left to emptyCapabilities, which reports it as
+// ErrEmptyCapability. For ValidateStrict such a name is also one outside
+// the known set, and the one failure reporting it matches
 // ErrUnknownCapability as well, so that a caller matching either sentinel
 // finds it while the report names it once.
 func (check *validator) capabilitySpelling(caps []string) {
 	for idx, name := range caps {
-		if name == "" || capabilityWord(name) {
+		if name == "" || capabilitySpelled(name) {
 			continue
 		}
 
 		check.report.Report(func() error {
+			hint := ""
+			if capabilityWord(name) {
+				hint = " (apparmor_parser names it without the cap_ prefix)"
+			}
+
 			if check.strict {
 				return fmt.Errorf(
-					"%s[%d]: %s: %w, so an %w",
+					"%s[%d]: %s: %w%s, so an %w",
 					allowedCapabilitiesPath, idx, merge.QuoteBounded(name),
-					ErrInvalidCapabilityName, ErrUnknownCapability,
+					ErrInvalidCapabilityName, hint, ErrUnknownCapability,
 				)
 			}
 
 			return fmt.Errorf(
-				"%s[%d]: %s: %w",
-				allowedCapabilitiesPath, idx, merge.QuoteBounded(name), ErrInvalidCapabilityName,
+				"%s[%d]: %s: %w%s",
+				allowedCapabilitiesPath, idx, merge.QuoteBounded(name),
+				ErrInvalidCapabilityName, hint,
 			)
 		})
 	}
+}
+
+// capabilitySpelled reports whether a name is spelled the way
+// apparmor_parser names a capability: a word (see capabilityWord) without
+// the "cap_" prefix of the kernel's constants, in any case. The merge
+// lower-cases a name, and apparmor_parser loads "chown" but not "cap_chown",
+// so "CAP_CHOWN" never loads, whatever kernel may know a capability of that
+// name later.
+func capabilitySpelled(name string) bool {
+	return capabilityWord(name) && !strings.HasPrefix(asciiLower(name), "cap_")
 }
 
 // capabilityWord reports whether a name is spelled the way a capability is:
@@ -1173,12 +1299,13 @@ func (check *validator) duplicateCapabilities(caps []string) {
 }
 
 // capabilityNames reports the names outside the known set. A name that is
-// empty or not spelled as a capability is left out, since structure and
+// empty or not spelled as a capability, "cap_" prefix included, is left
+// out, since structure and
 // capabilitySpelling have reported it already, the latter matching
 // ErrUnknownCapability too.
 func (check *validator) capabilityNames(caps []string) {
 	for idx, name := range caps {
-		if name == "" || !capabilityWord(name) || isKnownCapability(name) {
+		if name == "" || !capabilitySpelled(name) || isKnownCapability(name) {
 			continue
 		}
 

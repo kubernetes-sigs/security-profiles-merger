@@ -193,6 +193,16 @@ func referRulePaths(inputs []*Profile) map[string]struct{} {
 // keeps whatever could matter and may remove a right no allowed move needs,
 // which only permits more.
 //
+// Options.Downgrade drops the rights an older ABI does not know from the
+// union and from the inputs alike, which can turn a move an input denies
+// for such a right into one it allows, while the union still denies it for
+// a right the version knows. So the conflicts are looked for at every
+// version from ABIV2 on that knows another filesystem right, with the
+// rights it does not know left out (see referLevels). ABIV1 needs no check:
+// it knows no refer right, so an input handling a filesystem right there
+// allows no move, and the union handles one there only where every input
+// does.
+//
 // A conflict needs an input granting refer, and the union keeps that grant
 // and so lists refer, which therefore stays handled and denied elsewhere.
 //
@@ -234,6 +244,75 @@ func unhandleMoveConflicts(result *Profile, inputs []*Profile) {
 		func(right FSAccessRight) bool { return fsBits.of(right)&conflicting != 0 },
 	)
 	pruneUnhandledRights(result)
+}
+
+// referLevels holds, for ABIV2 and each later version that knows a
+// filesystem right the one before it does not, the mask of the filesystem
+// rights that version knows. A union settles moves at each of them, since
+// Options.Downgrade cuts a profile to one of these sets, and a version that
+// adds no filesystem right cuts it as the one before it does.
+var referLevels = func() []uint32 {
+	var levels []uint32
+
+	for abi := ABIV2; abi <= LatestABIVersion; abi++ {
+		var known uint32
+
+		for right, needed := range fsAccessABI {
+			if needed <= abi {
+				known |= fsBits.of(right)
+			}
+		}
+
+		if len(levels) == 0 || levels[len(levels)-1] != known {
+			levels = append(levels, known)
+		}
+	}
+
+	return levels
+}()
+
+// settleLateRefer keeps a union from denying, once downgraded, the moves
+// and links an input allows because the downgrade left it handling no
+// filesystem right.
+//
+// An input handling only filesystem rights newer than ABIV2 handles none
+// once Options.Downgrade cuts it to a version below them, and then allows
+// every move and link, while a union listing refer still denies them at
+// every version from ABIV2 on. Where no rule of the union grants refer,
+// every input that handles a filesystem right denies every move, so the
+// union stops listing refer: it then denies moves only where it handles
+// another filesystem right, which every input handles too, at every
+// version. Where a rule grants refer, the union has to list refer to keep
+// the moves that input allows, and the downgraded union would deny the
+// moves the other input allows, so it stops handling filesystem rights
+// altogether, which permits more than any input does. Granting refer on
+// "/" would keep the other rights, but then the union would invent a rule
+// no input has.
+func settleLateRefer(result *Profile, inputs []*Profile) {
+	if !slices.Contains(result.HandledAccessFS, FSAccessRefer) ||
+		!slices.ContainsFunc(inputs, handlesOnlyLateFS) {
+		return
+	}
+
+	if rulesGrantRefer(result.PathRules) {
+		result.HandledAccessFS = nil
+	} else {
+		result.HandledAccessFS = slices.DeleteFunc(
+			result.HandledAccessFS,
+			func(right FSAccessRight) bool { return right == FSAccessRefer },
+		)
+	}
+
+	pruneUnhandledRights(result)
+}
+
+// handlesOnlyLateFS reports whether the profile handles filesystem rights,
+// but none that ABIV2 knows.
+func handlesOnlyLateFS(profile *Profile) bool {
+	return len(profile.HandledAccessFS) > 0 &&
+		!slices.ContainsFunc(profile.HandledAccessFS, func(right FSAccessRight) bool {
+			return fsAccessABI[right] <= ABIV2
+		})
 }
 
 // moveSide is what a directory answers for a move out of or into it: the
@@ -332,32 +411,43 @@ func (s moveSets) settle() (uint32, int) {
 }
 
 // moveConflicts returns the rights through which the union could deny a
-// move or link the input allows: comparing the directories with the rights
-// of the rules on "/" and, when belowRoot is set, without them as well.
+// move or link the input allows, at any version of referLevels: comparing
+// the directories with the rights of the rules on "/" and, when belowRoot
+// is set, without them as well.
 func moveConflicts(
 	input *Profile, resultMasks map[string]uint32, paths []string, belowRoot bool,
 ) uint32 {
-	withRoot, withoutRoot := moveSides(input, resultMasks, paths)
+	var conflicting uint32
 
-	conflicting := withRoot.conflicts()
-	if belowRoot {
-		conflicting |= withoutRoot.conflicts()
+	for _, level := range moveSides(input, resultMasks, paths, referLevels) {
+		conflicting |= level.withRoot.conflicts()
+		if belowRoot {
+			conflicting |= level.withoutRoot.conflicts()
+		}
 	}
 
 	return conflicting
 }
 
+// moveLevel holds the answers of the directories at one version of
+// referLevels, once compared with the rights the rules on "/" grant and
+// once without them.
+type moveLevel struct{ withRoot, withoutRoot moveSets }
+
 // moveSides returns the answers of the directories the input grants refer
-// on, once compared with the rights the rules on "/" grant and once without
-// them. Rights change only at rule paths, so a destination answers as the
-// deepest rule path above it does. A source also depends on the rules on
-// its children, so the parents of rule paths are asked as well.
+// on, at each of the given masks of known rights: the rights outside a mask
+// are left out, as Options.Downgrade drops them. Rights change only at rule
+// paths, so a destination answers as the deepest rule path above it does.
+// A source also depends on the rules on its children, so the parents of
+// rule paths are asked as well. Each path is looked up once, whatever the
+// number of masks.
 //
 // Whether a directory grants refer is read with the rules on "/" in both
-// cases, since the kernel counts them for the grant either way.
+// cases, since the kernel counts them for the grant either way, and refer
+// is known at every version of referLevels.
 func moveSides(
-	input *Profile, resultMasks map[string]uint32, paths []string,
-) (moveSets, moveSets) {
+	input *Profile, resultMasks map[string]uint32, paths []string, levels []uint32,
+) []moveLevel {
 	inputMasks := pathRuleMasks(input.PathRules)
 	children := make(map[string]uint32)
 
@@ -368,7 +458,14 @@ func moveSides(
 	}
 
 	files := fsBits.mask(fileAccessFS())
-	withRoot, withoutRoot := newMoveSets(files), newMoveSets(files)
+	sets := make([]moveLevel, len(levels))
+
+	for idx, known := range levels {
+		sets[idx] = moveLevel{
+			withRoot:    newMoveSets(files & known),
+			withoutRoot: newMoveSets(files & known),
+		}
+	}
 
 	add := func(path string, destination bool) {
 		inputBelow, inputRoot := maskAt(path, inputMasks)
@@ -378,14 +475,18 @@ func moveSides(
 
 		resultBelow, resultRoot := maskAt(path, resultMasks)
 
-		withRoot.add(moveSide{
-			input:    inputBelow | inputRoot,
-			result:   resultBelow | resultRoot,
-			children: children[path],
-		}, destination)
-		withoutRoot.add(moveSide{
-			input: inputBelow, result: resultBelow, children: children[path],
-		}, destination)
+		for idx, known := range levels {
+			sets[idx].withRoot.add(moveSide{
+				input:    (inputBelow | inputRoot) & known,
+				result:   (resultBelow | resultRoot) & known,
+				children: children[path] & known,
+			}, destination)
+			sets[idx].withoutRoot.add(moveSide{
+				input:    inputBelow & known,
+				result:   resultBelow & known,
+				children: children[path] & known,
+			}, destination)
+		}
 	}
 
 	for _, path := range paths {
@@ -396,7 +497,7 @@ func moveSides(
 		add(parent, false)
 	}
 
-	return withRoot, withoutRoot
+	return sets
 }
 
 // maskAt returns the rights the rules grant for a path, as effectiveFSAccess

@@ -78,6 +78,11 @@ func TestSentinelsAreShared(t *testing.T) {
 			shared: spm.ErrPathTooLong,
 		},
 		{
+			name:   "ErrInvalidOptions",
+			errs:   []error{seccomp.ErrInvalidOptions, landlock.ErrInvalidOptions},
+			shared: spm.ErrInvalidOptions,
+		},
+		{
 			name: "ErrArtifactTooLarge",
 			errs: []error{
 				seccomp.ErrArtifactTooLarge, apparmor.ErrArtifactTooLarge,
@@ -602,21 +607,22 @@ func TestAppArmorValidateBaseline(t *testing.T) {
 	}
 
 	// Paths QuotePath refuses would reach every result, so the baseline is
-	// refused at config load, each path named by its list and index.
+	// refused at config load, each path named by its list and index. An
+	// escaped tab QuotePath renders as \x09.
 	unrenderable := &apparmor.Profile{
 		Filesystem: &apparmor.FilesystemRules{
 			ReadOnlyPaths:  []string{"/etc/ok", "/etc/{a,,b}"},
-			ReadWritePaths: []string{"/a\\\tb", "/a\\\x01"},
+			ReadWritePaths: []string{"/a\\\tb", "/etc/{c,,d}"},
 		},
 	}
 
 	err = apparmor.ValidateBaseline(unrenderable)
 
 	problems := spm.Problems(err)
-	if len(problems) != 3 || !errors.Is(err, apparmor.ErrUnquotablePath) ||
+	if len(problems) != 2 || !errors.Is(err, apparmor.ErrUnquotablePath) ||
 		!strings.Contains(problems[0].Error(), "filesystem.readOnlyPaths[1]") ||
-		!strings.Contains(problems[2].Error(), "filesystem.readWritePaths[1]") {
-		t.Errorf("apparmor ValidateBaseline(unrenderable) = %v, want three ErrUnquotablePath", err)
+		!strings.Contains(problems[1].Error(), "filesystem.readWritePaths[1]") {
+		t.Errorf("apparmor ValidateBaseline(unrenderable) = %v, want two ErrUnquotablePath", err)
 	}
 
 	err = apparmor.ValidateBaseline(&apparmor.Profile{
@@ -698,5 +704,40 @@ func TestDecodeArtifact(t *testing.T) {
 			t.Errorf("%s: DecodeArtifact = %t, %v, want %v",
 				testCase.name, got.ok, got.err, testCase.want)
 		}
+	}
+}
+
+// TestInvalidOptionsAreOneSentinel checks that a node a caller described
+// wrongly reads alike from both packages that take Options, apart from a
+// profile that is wrong: an unknown seccomp architecture or a Landlock
+// version that names no kernel matches spm.ErrInvalidOptions, and an
+// artifact listing an unknown architecture does not.
+func TestInvalidOptionsAreOneSentinel(t *testing.T) {
+	t.Parallel()
+
+	profile := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
+
+	for name, err := range map[string]error{
+		"seccomp zero Options": seccomp.Options{}.Validate(profile),
+		"seccomp unknown arch": seccomp.ForArch("SCMP_ARCH_BOGUS").ValidateArtifact(profile),
+		"landlock v0":          landlock.Options{}.ValidateArtifact(&landlock.Profile{}),
+	} {
+		if !errors.Is(err, spm.ErrInvalidOptions) {
+			t.Errorf("%s = %v, want spm.ErrInvalidOptions", name, err)
+		}
+
+		var inputErr *spm.InputError
+		if errors.As(err, &inputErr) {
+			t.Errorf("%s = %v, want no InputError", name, err)
+		}
+	}
+
+	err := seccomp.ForArch(specs.ArchX86_64).ValidateArtifact(&specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Architectures: []specs.Arch{"SCMP_ARCH_BOGUS"},
+	})
+	if !errors.Is(err, seccomp.ErrUnknownArch) || errors.Is(err, spm.ErrInvalidOptions) {
+		t.Errorf("ValidateArtifact of an unknown architecture = %v, "+
+			"want ErrUnknownArch without ErrInvalidOptions", err)
 	}
 }

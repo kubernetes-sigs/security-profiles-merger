@@ -126,6 +126,82 @@ func TestArtifactLimitsAtTheirBoundary(t *testing.T) {
 	}
 }
 
+// TestPerSyscallLimitsOutlastAFullReport covers a profile past a
+// per-syscall limit that also holds more failures than a report keeps: 34
+// repeats of one architecture fill the report first, and the limit must
+// still be in it, so that the profile matches ErrArtifactTooLarge, for an
+// entry count and for a rule count, also where Validate fails.
+func TestPerSyscallLimitsOutlastAFullReport(t *testing.T) {
+	t.Parallel()
+
+	archs := make([]specs.Arch, 34)
+	for idx := range archs {
+		archs[idx] = specs.ArchX86_64
+	}
+
+	entries := make([]specs.LinuxSyscall, 0, seccomp.MaxArtifactEntriesPerSyscall+1)
+	for range seccomp.MaxArtifactEntriesPerSyscall + 1 {
+		entries = append(
+			entries,
+			specs.LinuxSyscall{Names: []string{syscallRead}, Action: specs.ActAllow},
+		)
+	}
+
+	conditions := make([]specs.LinuxSeccompArg, 0, seccomp.MaxArtifactRulesPerSyscall+1)
+	for idx := range seccomp.MaxArtifactRulesPerSyscall + 1 {
+		conditions = append(conditions, specs.LinuxSeccompArg{
+			Index: 0, Op: specs.OpEqualTo, Value: uint64(idx),
+		})
+	}
+
+	for _, testCase := range []struct {
+		name     string
+		profile  *specs.LinuxSeccomp
+		sentinel error
+	}{
+		{
+			name: "entries",
+			profile: &specs.LinuxSeccomp{
+				DefaultAction: specs.ActErrno, Architectures: archs, Syscalls: entries,
+			},
+			sentinel: seccomp.ErrTooManyEntriesPerSyscall,
+		},
+		{
+			name: "rules",
+			profile: &specs.LinuxSeccomp{
+				DefaultAction: specs.ActErrno, Architectures: archs,
+				Syscalls: []specs.LinuxSyscall{
+					{Names: []string{syscallRead}, Action: specs.ActAllow, Args: conditions},
+				},
+			},
+			sentinel: seccomp.ErrTooManyRulesPerSyscall,
+		},
+		{
+			name: "rules of an invalid profile",
+			profile: &specs.LinuxSeccomp{
+				DefaultAction: "SCMP_ACT_BOGUS", Architectures: archs,
+				Syscalls: []specs.LinuxSyscall{
+					{Names: []string{syscallRead}, Action: specs.ActAllow, Args: conditions},
+				},
+			},
+			sentinel: seccomp.ErrTooManyRulesPerSyscall,
+		},
+	} {
+		for name, validate := range map[string]func(*specs.LinuxSeccomp) error{
+			"ValidateArtifact": seccomp.ValidateArtifact,
+			"ValidateStrict":   seccomp.ValidateStrict,
+		} {
+			err := validate(testCase.profile)
+			if !errors.Is(err, seccomp.ErrMoreProblems) ||
+				!errors.Is(err, testCase.sentinel) ||
+				!errors.Is(err, seccomp.ErrArtifactTooLarge) {
+				t.Errorf("%s of %s = %v, want %v among more problems",
+					name, testCase.name, err, testCase.sentinel)
+			}
+		}
+	}
+}
+
 // TestDiffSeesPastTheClauseBudget covers what Diff reports for a profile
 // whose syscalls it reads in summarized form. Past an internal budget a
 // syscall is read as the two clauses a collapse could pick rather than as

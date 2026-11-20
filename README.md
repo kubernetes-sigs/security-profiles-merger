@@ -300,7 +300,7 @@ log.Print(aaCombined)
 var baseline, recorded1, recorded2 *landlock.Profile
 var artifactBytes []byte
 var nodeABI landlock.ABIVersion
-var openBeneath func(string) error
+var openBeneath func(path, ancestor string) error
 -->
 ```go
 // A kernel rejects a right its ABI does not know, so validate against the
@@ -320,14 +320,15 @@ if err := node.Validate(llEffective); err != nil {
 }
 
 // A rule of the result can carry the baseline's grant on an ancestor down
-// to a path the artifact chose. Open each such path without leaving the
-// ancestor's hierarchy, or refuse the profile (see docs/integration.md).
+// to a path the artifact chose. Open each such path so that it cannot
+// leave the hierarchy of its ancestor, as docs/integration.md describes,
+// or refuse the profile.
 lowered, err := landlock.LoweredRulePaths(llEffective, baseline, artifact)
 if err != nil {
     return err
 }
-for _, path := range lowered {
-    if err := openBeneath(path); err != nil {
+for _, each := range lowered {
+    if err := openBeneath(each.Path, each.Ancestor); err != nil {
         return err
     }
 }

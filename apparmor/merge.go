@@ -51,7 +51,8 @@ var (
 	// the paths left out were ones the budget cost. It is not wrapped in
 	// an InputError. Union never returns it: past the budget it keeps
 	// every path with its own permissions, which permits what the exact
-	// union permits.
+	// union permits. ValidateBaseline returns it for a baseline whose
+	// patterns leave too little of the compile budget for an artifact's.
 	ErrBudgetExceeded = spm.ErrBudgetExceeded
 )
 
@@ -123,23 +124,39 @@ func Union(profiles ...*Profile) (*Profile, error) {
 }
 
 // ValidateBaseline checks a baseline once, where a runtime loads its
-// configuration: Validate, then QuotePath of every path, then Intersect of
+// configuration: Validate, then QuotePath of every path and the spelling of
+// every capability name, then the length of its patterns, then Intersect of
 // the baseline alone, then Diff of the baseline against that intersection.
 //
 // A path QuotePath refuses (ErrUnquotablePath) would reach a merge result
-// the runtime cannot render, so a misconfigured node would otherwise
-// surface as the failure of every workload; each is reported with its list
-// and index. A relative path, which QuotePath refuses as well, is reported
-// once, by Validate. The intersection is equal to the baseline exactly
-// when the merge reads every rule of it, so an unequal diff, reported with
-// ErrInexactBaseline and the diff in the message, names what every merge
-// with that baseline takes away whatever the artifact says, such as a
-// pattern apparmor_parser rejects, which an intersection drops. Treat any
-// error as a misconfigured node.
+// the runtime cannot render, and a capability name apparmor_parser does not
+// load (ErrInvalidCapabilityName), such as "net admin" or "CAP_CHOWN",
+// a result it cannot load, so a misconfigured node would otherwise surface
+// as the failure of every workload; each is reported with its list and
+// index. A relative path, which QuotePath refuses as well, is reported
+// once, by Validate. A capability name this package does not know is
+// accepted, as ValidateArtifact accepts it, since a newer kernel may know
+// it.
+//
+// A baseline whose glob patterns are longer in total than
+// 2*MaxArtifactPatternBytes leaves too little of a merge's compile budget
+// for the patterns of the artifacts merged with it (see the Cost bounds
+// section of the package documentation), so Intersect would fail with
+// ErrBudgetExceeded for nearly every workload with patterns of its own:
+// it is reported with ErrBudgetExceeded and the byte count, without an
+// InputError. Patterns are counted once each, normalized as the merge
+// reads them.
+//
+// The intersection is equal to the baseline exactly when the merge reads
+// every rule of it, so an unequal diff, reported with ErrInexactBaseline
+// and the diff in the message, names what every merge with that baseline
+// takes away whatever the artifact says, such as a pattern apparmor_parser
+// rejects, which an intersection drops. Treat any error as a misconfigured
+// node.
 //
 // It returns the failures of Validate as Validate does, those of QuotePath
-// in one bounded report, and the errors of the merge without an
-// InputError, since there is one input. See
+// and of the capability names in one bounded report, and the errors of the
+// merge without an InputError, since there is one input. See
 // https://github.com/kubernetes-sigs/security-profiles-merger/blob/main/docs/integration.md#the-runtime-flow
 // for where it fits.
 func ValidateBaseline(baseline *Profile) error {
@@ -148,20 +165,18 @@ func ValidateBaseline(baseline *Profile) error {
 		return err
 	}
 
-	var unrenderable merge.Collector
-
-	for list, paths := range pathLists(baseline) {
-		for idx, path := range *paths {
-			_, err := QuotePath(path)
-			if err != nil {
-				unrenderable.Reportf("%s[%d]: %w", list, idx, err)
-			}
-		}
-	}
-
-	err = unrenderable.Err()
+	err = baselineRendering(baseline)
 	if err != nil {
 		return err
+	}
+
+	patternBytes := baselinePatternBytes(baseline)
+	if patternBytes > maxBaselinePatternBytes {
+		return fmt.Errorf(
+			"%s: %d bytes of glob patterns, past the %d a baseline may hold to leave "+
+				"the compile budget room for two artifacts: %w",
+			pathListsScope, patternBytes, maxBaselinePatternBytes, ErrBudgetExceeded,
+		)
 	}
 
 	settled, err := Intersect(baseline)
@@ -179,6 +194,58 @@ func ValidateBaseline(baseline *Profile) error {
 	}
 
 	return nil
+}
+
+// baselineRendering reports, in one bounded report, the paths of a
+// baseline QuotePath refuses and the capability names apparmor_parser does
+// not load, which a runtime could render into no merge result.
+func baselineRendering(baseline *Profile) error {
+	check := newValidator(newKeyCache())
+
+	for list, paths := range pathLists(baseline) {
+		for idx, path := range *paths {
+			_, err := QuotePath(path)
+			if err != nil {
+				check.report.Reportf("%s[%d]: %w", list, idx, err)
+			}
+		}
+	}
+
+	if baseline.Capabilities != nil {
+		check.capabilitySpelling(baseline.Capabilities.AllowedCapabilities)
+	}
+
+	return check.report.Err()
+}
+
+// maxBaselinePatternBytes bounds the glob patterns ValidateBaseline accepts
+// in a baseline: what the compile budget of one call leaves once the
+// patterns of two artifacts ValidateArtifact accepts are compiled after it.
+const maxBaselinePatternBytes = maxCallCompileBytes - 2*MaxArtifactPatternBytes
+
+// baselinePatternBytes returns the bytes of the distinct glob patterns of a
+// profile, normalized as the merge reads them, which is what a merge charges
+// the compile budget for them. It counts a pattern that fails to compile,
+// which the merge does not charge, so it errs high; such a pattern is
+// dropped from an intersection and makes the baseline inexact anyway.
+func baselinePatternBytes(profile *Profile) int {
+	matchers := newKeyCache()
+	seen := make(map[string]bool)
+	total := 0
+
+	for _, paths := range pathLists(profile) {
+		for _, path := range *paths {
+			normalized := normalizePath(path)
+			if seen[normalized] || !matchers.isGlob(normalized) {
+				continue
+			}
+
+			seen[normalized] = true
+			total += len(normalized)
+		}
+	}
+
+	return total
 }
 
 type strategy interface {

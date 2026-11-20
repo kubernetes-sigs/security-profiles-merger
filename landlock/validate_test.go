@@ -1113,21 +1113,26 @@ func validationCorpus() map[string]*landlock.Profile {
 	}
 }
 
-// TestValidationLattice asserts the order the three validators are
-// documented in: Validate checks what the merge needs, ValidateArtifact adds
-// what a kernel could not load, and ValidateStrict adds the duplicate
-// checks. So everything Validate rejects ValidateArtifact rejects, and
-// everything ValidateArtifact rejects ValidateStrict rejects.
+// TestValidationLattice asserts the order the validators are documented
+// in: Validate checks what the merge needs, ValidateBaseline adds what a
+// kernel could not load, ValidateArtifact adds MaxArtifactRules, and
+// ValidateStrict adds the duplicate checks. So each rejects everything the
+// one before it rejects.
 func TestValidationLattice(t *testing.T) {
 	t.Parallel()
 
 	for name, profile := range validationCorpus() {
 		base := landlock.Validate(profile)
+		baseline := landlock.ValidateBaseline(profile)
 		artifact := landlock.ValidateArtifact(profile)
 		strict := landlock.ValidateStrict(profile)
 
-		if base != nil && artifact == nil {
-			t.Errorf("%s: Validate = %v but ValidateArtifact accepted it", name, base)
+		if base != nil && baseline == nil {
+			t.Errorf("%s: Validate = %v but ValidateBaseline accepted it", name, base)
+		}
+
+		if baseline != nil && artifact == nil {
+			t.Errorf("%s: ValidateBaseline = %v but ValidateArtifact accepted it", name, baseline)
 		}
 
 		if artifact != nil && strict == nil {
@@ -1327,8 +1332,109 @@ func TestValidateMessages(t *testing.T) {
 	}
 
 	_, err = landlock.Options{ABI: 0}.Downgrade(profile)
-	if want := "v0: unknown Landlock ABI version (the first is v1)"; err == nil ||
+	if want := "invalid options: v0: unknown Landlock ABI version (the first is v1)"; err == nil ||
 		err.Error() != want {
 		t.Errorf("Options{v0}.Downgrade() = %v, want %s", err, want)
+	}
+}
+
+// TestValidateBaseline covers what a baseline needs beyond Validate: each
+// profile below passes Validate and the merge, yet an intersection with it
+// is not what its author meant, or no kernel loads it.
+func TestValidateBaseline(t *testing.T) {
+	t.Parallel()
+
+	read := fsRights{landlock.FSAccessReadFile}
+	truncate := fsRights{landlock.FSAccessReadFile, landlock.FSAccessTruncate}
+
+	tests := map[string]struct {
+		profile *landlock.Profile
+		want    error
+	}{
+		"relative path": {
+			fsProfile(read, landlock.PathRule{Path: "etc", AccessFS: read}),
+			landlock.ErrRelativePath,
+		},
+		"trailing slash": {
+			fsProfile(read, landlock.PathRule{Path: "/etc/", AccessFS: read}),
+			landlock.ErrTrailingSlash,
+		},
+		"unhandled right": {
+			fsProfile(read, landlock.PathRule{Path: pathEtc, AccessFS: truncate}),
+			landlock.ErrUnhandledRight,
+		},
+		"empty rule": {
+			fsProfile(read, landlock.PathRule{Path: pathEtc, AccessFS: nil}),
+			landlock.ErrEmptyRule,
+		},
+		"empty ruleset": {&landlock.Profile{}, landlock.ErrEmptyRuleset},
+	}
+
+	for name, test := range tests {
+		err := landlock.Validate(test.profile)
+		if err != nil {
+			t.Errorf("%s: Validate = %v, want nil", name, err)
+		}
+
+		err = landlock.ValidateBaseline(test.profile)
+		if !errors.Is(err, test.want) {
+			t.Errorf("%s: ValidateBaseline = %v, want %v", name, err, test.want)
+		}
+	}
+
+	// A relative rule grants nothing an absolute path sees, so the
+	// intersection drops the baseline's grant without an error.
+	relative := fsProfile(read, landlock.PathRule{Path: "etc", AccessFS: read})
+	assertMergeFormat(t, "Intersect", landlock.Intersect, "Profile{fs:read_file}",
+		relative, fsProfile(read, landlock.PathRule{Path: pathEtc, AccessFS: read}))
+}
+
+// TestOptionsValidateBaseline checks that Options adds the node's ABI
+// version to ValidateBaseline, and that a baseline past MaxArtifactRules
+// passes, since the node operator chose its size.
+func TestOptionsValidateBaseline(t *testing.T) {
+	t.Parallel()
+
+	read := fsRights{landlock.FSAccessReadFile}
+	truncate := fsRights{landlock.FSAccessReadFile, landlock.FSAccessTruncate}
+
+	// The node's kernel at ABIV2 does not know truncate, so every merge
+	// result with this baseline would fail to load there.
+	baseline := fsProfile(truncate, landlock.PathRule{Path: pathEtc, AccessFS: truncate})
+
+	err := landlock.ValidateBaseline(baseline)
+	if err != nil {
+		t.Errorf("ValidateBaseline = %v, want nil", err)
+	}
+
+	err = landlock.Options{ABI: landlock.ABIV2}.ValidateBaseline(baseline)
+	if !errors.Is(err, landlock.ErrUnsupportedABIRight) {
+		t.Errorf("Options{ABIV2}.ValidateBaseline = %v, want %v",
+			err, landlock.ErrUnsupportedABIRight)
+	}
+
+	err = landlock.Options{ABI: 0}.ValidateBaseline(baseline)
+	if !errors.Is(err, landlock.ErrInvalidOptions) ||
+		!errors.Is(err, landlock.ErrUnknownABIVersion) {
+		t.Errorf("Options{0}.ValidateBaseline = %v, "+
+			"want ErrInvalidOptions and ErrUnknownABIVersion", err)
+	}
+
+	large := &landlock.Profile{HandledAccessFS: read}
+	for idx := range landlock.MaxArtifactRules + 1 {
+		large.PathRules = append(large.PathRules, landlock.PathRule{
+			Path: fmt.Sprintf("/d%d", idx), AccessFS: read,
+		})
+	}
+
+	err = landlock.Options{ABI: landlock.ABIV1}.ValidateBaseline(large)
+	if err != nil {
+		t.Errorf("ValidateBaseline of %d rules = %v, want nil", len(large.PathRules), err)
+	}
+
+	err = landlock.ValidateArtifact(large)
+	if !errors.Is(err, landlock.ErrTooManyRules) {
+		t.Errorf("ValidateArtifact of %d rules = %v, want %v",
+			len(large.PathRules), err, landlock.ErrTooManyRules)
 	}
 }

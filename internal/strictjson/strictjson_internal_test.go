@@ -92,6 +92,17 @@ func TestDuplicateKeys(t *testing.T) {
 		{`{"ab":1,"a":2}`, nil},
 		{`"text"`, nil},
 		{`{"a":1,"a":`, []string{"a"}},
+		// A member repeated inside an object that is itself repeated is
+		// found once per occurrence of the object and reported once.
+		{`{"a":{"b":1,"b":2},"a":{"b":1,"b":2}}`, []string{"a.b", "a"}},
+		{`{"":{"":0,"":0},"":{"":0,""`, []string{`[""][""]`, `[""]`}},
+		// A whole path past the length a report shows is not cut, so it
+		// is reported once too.
+		{
+			`{"a":{"` + strings.Repeat("L", 70) + `":1,"` + strings.Repeat("L", 70) + `":2},` +
+				`"a":{"` + strings.Repeat("L", 70) + `":1,"` + strings.Repeat("L", 70) + `":2}}`,
+			[]string{"a." + strings.Repeat("L", 70), "a"},
+		},
 	}
 
 	for _, test := range tests {
@@ -128,8 +139,8 @@ func TestBracketedPathsAreQuotedOnce(t *testing.T) {
 		},
 		// Plain names may hold ", ", which stays inside the quotes.
 		{
-			[]string{"x", `a, b["c.d"]`, `["e, f"]`},
-			`unknown fields "x", "a, b"["c.d"], ["e, f"]`,
+			[]string{"x", `a, b["c.d"]`, `["e, f."]`},
+			`unknown fields "x", "a, b"["c.d"], ["e, f."]`,
 		},
 		{[]string{long}, "unknown field " + merge.QuoteBounded(long)},
 		{[]string{`a["b`}, "unknown field " + merge.QuoteBounded(`a["b`)},

@@ -40,16 +40,21 @@ What a runtime gets wrong most easily, each explained further down:
   runtime then sets `SECCOMP_FILTER_FLAG_SPEC_ALLOW`
   ([Extra steps after Intersect](#extra-steps-after-intersect)).
 - **Check `landlock.LoweredRulePaths`** of a Landlock result and open each
-  path it reports beneath its ancestor, or refuse the profile
+  path it reports beneath its `Ancestor` without crossing a symlink or a
+  mount (where `InRoot` is set, only inside the root), or refuse the
+  profile
   ([Landlock: lowered rule paths](#landlock-lowered-rule-paths)).
 - **Check the Landlock result against the node's ABI** with
   `landlock.Options{ABI: nodeABI}.Validate`: a ruleset the kernel refuses
   must not turn into running without Landlock
   ([Extra steps after Intersect](#extra-steps-after-intersect)).
-- **Check every seccomp and AppArmor baseline with `ValidateBaseline`** at
-  config load, not only the CRI-O default: an error there is a
+- **Check every baseline with `ValidateBaseline`** at config load, not
+  only the CRI-O default, and a Landlock one with
+  `landlock.Options{ABI: nodeABI}.ValidateBaseline`: an error there is a
   misconfigured node, which would otherwise fail every workload. The
-  AppArmor one also refuses paths `apparmor.QuotePath` cannot render
+  AppArmor one also refuses paths `apparmor.QuotePath` cannot render,
+  capability names apparmor_parser does not load, and patterns that leave
+  the merge too little budget for an artifact's
   ([the runtime flow](#the-runtime-flow)).
 - **Render AppArmor paths through `apparmor.QuotePath`**, never as they
   are: a path can hold what the profile lexer reads as syntax, and escaping
@@ -130,10 +135,13 @@ if diff, err := seccomp.Diff(baseline, effective); err == nil && diff.Architectu
 ```
 
 The same calls exist in `apparmor` and `landlock`, which need the
-[extra steps](#extra-steps-after-intersect) below before step 4, except
-`ValidateBaseline`, the self-check of step 0, which only `seccomp` and
-`apparmor` have. A Landlock baseline is checked with `Validate`, or
-`ValidateStrict` for one a person wrote: `Intersect` of one Landlock
+[extra steps](#extra-steps-after-intersect) below before step 4. Check a
+Landlock baseline with `landlock.Options{ABI: nodeABI}.ValidateBaseline`,
+not with `Validate`: it refuses a relative path, which covers no path in
+the merge, so `Intersect` would drop what the baseline grants there
+without an error, a trailing slash, a rule granting a right the baseline
+does not handle, and a right the node's kernel does not know, which would
+fail every merge result. It has no self-check: `Intersect` of one Landlock
 profile drops the rights a rule on an ancestor already grants, so a valid
 baseline granting `read_file` on `/` and `read_file` and `execute` on
 `/usr` diffs unequal against it without the merge taking anything away. It
@@ -143,11 +151,15 @@ it, since the kernel denies `refer` there anyway, so a baseline listing
 `read_file` and `refer` diffs unequal for that too.
 
 0. **Check the baseline once, at config load, with `ValidateBaseline`**
-   (seccomp and AppArmor): `Validate`, then
+   (for Landlock see above): `Validate`, then
    `Diff(baseline, Intersect(baseline))`. The intersection of the baseline
    alone is equal to it exactly when the merge reads every rule of it, so
    an unequal diff, `ErrInexactBaseline`, names what every merge with that
-   baseline takes away, whatever the artifact says. It shows more
+   baseline takes away, whatever the artifact says. The seccomp one also
+   diffs it against its intersection with a profile allowing every call on
+   the same architectures: next to any artifact the merge drops the 32-bit
+   architectures, or collapses the syscall, for a condition on a value
+   above 32 bits, which the baseline alone keeps. It shows more
    than `ValidateArtifact` reports (see the seccomp
    [Diff](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Diff)
    section). Run it on the node, or through `seccomp.ForArch` naming the
@@ -155,8 +167,12 @@ it, since the kernel denies `refer` there anyway, so a baseline listing
    error as a misconfigured node rather than as something to fix at merge
    time. For AppArmor it also refuses every path `apparmor.QuotePath`
    cannot render (`ErrUnquotablePath`; a relative path `Validate` refuses
-   first, with `ErrRelativePath`), which would otherwise reach every merge
-   result and fail each workload instead of the node.
+   first, with `ErrRelativePath`) and every capability name apparmor_parser
+   does not load, such as `CAP_CHOWN` (`ErrInvalidCapabilityName`), which
+   would otherwise reach every merge result and fail each workload instead
+   of the node, and glob patterns longer in total than twice
+   `MaxArtifactPatternBytes` (`ErrBudgetExceeded`), past which an
+   intersection with an artifact holding patterns fails.
 
    Moby, containerd and CRI-O list one syscall in several entries in their
    defaults, which `ValidateStrict` reports. The Moby and containerd defaults
@@ -316,8 +332,8 @@ Landlock, building the `landlock_ruleset_attr` and the rules:
 work, so that an over-large artifact is rejected where the reason can be
 reported rather than merged slowly. In `seccomp` that holds for the limits on
 the whole profile, such as `MaxArtifactEntries`; its per-syscall limits come
-in the same bounded report as every other finding, so a profile with
-enough earlier problems matches `ErrMoreProblems` instead of such a limit.
+first in the bounded report of every other finding, so a profile past one
+always matches its error.
 Every limit error matches `spm.ErrArtifactTooLarge`, for a caller that
 treats every oversized artifact alike. `Validate` applies none of them
 except the path length, and neither does the merge, so run
@@ -438,8 +454,8 @@ caused them. Check for an `InputError` first, then for these:
 | `ErrBudgetExceeded` | `apparmor.Intersect`; `landlock.Intersect` and `landlock.Union` | The inputs together are too large to merge precisely. After the baseline check, the artifact brought the size: reject the workload |
 | `seccomp.ErrLostRules` | `seccomp.Union`; `seccomp.Intersect` where it cannot drop an architecture | libseccomp would lose the rules of an architecture in the result. The baseline check at config load catches a baseline that does this alone, so after it the artifact brought the rules: reject the workload |
 | `seccomp.ErrNotifyWithoutListener` | `seccomp.Intersect` and `seccomp.Union`, on their result | A result that would notify without a listener. `Validate` of every input rules it out, so treat it as an internal error and reject the workload. On an input it comes inside an `InputError` |
-| `seccomp.ErrUnknownArch` | Every method that returns an error of a `seccomp.ForArch` naming an architecture the package does not know | A misconfigured node or caller, before any profile was read. On an input it comes inside an `InputError` |
-| `seccomp.ErrInvalidOptions` | Every method that returns an error of the zero `seccomp.Options` | A bug in the caller, before any profile was read |
+| `seccomp.ErrUnknownArch` | Every method that returns an error of a `seccomp.ForArch` naming an architecture the package does not know, matching `spm.ErrInvalidOptions` as well | A misconfigured node or caller, before any profile was read. On an input it comes inside an `InputError`, without `ErrInvalidOptions` |
+| `spm.ErrInvalidOptions` | Every method that returns an error of the zero `seccomp.Options`, of a `seccomp.ForArch` naming an unknown architecture, or of a `landlock.Options` naming a version below `ABIV1` (`landlock.ErrUnknownABIVersion`); `seccomp.ErrInvalidOptions` and `landlock.ErrInvalidOptions` are this sentinel | A bug in the caller or a misconfigured node, before any profile was read |
 
 A seccomp merge also returns `ErrConflictingListener` inside an
 `InputError` naming the later of two inputs, although both took part (see
@@ -515,9 +531,53 @@ or a bind mount, the kernel binds the rule to whatever it resolves to,
 which the baseline never covered, and the artifact's author chose the path
 (see [Lowered rule paths](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#hdr-Lowered_rule_paths)).
 
+Open each reported path so that it cannot leave the hierarchy of its
+`Ancestor`, and keep the descriptor through `landlock_add_rule`:
+
+1. Open `Ancestor` the way the runtime opens a rule path when it loads a
+   profile, as an `O_PATH` descriptor. That is how the kernel would bind
+   the rule the grant came from, whether `Input` names the baseline or the
+   artifact.
+2. Open `Path` relative to that descriptor with
+   `openat2(O_PATH, RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV)`.
+   `RESOLVE_BENEATH` and `RESOLVE_NO_SYMLINKS` alone still cross mount
+   points, and a bind mount on the path covers files outside the
+   ancestor's hierarchy; `RESOLVE_NO_XDEV` refuses every mount point,
+   bind mounts of the same file system included. Where the open fails,
+   refuse the profile.
+3. A rule on a file that is not a directory covers that file under every
+   name, which no resolve flag sees, so refuse such a file with more than
+   one hard link.
+4. Pass that descriptor to `landlock_add_rule` as the rule's `parent_fd`.
+   Opening the path again by name would leave a window in which a symlink
+   or a mount swapped into it redirects the rule.
+
+An `Ancestor` of `/` is reported only where the rule on `/` of the input
+the grant came from grants every right lowered onto the path, as in a
+baseline granting read access on `/`. That rule grants its rights on
+everything a path from the root reaches, through every mount and under
+every name, so for the access the lowered rule grants, it grants nothing
+more wherever the path resolves inside the root. Where `InRoot` is set,
+which it is only for an `Ancestor` of `/` in a result that grants no
+`refer`, open the path relative to the root the runtime resolves rule
+paths against with `RESOLVE_IN_ROOT` alone, so that a volume mounted
+beneath it is not refused, and skip the link check. A result granting
+`refer` gets no shortcut, since a rule landing on another directory
+through a symlink changes which moves the kernel allows (see below), so
+an `Ancestor` of `/` takes the full set of flags there. Even with
+`InRoot`, the lowered rule binds to the file, so it also grants its rights
+through a name or a descriptor outside the root: a hard link or bind
+mount elsewhere, or a descriptor a peer container of the pod passes in
+(see
+[Lowered rule paths](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#hdr-Lowered_rule_paths)).
+
 <!-- go-snippet
 var baseline, artifact *landlock.Profile
-var openBeneath func(string) (int, error)
+var rootFD int
+var openRulePath func(string) (int, error)
+var openat2 func(dirFD int, rel string, resolve uint64) (int, error)
+var resolveInRoot, resolveBeneathNoSymlinksNoXDev uint64
+var isMultiplyLinkedFile func(fd int) bool
 var ruleFDs map[string]int
 -->
 ```go
@@ -530,29 +590,61 @@ lowered, err := landlock.LoweredRulePaths(effective, baseline, artifact)
 if err != nil {
     return err
 }
-for _, path := range lowered {
-    // openBeneath is the runtime's own: it opens path as O_PATH with
-    // openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS), relative to the path of
-    // the baseline rule the access came from, an ancestor of path. A deeper
-    // baseline rule is not the one to resolve from: it may itself sit on a
-    // symlink. Where that fails, refuse the profile.
-    fd, err := openBeneath(path)
+for _, each := range lowered {
+    rel := strings.TrimPrefix(strings.TrimPrefix(each.Path, each.Ancestor), "/")
+    if each.InRoot {
+        // An Ancestor of "/" in a result granting no refer:
+        // openat2(rootFD, rel, O_PATH) with RESOLVE_IN_ROOT.
+        fd, err := openat2(rootFD, rel, resolveInRoot)
+        if err != nil {
+            return fmt.Errorf("lowered rule path %q: %w", each.Path, err)
+        }
+        ruleFDs[each.Path] = fd
+        continue
+    }
+    // openRulePath is how the runtime opens any rule path, as O_PATH, "/"
+    // included.
+    dirFD, err := openRulePath(each.Ancestor)
     if err != nil {
-        return fmt.Errorf("lowered rule path %q: %w", path, err)
+        return fmt.Errorf("ancestor %q: %w", each.Ancestor, err)
+    }
+    // openat2(dirFD, rel, O_PATH) with
+    // RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV.
+    fd, err := openat2(dirFD, rel, resolveBeneathNoSymlinksNoXDev)
+    if err != nil {
+        return fmt.Errorf("lowered rule path %q: %w", each.Path, err)
+    }
+    if isMultiplyLinkedFile(fd) {
+        return fmt.Errorf("lowered rule path %q: a file with several links", each.Path)
     }
     // Pass this descriptor to landlock_add_rule as the rule's parent_fd.
-    // Opening path again by name would leave a window in which a symlink
-    // swapped into it redirects the rule.
-    ruleFDs[path] = fd
+    ruleFDs[each.Path] = fd
 }
 ```
 
-A runtime that would rather have the kernel intersect can skip the merge and
-enforce the baseline and the artifact as two Landlock layers, one
-`landlock_restrict_self` call each. Give a layer that handles no filesystem
-right `refer` as its handled filesystem right, with a rule granting `refer`
-on `/`: otherwise it denies moving or linking a file into another directory,
-which `Intersect` of the same inputs allows (see
+No lowered path does not mean the result treats moves and links as the
+inputs do. The kernel decides a move or link into another directory by
+comparing the rights of both directories, and the merge settles that by
+comparing path strings, so where a rule path of the result is a symlink
+or a bind mount to another rule path, the result can allow a move an
+input denies, with nothing lowered. The mounts of the node also decide
+whether the kernel counts the rule on `/` in that comparison, which no way
+of opening the rule paths settles. A runtime that cannot rule out such a
+layout opens every rule path of a result granting `refer` the same way,
+relative to `/` with `RESOLVE_NO_SYMLINKS` and `RESOLVE_NO_XDEV`, or uses
+separate layers (see
+[Lowered rule paths](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#hdr-Lowered_rule_paths)).
+
+A runtime that cannot establish that topology, or would rather have the
+kernel intersect, skips the merge and enforces the baseline and the
+artifact as two Landlock layers, one `landlock_restrict_self` call each.
+The kernel then checks each layer on the resolved files, and allows a
+move or link into another directory only when every layer allows it. Give
+a layer that handles no filesystem right `refer` as its handled
+filesystem right, with a rule granting `refer` on `/`: otherwise, once
+another layer handles a filesystem right, it denies moving or linking a
+file into another directory, which `Intersect` of the same inputs allows
+(see
 [Lowered rule paths](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#hdr-Lowered_rule_paths)).
 
 Also check the result with `landlock.Options{ABI: nodeABI}.Validate`, where
@@ -607,6 +699,12 @@ few properties of the result matter:
   result permit that right everywhere, and so can `refer` grants one
   ruleset cannot express (see
   [What the models leave out](#what-the-models-leave-out)).
+- **Landlock downgrades keep the guarantee.** For every ABI version,
+  `landlock.Options.Downgrade` of the union permits whatever the downgrade
+  of each recording permits. Where a recording handles only filesystem
+  rights newer than ABI version 2, which a downgrade can leave it without,
+  the union permits more to keep that (see
+  [Refer](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#hdr-Refer)).
 - **AppArmor merges permissions per path.** A path read-only in one
   recording and write-only in another comes out read-write, and so does a
   read-only path one recording lists under a write-only glob of the other.

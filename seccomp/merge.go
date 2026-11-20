@@ -105,7 +105,8 @@ type InputError = spm.InputError
 // to least trusted, the baseline first: ties in errno go to the earlier
 // input, and only the first may name a listener (ErrConflictingListener).
 // An input listing an architecture of another byte order than the native
-// one is refused with ErrMixedByteOrder, and a result that would notify
+// one, or where that is not known, architectures of both byte orders, is
+// refused with ErrMixedByteOrder, and a result that would notify
 // without a listener with ErrNotifyWithoutListener. Intersect may drop
 // 32-bit and multiplexing architectures from the list, and one whose rules
 // libseccomp would lose, where it can drop none of those it refuses with
@@ -155,7 +156,15 @@ func Union(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 // the baseline exactly when the merge reads every rule of it, so an unequal
 // diff, reported with ErrInexactBaseline and the diff in the message, names
 // what every merge with that baseline takes away whatever the artifact
-// says. Treat any error as a misconfigured node.
+// says. A merge with an artifact can settle more than the baseline alone
+// does: a condition on a value above 32 bits, which a 32-bit architecture
+// cuts, is kept by Intersect of the baseline alone, but next to another
+// input the merge drops the 32-bit architectures or collapses the syscall.
+// So ValidateBaseline also diffs the baseline against its intersection
+// with a profile allowing every call on the same architectures, with the
+// same flags and listener, which takes nothing away of its own, and
+// reports an unequal diff the same way. Treat any error as a misconfigured
+// node.
 //
 // It returns the failures of Validate as Validate does and the errors of
 // the merge without an InputError, since there is one input. Like
@@ -229,11 +238,13 @@ func foldProfiles(
 // architecture would give a result that loads where no input does, under
 // rules written for another architecture. Union, which never drops an
 // architecture an input covers, keeps it in its result, which then fails to
-// load as the input does. Where the native architecture is not known, no
-// byte order is foreign.
+// load as the input does. Where the native architecture is not known,
+// either byte order may be native, and intersection refuses an input
+// listing architectures of both, which loads on no node. Its result lists
+// only architectures every input lists, so it mixes them neither.
 func (m ruleMerger) checkInput(profile *specs.LinuxSeccomp) error {
 	err := Validate(profile)
-	if err != nil || !m.intersect || m.native == "" {
+	if err != nil || !m.intersect {
 		return err
 	}
 

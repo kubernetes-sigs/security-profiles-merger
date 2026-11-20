@@ -431,11 +431,31 @@ func TestValidateRejectsVariables(t *testing.T) {
 
 // TestValidateRejectsEscapedVariables covers a variable whose "@" or "{" is
 // spelled as an escape. The parser resolves escapes before it expands
-// variables, so the path references one all the same.
+// variables, so the path references one all the same. It also covers what
+// apparmor_parser's extract_variable reads as a variable and what it does
+// not.
 func TestValidateRejectsEscapedVariables(t *testing.T) {
 	t.Parallel()
 
-	for _, path := range []string{`/\x40{HOME}/x`, `/\100{HOME}/x`, `/\d064{HOME}/x`} {
+	for _, path := range []string{
+		`/\x40{HOME}/x`, `/\100{HOME}/x`, `/\d064{HOME}/x`,
+		// An escaped backslash leaves the "@" unescaped.
+		`/a/\\@{HOME}`,
+		// Names apparmor_parser refuses to load are reported all the same,
+		// and so is an empty one, which earlier releases refuse.
+		"/a/@{1}", "/a/@{a-b}", "/a/@{}", "/a/@{}x}",
+		// A comma form ends what apparmor_parser 5 expands, while earlier
+		// releases go on to the variable after it.
+		"/a/@{b,c}/@{HOME}",
+		// A comma after a name that does not start with a letter, or after
+		// a character other than a letter, digit or "_", is no comma form:
+		// the parser refuses the name (VAR_INVAL_START, VAR_INVAL_CHARS).
+		"/a/@{,a}", "/a/@{a-b,c}", "/a/@{1a,b}",
+		// extract_variable reads the character after "@{" as part of the
+		// name, so the backslash there escapes nothing, and the second
+		// "@{" opens a name it refuses (VAR_INVAL_START).
+		`/@{\@{\}`,
+	} {
 		profile := readOnly(path)
 
 		err := apparmor.Validate(profile)
@@ -451,7 +471,15 @@ func TestValidateRejectsEscapedVariables(t *testing.T) {
 
 	// An escaped backslash before "@" leaves the "@" as written, and an
 	// escaped "{" stays escaped: neither spells a variable.
-	for _, path := range []string{`/a\\x40{b,c}`, `/a@\{b`} {
+	for _, path := range []string{
+		`/a\\x40{b,c}`, `/a@\{b`,
+		// The parser reads no variable where the "@" is escaped, where the
+		// "{" stays escaped, where no "}" closes the name, or where the name
+		// holds a comma, which it reads as an alternation after a literal
+		// "@".
+		`/a/\@{HOME}`, `/a/\x40\x7bHOME}`, "/a/@{x", "/a/@{a,b}",
+		`/a/@{HOME\}`, "/a/@{a_1,b}",
+	} {
 		err := apparmor.Validate(readOnly(path))
 		if errors.Is(err, apparmor.ErrUnsupportedVariable) {
 			t.Errorf("Validate(%q) = %v, want no ErrUnsupportedVariable", path, err)
@@ -541,6 +569,108 @@ func TestValidateBaselineReportsARelativePathOnce(t *testing.T) {
 
 	if count := strings.Count(err.Error(), "readOnlyPaths[0]"); count != 1 {
 		t.Errorf("ValidateBaseline = %q names the path %d times, want once", err, count)
+	}
+}
+
+// TestValidateBaselineRefusesPatternsPastTheCompileBudget covers a baseline
+// whose glob patterns alone take the compile budget of a merge: Validate
+// accepts it and it intersects with itself exactly, but intersected with
+// an artifact it leaves patterns uncompiled and fails with
+// ErrBudgetExceeded, for nearly every workload. ValidateBaseline reports
+// it with the same sentinel, without an InputError.
+func TestValidateBaselineRefusesPatternsPastTheCompileBudget(t *testing.T) {
+	t.Parallel()
+
+	long := strings.Repeat("a", 3980)
+
+	baselineOf := func(count int) *apparmor.Profile {
+		paths := make([]string, 0, count)
+		for idx := range count {
+			paths = append(paths, fmt.Sprintf("/p%02d/%s/*", idx, long))
+		}
+
+		return &apparmor.Profile{Filesystem: &apparmor.FilesystemRules{ReadOnlyPaths: paths}}
+	}
+
+	baseline := baselineOf(70)
+
+	err := apparmor.ValidateBaseline(baseline)
+
+	var inputErr *apparmor.InputError
+	if !errors.Is(err, apparmor.ErrBudgetExceeded) || errors.As(err, &inputErr) {
+		t.Fatalf("ValidateBaseline = %v, want ErrBudgetExceeded without an InputError", err)
+	}
+
+	artifact := &apparmor.Profile{
+		Filesystem: &apparmor.FilesystemRules{ReadOnlyPaths: []string{"/p69/" + long + "/x"}},
+	}
+
+	err = apparmor.ValidateArtifact(artifact)
+	if err != nil {
+		t.Fatalf("ValidateArtifact = %v, want nil", err)
+	}
+
+	_, err = apparmor.Intersect(baseline, artifact)
+	if !errors.Is(err, apparmor.ErrBudgetExceeded) {
+		t.Errorf("Intersect = %v, want the ErrBudgetExceeded ValidateBaseline predicts", err)
+	}
+
+	// 32 such patterns stay within twice MaxArtifactPatternBytes, which
+	// leaves the budget room for two artifacts.
+	err = apparmor.ValidateBaseline(baselineOf(32))
+	if err != nil {
+		t.Errorf("ValidateBaseline of 32 patterns = %v, want nil", err)
+	}
+}
+
+// TestAcceptedBaselineLeavesRoomForArtifacts checks the other side of the
+// bound ValidateBaseline puts on a baseline's patterns: a baseline at it
+// merges with artifacts holding nearly MaxArtifactPatternBytes of patterns,
+// and literals the baseline's patterns and their own match, the pass that
+// keeps granted literals included.
+func TestAcceptedBaselineLeavesRoomForArtifacts(t *testing.T) {
+	t.Parallel()
+
+	long := strings.Repeat("a", 3980)
+
+	baselinePaths := make([]string, 0, 32)
+	for idx := range 32 {
+		baselinePaths = append(baselinePaths, fmt.Sprintf("/p%02d/%s/*", idx, long))
+	}
+
+	baseline := &apparmor.Profile{
+		Filesystem: &apparmor.FilesystemRules{ReadOnlyPaths: baselinePaths},
+	}
+
+	err := apparmor.ValidateBaseline(baseline)
+	if err != nil {
+		t.Fatalf("ValidateBaseline = %v, want nil", err)
+	}
+
+	patterns := make([]string, 0, 18)
+	patterns = append(patterns, "/p05/"+long+"/x", "/q00/"+long+"/y")
+
+	for idx := range 16 {
+		patterns = append(patterns, fmt.Sprintf("/q%02d/%s/*", idx, long))
+	}
+
+	artifact := &apparmor.Profile{
+		Filesystem: &apparmor.FilesystemRules{ReadOnlyPaths: patterns},
+	}
+
+	err = apparmor.ValidateArtifact(artifact)
+	if err != nil {
+		t.Fatalf("ValidateArtifact = %v, want nil", err)
+	}
+
+	for _, inputs := range [][]*apparmor.Profile{
+		{baseline, artifact}, {baseline, artifact, artifact},
+	} {
+		_, err = apparmor.Intersect(inputs...)
+		if err != nil {
+			t.Errorf("Intersect of %d inputs with an accepted baseline = %v, want nil",
+				len(inputs), err)
+		}
 	}
 }
 

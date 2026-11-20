@@ -226,11 +226,11 @@ func TestMoveConflictsScaleLinearly(t *testing.T) {
 		result := unionTwo(left, right)
 		resultMasks := pathRuleMasks(result.PathRules)
 		paths := inputRulePaths([]*Profile{left, right})
-		withRoot, withoutRoot := moveSides(left, resultMasks, paths)
-		_, withComparisons := withRoot.settle()
-		_, withoutComparisons := withoutRoot.settle()
+		full := moveSides(left, resultMasks, paths, referLevels[len(referLevels)-1:])[0]
+		_, withComparisons := full.withRoot.settle()
+		_, withoutComparisons := full.withoutRoot.settle()
 
-		return len(withRoot.destinations), withComparisons + withoutComparisons
+		return len(full.withRoot.destinations), withComparisons + withoutComparisons
 	}
 
 	smallDestinations, smallComparisons := measure(small)

@@ -276,32 +276,33 @@ limitations under the License.
 //
 // Architectures follow how runc and crun load them: the filter always covers
 // the native architecture, and the listed architectures are added to it. An
-// empty list means "native only" and a non-empty list "native plus these".
-// A list need not name the native architecture, and a profile listing only
+// empty list means "native only" and a non-empty list "native plus these". A
+// list need not name the native architecture, and a profile listing only
 // foreign architectures is valid. [Validate] accepts every architecture the
 // runtime-spec names. libseccomp keeps one byte order per filter, though,
-// and refuses an architecture of the other one with EDOM, so a runtime
-// fails to load a profile listing s390x, ppc64, big-endian MIPS, parisc,
-// m68k or sheb on a little-endian node, or a little-endian architecture on
-// a big-endian one. [ValidateArtifact] reports such an architecture
+// and refuses an architecture of the other one with EDOM, so a runtime fails
+// to load a profile listing s390x, ppc64, big-endian MIPS, parisc, m68k or
+// sheb on a little-endian node, or a little-endian architecture on a
+// big-endian one. [ValidateArtifact] reports such an architecture
 // ([ErrMixedByteOrder]); where the native architecture is not known, it
-// reports a list mixing the two byte orders, which loads on no node.
-// Where the native architecture is known, [Intersect] refuses an input
-// listing such an architecture, as an [InputError] wrapping
-// [ErrMixedByteOrder], rather than drop the architecture: the input does
-// not load on the node, and the result without it would, applying rules
-// written for another architecture. [Union] keeps every architecture an
-// input covers, so a union of inputs listing one fails to load as they do.
-// Where the native architecture is not known, neither merge looks at the
-// byte order. runc knows no parisc, m68k or sh and refuses a profile listing
-// one, while crun resolves the name through libseccomp. [Intersect] takes
-// the plain set intersection of the lists, which may be empty, less the
-// architectures it drops as described below. [Union] combines them. The
-// set the union covers is exact, but the behavior on an architecture only
-// one input lists is not the rule-by-rule union: there the other input's
-// filter applies libseccomp's action for an unlisted architecture,
-// SCMP_ACT_KILL, while the result applies the merged rules. That is the
-// permissive direction, so the union guarantee holds.
+// reports a list mixing the two byte orders, which loads on no node. Where
+// the native architecture is known, [Intersect] refuses an input listing
+// such an architecture, as an [InputError] wrapping [ErrMixedByteOrder],
+// rather than drop the architecture: the input does not load on the node,
+// and the result without it would, applying rules written for another
+// architecture. [Union] keeps every architecture an input covers, so a union
+// of inputs listing one fails to load as they do. Where the native
+// architecture is not known, [Intersect] refuses an input whose list mixes
+// the two byte orders, which loads on no node, and [Union] keeps it. runc
+// knows no parisc, m68k or sh and refuses a profile listing one, while crun
+// resolves the name through libseccomp. [Intersect] takes the plain set
+// intersection of the lists, which may be empty, less the architectures it
+// drops as described below. [Union] combines them. The set the union covers
+// is exact, but the behavior on an architecture only one input lists is not
+// the rule-by-rule union: there the other input's filter applies
+// libseccomp's action for an unlisted architecture, SCMP_ACT_KILL, while the
+// result applies the merged rules. That is the permissive direction, so the
+// union guarantee holds.
 //
 // The evaluation model covers the program libseccomp compiles for a 64-bit
 // architecture on which every syscall is called directly. Two effects of
@@ -422,9 +423,9 @@ limitations under the License.
 // Where the profile covers an architecture that multiplexes,
 // [ValidateArtifact] reports ([ErrConflictingEntries]) the rules of a
 // multiplexed syscall whose copies libseccomp may refuse, and conditional
-// rules of the multiplexer next to rules of a syscall it carries; [Diff] of
-// a profile against [Intersect] of it alone shows what every merge settles
-// in it, whatever the other inputs.
+// rules of the multiplexer next to rules of a syscall it carries;
+// [ValidateBaseline] reports what every merge settles in a profile,
+// whatever the other inputs.
 //
 // Dropping an architecture from the list does not remove it from a filter
 // where it is native, so [Intersect] is meant to run on the node that loads

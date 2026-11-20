@@ -69,6 +69,22 @@ func selfDiff(t *testing.T, native specs.Arch, profile *specs.LinuxSeccomp) *sec
 	return diff
 }
 
+// requireExactBaseline checks that the merge reads every rule of a profile
+// on a node of the given architecture, alone and next to an artifact, so
+// that it passes as a baseline there.
+func requireExactBaseline(t *testing.T, native specs.Arch, profile *specs.LinuxSeccomp) {
+	t.Helper()
+
+	if diff := selfDiff(t, native, profile); !diff.Equal {
+		t.Errorf("%s: expected the profile to be read exactly, got %s", native, diff.String())
+	}
+
+	err := forNode(native).ValidateBaseline(profile)
+	if err != nil {
+		t.Errorf("%s: ValidateBaseline: %v", native, err)
+	}
+}
+
 // TestCRIODefaultNeedsRestating pins what the integration guide says about
 // the CRI-O default (containers/common, rendered on amd64): ValidateArtifact
 // names its setns, clone and socket entries, and an intersection with it
@@ -137,10 +153,7 @@ func TestCRIODefaultRestated(t *testing.T) {
 			read.Architectures = nil
 		}
 
-		if diff := selfDiff(t, native, read); !diff.Equal {
-			t.Errorf("%s: expected the restated default to be read exactly, got %s",
-				native, diff.String())
-		}
+		requireExactBaseline(t, native, read)
 	}
 
 	merged, err := amd64.Intersect(profile, &specs.LinuxSeccomp{
@@ -217,10 +230,7 @@ func TestMobyAndContainerdDefaultsPass(t *testing.T) {
 			}
 
 			for _, native := range []specs.Arch{specs.ArchX86_64, specs.ArchX86} {
-				if diff := selfDiff(t, native, profile); !diff.Equal {
-					t.Errorf("%s: expected the default to be read exactly, got %s",
-						native, diff.String())
-				}
+				requireExactBaseline(t, native, profile)
 			}
 		})
 	}

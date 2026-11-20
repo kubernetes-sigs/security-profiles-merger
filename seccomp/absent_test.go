@@ -448,8 +448,8 @@ func TestMergesTryEveryNativeNextToX32(t *testing.T) {
 }
 
 // TestMergesTryX32AsAnUnknownNative covers an unknown native architecture
-// next to a list naming x86_64 alone, the one case where counting the
-// natives only crun runs on changes a result: x32 shares x86_64's block and
+// next to a list naming x86_64 alone, where counting x32, which only crun
+// runs on, changes a result: x32 shares x86_64's block and
 // lacks uselib, so testing uselib first loses x86_64's rule on arch_prctl
 // there, while no other architecture has a rule at stake. Dropping x32 from
 // the list does not remove a native x32, so the merge is refused, naming
@@ -471,6 +471,41 @@ func TestMergesTryX32AsAnUnknownNative(t *testing.T) {
 	_, err = seccomp.ForArch(specs.ArchX86_64).Intersect(baseline, artifact)
 	if err != nil {
 		t.Errorf("ForArch(x86_64).Intersect = %v, want a result", err)
+	}
+}
+
+// TestMergesTryEveryArchitectureAsAnUnknownNative covers an unknown native
+// architecture that no Go program runs on other than x32: parisc lacks
+// newfstatat, which a rule without conditions makes the first syscall its
+// block tests, so the condition on mmap is lost there. Every architecture a
+// Go program runs on has newfstatat or no rule at stake, so each merges,
+// while ForAnyArch, which tries parisc as native, refuses the merge.
+func TestMergesTryEveryArchitectureAsAnUnknownNative(t *testing.T) {
+	t.Parallel()
+
+	baseline := listing(nil, filtered("mmap", specs.ActErrno, arg(0, specs.OpEqualTo, 1)))
+	artifact := listing(nil, filtered("newfstatat", specs.ActErrno))
+
+	result, err := seccomp.ForAnyArch().Intersect(baseline, artifact)
+	if !errors.Is(err, seccomp.ErrLostRules) ||
+		!strings.Contains(err.Error(), "SCMP_ARCH_PARISC, a possible native architecture") {
+		t.Errorf(
+			"ForAnyArch().Intersect = %s, %v, want ErrLostRules naming parisc as possibly native",
+			seccomp.FormatProfile(result),
+			err,
+		)
+	}
+
+	for _, native := range []specs.Arch{
+		specs.ArchX86, specs.ArchX86_64, specs.ArchARM, specs.ArchAARCH64,
+		specs.ArchMIPS, specs.ArchMIPS64, specs.ArchMIPSEL, specs.ArchMIPSEL64,
+		specs.ArchPPC64, specs.ArchPPC64LE, specs.ArchS390X,
+		specs.ArchRISCV64, specs.ArchLOONGARCH64,
+	} {
+		_, err = seccomp.ForArch(native).Intersect(baseline, artifact)
+		if err != nil {
+			t.Errorf("ForArch(%s).Intersect = %v, want a result", native, err)
+		}
 	}
 }
 

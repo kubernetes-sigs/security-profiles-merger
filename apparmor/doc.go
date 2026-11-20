@@ -128,9 +128,13 @@ limitations under the License.
 // a capability newer than this package would leave callers unable to merge
 // at all. ValidateArtifact requires a word of letters, digits and "_"
 // ([ErrInvalidCapabilityName]), for the reason it reports an unquotable
-// path, but does not check the name against the known set, since a newer
-// kernel may know it. ValidateStrict also reports a name outside the known
-// set ([ErrUnknownCapability]), which in a profile a person wrote is a typo.
+// path, without the "cap_" prefix of the kernel's constants, in any case:
+// apparmor_parser loads "chown" but not "cap_chown", which is what the
+// merge makes of "CAP_CHOWN". It does not check the name against the known
+// set, since a newer kernel may know it. [ValidateBaseline] checks the
+// spelling as ValidateArtifact does. ValidateStrict also reports a name
+// outside the known set ([ErrUnknownCapability]), which in a profile a
+// person wrote is a typo.
 //
 // # Glob patterns
 //
@@ -220,17 +224,19 @@ limitations under the License.
 // ([ErrUnsupportedVariable]), whose expansion this package does not know.
 // The variable check applies also where the "@" is spelled as an escape
 // (`\x40{HOME}`), since the parser resolves escapes before it expands
-// variables. The relative check reads the path as written: file rules must
-// use absolute paths, and apparmor_parser's lexer takes a path to start
-// with a raw "/", so `\x2fetc/passwd`, `\57etc/passwd` and `\/etc/passwd`
-// are relative, whatever their escapes decode to. Validate rejects them,
-// and so do the merges, so that a merge never returns one beside the
-// absolute spelling of the same name, a result ValidateArtifact would
-// reject. [Diff] reads such a path as naming no file, so it is not
-// "/etc/passwd" there either. A path referencing a variable is reported as
-// that alone, not as relative too. Validate accepts everything below, and
-// the merge treats it as opaque text or as a pattern matching nothing;
-// ValidateArtifact and ValidateStrict report it.
+// variables, and not to what the parser reads as no variable: an escaped
+// "@", an "@{" without a closing "}", and "@{a,b}", which apparmor_parser
+// reads as an alternation after a literal "@". The relative check reads the
+// path as written: file rules must use absolute paths, and apparmor_parser's
+// lexer takes a path to start with a raw "/", so `\x2fetc/passwd`,
+// `\57etc/passwd` and `\/etc/passwd` are relative, whatever their escapes
+// decode to. Validate rejects them, and so do the merges, so that a merge
+// never returns one beside the absolute spelling of the same name, a result
+// ValidateArtifact would reject. [Diff] reads such a path as naming no file,
+// so it is not "/etc/passwd" there either. A path referencing a variable is
+// reported as that alone, not as relative too. Validate accepts everything
+// below, and the merge treats it as opaque text or as a pattern matching
+// nothing; ValidateArtifact and ValidateStrict report it.
 //
 // A pattern apparmor_parser rejects is reported with [ErrInvalidGlob]: an
 // unclosed "{" or "[", a "}" or "]" without its opening counterpart (in
@@ -257,10 +263,11 @@ limitations under the License.
 // the rule does not load, and a consumer that renders "  <path> <perms>,\n"
 // would turn a path holding a newline into further rules of the profile
 // author's choosing. A backslash protects only a character that can be
-// written in a rule: the parser resolves no escape whose second byte is a
-// control character, so a backslash followed by a raw newline leaves both
-// bytes in the path and is reported too. The two-character forms (\n, \r,
-// \t, or \x0a) spell those paths safely. A backslash also escapes only where
+// written in a rule: the parser drops a backslash it resolves no escape for
+// and keeps the byte after it, so a backslash followed by a raw newline is a
+// path holding a newline, which a consumer renders raw, and is reported too.
+// The two-character forms (\n, \r, \t, or \x0a) spell those paths safely,
+// and [QuotePath] writes them. A backslash also escapes only where
 // the lexer reads it as the start of an escape: after a comma the lexer
 // takes the next byte as a plain character, so in `/a,\ b` the space still
 // ends the path and the rest is read as profile syntax, and a path ending in
@@ -439,23 +446,25 @@ limitations under the License.
 // which costs time and memory in proportion to the pattern's length. One
 // call compiles each pattern it reads once, and compiles patterns up to a
 // compile budget, a small multiple of [MaxArtifactPatternBytes], taking the
-// inputs in the order they are given, so a baseline listed first is
-// compiled first: a baseline holding more patterns than an artifact may,
-// and two artifacts [ValidateArtifact] accepts after it, are compiled in
-// full. A
-// pattern past the bound is left uncompiled and matches no name and no other
-// pattern. A union keeps it as it keeps every pattern, which permits the
-// same. An intersection could keep it only where every input lists it word
-// for word, and would drop what it covers on another input, so where an
-// input holds such a pattern [Intersect] fails with [ErrBudgetExceeded] when
-// the result may lose access, read as above. The call keeps every program it
-// compiled until it returns, and a program holds up to some 450 bytes per
-// byte of its pattern for the costliest shapes, such as a run of "*/"
-// components: a merge whose patterns fill the budget, which accepted
-// artifacts can, may hold on the order of a hundred megabytes while it runs
-// (two artifacts of sixteen four-kilobyte "*/" patterns intersected with
-// "/**" held some 25 megabytes). Profiles of the size KEP-6061 recommends, a
-// few patterns of a few dozen bytes, hold well under a megabyte.
+// inputs in the order they are given, so a baseline listed first is compiled
+// first: a baseline holding up to twice [MaxArtifactPatternBytes] of
+// patterns, and two artifacts [ValidateArtifact] accepts after it, are
+// compiled in full. [ValidateBaseline] refuses a baseline holding more with
+// [ErrBudgetExceeded], since its intersection with an artifact holding
+// patterns could fail with it. A pattern past the bound is left uncompiled
+// and matches no name and no other pattern. A union keeps it as it keeps
+// every pattern, which permits the same. An intersection could keep it only
+// where every input lists it word for word, and would drop what it covers on
+// another input, so where an input holds such a pattern [Intersect] fails
+// with [ErrBudgetExceeded] when the result may lose access, read as above.
+// The call keeps every program it compiled until it returns, and a program
+// holds up to some 450 bytes per byte of its pattern for the costliest
+// shapes, such as a run of "*/" components: a merge whose patterns fill the
+// budget, which accepted artifacts can, may hold on the order of a hundred
+// megabytes while it runs (two artifacts of sixteen four-kilobyte "*/"
+// patterns intersected with "/**" held some 25 megabytes). Profiles of the
+// size KEP-6061 recommends, a few patterns of a few dozen bytes, hold well
+// under a megabyte.
 //
 // What the merge bounds on its own is therefore the matching and the
 // compiling. Reading the profiles, validating them and normalizing their

@@ -103,7 +103,9 @@ var (
 	ErrMoreProblems = errors.New("more problems omitted")
 	// ErrBudgetExceeded is returned by a merge that would run past a bound
 	// on its own work. It is not wrapped in an InputError, since it is the
-	// inputs together that exceed the budget.
+	// inputs together that exceed the budget. apparmor.ValidateBaseline
+	// returns it too, for a baseline whose patterns alone leave the merge
+	// too little of its compile budget for an artifact's.
 	//
 	// apparmor.Intersect returns it where matching or compiling patterns
 	// exceeds one of its budgets and the result may then lose access, which
@@ -120,11 +122,21 @@ var (
 	ErrBudgetExceeded = errors.New("merge budget exceeded")
 	// ErrInexactBaseline is returned by seccomp.ValidateBaseline and
 	// apparmor.ValidateBaseline for a baseline that Validate accepts but
-	// whose intersection alone differs from it: the merge does not
-	// read every rule of it, so every merge with that baseline takes those
-	// rules away, whatever the artifact says. The message names what the
-	// merge settles. A runtime treats it as a misconfigured node.
+	// whose intersection alone differs from it, or for seccomp whose
+	// intersection with a profile allowing every call does: the merge does
+	// not read every rule of it, so every merge with that baseline takes
+	// those rules away, whatever the artifact says. The message names what
+	// the merge settles. A runtime treats it as a misconfigured node.
 	ErrInexactBaseline = errors.New("baseline holds rules the merge does not read exactly")
+	// ErrInvalidOptions is matched, through errors.Is, by every error the
+	// methods of seccomp.Options and landlock.Options return for options
+	// that name no node they can check for: the zero seccomp.Options, a
+	// seccomp.ForArch architecture the package does not know
+	// (seccomp.ErrUnknownArch), or a landlock.Options version below ABIV1
+	// (landlock.ErrUnknownABIVersion). It comes before any profile is
+	// looked at and is not wrapped in an InputError, so a runtime reads it
+	// as a misconfigured node, and never as a bad profile.
+	ErrInvalidOptions = errors.New("invalid options")
 	// ErrArtifactTooLarge is matched, through errors.Is, by every error
 	// ValidateArtifact and ValidateStrict of the three packages return for a
 	// profile past one of their MaxArtifact limits: seccomp's

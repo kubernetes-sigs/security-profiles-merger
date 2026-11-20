@@ -41,8 +41,8 @@ func TestValidateArtifactRejectsUnquotablePaths(t *testing.T) {
 		"/tmp/a\rb", "/tmp/a,", "/tmp/a,,b", "/tmp/a, b", "/etc/{a,b},",
 		"/etc/[!a]", `/tmp/a\\ b`, "/tmp/ ",
 		// A backslash does not protect a control character: the parser
-		// resolves no escape whose second byte is one, so both bytes reach
-		// the rule and the newline ends it wherever a consumer renders it.
+		// drops the backslash and keeps the byte, so the newline ends the
+		// rule wherever a consumer renders it.
 		"/tmp/a\\\nb", "/tmp/a\\\rb", "/tmp/a\\\tb",
 		// A comma takes the byte after it as a plain character, so a
 		// backslash there escapes nothing: the lexer's token ends at the
@@ -221,6 +221,10 @@ func TestValidateArtifactRejectsCapabilityNames(t *testing.T) {
 	for _, name := range []string{
 		"net_raw,\n  file", "net_raw r", "cap with space", "@{FOO}",
 		"../../x", "net-raw", "net_raw\n", `"net_raw"`,
+		// apparmor_parser names a capability without the prefix of the
+		// kernel's constant, so the merge's lower-cased "cap_chown" does
+		// not load, and Intersect with "chown" would drop it.
+		"CAP_CHOWN", "cap_chown", "Cap_Net_Admin", "cap_",
 	} {
 		profile := &apparmor.Profile{
 			Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{name}},
@@ -229,6 +233,13 @@ func TestValidateArtifactRejectsCapabilityNames(t *testing.T) {
 		err := apparmor.ValidateArtifact(profile)
 		if !errors.Is(err, apparmor.ErrInvalidCapabilityName) {
 			t.Errorf("ValidateArtifact(%q) = %v, want ErrInvalidCapabilityName", name, err)
+		}
+
+		// A baseline carrying such a name would put it into every merge
+		// result, which the runtime then cannot load.
+		err = apparmor.ValidateBaseline(profile)
+		if !errors.Is(err, apparmor.ErrInvalidCapabilityName) {
+			t.Errorf("ValidateBaseline(%q) = %v, want ErrInvalidCapabilityName", name, err)
 		}
 
 		// ValidateStrict reports the same names, as none of them is a
@@ -258,7 +269,7 @@ func TestValidateArtifactRejectsCapabilityNames(t *testing.T) {
 func TestValidateArtifactAcceptsUnknownCapabilityNames(t *testing.T) {
 	t.Parallel()
 
-	for _, name := range []string{"SYS_FUTURE", "bpf2", "NET_ADMIN", "x"} {
+	for _, name := range []string{"SYS_FUTURE", "bpf2", "NET_ADMIN", "x", "capx", "cap"} {
 		profile := &apparmor.Profile{
 			Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{name}},
 		}
@@ -266,6 +277,11 @@ func TestValidateArtifactAcceptsUnknownCapabilityNames(t *testing.T) {
 		err := apparmor.ValidateArtifact(profile)
 		if err != nil {
 			t.Errorf("ValidateArtifact(%q) = %v, want nil", name, err)
+		}
+
+		err = apparmor.ValidateBaseline(profile)
+		if err != nil {
+			t.Errorf("ValidateBaseline(%q) = %v, want nil", name, err)
 		}
 	}
 }
