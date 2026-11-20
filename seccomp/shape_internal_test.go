@@ -338,8 +338,9 @@ func TestIndexSetBeyondItsBits(t *testing.T) {
 
 // TestPruneDominatedOnEquivalentFilters checks what pruneDominated does
 // with two clauses whose filters cover each other, "a0 <= 0" and "a0 < 1":
-// with one result the later one goes, with different results both stay,
-// since they conflict and the set collapses as a whole.
+// with one result the one with the greater key goes, whatever their order,
+// and both go where a wider clause makes either dead; with different
+// results both stay, since they conflict and the set collapses as a whole.
 func TestPruneDominatedOnEquivalentFilters(t *testing.T) {
 	t.Parallel()
 
@@ -354,13 +355,25 @@ func TestPruneDominatedOnEquivalentFilters(t *testing.T) {
 		clauses []clause
 		want    []clause
 	}{
-		"same result keeps the first": {
+		"same result keeps one": {
 			clauses: []clause{le0(specs.ActErrno), lt1(specs.ActErrno)},
 			want:    []clause{le0(specs.ActErrno)},
 		},
-		"same result keeps the first in the other order": {
+		"same result keeps the same one in the other order": {
 			clauses: []clause{lt1(specs.ActErrno), le0(specs.ActErrno)},
-			want:    []clause{lt1(specs.ActErrno)},
+			want:    []clause{le0(specs.ActErrno)},
+		},
+		"twins go together where a wider clause makes one dead": {
+			clauses: []clause{
+				clauseOn(specs.ActTrap, 0, specs.OpLessThan, 1),
+				clauseOn(specs.ActTrap, 0, specs.OpEqualTo, 0),
+				{action: specs.ActErrno, errnoRet: nil, args: []specs.LinuxSeccompArg{
+					{Index: 0, Value: 1, ValueTwo: 0, Op: specs.OpMaskedEqual},
+				}},
+			},
+			want: []clause{{action: specs.ActErrno, errnoRet: nil, args: []specs.LinuxSeccompArg{
+				{Index: 0, Value: 1, ValueTwo: 0, Op: specs.OpMaskedEqual},
+			}}},
 		},
 		"different results keep both": {
 			clauses: []clause{le0(specs.ActErrno), lt1(specs.ActAllow)},

@@ -367,3 +367,78 @@ func TestUnionSettlesMovesWithoutTheRootRule(t *testing.T) {
 		fsProfile(read, landlock.PathRule{Path: "/data", AccessFS: read}),
 	)
 }
+
+// TestUnionOutlastsDowngrade covers unions that a downgrade made less
+// permissive than an input. An input handling only filesystem rights newer
+// than ABIV2 handles none once downgraded below them and allows every move,
+// so a union listing refer may not deny one there. And a move an input
+// denies at the full ABI for a right it grants at the destination, it
+// allows once a downgrade drops that right, so the union settles moves at
+// every version.
+func TestUnionOutlastsDowngrade(t *testing.T) {
+	t.Parallel()
+
+	only := func(right landlock.FSAccessRight, path string) *landlock.Profile {
+		return fsProfile(fsRights{right}, landlock.PathRule{Path: path, AccessFS: fsRights{right}})
+	}
+	reader := only(landlock.FSAccessReadFile, "/b")
+	refer := fsRights{landlock.FSAccessRefer}
+
+	// The inputs share no handled right. Listing refer alone would deny,
+	// at v2 and up to the version before each right, the moves the other
+	// input allows there, since it handles nothing.
+	for _, late := range []landlock.FSAccessRight{
+		landlock.FSAccessTruncate, landlock.FSAccessIOCTLDev, landlock.FSAccessResolveUnix,
+	} {
+		assertMergeFormat(t, "Union", landlock.Union, "Profile{}", only(late, "/a"), reader)
+	}
+
+	// Sharing a right ABIV1 knows, refer stays implicit as before.
+	assertMergeFormat(t, "Union", landlock.Union,
+		"Profile{fs:read_file /a(read_file) /b(read_file)}",
+		only(landlock.FSAccessReadFile, "/a"), reader)
+
+	// A rule grants refer, so the union must list it, and the input
+	// handling truncate alone allows every move at v2: the union stops
+	// handling filesystem rights.
+	granting := fsProfile(
+		fsRights{landlock.FSAccessReadFile, landlock.FSAccessRefer, landlock.FSAccessTruncate},
+		landlock.PathRule{Path: "/a", AccessFS: refer},
+	)
+	assertMergeFormat(t, "Union", landlock.Union, "Profile{}",
+		granting, only(landlock.FSAccessTruncate, "/b"))
+
+	// The left input denies moving a file from /s to /d at v3, since it
+	// would gain truncate, and allows it at v2. The right input grants
+	// read_file on /d, which the file would gain there in the union, so the
+	// union stops handling read_file.
+	handled := fsRights{
+		landlock.FSAccessReadFile, landlock.FSAccessRefer, landlock.FSAccessTruncate,
+	}
+	mover := fsProfile(handled,
+		landlock.PathRule{Path: "/s", AccessFS: refer},
+		landlock.PathRule{
+			Path: "/d", AccessFS: fsRights{landlock.FSAccessRefer, landlock.FSAccessTruncate},
+		},
+	)
+	other := fsProfile(handled, landlock.PathRule{
+		Path: "/d", AccessFS: fsRights{landlock.FSAccessReadFile},
+	})
+	want := "Profile{fs:refer,truncate /d(refer,truncate) /s(refer)}"
+	assertMergeFormat(t, "Union", landlock.Union, want, mover, other)
+	assertMergeFormat(t, "Union", landlock.Union, want, other, mover)
+
+	united, err := landlock.Union(mover, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	downgraded, err := landlock.Options{ABI: landlock.ABIV2}.Downgrade(united)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := downgraded.String(); got != "Profile{fs:refer /d(refer) /s(refer)}" {
+		t.Errorf("Downgrade to v2 = %s, which denies moving a file from /s to /d", got)
+	}
+}

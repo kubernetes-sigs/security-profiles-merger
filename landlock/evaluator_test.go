@@ -205,6 +205,9 @@ func evalOwnRule(profile *landlock.Profile, file string, right landlock.FSAccess
 	return false
 }
 
+// evalParent returns the directory a file sits in.
+func evalParent(file string) string { return path.Dir(file) }
+
 // evalMoves calls check for every move among the probes: each probe but the
 // root, as a file and as a directory, into each probe that is neither its
 // parent nor the probe itself or beneath it.
@@ -241,11 +244,17 @@ var (
 		landlock.FSAccessReadDir,
 		landlock.FSAccessRefer,
 	}
-	// evalFileRights are the rights of evalRights that apply to a file that
-	// is not a directory, which the kernel calls ACCESS_FILE.
+	// evalFileRights are the rights that apply to a file that is not a
+	// directory, which the kernel calls ACCESS_FILE: the ones evalRights
+	// holds, and those the fuzz oracle of a downgraded union also evaluates
+	// moves for.
 	evalFileRights = []landlock.FSAccessRight{
+		landlock.FSAccessExecute,
 		landlock.FSAccessReadFile,
 		landlock.FSAccessWriteFile,
+		landlock.FSAccessTruncate,
+		landlock.FSAccessIOCTLDev,
+		landlock.FSAccessResolveUnix,
 	}
 )
 

@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -82,6 +83,9 @@ type documentScan struct {
 	duplicates, unknown, misspelled, missing pathCollector
 	// failed reports a syntax error before the end of the document.
 	failed bool
+	// divergent reports a member of a struct type whose fields decoders
+	// resolve differently (see jsonFields), which unknown holds then.
+	divergent bool
 }
 
 // scanDocument reads a document token by token, once, following the type
@@ -132,7 +136,8 @@ func PathAt(raw []byte, offset int64) (string, int64) {
 			return true
 		}
 
-		path, start = memberPath(stack), valueStart(raw, after)
+		path, _ = memberPath(stack)
+		start = valueStart(raw, after)
 
 		return false
 	})
@@ -187,6 +192,7 @@ func newScanState(
 			misspelled: pathCollector{paths: nil, wants: nil, omitted: 0},
 			missing:    pathCollector{paths: nil, wants: nil, omitted: 0},
 			failed:     false,
+			divergent:  false,
 		},
 	}
 }
@@ -246,7 +252,7 @@ func (state *scanState) next(token json.Token, after, end int64) bool {
 		if top.named != nil {
 			state.required.reportMissing(
 				top.typ,
-				memberPath(state.stack),
+				func() (string, bool) { return memberPath(state.stack) },
 				top.named,
 				&state.scan.missing,
 			)
@@ -281,7 +287,7 @@ func (state *scanState) next(token json.Token, after, end int64) bool {
 // reads or one a field reads only ignoring case. It also notes the type of
 // the member's value.
 func (state *scanState) member(frame *scanFrame, key string) {
-	path := func() string { return memberPath(state.stack) }
+	path := func() (string, bool) { return memberPath(state.stack) }
 
 	if frame.addKey(key) {
 		state.scan.duplicates.addLazily(path)
@@ -295,7 +301,9 @@ func (state *scanState) member(frame *scanFrame, key string) {
 		frame.child = frame.typ.Elem()
 	case frame.typ.Kind() == reflect.Struct:
 		// addKey folded the name already.
-		field, known, exact := fieldsOf(frame.typ).lookupFolded(key, frame.folded)
+		fields := fieldsOf(frame.typ)
+		field, known, exact := fields.lookupFolded(key, frame.folded)
+		state.scan.divergent = state.scan.divergent || fields.divergent
 
 		switch {
 		case !known:
@@ -320,7 +328,7 @@ func (state *scanState) scalar(top *scanFrame, token json.Token) {
 	case !state.checkMissing:
 	case top == nil || top.named == nil:
 		state.required.reportNull(
-			child, func() string { return memberPath(state.stack) }, &state.scan.missing,
+			child, func() (string, bool) { return memberPath(state.stack) }, &state.scan.missing,
 		)
 	default:
 		// A member of an object read as null is missing where the object
@@ -332,12 +340,12 @@ func (state *scanState) scalar(top *scanFrame, token json.Token) {
 // document sets to null where nothing else names them, as an element of a
 // list or a value of a map: encoding/json leaves a struct there zero. A
 // pointer stays nil and holds nothing to miss.
-func (required *Required) reportNull(typ reflect.Type, path func() string, found *pathCollector) {
+func (required *Required) reportNull(typ reflect.Type, path pathOf, found *pathCollector) {
 	if typ == nil || typ.Kind() != reflect.Struct || !required.requiresFields(typ) {
 		return
 	}
 
-	required.reportMissing(typ, path(), nil, found)
+	required.reportMissing(typ, path, nil, found)
 }
 
 func isClosing(delim json.Delim) bool {
@@ -469,15 +477,16 @@ func (frame *scanFrame) startValue() {
 const maxPathBytes = merge.MaxQuotedBytes + utf8.UTFMax
 
 // memberPath returns the path of the member the innermost frame is at, or
-// the start of it once it is longer than any report shows. Every outer
-// frame is at the value holding the next one: an object at its current
-// member, an array at the element before its next index.
-func memberPath(stack []*scanFrame) string {
+// the start of it once it is longer than any report shows, and whether it
+// cut the path there. Every outer frame is at the value holding the next
+// one: an object at its current member, an array at the element before its
+// next index.
+func memberPath(stack []*scanFrame) (string, bool) {
 	path := ""
 
-	for _, frame := range stack {
+	for idx, frame := range stack {
 		if len(path) > maxPathBytes {
-			break
+			return path, idx < len(stack)
 		}
 
 		if frame.object {
@@ -489,8 +498,12 @@ func memberPath(stack []*scanFrame) string {
 		path += "[" + strconv.Itoa(frame.index-1) + "]"
 	}
 
-	return path
+	return path, false
 }
+
+// pathOf builds the path of a member, and reports whether memberPath cut
+// it, only when called, so that a path nobody keeps is never built.
+type pathOf func() (string, bool)
 
 // maxReportedPaths is the number of field paths one message lists, the same
 // ceiling the library puts on the failures it joins.
@@ -502,6 +515,14 @@ const maxReportedPaths = merge.MaxJoinedErrors
 // how many paths it holds and how long each one is, since a path carries its
 // whole ancestry, so an unbounded collector turns a profile of a few hundred
 // kilobytes into hundreds of megabytes of warning.
+//
+// It keeps each path once, in the order first seen: a member repeated in
+// an object that is itself repeated is found once per occurrence of the
+// object. A path memberPath cut (see maxPathBytes) stands for every member
+// beneath its start, so two such paths that read alike may name different
+// members, and each is kept and counts toward the bound. A path is compared
+// only once it is built, so past the bound, where none is built, a repeat
+// counts among the ones left out.
 type pathCollector struct {
 	paths []string
 	// wants holds, for a collector of misspelled members, the spelling of
@@ -517,31 +538,37 @@ func (c *pathCollector) err(kind error) error {
 }
 
 func (c *pathCollector) add(path string) {
-	c.addLazily(func() string { return path })
+	c.addLazily(func() (string, bool) { return path, false })
 }
 
 // addWant is addLazily for a misspelled member, with the spelling of the
 // field it stands for.
-func (c *pathCollector) addWant(path func() string, want string) {
+func (c *pathCollector) addWant(path pathOf, want string) {
 	if len(c.paths) >= maxReportedPaths {
 		c.omitted++
 
 		return
 	}
 
-	c.paths = append(c.paths, path())
-	c.wants = append(c.wants, want)
+	built, cut := path()
+	if cut || !slices.Contains(c.paths, built) {
+		c.paths = append(c.paths, built)
+		c.wants = append(c.wants, want)
+	}
 }
 
 // addLazily is add for a path that is only worth building when it is kept.
-func (c *pathCollector) addLazily(path func() string) {
+func (c *pathCollector) addLazily(path pathOf) {
 	if len(c.paths) >= maxReportedPaths {
 		c.omitted++
 
 		return
 	}
 
-	c.paths = append(c.paths, path())
+	built, cut := path()
+	if cut || !slices.Contains(c.paths, built) {
+		c.paths = append(c.paths, built)
+	}
 }
 
 // foldName returns the name in the case-folded form encoding/json uses to
@@ -585,8 +612,10 @@ func foldRune(char rune) rune {
 // part is quoted once, so a list of paths reads one way even where a plain
 // name holds a comma or a space. Every other path is quoted whole by
 // merge.QuoteBounded, and so is one longer than merge.MaxQuotedBytes, which
-// that cuts, or one whose brackets do not parse, such as a name the decoder
-// reported.
+// that cuts, or one joinFieldPath does not build: brackets that do not
+// parse, or a bracketed name that is a plain path segment, which
+// joinFieldPath writes after a dot. Read as a path, `a["b"]` would name the
+// member b of the object a.
 func quotePath(path string) string {
 	if !strings.Contains(path, `["`) || len(path) > merge.MaxQuotedBytes {
 		return merge.QuoteBounded(path)
@@ -609,22 +638,35 @@ func quotePath(path string) string {
 			break
 		}
 
-		literal, err := strconv.QuotedPrefix(rest[1:])
-		if err != nil || !strings.HasPrefix(rest[1+len(literal):], "]") {
-			return merge.QuoteBounded(path)
-		}
-
-		name, err := strconv.Unquote(literal)
-		if err != nil {
+		name, size, ok := bracketedName(rest)
+		if !ok {
 			return merge.QuoteBounded(path)
 		}
 
 		rendered.WriteString("[" + merge.QuoteBounded(name) + "]")
 
-		rest = rest[len(literal)+2:]
+		rest = rest[size:]
 	}
 
 	return rendered.String()
+}
+
+// bracketedName returns the name of the bracketed segment a path starts
+// with, as joinFieldPath writes it, and its length, or false where the path
+// starts with none: brackets that do not parse, or a name that is a plain
+// path segment, which joinFieldPath writes after a dot instead.
+func bracketedName(path string) (string, int, bool) {
+	literal, err := strconv.QuotedPrefix(strings.TrimPrefix(path, "["))
+	if err != nil || !strings.HasPrefix(path[1+len(literal):], "]") {
+		return "", 0, false
+	}
+
+	name, err := strconv.Unquote(literal)
+	if err != nil || plainFieldName(name) {
+		return "", 0, false
+	}
+
+	return name, len(literal) + len("[]"), true
 }
 
 // pathsError wraps kind with the quoted paths, pluralizing the kind when

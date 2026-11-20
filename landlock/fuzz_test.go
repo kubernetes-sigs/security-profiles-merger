@@ -240,6 +240,57 @@ func addLandlockFuzzSeeds(f *testing.F) {
 		uint8(0x00), uint8(0x00),
 	)
 
+	// The inputs share no handled filesystem right, so the union handles
+	// refer alone, while truncate needs ABI v3: downgraded to v2 the left
+	// input handles nothing and allows every move, which a union listing
+	// refer would deny.
+	f.Add(
+		uint32(0x8000), uint8(0x00), uint8(0x00),
+		"/a", "/b",
+		uint32(0x8000), uint32(0x00),
+		uint16(0), uint16(0),
+		uint8(0x00), uint8(0x00),
+		uint32(0x400), uint8(0x00), uint8(0x00),
+		"/b", "/c",
+		uint32(0x400), uint32(0x00),
+		uint16(0), uint16(0),
+		uint8(0x00), uint8(0x00),
+	)
+
+	// The left input grants refer on /a, the right handles truncate alone:
+	// downgraded to v2 the right input allows every move, so the union may
+	// not deny one there.
+	f.Add(
+		uint32(0x8C00), uint8(0x00), uint8(0x00),
+		"/a", "/b",
+		uint32(0x800), uint32(0x00),
+		uint16(0), uint16(0),
+		uint8(0x00), uint8(0x00),
+		uint32(0x8000), uint8(0x00), uint8(0x00),
+		"/b", "/c",
+		uint32(0x8000), uint32(0x00),
+		uint16(0), uint16(0),
+		uint8(0x00), uint8(0x00),
+	)
+
+	// Both handle read_file, refer and truncate; the left grants refer on
+	// /s and refer and truncate on /d, the right read_file on /d. At v3 the
+	// left denies moving a file from /s to /d, which would gain truncate,
+	// but downgraded to v2 it allows it, so the union may not deny it for
+	// the read_file it grants on /d.
+	f.Add(
+		uint32(0x8C00), uint8(0x00), uint8(0x00),
+		"/s", "/d",
+		uint32(0x800), uint32(0x8800),
+		uint16(0), uint16(0),
+		uint8(0x00), uint8(0x00),
+		uint32(0x8C00), uint8(0x00), uint8(0x00),
+		"/d", "/x",
+		uint32(0x400), uint32(0x00),
+		uint16(0), uint16(0),
+		uint8(0x00), uint8(0x00),
+	)
+
 	// Identical profiles.
 	f.Add(
 		uint32(0x03), uint8(0x01), uint8(0x02),
@@ -843,15 +894,21 @@ func assertFSExact(
 	t *testing.T,
 	name string,
 	combine func(left, right bool) bool,
-	exempt func(result *landlock.Profile, right landlock.FSAccessRight, got bool) bool,
+	exempt func(
+		result *landlock.Profile, inputs []*landlock.Profile, right landlock.FSAccessRight, got bool,
+	) bool,
 	result, left, right *landlock.Profile,
 ) {
 	t.Helper()
 
+	inputs := []*landlock.Profile{left, right}
+
 	for _, path := range probePaths(left, right, result) {
 		for _, access := range allFSRights() {
 			want := combine(fsPermits(left, path, access), fsPermits(right, path, access))
-			if got := fsPermits(result, path, access); got != want && !exempt(result, access, got) {
+
+			got := fsPermits(result, path, access)
+			if got != want && !exempt(result, inputs, access, got) {
 				t.Errorf(
 					"%s permits %q at %q = %v, want %v\nleft=%s\nright=%s\nresult=%s",
 					name, access, path, got, want,
@@ -908,6 +965,128 @@ func assertUnionInvariants(
 	assertUnionHandledCoversCommon(t, result, left, right)
 	assertUnionScopedSubset(t, result, left, right)
 	assertUnionScopedCoversCommon(t, result, left, right)
+	assertUnionOutlastsDowngrade(t, result, left, right)
+}
+
+// assertUnionOutlastsDowngrade checks the union against each input after
+// Options.Downgrade to every ABI version: the downgraded union permits
+// every access at the absolute probe paths, and allows every move or link
+// among them, inside the root mount and inside any other, that a
+// downgraded input permits. Downgrade drops rights from the union and the
+// inputs alike, which can leave an input handling no filesystem right, and
+// so allowing every move, or allowing a move it denied for a dropped right.
+// Inside a mount other than the root mount the union may deny a move for
+// refer alone, as assertUnionMoves allows.
+func assertUnionOutlastsDowngrade(t *testing.T, result, left, right *landlock.Profile) {
+	t.Helper()
+
+	probes := probePaths(left, right, result)
+
+	for abi := landlock.ABIV1; abi <= landlock.LatestABIVersion; abi++ {
+		options := landlock.Options{ABI: abi}
+		union := downgradeCleaned(t, options, result)
+		inputs := []*landlock.Profile{
+			downgradeCleaned(t, options, left), downgradeCleaned(t, options, right),
+		}
+
+		for _, probe := range probes {
+			for _, access := range allFSRights() {
+				if !strings.HasPrefix(probe, "/") || fsPermits(union, probe, access) ||
+					!fsPermits(inputs[0], probe, access) && !fsPermits(inputs[1], probe, access) {
+					continue
+				}
+
+				t.Errorf("at v%d the union denies %q at %q, which an input permits\n"+
+					"left=%s\nright=%s\nresult=%s",
+					abi, access, probe, left.String(), right.String(), result.String())
+			}
+		}
+
+		if !assertDowngradedUnionMoves(t, abi, probes, inputs, union) {
+			t.Errorf("left=%s\nright=%s\nresult=%s", left.String(), right.String(), result.String())
+
+			return
+		}
+	}
+}
+
+// assertDowngradedUnionMoves reports, as the first failure, a move or link
+// among the absolute probes that an input allows and the union denies,
+// and whether there was none.
+func assertDowngradedUnionMoves(
+	t *testing.T, abi landlock.ABIVersion, probes []string,
+	inputs []*landlock.Profile, union *landlock.Profile,
+) bool {
+	t.Helper()
+
+	for _, file := range probes {
+		for _, dst := range probes {
+			if file == "/" || !strings.HasPrefix(file, "/") || !strings.HasPrefix(dst, "/") ||
+				dst == evalParent(file) || evalCovers(file, dst) {
+				continue
+			}
+
+			dir, rootMount, denied := unionDeniesMove(inputs, union, file, dst)
+			if denied {
+				t.Errorf("at v%d the union denies moving %q (dir %v, root mount %v) into %q, "+
+					"which an input allows\ndowngraded union=%s\ndowngraded inputs=%v",
+					abi, file, dir, rootMount, dst, union.String(), inputs)
+
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+// unionDeniesMove reports a way of moving the file into dst, as a
+// directory or not and inside the root mount or not, that an input allows
+// and the union denies, and whether there is one. Inside a mount other than
+// the root mount the union may deny a move for refer alone.
+func unionDeniesMove(
+	inputs []*landlock.Profile, union *landlock.Profile, file, dst string,
+) (bool, bool, bool) {
+	for _, move := range [][2]bool{{false, true}, {true, true}, {false, false}, {true, false}} {
+		dir, rootMount := move[0], move[1]
+
+		var gainable []landlock.FSAccessRight
+		if !rootMount {
+			gainable = []landlock.FSAccessRight{landlock.FSAccessRefer}
+		}
+
+		if evalMoveGaining(union, file, dst, dir, rootMount, gainable) {
+			continue
+		}
+
+		if slices.ContainsFunc(inputs, func(input *landlock.Profile) bool {
+			return evalMove(input, file, dst, dir, rootMount)
+		}) {
+			return dir, rootMount, true
+		}
+	}
+
+	return false, false, false
+}
+
+// downgradeCleaned returns the profile downgraded to the options' version,
+// with every rule path cleaned, so that the evaluator, which compares paths
+// as strings, reads the rules as the merge does.
+func downgradeCleaned(
+	t *testing.T, options landlock.Options, profile *landlock.Profile,
+) *landlock.Profile {
+	t.Helper()
+
+	downgraded, err := options.Downgrade(profile)
+	if err != nil {
+		t.Fatalf("Downgrade to v%d: %v", options.ABI, err)
+	}
+
+	for idx := range downgraded.PathRules {
+		downgraded.PathRules[idx].Path = oracleCleanPath(downgraded.PathRules[idx].Path)
+	}
+
+	return downgraded
 }
 
 // assertUnionKeepsInputPaths checks that a union keeps a rule on every path
@@ -1021,16 +1200,42 @@ func assertUnionHandledCoversCommon(
 
 // intersectExempt allows an intersection to deny refer where both inputs
 // permit it, which it does where a move could gain a right an input denies.
-func intersectExempt(_ *landlock.Profile, right landlock.FSAccessRight, got bool) bool {
+func intersectExempt(
+	_ *landlock.Profile, _ []*landlock.Profile, right landlock.FSAccessRight, got bool,
+) bool {
 	return !got && right == landlock.FSAccessRefer
 }
 
 // unionExempt allows a union to permit a right neither input permits once
 // it stops handling it, which it does where the right could deny a move an
-// input allows.
-func unionExempt(result *landlock.Profile, right landlock.FSAccessRight, got bool) bool {
-	return got && right != landlock.FSAccessRefer &&
-		!slices.Contains(result.HandledAccessFS, right)
+// input allows. It also allows a union to permit refer where an input
+// handles only filesystem rights newer than ABIV2: such an input allows
+// every move once downgraded below them, so the union then stops listing
+// refer, or stops handling filesystem rights where a rule grants refer.
+func unionExempt(
+	result *landlock.Profile, inputs []*landlock.Profile, right landlock.FSAccessRight, got bool,
+) bool {
+	if !got {
+		return false
+	}
+
+	if right == landlock.FSAccessRefer && slices.ContainsFunc(inputs, handlesOnlyLateFS) {
+		return true
+	}
+
+	return right != landlock.FSAccessRefer && !slices.Contains(result.HandledAccessFS, right)
+}
+
+// handlesOnlyLateFS reports whether the profile handles filesystem rights,
+// but none that ABIV2 knows, so that it handles none once downgraded to
+// ABIV2.
+func handlesOnlyLateFS(profile *landlock.Profile) bool {
+	known := landlock.FSAccessRights()
+
+	return len(profile.HandledAccessFS) > 0 &&
+		!slices.ContainsFunc(profile.HandledAccessFS, func(right landlock.FSAccessRight) bool {
+			return known[right] <= landlock.ABIV2
+		})
 }
 
 // grantsRefer reports whether a profile has a loadable rule granting refer,

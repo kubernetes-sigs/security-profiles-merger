@@ -73,7 +73,7 @@ func Unmarshal[T any](data []byte, target *T, required *Required) error {
 			return fmt.Errorf("decode profile: %w", spm.ErrNotAnObject)
 		}
 
-		return fmt.Errorf("decode profile: %w", merge.BoundedError(endError(data, err)))
+		return fmt.Errorf("decode profile: %w", merge.BoundedError(syntaxError(data, err)))
 	}
 
 	// A value that decoded but is not an object, which only null does, is
@@ -133,14 +133,18 @@ func Decode[T any](data []byte, target *T) (Hint, error) {
 // does.
 var errUnexpectedEnd = errors.New("unexpected end of JSON input")
 
-// endError returns the syntax error json.Unmarshal reports for a document
-// that ends before its first value does, such as an empty one or "{", in
-// place of the io.EOF or io.ErrUnexpectedEOF a json.Decoder reports for it.
-// Those name the end of a stream, which a caller testing for them would
-// take for a reader that ran dry rather than for a document that is not
-// valid JSON. Any other error is returned as it is.
-func endError(data []byte, err error) error {
-	if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+// syntaxError returns the error json.Unmarshal reports for a document that
+// is not well-formed JSON in place of err, the error decoding its first
+// value returned: json.Unmarshal checks the syntax of the whole document
+// before it decodes anything, so a type error in the first value of
+// `{"defaultErrnoRet":"x"} x` loses to the syntax error behind it. That also
+// gives a document that ends before its first value does, such as an empty
+// one or "{", the *json.SyntaxError json.Unmarshal reports, in place of the
+// io.EOF or io.ErrUnexpectedEOF a json.Decoder reports for it, which name
+// the end of a stream that a caller would take for a reader that ran dry.
+// For a well-formed document, err is returned as it is.
+func syntaxError(data []byte, err error) error {
+	if json.Valid(data) {
 		return err
 	}
 
@@ -148,8 +152,7 @@ func endError(data []byte, err error) error {
 
 	syntaxErr := json.Unmarshal(data, &raw)
 	if syntaxErr == nil {
-		// Not reached: the decoder reads the whole first value, so a
-		// document it ran out of is one json.Unmarshal refuses too.
+		// Not reached: json.Unmarshal checks the syntax json.Valid checks.
 		return errUnexpectedEnd
 	}
 
@@ -268,7 +271,7 @@ func findings[T any](
 		}
 
 		for _, finding := range []Finding{
-			{Kind: spm.ErrUnknownField, Err: scan.unknownErr(data, hint)},
+			{Kind: spm.ErrUnknownField, Err: scan.unknownErr(hint)},
 			{Kind: spm.ErrMisspelledField, Err: scan.misspelledErr()},
 			{Kind: spm.ErrMissingField, Err: scan.missing.err(spm.ErrMissingField)},
 		} {
@@ -290,16 +293,19 @@ func findings[T any](
 
 // unknownErr reports the members no field reads. The decoder is what
 // decides that, so they are only reported where hint says the decoder met
-// one; should the scan ever disagree and find none, the decoder's own
-// finding is reported rather than dropped, so that the check fails closed.
-// A document that is not valid JSON is the decoder's to refuse, and says
-// nothing here.
-func (scan *documentScan) unknownErr(data []byte, hint Hint) error {
+// one; should the scan ever disagree and find none, such as for a document
+// it cannot read to the end, the decoder's own finding is reported rather
+// than dropped, so that the check fails closed. That finding is a member
+// name rather than a path, so it is written as the path of a member by that
+// name, which brackets and quotes a name that is no plain path segment. A
+// member of a type whose fields decoders resolve differently is reported
+// whatever the decoder says (see jsonFields).
+func (scan *documentScan) unknownErr(hint Hint) error {
 	switch {
-	case !hint.found:
+	case !hint.found && !scan.divergent:
 		return nil
-	case len(scan.unknown.paths) == 0 && json.Valid(data):
-		return pathsError(spm.ErrUnknownField, []string{hint.unknown}, nil, 0)
+	case len(scan.unknown.paths) == 0 && scan.unknown.omitted == 0:
+		return pathsError(spm.ErrUnknownField, []string{joinFieldPath("", hint.unknown)}, nil, 0)
 	default:
 		return scan.unknown.err(spm.ErrUnknownField)
 	}

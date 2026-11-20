@@ -758,6 +758,10 @@ func FuzzAppArmorValidateArtifact(f *testing.F) {
 	f.Add(uint64(0x80), "/tmp/a b", "/tmp/c,", false, false, false)
 	f.Add(uint64(0x80), `/tmp/\000`, "/tmp/[!a]", false, false, false)
 	f.Add(uint64(0x80), `\x2fetc/passwd`, `\57etc/shadow`, false, false, false)
+	// apparmor_parser reads no variable in an "@{" whose name holds a comma
+	// or whose "@" is escaped, but one in an escaped backslash's "@{".
+	f.Add(uint64(0x80), "/a/@{b,c}", `/a/\@{HOME}`, false, false, false)
+	f.Add(uint64(0x80), `/a/\\@{HOME}`, "/a/@{x", false, false, false)
 
 	f.Fuzz(func(
 		t *testing.T,

@@ -75,7 +75,8 @@ var (
 	// the maximum (5).
 	ErrArgIndexOutOfRange = errors.New("syscall arg index out of range")
 	// ErrUnknownArch is returned when a profile contains an unrecognized
-	// architecture.
+	// architecture, and, matching ErrInvalidOptions as well, by every
+	// method of an Options from ForArch naming one.
 	ErrUnknownArch = errors.New("unknown architecture")
 	// ErrDuplicateArch is returned by ValidateArtifact and ValidateStrict
 	// when the same architecture appears more than once. Validate and the
@@ -170,7 +171,8 @@ var (
 	// one byte order per filter and refuses such an architecture with EDOM,
 	// so a runtime fails to load the profile. Where the native architecture
 	// is not known, a list holding architectures of both byte orders is
-	// reported, since it loads on no node, and the merges accept it.
+	// reported, since it loads on no node: by the validators, and by
+	// Intersect for an input, while Union accepts it.
 	ErrMixedByteOrder = errors.New("architecture of another byte order")
 	// ErrNotifyUnsupported is returned by Validate when SCMP_ACT_NOTIFY
 	// appears where runc refuses it outright: as the default action, or on
@@ -494,8 +496,10 @@ func strictChecks(native specs.Arch) []profileCheck {
 //     covers a 32-bit architecture (ErrValueTooWide);
 //   - a profile past a MaxArtifact limit (ErrTooManyEntries,
 //     ErrTooManyNamesPerEntry, ErrTooManyRules, checked first and on their
-//     own, and ErrTooManyEntriesPerSyscall, ErrTooManyRulesPerSyscall);
-//     each matches ErrArtifactTooLarge;
+//     own, and ErrTooManyEntriesPerSyscall, ErrTooManyRulesPerSyscall,
+//     checked next and reported ahead of every other failure, so that a
+//     profile past one always matches its error); each matches
+//     ErrArtifactTooLarge;
 //   - rules of one syscall with different results that a runtime refuses
 //     or evaluates in its own order (ErrConflictingEntries);
 //   - a filter in which libseccomp loses the rules of a covered
@@ -526,7 +530,6 @@ func artifactChecks(native specs.Arch) []profileCheck {
 		validateSyscallNameSpelling,
 		validateNoNotify,
 		validateNoListener,
-		validateEntryCount,
 		validateUnusedErrnoRet,
 		func(profile *specs.LinuxSeccomp) error { return validateValueWidth(profile, native) },
 		func(profile *specs.LinuxSeccomp) error { return validateByteOrder(profile, native) },
@@ -617,12 +620,14 @@ func validateValueWidth(profile *specs.LinuxSeccomp, native specs.Arch) error {
 
 type profileCheck func(profile *specs.LinuxSeccomp) error
 
-// validateWith runs validateProfileSize, and where the profile is within
-// its bounds Validate and every check, collecting all failures into one
-// error. The checks in loadable run only when Validate passes: they expand
-// entries the way a runtime loads them, which assumes known operators and
-// argument indices in range, so that an entry without a repeated index
-// carries at most one condition per index.
+// validateWith runs validateProfileSize, and where the profile is within its
+// bounds the per-syscall limits, Validate and every check, collecting all
+// failures into one error. The per-syscall limits come first, so that the
+// bound on the report does not leave them all out and a profile past one
+// always matches ErrArtifactTooLarge. The checks in loadable run only when
+// Validate passes: they expand entries the way a runtime loads them, which
+// assumes known operators and argument indices in range, so that an entry
+// without a repeated index carries at most one condition per index.
 func validateWith(
 	profile *specs.LinuxSeccomp, checks []profileCheck, loadable ...profileCheck,
 ) error {
@@ -635,10 +640,12 @@ func validateWith(
 		return err
 	}
 
-	err = Validate(profile)
-
 	var errs merge.Collector
 
+	errs.Add(validateEntryCount(profile))
+	errs.Add(validateRuleCount(profile))
+
+	err = Validate(profile)
 	errs.Add(err)
 
 	for _, check := range checks {

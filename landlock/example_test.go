@@ -318,17 +318,19 @@ func ExampleLoweredRulePaths() {
 	}
 
 	// The result grants the baseline's access on the artifact's path, so
-	// the runtime must open it without following symlinks out of /srv, or
-	// refuse the artifact.
+	// the runtime must open it beneath /srv without following symlinks or
+	// crossing mounts, or refuse the artifact.
 	lowered, err := landlock.LoweredRulePaths(result, baseline, artifact)
 	if err != nil {
 		panic(err)
 	}
 
-	fmt.Println(lowered)
+	for _, each := range lowered {
+		fmt.Printf("%s beneath %s, from input %d\n", each.Path, each.Ancestor, each.Input)
+	}
 
 	// Output:
-	// [/srv/data/link]
+	// /srv/data/link beneath /srv, from input 0
 }
 
 func ExampleRequiredABIVersion() {
@@ -476,11 +478,14 @@ func Example() {
 	}
 
 	fmt.Println(effective.String())
-	fmt.Println("open beneath /srv:", lowered)
+
+	for _, each := range lowered {
+		fmt.Printf("open %s beneath %s\n", each.Path, each.Ancestor)
+	}
 
 	// Output:
 	// Profile{fs:read_file,write_file /srv/data(read_file)}
-	// open beneath /srv: [/srv/data]
+	// open /srv/data beneath /srv
 }
 
 // A runtime maps each right to the kernel's bit with a table of its own.

@@ -30,7 +30,8 @@ limitations under the License.
 // Hierarchy resolution is textual, while the kernel binds a rule to the
 // file its path resolves to, so a rule of an [Intersect] result can grant an
 // input's access on a deeper path another input chose; [LoweredRulePaths]
-// reports which rules of a result carry such a grant.
+// reports which rules of a result carry such a grant, and beneath which
+// ancestor to open each.
 //
 // [UnmarshalStrict] decodes a profile and refuses what encoding/json accepts
 // silently: members no field reads, members that name a field only ignoring
@@ -43,11 +44,14 @@ limitations under the License.
 // # Validation
 //
 // [Validate] checks what the merge needs: known access rights and valid
-// paths. [ValidateArtifact] adds the size limit and what a kernel could not
-// load, and [ValidateStrict] adds duplicate rules and rights, which no other
-// validator reports, so each rejects everything the one before it rejects.
-// The methods of [Options] run the validator of the same name and check
-// the rights against an ABI version as well.
+// paths. [ValidateBaseline] adds what a kernel could not load,
+// [ValidateArtifact] adds the size limit, and [ValidateStrict] adds
+// duplicate rules and rights, which no other validator reports, so each
+// rejects everything the one before it rejects. The methods of [Options]
+// run the validator of the same name and check the rights against an ABI
+// version as well. A runtime checks its baseline with
+// [Options.ValidateBaseline] at config load and every artifact with
+// [Options.ValidateArtifact] or [Options.DecodeArtifact].
 //
 // Validate is what the merge runs on its inputs. Duplicate rules and rights
 // pass Validate anyway, since the kernel and the merge fold them, so a
@@ -85,10 +89,13 @@ limitations under the License.
 // A merge result that handles and scopes nothing restricts nothing.
 // Intersect returns one only when no input handles or scopes anything, and
 // Union when the inputs share no handled or scoped right, counting the
-// implicit refer denial (for example when one handles only filesystem
-// rights and the other only network rights). The kernel refuses to create
-// such a ruleset and ValidateArtifact reports it with [ErrEmptyRuleset]; a
-// runtime should apply no Landlock ruleset instead.
+// implicit refer denial (for example when one handles only filesystem rights
+// and the other only network rights). It also stops listing refer, or stops
+// handling filesystem rights where a rule grants refer, when an input
+// handles only filesystem rights newer than [ABIV2], which can leave it
+// handling and scoping nothing as well (see Refer). The kernel refuses to
+// create such a ruleset and ValidateArtifact reports it with
+// [ErrEmptyRuleset]; a runtime should apply no Landlock ruleset instead.
 //
 // # Refer
 //
@@ -107,6 +114,16 @@ limitations under the License.
 // result handles another filesystem right that ABIV1 knows, which
 // [Options.Downgrade] keeps at every version, so that the denial outlasts a
 // downgrade.
+//
+// Union keeps its guarantee after [Options.Downgrade] too: for every
+// version, the downgraded union permits whatever a downgraded input
+// permits. An input handling only filesystem rights newer than [ABIV2],
+// such as truncate alone, handles none once downgraded below them and then
+// allows every move and link, which a union listing refer would deny. So
+// where an input handles no filesystem right ABIV2 knows, the union does
+// not list refer, and where a rule grants refer, which it must list then,
+// it stops handling filesystem rights altogether, which permits more than
+// any input does.
 //
 // Refer inherits down the hierarchy like every other right, across mount
 // points too: the kernel collects the rights of both directories of a move
@@ -136,9 +153,13 @@ limitations under the License.
 // grants on some path where an input granting refer there does not, while
 // that input grants refer on another path where the union does not grant
 // the right, and may allow moving a file from the second path to the
-// first. The check is conservative, so it may stop handling a right no
-// allowed move needs, and refer itself always stays handled, so it remains
-// denied where no input grants it. The merge settles moves against every
+// first. The check runs at the full ABI and at every older version that
+// knows another filesystem right, with the rights that version does not
+// know left out, since a downgrade can turn a move an input denies for
+// such a right into one it allows. The check is conservative, so it may
+// stop handling a right no allowed move needs, and refer itself stays
+// handled, so it remains denied where no input grants it, apart from the
+// downgrade case above. The merge settles moves against every
 // input at the end, so this does not depend on how a fold of more than two
 // inputs is grouped.
 //
@@ -205,8 +226,9 @@ limitations under the License.
 // symlink "/srv/data/../public" need not be "/srv/public". Diff cleans paths
 // the same way and keeps ".." components as written.
 //
-// ValidateArtifact and ValidateStrict also reject a path other than the
-// root that ends in "/" or "/." ([ErrTrailingSlash]): the kernel opens it
+// ValidateBaseline, ValidateArtifact and ValidateStrict also reject a
+// relative path ([ErrRelativePath]) and a path other than the root that
+// ends in "/" or "/." ([ErrTrailingSlash]): the kernel opens it
 // only as a directory, so a rule on "/srv/f/" for a regular file cannot be
 // loaded, and cleaning would turn it into one that can. They reject a path
 // that is not valid UTF-8 ([ErrInvalidUTF8Path]) too, which the JSON form
@@ -231,39 +253,87 @@ limitations under the License.
 // a baseline, the artifact's author picks those paths and the container may
 // own the files they name.
 //
-// A caller that cannot rule this out should either ask [LoweredRulePaths]
-// which result rules carry a lowered grant and open exactly those without
-// leaving their declared hierarchy (openat2 with RESOLVE_BENEATH and
-// RESOLVE_NO_SYMLINKS relative to the covering ancestor), refuse a profile
-// that has any, or skip the merge and enforce the rulesets as separate
-// Landlock layers (one landlock_restrict_self call each), which the kernel
-// checks on the resolved files rather than on path strings.
+// A caller that cannot rule this out has three choices. It can ask
+// [LoweredRulePaths] which result rules carry a lowered grant and open
+// each of them so that it cannot leave the hierarchy of its
+// [LoweredPath].Ancestor. It opens the ancestor the way it opens a rule
+// path when it loads a profile, which is how the kernel binds the rule of
+// the input the grant came from, the baseline or the artifact. It then
+// opens the rule path relative to that descriptor with openat2 and
+// RESOLVE_BENEATH, RESOLVE_NO_SYMLINKS and RESOLVE_NO_XDEV, and passes the
+// descriptor it gets to landlock_add_rule as parent_fd rather than opening
+// the path again by name. RESOLVE_BENEATH and RESOLVE_NO_SYMLINKS alone do
+// not suffice: they still cross a mount point, and a bind mount on the
+// deeper path, which a container may be able to create, covers files
+// outside the ancestor's hierarchy. RESOLVE_NO_XDEV refuses every mount
+// point, bind mounts of the same file system included, so the open fails
+// where the layout is not what the merge assumed, and the caller refuses
+// the profile then. A rule on a file that is not a directory covers that
+// file under every name, so the caller also refuses such a file with more
+// than one hard link.
 //
-// Refusing a result with lowered rule paths makes the textual assumption
-// safe for the access a rule grants, but not for moves and links, which the
-// kernel decides by comparing the rights of two directories. The merge
-// decides where refer is safe by comparing path strings (see the Refer
-// section), so two rule paths it reads as unrelated can be one directory to
-// the kernel. With a baseline handling refer, write_file and make_reg and
+// An Ancestor of "/" in a result granting no refer is the exception, and
+// a common one: without it, a baseline granting read access on "/" would
+// be refused wherever a lowered path crosses into a volume.
+// LoweredRulePaths reports "/" only when every right lowered onto the path
+// is one the rule on "/" of the input lowering it grants, and otherwise
+// the ancestor the other rights come from, and it sets [LoweredPath].InRoot
+// where the shortcut applies. A rule on "/" grants its rights on
+// everything a path from the root reaches, through every mount and under
+// every name, since the kernel continues its walk past each mount point up
+// to the root. For the access a rule grants, a lowered rule on whatever
+// such a path resolves to therefore grants nothing the rule on "/" does
+// not, so the caller opens the path relative to the root it resolves rule
+// paths against with RESOLVE_IN_ROOT alone, which keeps the resolution,
+// symlinks included, inside that root, and needs no link check. A result
+// granting refer gets no shortcut: the kernel decides a move by comparing
+// the rights of two directories, and a rule landing on another directory
+// through a symlink changes that comparison (see below), so its paths are
+// opened beneath "/" with RESOLVE_BENEATH, RESOLVE_NO_SYMLINKS and
+// RESOLVE_NO_XDEV. Even without refer, the shortcut leaves out access
+// through a name or descriptor outside the root, also to a file the root
+// reaches: the lowered rule binds to the file, so it grants its rights
+// through a hard link or a bind mount outside the root and through a
+// descriptor passed in, for example by a peer container of the pod, where
+// the walk never reaches the rule on "/".
+//
+// Instead of opening the paths, a caller can refuse a profile with any
+// lowered rule path. Or it can skip the merge and enforce the rulesets as
+// separate Landlock layers (one landlock_restrict_self call each), which
+// the kernel checks on the resolved files rather than on path strings.
+//
+// Opening the lowered rule paths this way covers the access a rule grants,
+// but not moves and links, which the kernel decides by comparing the
+// rights of two directories. The merge decides where refer is safe by
+// comparing path strings (see the Refer section), so two rule paths it
+// reads as unrelated can be one directory to the kernel, and a result
+// with no lowered rule path at all can still allow a move an input
+// denies. With a baseline handling refer, write_file and make_reg and
 // granting /p and /q refer and make_reg and /y write_file, and an artifact
 // granting /p and /q refer and make_reg, Intersect grants /p and /q refer
 // and make_reg, and LoweredRulePaths reports nothing. Where /q is a
 // symlink or a bind mount to /y, the baseline denies moving a file from /p
 // to /q, since the file would gain write_file there, and the result allows
-// it. A caller that cannot rule out such paths should open the rule paths
-// of a result granting refer without following symlinks or crossing mounts,
-// or enforce the inputs as separate layers.
+// it. A caller that cannot rule out such a layout opens every rule path of
+// a result granting refer the same way, relative to "/" with
+// RESOLVE_NO_SYMLINKS and RESOLVE_NO_XDEV, and refuses the profile where
+// that fails. The mounts of the node also decide whether the kernel counts
+// the rule on "/" when it compares the two directories of a move, which no
+// way of opening the rule paths settles: inside a mount other than the
+// root mount, the result can allow a move an input denies (see Refer). A
+// caller that cannot accept either enforces the inputs as separate layers.
 //
-// Stacked layers are not quite the intersection, though: they can deny
-// more. Once some layer of the stack handles a filesystem right, the kernel
-// denies moving or linking a file into another directory (EXDEV) in every
-// layer that does not grant refer on both directories, including a layer
-// that handles no filesystem right at all, such as one restricting only
-// network access or scopes; such a layer on its own allows the move.
-// Intersect reads such an input as permitting every filesystem access,
-// refer included, so a move its result and each input on its own allow
-// fails once the inputs are stacked.
-// A runtime stacking layers should give a layer that handles no filesystem
+// Separate layers are the fallback that needs no assumption about the
+// layout, but they are not quite the intersection: they can deny more.
+// The kernel allows a move or link into another directory only when every
+// layer allows it, and once some layer of the stack handles a filesystem
+// right, it denies one (EXDEV) in every layer that does not grant refer on
+// both directories, including a layer that handles no filesystem right at
+// all, such as one restricting only network access or scopes; such a
+// layer on its own allows the move. Intersect reads such an input as
+// permitting every filesystem access, refer included, so a move its result
+// and each input on its own allow fails once the inputs are stacked. A
+// runtime stacking layers should give a layer that handles no filesystem
 // right a handled access set of [FSAccessRefer] and a rule granting refer
 // on "/", which keeps moves as the profile meant them.
 //

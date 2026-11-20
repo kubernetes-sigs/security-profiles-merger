@@ -99,9 +99,8 @@ func validateLostRules(profile *specs.LinuxSeccomp, native specs.Arch) error {
 	return nil
 }
 
-// validateSyscallRules checks the rules each syscall loads: their count
-// (MaxArtifactRulesPerSyscall) and, for syscalls within that bound,
-// conflicts between them (see ValidateArtifact), on the syscall and, where
+// validateSyscallRules checks the rules each syscall loads for conflicts
+// between them (see ValidateArtifact), on the syscall and, where
 // the profile covers an architecture that multiplexes it, on the
 // multiplexer. Rules are expanded the way a runtime adds them: entries equal
 // to the profile default are skipped, an entry with several conditions on
@@ -118,8 +117,6 @@ func validateSyscallRules(profile *specs.LinuxSeccomp, native specs.Arch) error 
 		reported: make(map[string]struct{}),
 		errs:     merge.Collector{},
 	}
-
-	checker.checkCounts()
 
 	// Past the profile-wide bound, expanding the entries is the very work
 	// that bound exists to prevent. validateWith runs this only after
@@ -145,14 +142,18 @@ type ruleChecker struct {
 	errs     merge.Collector
 }
 
-// checkCounts reports every syscall over the rule bound, in name order.
-// Only the names it reports are sorted: a profile may name as many syscalls
-// as it has bytes for, while the ones it can put over the bound are limited
-// by the rules it loads.
-func (c *ruleChecker) checkCounts() {
+// validateRuleCount reports every syscall over the rule bound
+// (MaxArtifactRulesPerSyscall), in name order, counting rules the way
+// runtimes add them without expanding the entries. Only the names it
+// reports are sorted: a profile may name as many syscalls as it has bytes
+// for, while the ones it can put over the bound are limited by the rules it
+// loads.
+func validateRuleCount(profile *specs.LinuxSeccomp) error {
+	counts := clauseCounts(profile.Syscalls, defaultClause(profile))
+
 	var over []string
 
-	for name, count := range c.counts {
+	for name, count := range counts {
 		if count > MaxArtifactRulesPerSyscall {
 			over = append(over, name)
 		}
@@ -160,15 +161,19 @@ func (c *ruleChecker) checkCounts() {
 
 	slices.Sort(over)
 
+	var errs merge.Collector
+
 	for _, name := range over {
-		c.errs.Report(func() error {
+		errs.Report(func() error {
 			return fmt.Errorf(
 				"syscalls: %s in %d rules: %w (max %d)",
-				merge.QuoteBounded(name), c.counts[name], ErrTooManyRulesPerSyscall,
+				merge.QuoteBounded(name), counts[name], ErrTooManyRulesPerSyscall,
 				MaxArtifactRulesPerSyscall,
 			)
 		})
 	}
+
+	return errs.Err()
 }
 
 func (c *ruleChecker) conflict(idx int, name string) {

@@ -298,16 +298,86 @@ func TestLoweredRulePathsInputErrors(t *testing.T) {
 	}
 }
 
-// loweredPaths returns LoweredRulePaths, failing the test on an error.
+// loweredPaths returns the paths LoweredRulePaths reports, failing the test
+// on an error.
 func loweredPaths(t *testing.T, result *landlock.Profile, inputs ...*landlock.Profile) []string {
 	t.Helper()
 
-	paths, err := landlock.LoweredRulePaths(result, inputs...)
+	lowered, err := landlock.LoweredRulePaths(result, inputs...)
 	if err != nil {
 		t.Fatalf("LoweredRulePaths: %v", err)
 	}
 
+	if lowered == nil {
+		return nil
+	}
+
+	paths := make([]string, 0, len(lowered))
+	for _, each := range lowered {
+		paths = append(paths, each.Path)
+	}
+
 	return paths
+}
+
+// TestLoweredRulePathsNameTheAncestor checks the ancestor reported for each
+// lowered path, which a runtime opens the path beneath: the shallowest rule
+// path any input lowered a grant from, a deeper rule of the same input
+// included, and the input that rule belongs to.
+func TestLoweredRulePathsNameTheAncestor(t *testing.T) {
+	t.Parallel()
+
+	read := fsRights{landlock.FSAccessReadFile}
+	readWrite := fsRights{landlock.FSAccessReadFile, landlock.FSAccessWriteFile}
+
+	// The baseline grants read on /srv and write on /srv/a, the artifact
+	// write on / and both on /srv/a/x. The intersection carries the
+	// artifact's write from / onto /srv/a, which the baseline named, and
+	// the baseline's read from /srv onto /srv/a/x, which the artifact
+	// named.
+	baseline := fsProfile(readWrite,
+		landlock.PathRule{Path: "/srv", AccessFS: read},
+		landlock.PathRule{Path: "/srv/a", AccessFS: fsRights{landlock.FSAccessWriteFile}},
+	)
+	artifact := fsProfile(readWrite,
+		landlock.PathRule{Path: "/", AccessFS: fsRights{landlock.FSAccessWriteFile}},
+		landlock.PathRule{Path: "/srv/a/x", AccessFS: readWrite},
+	)
+
+	result := assertMergeFormat(t, "Intersect", landlock.Intersect,
+		"Profile{fs:read_file,write_file /srv/a(write_file) /srv/a/x(read_file)}",
+		baseline, artifact)
+
+	want := []landlock.LoweredPath{
+		{Path: "/srv/a", Ancestor: "/", Input: 1, InRoot: true},
+		{Path: "/srv/a/x", Ancestor: "/srv", Input: 0, InRoot: false},
+	}
+
+	lowered, err := landlock.LoweredRulePaths(result, baseline, artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !slices.Equal(lowered, want) {
+		t.Errorf("LoweredRulePaths = %v, want %v", lowered, want)
+	}
+
+	// The union keeps write on /srv/a/x, which the baseline grants from
+	// /srv/a. The ancestor stays /srv, the shallower of the two, so that
+	// opening beneath it also checks that /srv/a lies within /srv.
+	united := assertMergeFormat(t, "Union", landlock.Union,
+		"Profile{fs:read_file,write_file /(write_file) /srv(read_file) "+
+			"/srv/a(write_file) /srv/a/x(read_file,write_file)}",
+		baseline, artifact)
+
+	lowered, err = landlock.LoweredRulePaths(united, baseline, artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !slices.Equal(lowered, want) {
+		t.Errorf("LoweredRulePaths of the union = %v, want %v", lowered, want)
+	}
 }
 
 // requiredABI returns RequiredABIVersion, failing the test on an error.
@@ -352,5 +422,110 @@ func TestLoweredRulePathsOnMergeResults(t *testing.T) {
 	want := []string{"/var/run"}
 	if got := loweredPaths(t, united, root, nested); !slices.Equal(got, want) {
 		t.Errorf("LoweredRulePaths of a union = %v, want %v", got, want)
+	}
+}
+
+// TestLoweredRulePathsRootAncestor covers the ancestor reported for grants
+// a rule on "/" carries. Such a rule covers everything a path from the root
+// reaches, through every mount, so the ancestor is "/" only when the rule
+// on "/" grants every lowered right, and otherwise the ancestor the other
+// rights come from, which a runtime opens the path beneath without
+// crossing a mount.
+func TestLoweredRulePathsRootAncestor(t *testing.T) {
+	t.Parallel()
+
+	read := fsRights{landlock.FSAccessReadFile}
+	write := fsRights{landlock.FSAccessWriteFile}
+	readWrite := fsRights{landlock.FSAccessReadFile, landlock.FSAccessWriteFile}
+	artifact := fsProfile(readWrite, landlock.PathRule{Path: "/data/f", AccessFS: readWrite})
+
+	tests := map[string]struct {
+		inputs []*landlock.Profile
+		want   []landlock.LoweredPath
+	}{
+		"read everything": {
+			inputs: []*landlock.Profile{
+				fsProfile(readWrite,
+					landlock.PathRule{Path: "/", AccessFS: readWrite}),
+				artifact,
+			},
+			want: []landlock.LoweredPath{
+				{Path: "/data/f", Ancestor: "/", Input: 0, InRoot: true},
+			},
+		},
+		"write from a volume": {
+			inputs: []*landlock.Profile{
+				fsProfile(readWrite,
+					landlock.PathRule{Path: "/", AccessFS: read},
+					landlock.PathRule{Path: "/data", AccessFS: write}),
+				artifact,
+			},
+			want: []landlock.LoweredPath{{Path: "/data/f", Ancestor: "/data", Input: 0}},
+		},
+		"another input's deeper ancestor": {
+			inputs: []*landlock.Profile{
+				fsProfile(readWrite, landlock.PathRule{Path: "/", AccessFS: readWrite}),
+				fsProfile(readWrite, landlock.PathRule{Path: "/data", AccessFS: readWrite}),
+				artifact,
+			},
+			want: []landlock.LoweredPath{{Path: "/data/f", Ancestor: "/data", Input: 1}},
+		},
+	}
+
+	for name, test := range tests {
+		result, err := landlock.Intersect(test.inputs...)
+		if err != nil {
+			t.Fatalf("%s: Intersect: %v", name, err)
+		}
+
+		got, err := landlock.LoweredRulePaths(result, test.inputs...)
+		if err != nil {
+			t.Fatalf("%s: LoweredRulePaths: %v", name, err)
+		}
+
+		if !slices.Equal(got, test.want) {
+			t.Errorf("%s: LoweredRulePaths(%s) = %v, want %v", name, result, got, test.want)
+		}
+	}
+}
+
+// TestLoweredRulePathsReferStaysBeneath pins that a result granting refer
+// never takes the shortcut of an Ancestor of "/". The rule on "/" covers
+// every path from the root for the access it grants, but the kernel decides
+// a move by comparing the rights of two directories: with /q a symlink to
+// /y, a rule opened through it lands on /y, and the result then allows
+// moving a file from /p to /y, which the baseline denies, since the file
+// would gain write_file there. Linux denies that rename with EXDEV under
+// the baseline and allows it under such a result.
+func TestLoweredRulePathsReferStaysBeneath(t *testing.T) {
+	t.Parallel()
+
+	referMake := fsRights{landlock.FSAccessRefer, landlock.FSAccessMakeReg}
+	baseline := fsProfile(
+		fsRights{landlock.FSAccessRefer, landlock.FSAccessWriteFile, landlock.FSAccessMakeReg},
+		landlock.PathRule{Path: "/", AccessFS: referMake},
+		landlock.PathRule{Path: "/y", AccessFS: fsRights{landlock.FSAccessWriteFile}},
+	)
+	artifact := fsProfile(referMake,
+		landlock.PathRule{Path: "/p", AccessFS: referMake},
+		landlock.PathRule{Path: "/q", AccessFS: referMake},
+	)
+
+	result := assertMergeFormat(t, "Intersect", landlock.Intersect,
+		"Profile{fs:make_reg,refer,write_file /p(make_reg,refer) /q(make_reg,refer) "+
+			"/y(write_file)}",
+		baseline, artifact)
+
+	lowered, err := landlock.LoweredRulePaths(result, baseline, artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []landlock.LoweredPath{
+		{Path: "/p", Ancestor: "/", Input: 0, InRoot: false},
+		{Path: "/q", Ancestor: "/", Input: 0, InRoot: false},
+	}
+	if !slices.Equal(lowered, want) {
+		t.Errorf("LoweredRulePaths = %v, want %v", lowered, want)
 	}
 }

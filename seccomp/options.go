@@ -17,18 +17,23 @@ limitations under the License.
 package seccomp
 
 import (
-	"errors"
 	"fmt"
+	"slices"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
-// ErrInvalidOptions is returned by every method that returns an error of an
-// Options that names no node, the zero value. It comes before any profile
-// is looked at and is not wrapped in an InputError.
-var ErrInvalidOptions = errors.New("seccomp options name no node")
+// ErrInvalidOptions is matched by every error a method returns for an
+// Options that names no node it can check for: the zero value, and a
+// ForArch architecture this package does not know, which matches
+// ErrUnknownArch as well. It comes before any profile is looked at and is
+// not wrapped in an InputError, so it never matches what an artifact
+// listing an unknown architecture returns. It is spm.ErrInvalidOptions,
+// which landlock.Options errors match too.
+var ErrInvalidOptions = spm.ErrInvalidOptions
 
 // Options names the node a merge, diff or check is for. Runtimes always add
 // the native architecture of the node to a filter, whether or not the
@@ -51,21 +56,24 @@ var ErrInvalidOptions = errors.New("seccomp options name no node")
 //     program does. A result is settled, and a check runs, as for every one
 //     of them, so it loads safely wherever it runs, at the cost of rules a
 //     node of a known 64-bit architecture keeps. The byte order is the
-//     exception: an intersection accepts architectures of either byte
-//     order, and the stricter validators report only a list mixing the two
-//     (ErrMixedByteOrder). Of the architectures no Go program runs on, in
-//     practice only x32 changes a result: libseccomp can lose the rules of
-//     an x86_64 list where x32 is native, so a narrow x86_64 denylist may be
-//     refused with ErrLostRules. Where the node's architecture is known,
-//     name it with ForArch. Diff, which settles nothing, implies no
-//     architecture and compares the lists as written.
+//     exception: either byte order may be native, so Intersect and the
+//     stricter validators refuse only a list mixing the two
+//     (ErrMixedByteOrder), which loads on no node. The architectures no Go
+//     program runs on change results too: each lacks syscalls the others
+//     have, and libseccomp loses the rules of an architecture whose block
+//     tests such a syscall first, so a narrow denylist may be refused with
+//     ErrLostRules, as one denying newfstatat outright and mmap on a
+//     condition is for parisc, and an x86_64 one for x32, which shares the
+//     block of x86_64. Where the node's architecture is known, name it
+//     with ForArch. Diff, which settles nothing, implies no architecture
+//     and compares the lists as written.
 //
 // The zero value names no node and every method that returns an error
-// reports it with ErrInvalidOptions, so that an Options a caller forgot to fill in does not
-// silently stand for one. Options values are comparable, and two are equal
-// when they come from the same constructor with the same argument: ForHost()
-// and ForArch of the running program's architecture behave alike but are
-// not equal.
+// reports it with ErrInvalidOptions, so that an Options a caller forgot to
+// fill in does not silently stand for one. Options values are comparable,
+// and two are equal when they come from the same constructor with the same
+// argument: ForHost() and ForArch of the running program's architecture
+// behave alike but are not equal.
 //
 // Options has a method for every validator and for every other operation
 // whose result depends on the node: Validate, ValidateArtifact,
@@ -90,8 +98,8 @@ const (
 
 // ForArch returns the Options of a node whose native architecture is arch.
 // An architecture this package does not know, the empty one included, is
-// reported with ErrUnknownArch by every method that returns an error,
-// before it looks at a profile.
+// reported with an error matching both ErrInvalidOptions and ErrUnknownArch
+// by every method that returns an error, before it looks at a profile.
 func ForArch(arch specs.Arch) Options {
 	return Options{node: nodeArch, arch: arch}
 }
@@ -201,7 +209,43 @@ func (o Options) ValidateBaseline(baseline *specs.LinuxSeccomp) error {
 		return fmt.Errorf("%w: %s", ErrInexactBaseline, diff)
 	}
 
+	// A merge with any artifact reads the baseline next to another input,
+	// which can settle what the baseline alone keeps: a value above 32 bits
+	// is read as a 32-bit architecture compares it once another input takes
+	// part, so the merge drops the 32-bit architectures or collapses the
+	// syscall. An artifact allowing everything on the same architectures,
+	// with the same flags and listener, takes nothing away of its own, so
+	// what its intersection with the baseline lacks, every merge lacks.
+	merged, err := o.Intersect(baseline, allowingAll(baseline))
+	if err != nil {
+		return merge.SoleInputError(err)
+	}
+
+	diff, err = o.Diff(baseline, merged)
+	if err != nil {
+		return err
+	}
+
+	if !diff.Equal {
+		return fmt.Errorf("%w: next to an artifact: %s", ErrInexactBaseline, diff)
+	}
+
 	return nil
+}
+
+// allowingAll returns the profile that allows every call on the
+// architectures of the baseline, with its flags and listener, so that an
+// intersection with it settles only what the baseline brings.
+func allowingAll(baseline *specs.LinuxSeccomp) *specs.LinuxSeccomp {
+	return &specs.LinuxSeccomp{
+		DefaultAction:    specs.ActAllow,
+		DefaultErrnoRet:  nil,
+		Architectures:    slices.Clone(baseline.Architectures),
+		Flags:            slices.Clone(baseline.Flags),
+		ListenerPath:     baseline.ListenerPath,
+		ListenerMetadata: baseline.ListenerMetadata,
+		Syscalls:         nil,
+	}
 }
 
 // DecodeArtifact is DecodeArtifact for the node the options name.
@@ -255,7 +299,8 @@ func (o Options) native() (specs.Arch, error) {
 	case nodeArch:
 		if !isKnownArch(o.arch) {
 			return "", fmt.Errorf(
-				"native architecture: %s: %w", merge.QuoteBounded(string(o.arch)), ErrUnknownArch,
+				"%w: native architecture: %s: %w",
+				ErrInvalidOptions, merge.QuoteBounded(string(o.arch)), ErrUnknownArch,
 			)
 		}
 
@@ -263,5 +308,7 @@ func (o Options) native() (specs.Arch, error) {
 	case nodeNone:
 	}
 
-	return "", fmt.Errorf("%w: use ForArch, ForHost or ForAnyArch", ErrInvalidOptions)
+	return "", fmt.Errorf(
+		"%w: seccomp options name no node: use ForArch, ForHost or ForAnyArch", ErrInvalidOptions,
+	)
 }

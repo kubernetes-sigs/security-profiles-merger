@@ -18,6 +18,7 @@ package apparmor
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -67,6 +68,20 @@ func TestQuotePath(t *testing.T) {
 		{path: "/tmp/a\u0085b", want: `/tmp/a\xc2\x85b`},
 		{path: "/usr/binㅤ", want: `/usr/bin\xe3\x85\xa4`},
 		{path: "/tmp/\x7f", want: `/tmp/\x7f`},
+		// The parser drops a backslash it resolves no escape for and keeps
+		// the character, so an escaped character that does not print as
+		// itself is written as the \x escapes of its bytes.
+		{path: "/tmp/a\\\nb", want: `/tmp/a\x0ab`},
+		{path: "/tmp/a\\\tb", want: `/tmp/a\x09b`},
+		{path: "/tmp/a\\\rb", want: `/tmp/a\x0db`},
+		{path: "/tmp/a\\\x1bb", want: `/tmp/a\x1bb`},
+		{path: "/tmp/a\\\x7f", want: `/tmp/a\x7f`},
+		{path: "/tmp/{x,a\\\nb}", want: `/tmp/{x,a\x0ab}`},
+		{path: "/tmp/{x,\\\nb}", want: `/tmp/{x,\x0ab}`},
+		{path: "/tmp/*a\\\u2028b", want: `/tmp/*a\xe2\x80\xa8b`},
+		{path: "/tmp/a\\\u00a0b", want: `/tmp/a\xc2\xa0b`},
+		// An escaped character that prints keeps its backslash.
+		{path: "/tmp/a\\\u00e9", want: "/tmp/a\\\u00e9"},
 	} {
 		got, err := QuotePath(testCase.path)
 		if err != nil || got != testCase.want {
@@ -108,10 +123,6 @@ func TestQuotePathRefuses(t *testing.T) {
 	}
 
 	for _, path := range []string{
-		// The parser resolves no escape whose second byte is a control
-		// character, so the backslash stays in the name.
-		"/tmp/a\\\nb",
-		"/tmp/a\\\tb",
 		// An empty alternative: the second comma cannot be written so that
 		// the lexer reads it and the parser still takes it as a separator.
 		"/etc/{a,,b}",
@@ -123,5 +134,45 @@ func TestQuotePathRefuses(t *testing.T) {
 		if !errors.Is(err, ErrUnquotablePath) {
 			t.Errorf("QuotePath(%q) = %q, %v, want ErrUnquotablePath", path, got, err)
 		}
+	}
+}
+
+// TestQuotePathLongPattern checks a pattern within the matcher's length
+// limit whose escaped spelling is past it. The escapes do not change the
+// pattern apparmor_parser compiles, so QuotePath writes it, as it writes a
+// literal path of the same length.
+func TestQuotePathLongPattern(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{
+		"/a/*" + strings.Repeat(" ", 2100),
+		"/a/" + strings.Repeat(" ", 2100),
+		"/a/{b,c}" + strings.Repeat("\t", 2100),
+	} {
+		got, err := QuotePath(path)
+		if err != nil {
+			t.Errorf("QuotePath(%d bytes) = %v, want a spelling", len(path), err)
+
+			continue
+		}
+
+		if len(got) <= maxGlobPatternLen || hasUnquotableChar(got) {
+			t.Errorf("QuotePath(%d bytes) = %d bytes, want a longer spelling of one token",
+				len(path), len(got))
+		}
+
+		want := matcherKey(path, keyAnalysis(path))
+		if want.kind == keyText || matcherKey(got, analyzeUnbounded(got)) != want {
+			t.Errorf("QuotePath(%d bytes) names another path", len(path))
+		}
+	}
+
+	// A pattern past the limit is identified by its text, which an escape
+	// changes, so it is refused as before.
+	long := "/a/*" + strings.Repeat(" ", maxGlobPatternLen)
+
+	_, err := QuotePath(long)
+	if !errors.Is(err, ErrUnquotablePath) {
+		t.Errorf("QuotePath(%d bytes) = %v, want ErrUnquotablePath", len(long), err)
 	}
 }

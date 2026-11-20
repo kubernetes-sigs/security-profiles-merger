@@ -1138,10 +1138,16 @@ func (m ruleMerger) collapseClauses(clauses []clause, fallback *clause) []clause
 // argsCover) matches only calls the other matches too, and since the least
 // restrictive matching clause wins, it is dead unless it is less restrictive
 // than that other clause. Clauses with the same result also collapse into
-// the wider one, and of two clauses with the same result whose filters
-// cover each other, such as "a0 < 1" and "a0 <= 0", the later one goes: a
-// merge spells a conjoined condition after one input, so the same clause
-// can arrive in two spellings, which would be no safe shape together.
+// the wider one.
+//
+// Two clauses with the same result whose filters cover each other, such as
+// "a0 < 1" and "a0 <= 0", are one clause spelled twice: a merge spells a
+// conjoined condition after one input, so the same clause can arrive in two
+// spellings, which would be no safe shape together. Such twins live or die
+// together, since argsCover may see a wider filter cover one spelling and
+// not the other, and of two live twins the one with the greater key goes.
+// Neither depends on the order of the clauses, so a union is the same
+// whichever input comes first.
 //
 // It compares every clause against every other one, so past maxPruneClauses
 // it is skipped. Pruning only removes clauses that never decide a call, so
@@ -1152,20 +1158,18 @@ func pruneDominated(clauses []keyedClause) []keyedClause {
 		return clauses
 	}
 
+	dead := make([]bool, len(clauses))
+
+	for idx, current := range clauses {
+		dead[idx] = slices.ContainsFunc(clauses, func(other keyedClause) bool {
+			return dominates(other.clause, current.clause)
+		})
+	}
+
 	kept := make([]keyedClause, 0, len(clauses))
 
 	for idx, current := range clauses {
-		dominated := false
-
-		for otherIdx, other := range clauses {
-			if otherIdx != idx && dominates(other.clause, current.clause, otherIdx < idx) {
-				dominated = true
-
-				break
-			}
-		}
-
-		if !dominated {
+		if !dead[idx] && !twinGoes(clauses, dead, idx) {
 			kept = append(kept, current)
 		}
 	}
@@ -1173,21 +1177,38 @@ func pruneDominated(clauses []keyedClause) []keyedClause {
 	return kept
 }
 
+// twinGoes reports whether the clause at idx goes for a twin (see twins):
+// one that is dead, or one with a smaller key.
+func twinGoes(clauses []keyedClause, dead []bool, idx int) bool {
+	current := clauses[idx]
+
+	for otherIdx, other := range clauses {
+		if otherIdx != idx && twins(other.clause, current.clause) &&
+			(dead[otherIdx] || other.key < current.key) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // dominates reports whether the clause other makes current dead: other
-// strictly covers current and is less restrictive or has the same result,
-// or has the same result and an equivalent filter and comes first. Two
-// equivalent filters with different results are both kept: they are a
+// strictly covers current and is less restrictive or has the same result.
+// Two equivalent filters with different results are both kept: they are a
 // conflict to libseccomp, and the clause set collapses as one.
-func dominates(other, current clause, otherFirst bool) bool {
-	if !argsCover(other.args, current.args) {
+func dominates(other, current clause) bool {
+	if !argsCover(other.args, current.args) || argsCover(current.args, other.args) {
 		return false
 	}
 
-	if argsCover(current.args, other.args) {
-		return otherFirst && current.sameResult(other)
-	}
-
 	return current.sameResult(other) || stricter(current, other)
+}
+
+// twins reports whether two clauses have the same result and filters that
+// cover each other, so that they are one clause spelled twice.
+func twins(first, second clause) bool {
+	return first.sameResult(second) &&
+		argsCover(first.args, second.args) && argsCover(second.args, first.args)
 }
 
 // raiseOverlapsOfRedundant raises every clause that is stricter than a

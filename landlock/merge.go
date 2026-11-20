@@ -108,7 +108,9 @@ func Intersect(profiles ...*Profile) (*Profile, error) {
 // even where an ancestor grants the same rights. Where a right one input
 // grants at a destination would deny a move another input allows, the
 // result stops handling that right, which permits it everywhere and more
-// than any input does, and it may need ABIV2 to list FSAccessRefer. See the
+// than any input does, and it may need ABIV2 to list FSAccessRefer. The
+// guarantee holds after Options.Downgrade as well: at every version, the
+// downgraded result permits whatever a downgraded input permits. See the
 // Handled access, Refer and ABI versions sections of the package
 // documentation.
 //
@@ -266,7 +268,7 @@ func finishIntersect(result *Profile, inputs []*Profile) {
 // filesystem rights at all, so it stays as well.
 func dropImplicitRefer(result *Profile) {
 	if !slices.Contains(result.HandledAccessFS, FSAccessRefer) ||
-		rulesGrant(result.PathRules, FSAccessRefer) ||
+		rulesGrantRefer(result.PathRules) ||
 		!slices.ContainsFunc(result.HandledAccessFS, func(right FSAccessRight) bool {
 			return right != FSAccessRefer && fsAccessABI[right] == ABIV1
 		}) {
@@ -279,9 +281,11 @@ func dropImplicitRefer(result *Profile) {
 	)
 }
 
-// finishUnion stops handling the rights that would deny a move or link an
-// input allows.
+// finishUnion settles refer for inputs a downgrade leaves handling no
+// filesystem right, then stops handling the rights that would deny a move
+// or link an input allows, at the full ABI or after a downgrade.
 func finishUnion(result *Profile, inputs []*Profile) {
+	settleLateRefer(result, inputs)
 	unhandleMoveConflicts(result, inputs)
 }
 
@@ -419,7 +423,7 @@ func unionTwo(left, right *Profile) *Profile {
 	// does not need a newer ABI than necessary.
 	if len(left.HandledAccessFS) > 0 && len(right.HandledAccessFS) > 0 &&
 		!slices.Contains(result.HandledAccessFS, FSAccessRefer) &&
-		(len(result.HandledAccessFS) == 0 || rulesGrant(result.PathRules, FSAccessRefer)) {
+		(len(result.HandledAccessFS) == 0 || rulesGrantRefer(result.PathRules)) {
 		result.HandledAccessFS = append(result.HandledAccessFS, FSAccessRefer)
 	}
 
@@ -428,14 +432,11 @@ func unionTwo(left, right *Profile) *Profile {
 	return result
 }
 
-func rulesGrant(rules []PathRule, right FSAccessRight) bool {
-	for _, rule := range rules {
-		if slices.Contains(rule.AccessFS, right) {
-			return true
-		}
-	}
-
-	return false
+// rulesGrantRefer reports whether a rule grants FSAccessRefer.
+func rulesGrantRefer(rules []PathRule) bool {
+	return slices.ContainsFunc(rules, func(rule PathRule) bool {
+		return slices.Contains(rule.AccessFS, FSAccessRefer)
+	})
 }
 
 // intersectRules is a generic intersection for keyed rule slices. For every
@@ -761,6 +762,38 @@ func (e *ResultError) Error() string {
 // holds.
 func (e *ResultError) Unwrap() error { return e.Err }
 
+// LoweredPath is a rule path of a merge result that carries access an
+// input granted only on an ancestor path, as LoweredRulePaths reports it,
+// with the ancestor a runtime opens it beneath.
+type LoweredPath struct {
+	// Path is the rule path of the result, cleaned as the merge cleans it.
+	Path string
+	// Ancestor is the strict ancestor of Path a runtime opens Path
+	// beneath (see the Lowered rule paths section of the package
+	// documentation). It is "/" when the input's rule on "/" grants every
+	// right lowered onto Path, and otherwise the shallowest strict ancestor
+	// other than "/" on which a rule of an input grants a right the result
+	// carries at Path, which that input grants neither on "/" nor through
+	// its own rule on Path. Every such grant then comes from a rule on
+	// Ancestor or between it and Path.
+	Ancestor string
+	// Input is the index of the input whose rule is on Ancestor, as
+	// Intersect numbers its inputs, so that in
+	// LoweredRulePaths(effective, baseline, artifact) the baseline is 0.
+	// Where the rules of several inputs are on Ancestor, it is the first.
+	Input int
+	// InRoot reports whether opening Path anywhere inside the root the
+	// runtime resolves rule paths against keeps the rule within what the
+	// inputs grant, with RESOLVE_IN_ROOT alone: Ancestor is "/" and no
+	// rule of the result grants FSAccessRefer. Where it is false, Path is
+	// opened beneath Ancestor with RESOLVE_BENEATH, RESOLVE_NO_SYMLINKS and
+	// RESOLVE_NO_XDEV, an Ancestor of "/" included. A rule on "/" covers
+	// every path from the root for the access it grants, but a result
+	// granting refer decides moves by comparing the rights of two rule
+	// paths, which a rule landing on another directory changes.
+	InRoot bool
+}
+
 // LoweredRulePaths reports the rule paths of a merge result that carry
 // access an input granted only on an ancestor path. A path is reported when
 // the result grants a right there that some input grants through a rule on
@@ -769,12 +802,13 @@ func (e *ResultError) Unwrap() error { return e.Err }
 // merge lowered that input's grant onto the deeper path, which another
 // input named.
 //
-// The paths are cleaned as the merge cleans them, reported once each and
-// sorted, or nil when no grant was lowered. The result and every input are
-// checked with Validate first, and read as the merge reads an input: with
-// paths cleaned, rules for one path folded, and the rights a handled set
-// does not list dropped from the rules, since such a grant permits nothing
-// the input does not permit anyway and the merge ignores it.
+// Each path is reported once, with the ancestor to open it beneath (see
+// LoweredPath), and the list is sorted by path, or nil when no
+// grant was lowered. The result and every input are checked with Validate
+// first, and read as the merge reads an input: with paths cleaned, rules
+// for one path folded, and the rights a handled set does not list dropped
+// from the rules, since such a grant permits nothing the input does not
+// permit anyway and the merge ignores it.
 //
 // Inputs are numbered as Intersect numbers them: an input that is nil or
 // fails is reported as an InputError whose Index is its position among the
@@ -793,13 +827,15 @@ func (e *ResultError) Unwrap() error { return e.Err }
 // rule to the file its path resolves to, so a lowered grant lands wherever
 // the deeper path resolves, which may be outside the hierarchy the ancestor
 // rule covered and may be chosen by the author of an artifact. A caller can
-// open exactly these paths without leaving their declared hierarchy (openat2
-// with RESOLVE_BENEATH and RESOLVE_NO_SYMLINKS relative to the covering
-// ancestor), refuse a profile that has any, or enforce the inputs as
-// separate Landlock layers instead of merging them. For a Union result the
-// answer is informational: union grants what any input grants, and the
-// input naming the path granted the access there itself.
-func LoweredRulePaths(result *Profile, inputs ...*Profile) ([]string, error) {
+// open exactly these paths without leaving the hierarchy of their Ancestor
+// (openat2 with RESOLVE_BENEATH, RESOLVE_NO_SYMLINKS and RESOLVE_NO_XDEV
+// relative to a descriptor of Ancestor, or RESOLVE_IN_ROOT relative to the
+// root where InRoot is set), refuse a profile that has any, or
+// enforce the inputs as separate Landlock layers instead of merging them.
+// For a Union result the answer is informational: union grants what any
+// input grants, and the input naming the path granted the access there
+// itself.
+func LoweredRulePaths(result *Profile, inputs ...*Profile) ([]LoweredPath, error) {
 	resultPaths, err := validateProfile(result, tierMerge)
 	if err != nil {
 		return nil, &ResultError{Err: err}
@@ -814,38 +850,92 @@ func LoweredRulePaths(result *Profile, inputs ...*Profile) ([]string, error) {
 		return nil, nil
 	}
 
-	resultRules := pathKind().ruleMap(normalizeProfile(result, resultPaths).PathRules)
-
-	var lowered []string
+	resultProfile := normalizeProfile(result, resultPaths)
+	resultRules := pathKind().ruleMap(resultProfile.PathRules)
+	grantsRefer := rulesGrantRefer(resultProfile.PathRules)
+	lowered := make(map[string]LoweredPath)
 
 	for idx, input := range inputs {
 		// Read the input as the merge does, so that a grant the merge
 		// ignores is not reported as lowered.
 		normalized := normalizeProfile(input, cleaned[idx])
 		pruneUnhandledRights(normalized)
-		inputMasks := pathRuleMasks(normalized.PathRules)
+		addLowered(lowered, resultRules, pathRuleMasks(normalized.PathRules), idx, grantsRefer)
+	}
 
-		for path, access := range resultRules {
-			if loweredAt(path, fsBits.mask(access), inputMasks) {
-				lowered = append(lowered, path)
+	if len(lowered) == 0 {
+		return nil, nil
+	}
+
+	return slices.SortedFunc(maps.Values(lowered), func(left, right LoweredPath) int {
+		return cmp.Compare(left.Path, right.Path)
+	}), nil
+}
+
+// addLowered records in lowered each rule path of the result onto which
+// the input with the given index lowered a grant. An ancestor other than
+// the root wins over the root, and a shallower one over a deeper one; on a
+// tie the earlier input, which the caller passes first, stays.
+func addLowered(
+	lowered map[string]LoweredPath, resultRules map[string][]FSAccessRight,
+	inputMasks map[string]uint32, input int, grantsRefer bool,
+) {
+	for path, access := range resultRules {
+		ancestor, ok := loweredFrom(path, fsBits.mask(access), inputMasks)
+		if !ok {
+			continue
+		}
+
+		if found, seen := lowered[path]; !seen || deeperAncestor(found.Ancestor, ancestor) {
+			lowered[path] = LoweredPath{
+				Path: path, Ancestor: ancestor, Input: input,
+				InRoot: ancestor == rootPath && !grantsRefer,
 			}
 		}
 	}
-
-	slices.Sort(lowered)
-
-	return merge.NilIfEmpty(slices.Compact(lowered)), nil
 }
 
-// loweredAt reports whether the input grants one of the rights only on a
-// strict ancestor of the path. A right the input's own rule on the path
-// grants is not lowered, and neither is one no rule of the input grants at
-// all: that right reached the result from another input.
-func loweredAt(path string, access uint32, inputMasks map[string]uint32) bool {
+// loweredFrom returns the ancestor of the path a runtime opens it beneath
+// for the grants of the input lowered onto it (see LoweredPath), and
+// whether the input lowered any. A right the input's own rule on the path
+// grants is not lowered, and neither is one no rule of the input grants on
+// an ancestor: that right reached the result from another input. A right
+// the input's rule on "/" grants needs no ancestor of its own; the others
+// need the shallowest ancestor other than "/" granting one of them. The
+// strict ancestors of a path are all ancestors of its deepest one, so the
+// shallowest is also the shortest.
+func loweredFrom(path string, access uint32, inputMasks map[string]uint32) (string, bool) {
 	// A path without a strict ancestor can carry nothing lowered.
-	inherited := ancestorMask(strictAncestors(path), inputMasks)
+	wanted := access &^ inputMasks[path] & ancestorMask(strictAncestors(path), inputMasks)
+	if wanted == 0 {
+		return "", false
+	}
 
-	return access&^inputMasks[path]&inherited != 0
+	beyondRoot := wanted &^ inputMasks[rootPath]
+	if beyondRoot == 0 {
+		return rootPath, true
+	}
+
+	var shallowest string
+
+	for ancestor := range strictAncestors(path) {
+		if ancestor != rootPath && inputMasks[ancestor]&beyondRoot != 0 {
+			shallowest = ancestor
+		}
+	}
+
+	return shallowest, true
+}
+
+// deeperAncestor reports whether the ancestor found so far gives way to
+// another: the root to any other path, and a deeper path to a shallower
+// one. Both are ancestors of one path, so the shorter is the shallower.
+func deeperAncestor(found, other string) bool {
+	if found == rootPath || other == rootPath {
+		return found == rootPath && other != rootPath
+	}
+
+	return len(other) < len(found)
 }
 
 // unionRules is a generic union for keyed rule slices. The result shares no

@@ -374,6 +374,40 @@ func TestMergeSafetyOfErrnoEqualities(t *testing.T) {
 	checkMergeSafety(t, unionSafety(), profile, profile, false)
 }
 
+// TestUnionCommutesOnEquivalentFilters pins an input the fuzzer found. The
+// left input traps read for every first argument, through a0 != 0 and
+// a0 == 0 among other filters, and the right one traps read only where
+// a0 < 1, the same calls as a0 == 0. The union spells that clause both
+// ways, and pruning kept whichever came first: "a0 == 0", which a wider
+// clause makes dead, or "a0 < 1", which it does not see covered, so the
+// syscall then collapsed to the default in one order only.
+func TestUnionCommutesOnEquivalentFilters(t *testing.T) {
+	t.Parallel()
+
+	left := profileOf(specs.ActTrace,
+		filtered("read", specs.ActTrap, arg(0, specs.OpNotEqual, 0)),
+		filtered("read", specs.ActTrap, masked(0, 0x3000000030, 0)),
+		filtered("read", specs.ActTrap, arg(0, specs.OpEqualTo, 0), masked(0, 1, 0)),
+	)
+	right := profileOf(specs.ActErrno, filtered("read", specs.ActTrap, arg(0, specs.OpLessThan, 1)))
+
+	forward, err := seccomp.Union(left, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	backward, err := seccomp.Union(right, left)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := seccomp.FormatProfile(backward), seccomp.FormatProfile(forward); got != want {
+		t.Errorf("Union(right, left) = %s, want %s as Union(left, right)", got, want)
+	}
+
+	checkMergeSafety(t, unionSafety(), left, right, true)
+}
+
 func FuzzIntersectSafety(f *testing.F) {
 	addSafetySeeds(f)
 

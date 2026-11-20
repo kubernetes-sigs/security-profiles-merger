@@ -25,6 +25,7 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"sigs.k8s.io/security-profiles-merger/seccomp"
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 // These tests cover what the merge and ValidateArtifact do for the
@@ -165,6 +166,59 @@ func wideValuePair() (*specs.LinuxSeccomp, *specs.LinuxSeccomp) {
 	return baseline, artifact
 }
 
+// TestValidateBaselineReportsWideValuesNextToAnArtifact covers a baseline
+// that Intersect of it alone keeps whole, but every merge with an artifact
+// settles: a condition on a value above 32 bits next to x86 makes the merge
+// drop x86 on an x86_64 node, which kills every 32-bit process, and
+// collapse the syscall where x86 may be native. ValidateBaseline reports
+// both, and the same baseline without x86 on an x86_64 node passes.
+func TestValidateBaselineReportsWideValuesNextToAnArtifact(t *testing.T) {
+	t.Parallel()
+
+	baseline := on(profileOf(specs.ActErrno,
+		filtered("read", specs.ActAllow),
+		filtered("write", specs.ActAllow),
+		filtered("exit", specs.ActAllow),
+		filtered("personality", specs.ActAllow, arg(0, specs.OpEqualTo, 1<<32|8)),
+	), specs.ArchX86_64, specs.ArchX86)
+
+	for _, testCase := range []struct {
+		node seccomp.Options
+		want string
+	}{
+		{node: seccomp.ForArch(specs.ArchX86_64), want: "SCMP_ARCH_X86"},
+		{node: seccomp.ForArch(specs.ArchX86), want: "personality"},
+		{node: seccomp.ForAnyArch(), want: "personality"},
+	} {
+		settled, err := testCase.node.Intersect(baseline)
+		if err != nil {
+			t.Fatalf("%s: Intersect: %v", testCase.node, err)
+		}
+
+		diff, err := testCase.node.Diff(baseline, settled)
+		if err != nil || !diff.Equal {
+			t.Fatalf("%s: Intersect of the baseline alone settles it: %v, %v",
+				testCase.node, diff, err)
+		}
+
+		err = testCase.node.ValidateBaseline(baseline)
+		if !errors.Is(err, seccomp.ErrInexactBaseline) ||
+			!strings.Contains(err.Error(), "next to an artifact") ||
+			!strings.Contains(err.Error(), testCase.want) {
+			t.Errorf("%s: ValidateBaseline = %v, want ErrInexactBaseline naming %s",
+				testCase.node, err, testCase.want)
+		}
+	}
+
+	narrowed := seccomp.Clone(baseline)
+	narrowed.Architectures = []specs.Arch{specs.ArchX86_64}
+
+	err := seccomp.ForArch(specs.ArchX86_64).ValidateBaseline(narrowed)
+	if err != nil {
+		t.Errorf("ValidateBaseline without x86 = %v, want nil", err)
+	}
+}
+
 func TestIntersectDropsNarrowArchitecturesForWideValues(t *testing.T) {
 	t.Parallel()
 
@@ -213,7 +267,7 @@ func TestIntersectDropsArchitectureUnderKillProcess(t *testing.T) {
 // other byte order, which libseccomp cannot load next to the native one,
 // naming that input, rather than drop the architecture and return a result
 // that loads where the input does not. Union keeps every architecture an
-// input covers, and with the node not known both merges accept the list.
+// input covers.
 func TestIntersectRefusesArchitecturesOfTheOtherByteOrder(t *testing.T) {
 	t.Parallel()
 
@@ -254,11 +308,48 @@ func TestIntersectRefusesArchitecturesOfTheOtherByteOrder(t *testing.T) {
 				testCase.native, seccomp.FormatProfile(union), err)
 		}
 	}
+}
 
-	result, err := seccomp.ForAnyArch().Intersect(mixed, mixed)
-	if err != nil || len(result.Architectures) != len(mixed.Architectures) {
-		t.Errorf("Options{}.Intersect = %s, %v, want every architecture kept",
-			seccomp.FormatProfile(result), err)
+// TestIntersectRefusesMixedByteOrdersForAnyArch checks that with the node
+// not known, where either byte order may be native, Intersect refuses an
+// input listing architectures of both, which loads on no node, and so does
+// ValidateBaseline, while Union keeps it and a list of one byte order
+// passes.
+func TestIntersectRefusesMixedByteOrdersForAnyArch(t *testing.T) {
+	t.Parallel()
+
+	mixed := on(profileOf(specs.ActErrno, filtered("read", specs.ActAllow)),
+		specs.ArchX86_64, specs.ArchAARCH64, specs.ArchS390X, specs.ArchPPC64)
+	anyArch := seccomp.ForAnyArch()
+	bigEndian := on(profileOf(specs.ActErrno, filtered("read", specs.ActAllow)),
+		specs.ArchS390X, specs.ArchPPC64)
+
+	const wantMixed = `architectures: architecture of another byte order (big-endian ` +
+		`"SCMP_ARCH_S390X", "SCMP_ARCH_PPC64" next to little-endian ` +
+		`"SCMP_ARCH_X86_64", "SCMP_ARCH_AARCH64")`
+
+	for _, inputs := range [][]*specs.LinuxSeccomp{
+		{mixed},
+		{bigEndian, mixed},
+		{mixed, bigEndian},
+	} {
+		checkByteOrderRefused(t, anyArch, inputs, slices.Index(inputs, mixed), wantMixed)
+	}
+
+	err := anyArch.ValidateBaseline(mixed)
+	if !errors.Is(err, seccomp.ErrMixedByteOrder) || err.Error() != wantMixed {
+		t.Errorf("ForAnyArch().ValidateBaseline = %v, want %s", err, wantMixed)
+	}
+
+	err = anyArch.ValidateBaseline(bigEndian)
+	if err != nil {
+		t.Errorf("ForAnyArch().ValidateBaseline of a big-endian list = %v", err)
+	}
+
+	union, err := anyArch.Union(mixed, bigEndian)
+	if err != nil || len(union.Architectures) != len(mixed.Architectures) {
+		t.Errorf("ForAnyArch().Union = %s, %v, want every architecture kept",
+			seccomp.FormatProfile(union), err)
 	}
 }
 
@@ -721,17 +812,11 @@ func TestOptionsNameTheNativeArchitecture(t *testing.T) {
 
 // TestZeroOptionsAreInvalid checks that the zero Options, which name no
 // node, fail every method with ErrInvalidOptions before a profile is looked
-// at, rather than standing for some node, and that ForArch of the empty
-// architecture names an unknown one.
+// at, rather than standing for some node.
 func TestZeroOptionsAreInvalid(t *testing.T) {
 	t.Parallel()
 
 	profile := profileOf(specs.ActErrno)
-
-	_, err := seccomp.ForArch("").Intersect(profile)
-	if !errors.Is(err, seccomp.ErrUnknownArch) {
-		t.Errorf("ForArch(\"\").Intersect = %v, want ErrUnknownArch", err)
-	}
 
 	for _, opts := range []seccomp.Options{{}} {
 		_, intersectErr := opts.Intersect(profile)
@@ -756,36 +841,62 @@ func TestZeroOptionsAreInvalid(t *testing.T) {
 	}
 }
 
+// TestOptionsRejectUnknownArchitecture checks that ForArch of an
+// architecture the package does not know, the empty one included, fails
+// every method with an error matching both ErrInvalidOptions and
+// ErrUnknownArch, outside an InputError, so that a runtime tells a
+// misconfigured node from an artifact listing an unknown architecture,
+// which matches ErrUnknownArch alone.
 func TestOptionsRejectUnknownArchitecture(t *testing.T) {
 	t.Parallel()
 
-	const bogus specs.Arch = "SCMP_ARCH_BOGUS"
-
 	profile := profileOf(specs.ActErrno)
+	document := []byte(`{"defaultAction":"SCMP_ACT_ERRNO"}`)
 
-	_, err := seccomp.ForArch(bogus).Intersect(profile)
-	if !errors.Is(err, seccomp.ErrUnknownArch) {
-		t.Errorf("Options.Intersect = %v, want ErrUnknownArch", err)
+	for _, arch := range []specs.Arch{"", "SCMP_ARCH_BOGUS"} {
+		opts := seccomp.ForArch(arch)
+
+		_, intersectErr := opts.Intersect(profile)
+		_, unionErr := opts.Union(profile)
+		_, diffErr := opts.Diff(profile, profile)
+		_, decodeErr := opts.DecodeArtifact(document)
+
+		for name, err := range map[string]error{
+			"Intersect":        intersectErr,
+			"Union":            unionErr,
+			"Diff":             diffErr,
+			"Validate":         opts.Validate(profile),
+			"ValidateArtifact": opts.ValidateArtifact(profile),
+			"ValidateStrict":   opts.ValidateStrict(profile),
+			"ValidateBaseline": opts.ValidateBaseline(profile),
+			"DecodeArtifact":   decodeErr,
+		} {
+			var inputErr *seccomp.InputError
+			if !errors.Is(err, seccomp.ErrInvalidOptions) ||
+				!errors.Is(err, seccomp.ErrUnknownArch) ||
+				!errors.Is(err, spm.ErrInvalidOptions) ||
+				errors.As(err, &inputErr) {
+				t.Errorf("%v.%s = %v, want ErrInvalidOptions and ErrUnknownArch", opts, name, err)
+			}
+		}
 	}
 
-	_, err = seccomp.ForArch(bogus).Union(profile)
-	if !errors.Is(err, seccomp.ErrUnknownArch) {
-		t.Errorf("Options.Union = %v, want ErrUnknownArch", err)
-	}
+	// An artifact listing an unknown architecture is a bad profile, not a
+	// misconfigured node.
+	listed := []byte(`{"defaultAction":"SCMP_ACT_ERRNO","architectures":["SCMP_ARCH_BOGUS"]}`)
+	amd64 := seccomp.ForArch(specs.ArchX86_64)
 
-	err = seccomp.ForArch(bogus).ValidateArtifact(profile)
-	if !errors.Is(err, seccomp.ErrUnknownArch) {
-		t.Errorf("Options.ValidateArtifact = %v, want ErrUnknownArch", err)
-	}
+	_, decodeErr := amd64.DecodeArtifact(listed)
+	_, intersectErr := amd64.Intersect(profile, on(profileOf(specs.ActErrno), "SCMP_ARCH_BOGUS"))
 
-	err = seccomp.ForArch(bogus).ValidateStrict(profile)
-	if !errors.Is(err, seccomp.ErrUnknownArch) {
-		t.Errorf("Options.ValidateStrict = %v, want ErrUnknownArch", err)
-	}
-
-	diff, err := seccomp.ForArch(bogus).Diff(profile, profile)
-	if !errors.Is(err, seccomp.ErrUnknownArch) {
-		t.Errorf("Options.Diff = %s, %v, want ErrUnknownArch", diff.String(), err)
+	for name, err := range map[string]error{
+		"DecodeArtifact": decodeErr,
+		"Intersect":      intersectErr,
+	} {
+		if !errors.Is(err, seccomp.ErrUnknownArch) || errors.Is(err, seccomp.ErrInvalidOptions) {
+			t.Errorf("%s of an artifact listing an unknown architecture = %v, "+
+				"want ErrUnknownArch without ErrInvalidOptions", name, err)
+		}
 	}
 }
 

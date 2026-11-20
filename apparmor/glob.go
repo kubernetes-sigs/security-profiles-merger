@@ -267,6 +267,19 @@ func (matcher *globMatcher) relativeLiteral() bool {
 // compileMatcher compiles it. A path past the length limit is not
 // translated either, since it never compiles.
 func analyzePattern(pattern string, compile bool) *globMatcher {
+	return analyzeWithin(pattern, maxGlobPatternLen, compile)
+}
+
+// analyzeUnbounded analyzes a pattern as analyzePattern does, translating
+// it past maxGlobPatternLen and compiling nothing, for the identity of a
+// spelling QuotePath writes (see quotedKey). Its caller bounds the length.
+func analyzeUnbounded(pattern string) *globMatcher {
+	return analyzeWithin(pattern, len(pattern), false)
+}
+
+// analyzeWithin is analyzePattern with the length past which a pattern is
+// globTooComplex.
+func analyzeWithin(pattern string, maxLen int, compile bool) *globMatcher {
 	conv := convertPattern(filterSlashes(decodeEscapes(pattern)))
 
 	matcher := &globMatcher{
@@ -299,7 +312,7 @@ func analyzePattern(pattern string, compile bool) *globMatcher {
 		return matcher
 	}
 
-	if len(pattern) > maxGlobPatternLen {
+	if len(pattern) > maxLen {
 		matcher.status = globTooComplex
 
 		return matcher
