@@ -17,7 +17,10 @@ limitations under the License.
 package apparmor_test
 
 import (
+	"fmt"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
@@ -305,6 +308,291 @@ func TestIntersectGrantsLiteralsThroughOwnPatterns(t *testing.T) {
 				t.Errorf("%s, order %v: Intersect = %#v, want %#v",
 					test.name, order, got.Filesystem, test.want)
 			}
+		}
+	}
+}
+
+// budgetBaseline returns a baseline whose own literals and patterns cost
+// the literal pass of an intersection more than its budget: thousands of
+// read-only literals under one directory, among them /usr/lib/x.so, and a
+// hundred long write-only patterns under it, with write-only /usr/lib/*.so.
+// Each pattern by itself is under MaxPathLen, and together they are under
+// what ValidateBaseline admits of patterns, which accepts the baseline.
+func budgetBaseline() *apparmor.Profile {
+	const literalCount, patternCount = 3000, 100
+
+	literals := make([]string, 0, literalCount+1)
+	literals = append(literals, "/usr/lib/x.so")
+
+	for idx := range literalCount {
+		literals = append(literals, fmt.Sprintf("/usr/lib/l%04d", idx))
+	}
+
+	long := strings.Repeat("a", 1000)
+	patterns := make([]string, 0, patternCount+1)
+	patterns = append(patterns, "/usr/lib/*.so")
+
+	for idx := range patternCount {
+		patterns = append(patterns, fmt.Sprintf("/usr/lib/p%03d%s*", idx, long))
+	}
+
+	return &apparmor.Profile{Filesystem: &apparmor.FilesystemRules{
+		ReadOnlyPaths: literals, WriteOnlyPaths: patterns,
+	}}
+}
+
+// TestIntersectPassSkipsTheBaselinesOwnMatches covers a baseline whose
+// literals matched against its own patterns alone run the literal pass
+// past its budget. The pass matches a literal against the patterns of the
+// input listing it only where the other inputs grant the literal more than
+// that input's entry does, so an artifact asking for one of the literals
+// gets what both grant it, read-write here, as it does from a small
+// baseline.
+func TestIntersectPassSkipsTheBaselinesOwnMatches(t *testing.T) {
+	t.Parallel()
+
+	baseline := budgetBaseline()
+	artifact := &apparmor.Profile{Filesystem: &apparmor.FilesystemRules{
+		ReadWritePaths: []string{"/usr/lib/{x,y}.so"},
+	}}
+
+	err := apparmor.ValidateArtifact(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = apparmor.ValidateBaseline(baseline)
+	if err != nil {
+		t.Fatalf("ValidateBaseline: %v", err)
+	}
+
+	got, err := apparmor.Intersect(baseline, artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := &apparmor.FilesystemRules{ReadWritePaths: []string{"/usr/lib/x.so"}}
+	if !reflect.DeepEqual(got.Filesystem, want) {
+		t.Errorf("Intersect = %s, want filesystem %+v", got, want)
+	}
+}
+
+// TestIntersectPassFallsBackPastItsBudget pins what the literal pass does
+// past its budget, which ValidateBaseline does not detect: an artifact
+// asking for more on the many literals of budgetBaseline makes the pass
+// match each against the baseline's patterns, and past the budget the
+// result is the fold's, which grants /usr/lib/x.so read only where both
+// grant it read-write, as they do with fewer literals beside it. It keeps
+// less than every input grants, never more.
+func TestIntersectPassFallsBackPastItsBudget(t *testing.T) {
+	t.Parallel()
+
+	artifact := &apparmor.Profile{Filesystem: &apparmor.FilesystemRules{
+		ReadWritePaths: []string{"/usr/lib/{l,x}*"},
+	}}
+	small := &apparmor.Profile{Filesystem: &apparmor.FilesystemRules{
+		ReadOnlyPaths:  []string{"/usr/lib/l0000", "/usr/lib/x.so"},
+		WriteOnlyPaths: []string{"/usr/lib/*.so"},
+	}}
+
+	for _, test := range []struct {
+		name     string
+		baseline *apparmor.Profile
+		want     []string
+	}{
+		{"past the pass budget", budgetBaseline(), nil},
+		{"within the pass budget", small, []string{"/usr/lib/x.so"}},
+	} {
+		err := apparmor.ValidateBaseline(test.baseline)
+		if err != nil {
+			t.Fatalf("%s: ValidateBaseline: %v", test.name, err)
+		}
+
+		got, err := apparmor.Intersect(test.baseline, artifact)
+		if err != nil {
+			t.Fatalf("%s: Intersect: %v", test.name, err)
+		}
+
+		if !slices.Equal(got.Filesystem.ReadWritePaths, test.want) ||
+			!slices.Contains(got.Filesystem.ReadOnlyPaths, "/usr/lib/l0000") {
+			t.Errorf("%s: Intersect grants read-write %v, want %v and /usr/lib/l0000 read-only",
+				test.name, got.Filesystem.ReadWritePaths, test.want)
+		}
+	}
+}
+
+// TestValidateBaselineAcceptsLiteralsBesidePatterns covers a baseline of
+// many read-only literals beside long write-only patterns that cover none
+// of them, in one directory: ValidateBaseline accepts it, and an artifact
+// writing the whole directory gets what both grant, the literals read-only
+// and the patterns write-only.
+func TestValidateBaselineAcceptsLiteralsBesidePatterns(t *testing.T) {
+	t.Parallel()
+
+	literals := numberedPaths("/usr/lib/l%04d", "", 2000)
+	patterns := numberedPaths("/usr/lib/p%03d", strings.Repeat("a", 100)+"*", 100)
+	baseline := &apparmor.Profile{Filesystem: &apparmor.FilesystemRules{
+		ReadOnlyPaths: literals, WriteOnlyPaths: patterns,
+	}}
+
+	err := apparmor.ValidateBaseline(baseline)
+	if err != nil {
+		t.Fatalf("ValidateBaseline: %v", err)
+	}
+
+	got, err := apparmor.Intersect(baseline, &apparmor.Profile{
+		Filesystem: &apparmor.FilesystemRules{ReadWritePaths: []string{"/usr/lib/**"}},
+	})
+	if err != nil {
+		t.Fatalf("Intersect: %v", err)
+	}
+
+	want := &apparmor.FilesystemRules{
+		ReadOnlyPaths: literals, WriteOnlyPaths: patterns, ReadWritePaths: []string{},
+	}
+	if !reflect.DeepEqual(nonNil(got.Filesystem), want) {
+		t.Errorf("Intersect = %d read-only, %d write-only, %d read-write paths, want %d, %d and 0",
+			len(got.Filesystem.ReadOnlyPaths), len(got.Filesystem.WriteOnlyPaths),
+			len(got.Filesystem.ReadWritePaths), len(literals), len(patterns))
+	}
+}
+
+// TestIntersectPassSkipsLiteralsTheFoldKept covers a baseline of read-write
+// literals and long write-only patterns under one directory, which
+// ValidateBaseline accepts, against an artifact writing everything there.
+// The fold keeps every literal write-only, which is all both grant, so the
+// pass has nothing to add to any of them and must not spend its budget
+// matching them against the patterns of the result, which keep the
+// baseline's. Past the budget the result would be the same, so the test
+// asks whether the pass stayed within it.
+func TestIntersectPassSkipsLiteralsTheFoldKept(t *testing.T) {
+	t.Parallel()
+
+	artifact := &apparmor.Profile{Filesystem: &apparmor.FilesystemRules{
+		WriteOnlyPaths: []string{"/usr/lib/**"},
+	}}
+
+	for _, test := range []struct{ literals, patternLen int }{
+		{2000, 256}, {3000, 500}, {3000, 1000},
+	} {
+		name := fmt.Sprintf("%d literals, %d-byte patterns", test.literals, test.patternLen)
+		literals := numberedPaths("/usr/lib/l%04d", "", test.literals)
+		patterns := numberedPaths("/usr/lib/p%03d", strings.Repeat("a", test.patternLen)+"*", 100)
+		baseline := &apparmor.Profile{Filesystem: &apparmor.FilesystemRules{
+			ReadWritePaths: literals, WriteOnlyPaths: patterns,
+		}}
+
+		if test.patternLen == 256 {
+			err := apparmor.ValidateBaseline(baseline)
+			if err != nil {
+				t.Fatalf("%s: ValidateBaseline: %v", name, err)
+			}
+		}
+
+		want := &apparmor.FilesystemRules{
+			ReadOnlyPaths:  []string{},
+			WriteOnlyPaths: slices.Sorted(slices.Values(slices.Concat(literals, patterns))),
+			ReadWritePaths: []string{},
+		}
+		checkPassResult(t, name, want, baseline, artifact)
+	}
+}
+
+// numberedPaths returns count paths spelled by format, which takes the
+// index, followed by tail.
+func numberedPaths(format, tail string, count int) []string {
+	paths := make([]string, 0, count)
+	for idx := range count {
+		paths = append(paths, fmt.Sprintf(format, idx)+tail)
+	}
+
+	return paths
+}
+
+// checkPassResult intersects the inputs, compares the filesystem rules of
+// the result with want, and checks that the literal pass stayed within its
+// budget, which a result equal to the fold's does not show by itself.
+func checkPassResult(
+	t *testing.T, name string, want *apparmor.FilesystemRules, inputs ...*apparmor.Profile,
+) {
+	t.Helper()
+
+	got, err := apparmor.Intersect(inputs...)
+	if err != nil {
+		t.Fatalf("%s: Intersect: %v", name, err)
+	}
+
+	if !reflect.DeepEqual(nonNil(got.Filesystem), want) {
+		t.Errorf("%s: Intersect = %d read-only, %d write-only, %d read-write paths, "+
+			"want %d, %d and %d", name,
+			len(got.Filesystem.ReadOnlyPaths), len(got.Filesystem.WriteOnlyPaths),
+			len(got.Filesystem.ReadWritePaths), len(want.ReadOnlyPaths),
+			len(want.WriteOnlyPaths), len(want.ReadWritePaths))
+	}
+
+	if !apparmor.LiteralPassWithin(got, inputs...) {
+		t.Errorf("%s: the literal pass ran past its budget", name)
+	}
+}
+
+// nonNil returns the rules with every nil list made empty.
+func nonNil(rules *apparmor.FilesystemRules) *apparmor.FilesystemRules {
+	return &apparmor.FilesystemRules{
+		ReadOnlyPaths:  append([]string{}, rules.ReadOnlyPaths...),
+		WriteOnlyPaths: append([]string{}, rules.WriteOnlyPaths...),
+		ReadWritePaths: append([]string{}, rules.ReadWritePaths...),
+	}
+}
+
+// TestIntersectPassBoundsWhatInputsCanGrant covers an artifact of many
+// read-only literals and read-only patterns in one directory, and a literal
+// outside the baseline, against a baseline granting that directory
+// read-write. The fold keeps every literal read-only, and the pass looks
+// for write, which the artifact's own entries and patterns cannot grant:
+// bounding what each input grants at most settles every literal without
+// matching it, where matching each against the artifact's patterns and the
+// result's ran past the budget. Every order gives the fold's result.
+func TestIntersectPassBoundsWhatInputsCanGrant(t *testing.T) {
+	t.Parallel()
+
+	baseline := runtimeBaseline()
+	// The orders, of the baseline (0) and the artifact (1).
+	all := [][]int{{0, 1}, {1, 0}, {0, 1, 1}, {0, 0, 1}}
+
+	for _, test := range []struct {
+		pairs  int
+		orders [][]int
+	}{
+		{300, all},
+		{500, all},
+		{200, [][]int{{0, 1, 1}}},
+	} {
+		literals := numberedPaths("/data/app/file-%04d-", strings.Repeat("x", 40), test.pairs)
+		patterns := numberedPaths("/data/app/pat-%04d-", strings.Repeat("y", 40)+"*", test.pairs)
+		artifact := &apparmor.Profile{Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths: slices.Concat(literals, patterns, []string{"/nothere/x"}),
+		}}
+
+		err := apparmor.ValidateArtifact(artifact)
+		if err != nil {
+			t.Fatalf("%d pairs: ValidateArtifact: %v", test.pairs, err)
+		}
+
+		want := &apparmor.FilesystemRules{
+			ReadOnlyPaths:  slices.Sorted(slices.Values(slices.Concat(literals, patterns))),
+			WriteOnlyPaths: []string{},
+			ReadWritePaths: []string{},
+		}
+		profiles := []*apparmor.Profile{baseline, artifact}
+
+		for _, order := range test.orders {
+			inputs := make([]*apparmor.Profile, 0, len(order))
+			for _, idx := range order {
+				inputs = append(inputs, profiles[idx])
+			}
+
+			name := fmt.Sprintf("%d pairs, order %v", test.pairs, order)
+			checkPassResult(t, name, want, inputs...)
 		}
 	}
 }

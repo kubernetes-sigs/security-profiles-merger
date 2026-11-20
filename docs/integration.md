@@ -174,7 +174,11 @@ it, since the kernel denies `refer` there anyway, so a baseline listing
    would otherwise reach every merge result and fail each workload instead
    of the node, and glob patterns longer in total than twice
    `MaxArtifactPatternBytes` (`ErrBudgetExceeded`), past which an
-   intersection with an artifact holding patterns fails.
+   intersection with an artifact holding patterns fails. It does not
+   detect a baseline with many literal paths in directories its patterns
+   cover, which can make the literal pass of an intersection fall back
+   for an artifact asking for more on those paths: the result then may
+   keep less on them than every input grants, never more.
 
    Moby, containerd and CRI-O list one syscall in several entries in their
    defaults, which `ValidateStrict` reports. The Moby and containerd defaults
@@ -355,6 +359,9 @@ bounds the cost of the merge.
   merge of N inputs can cost up to 3(N-1) times what one list at its budget
   costs. The pass over the literal paths that ends an `Intersect` of two
   or more inputs adds up to three times what one list at its budget costs.
+  Past its budget the pass leaves the result as the fold returned it,
+  which never grants more than every input, but may keep less on a
+  literal than every input grants it.
   A `Union` of recordings holding only literal paths is merged in one pass,
   at a cost linear in their size apart from sorting the result; one holding
   patterns is folded, which matters for a `Union` of many recordings.
@@ -683,7 +690,9 @@ few properties of the result matter:
 - **Order.** Input order decides the seccomp tie-breaks, as it does for
   `Intersect`: an errno value follows the earlier input when actions tie.
   The same recordings in the same order always give the same profile, so
-  pass them in a fixed order, such as by name.
+  pass them in a fixed order, such as by name. With three or more, the
+  order can also change how tight the seccomp result is, never that it
+  permits what any recording permits.
 - **Name the nodes' architecture.** A seccomp `Union` depends on the
   native architecture as `Intersect` does, and the operator may run on
   another architecture than the nodes it merges for. Call

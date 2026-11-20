@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strings"
 
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
@@ -148,8 +149,8 @@ func parseValidateModes(value string, inputs int) ([]validateMode, error) {
 		mode, ok := modeByName(name)
 		if !ok {
 			return nil, fmt.Errorf(
-				"%w %q (use %s, %s, or %s)",
-				errUnknownValidateMode, name,
+				"%w %s (use %s, %s, or %s)",
+				errUnknownValidateMode, merge.QuoteBounded(name),
 				modeNameDefault, modeNameStrict, modeNameArtifact,
 			)
 		}
@@ -200,8 +201,8 @@ func (opts *mergeOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) int 
 	if strategy != strategyIntersect && strategy != strategyUnion {
 		_, _ = fmt.Fprintf(
 			stderr,
-			"error: unknown strategy %q (use intersect or union)\n",
-			strategy,
+			"error: unknown strategy %s (use intersect or union)\n",
+			merge.QuoteBounded(strategy),
 		)
 
 		return exitUsage

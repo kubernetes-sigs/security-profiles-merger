@@ -25,6 +25,7 @@ import (
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
 
@@ -96,8 +97,8 @@ func parseArch(value string, named bool) (archOption, error) {
 		return archOption{named: named, value: seccomp.ForArch(specs.Arch(value))}, nil
 	default:
 		return archOption{named: named, value: seccomp.ForHost()}, fmt.Errorf(
-			"%w %q (use %s, %s, or a name such as %sX86_64)",
-			errUnknownArchName, value, archNative, archNone, archPrefix,
+			"%w %s (use %s, %s, or a name such as %sX86_64)",
+			errUnknownArchName, merge.QuoteBounded(value), archNative, archNone, archPrefix,
 		)
 	}
 }

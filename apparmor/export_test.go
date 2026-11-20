@@ -36,3 +36,35 @@ func PathIdentity(path string) string {
 
 	return fmt.Sprintf("%d:%t:%s", key.kind, key.relative, key.text)
 }
+
+// LiteralPassWithin reports whether the literal pass that ends an
+// intersection of the inputs stays within its budget in every list, given
+// kept, the result of the fold, so that external tests can tell a pass that
+// ran from one that fell back where both leave the result alike. The inputs
+// are read as Intersect of each alone returns them.
+func LiteralPassWithin(kept *Profile, inputs ...*Profile) bool {
+	matchers := newMatcherCache()
+	prepared := make([]*Profile, len(inputs))
+
+	for idx, input := range inputs {
+		alone, err := Intersect(input)
+		if err != nil {
+			return false
+		}
+
+		prepared[idx] = alone
+	}
+
+	for _, list := range permLists {
+		perms := make([]map[string]fsPermission, len(prepared))
+		for idx, input := range prepared {
+			perms[idx] = list.perms(input)
+		}
+
+		if _, within := missingLiteralGrants(perms, list.perms(kept), matchers); !within {
+			return false
+		}
+	}
+
+	return true
+}

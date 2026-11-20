@@ -453,7 +453,7 @@ func TestMissingPathsAreBuiltLazily(t *testing.T) {
 
 			return "x", false
 		},
-		map[string]bool{foldName("port"): true, foldName("name"): true},
+		map[string]bool{"port": true, "name": true},
 		&pathCollector{paths: nil, wants: nil, omitted: 0},
 	)
 

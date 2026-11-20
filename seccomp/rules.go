@@ -1146,8 +1146,10 @@ func (m ruleMerger) collapseClauses(clauses []clause, fallback *clause) []clause
 // spellings, which would be no safe shape together. Such twins live or die
 // together, since argsCover may see a wider filter cover one spelling and
 // not the other, and of two live twins the one with the greater key goes.
-// Neither depends on the order of the clauses, so a union is the same
-// whichever input comes first.
+// Neither depends on the order of the clauses, so a union of two inputs is
+// the same whichever comes first. Three or more merge pairwise, and their
+// order can still change how tight a result is (see the Union section of
+// the package documentation).
 //
 // It compares every clause against every other one, so past maxPruneClauses
 // it is skipped. Pruning only removes clauses that never decide a call, so

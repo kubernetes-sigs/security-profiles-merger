@@ -358,6 +358,36 @@ func TestReadInputsEmptyFile(t *testing.T) {
 	}
 }
 
+// TestSpaceOutsideJSONIsNoEmptyInput covers a file or stdin holding only
+// characters that bytes.TrimSpace takes for space but JSON does not, such
+// as U+00A0, U+0085 and a form feed: it is a document that does not parse,
+// reported where the decoder stops, not an empty input.
+func TestSpaceOutsideJSONIsNoEmptyInput(t *testing.T) {
+	t.Parallel()
+
+	const notJSONSpace = "\u00a0 \f\u0085\n"
+
+	file := writeTemp(t, notJSONSpace)
+
+	for _, test := range []struct {
+		args  []string
+		stdin io.Reader
+		name  string
+	}{
+		{[]string{file}, nil, file},
+		{[]string{stdinArg}, strings.NewReader(notJSONSpace), stdinName},
+	} {
+		code, stdout, stderr := runCapture(t,
+			append([]string{cmdValidate, flagType, typeSeccomp}, test.args...), test.stdin)
+
+		if code != 1 || stdout != "" ||
+			!strings.HasPrefix(stderr, "error: "+test.name+": line 1, column 1: ") {
+			t.Errorf("%q: exit code = %d, stdout = %q, stderr = %q, want 1 and a syntax error",
+				test.args, code, stdout, stderr)
+		}
+	}
+}
+
 // TestUnreadableInputsFailOnTheirOwn covers inputs that cannot be read
 // beside others: every one is reported, the others are still checked, and
 // the exit code does not depend on their order.

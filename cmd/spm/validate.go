@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strconv"
 
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 	"sigs.k8s.io/security-profiles-merger/landlock"
 )
 
@@ -209,12 +210,23 @@ func parseABI(value string, named bool) (landlock.ABIVersion, error) {
 	}
 
 	version, err := strconv.Atoi(value)
-	if err != nil || value[0] < '0' || value[0] > '9' || version < int(landlock.ABIV1) {
-		return 0, fmt.Errorf("%w %q (use a whole number from %d on)",
-			errBadABI, value, landlock.ABIV1)
+
+	switch {
+	case err == nil && unsignedDigits(value) && version >= int(landlock.ABIV1):
+	case errors.Is(err, strconv.ErrRange) && unsignedDigits(value):
+		return 0, fmt.Errorf("%w %s (too large)", errBadABI, merge.QuoteBounded(value))
+	default:
+		return 0, fmt.Errorf("%w %s (use a whole number from %d on)",
+			errBadABI, merge.QuoteBounded(value), landlock.ABIV1)
 	}
 
 	return landlock.ABIVersion(version), nil
+}
+
+// unsignedDigits reports whether a value starts with a decimal digit, as a
+// version without a sign does.
+func unsignedDigits(value string) bool {
+	return value != "" && value[0] >= '0' && value[0] <= '9'
 }
 
 // validateFlagsNamed reports which validate flags were named, which a

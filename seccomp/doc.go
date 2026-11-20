@@ -185,6 +185,12 @@ limitations under the License.
 // inputs allows every read, although both deny arg0 in {0, 2, 3, 4}. The
 // guarantees always hold; only the tightness varies.
 //
+// Two inputs merge to the same actions in either order, errno values aside
+// (see the Errno values section). Three or more are merged pairwise, first
+// to last, and a conservative step can lose more precision in one order
+// than in another, so their order can change how tight the result is, but
+// never the guarantee.
+//
 // # Errno values
 //
 // An unset errnoRet on SCMP_ACT_ERRNO or SCMP_ACT_TRACE means EPERM, as runc
@@ -196,8 +202,8 @@ limitations under the License.
 // and per-syscall ErrnoRet from the input whose action is picked. When the
 // actions tie, the earlier (leftmost) input wins. Whether a conditional
 // entry that shares the default action but not its errno survives can
-// therefore depend on argument order, so results are order-independent in
-// effect only for profiles without errno values.
+// therefore depend on argument order, so even two inputs give results of
+// the same effect in either order only for profiles without errno values.
 //
 // Clauses of one syscall that apply one action, each test one argument for
 // equality with a different filter, and report different errno values are

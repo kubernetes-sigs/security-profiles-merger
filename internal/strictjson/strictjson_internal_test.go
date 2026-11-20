@@ -921,6 +921,181 @@ func TestMissingFieldsOfInMaps(t *testing.T) {
 	}
 }
 
+// checkMissingCases decodes each document into a T as encoding/json does
+// and compares the missing members the scan reports with the want of it.
+func checkMissingCases[T any](t *testing.T, cases []struct {
+	raw  string
+	want []string
+},
+) {
+	t.Helper()
+
+	for _, test := range cases {
+		var decoded T
+
+		err := json.Unmarshal([]byte(test.raw), &decoded)
+		if err != nil {
+			t.Fatalf("%s: %v", test.raw, err)
+		}
+
+		got, omitted := missingFieldsOf([]byte(test.raw), &decoded, nil)
+		if !slices.Equal(got, test.want) || omitted != 0 {
+			t.Errorf("%T %s: missingFieldsOf = %v (%d omitted), want %v",
+				decoded, test.raw, got, omitted, test.want)
+		}
+	}
+}
+
+// foldedTwins has two fields whose JSON names differ only in case, the
+// second of them required. encoding/json fills the field a member names
+// exactly before one it names ignoring case, so "a" fills A and leaves B.
+type foldedTwins struct {
+	A string `json:"a"`
+	B string `json:"A" strict:"required"` //nolint:tagliatelle // a second spelling is the point
+}
+
+// TestMissingFieldsOfFoldedTwins covers a required field whose name folds
+// like that of another field: a member is matched to the field
+// encoding/json fills, not to every field its name folds to.
+func TestMissingFieldsOfFoldedTwins(t *testing.T) {
+	t.Parallel()
+
+	checkMissingCases[foldedTwins](t, []struct {
+		raw  string
+		want []string
+	}{
+		{`{"a":"x"}`, []string{"A"}},
+		{`{"A":"x"}`, nil},
+		{`{"A":null,"b":1}`, []string{"A"}},
+	})
+
+	var decoded foldedTwins
+
+	err := Unmarshal([]byte(`{"a":"x"}`), &decoded, nil)
+	if !errors.Is(err, spm.ErrMissingField) || err.Error() != `missing field "A"` {
+		t.Errorf("Unmarshal = %v, want missing field \"A\"", err)
+	}
+}
+
+// PointerInner is embedded through a pointer, which encoding/json allocates
+// once a document names any member of it, null or not. It is exported, as
+// the decoder cannot allocate a pointer to an unexported struct.
+type PointerInner struct {
+	P string `json:"p" strict:"required"`
+	Q string `json:"q"`
+}
+
+type pointerEmbedding struct {
+	*PointerInner
+
+	R string `json:"r"`
+}
+
+// PointerMiddle embeds PointerInner through a pointer of its own.
+type PointerMiddle struct {
+	*PointerInner
+
+	M string `json:"m" strict:"required"`
+}
+
+type pointerNesting struct {
+	*PointerMiddle
+
+	R string `json:"r"`
+}
+
+// TestMissingFieldsOfPointerEmbedding covers a required field of a struct
+// embedded through a pointer: it is missing wherever the decoder allocates
+// the struct, which a member of it does, at any depth, and not where the
+// pointer stays nil.
+func TestMissingFieldsOfPointerEmbedding(t *testing.T) {
+	t.Parallel()
+
+	checkMissingCases[pointerEmbedding](t, []struct {
+		raw  string
+		want []string
+	}{
+		{`{}`, nil},
+		{`{"r":"x"}`, nil},
+		{`{"q":"x"}`, []string{"p"}},
+		{`{"q":null}`, []string{"p"}},
+		{`{"Q":"x"}`, []string{"p"}},
+		{`{"p":null}`, []string{"p"}},
+		{`{"p":"x"}`, nil},
+	})
+
+	checkMissingCases[pointerNesting](t, []struct {
+		raw  string
+		want []string
+	}{
+		{`{"r":"x"}`, nil},
+		// A member of the middle struct leaves the inner pointer nil.
+		{`{"m":"x"}`, nil},
+		{`{"m":null}`, []string{"m"}},
+		{`{"q":"x"}`, []string{"p", "m"}},
+		{`{"q":"x","m":"y"}`, []string{"p"}},
+	})
+}
+
+type requiredArrays struct {
+	Pair     [2]requiredRule            `json:"pair"`
+	Nested   [][2]requiredRule          `json:"nested"`
+	Pointers [2]*requiredRule           `json:"pointers"`
+	Wide     [40]requiredRule           `json:"wide"`
+	Plain    [2]unrequiredRule          `json:"plain"`
+	Mapped   map[string][1]requiredRule `json:"mapped"`
+}
+
+// TestMissingFieldsOfArrays covers a required field of the elements of a
+// Go array: encoding/json zeroes the elements a document does not give,
+// and leaves an array it gives null or leaves out zero.
+func TestMissingFieldsOfArrays(t *testing.T) {
+	t.Parallel()
+
+	full := strings.Repeat(`{"port":1},`, 40)
+	full = `"wide":[` + full[:len(full)-1] + `]`
+
+	checkMissingCases[requiredArrays](t, []struct {
+		raw  string
+		want []string
+	}{
+		{`{"pair":[{"port":1},{"port":2}],` + full + `}`, nil},
+		// encoding/json drops elements past the length of the array.
+		{`{"pair":[{"port":1},{"port":2},{}],` + full + `}`, nil},
+		{`{"pair":[{"port":1}],` + full + `}`, []string{"pair[1].port"}},
+		{`{"pair":[{"port":1},null],` + full + `}`, []string{"pair[1].port"}},
+		{`{"pair":[{},{"port":1}],` + full + `}`, []string{"pair[0].port"}},
+		{`{"pair":[],` + full + `}`, []string{"pair[0].port", "pair[1].port"}},
+		{`{"pair":null,` + full + `}`, []string{"pair[0].port", "pair[1].port"}},
+		{
+			`{` + full + `,"pair":[{"port":1},{"port":2}],"nested":[[{"port":1}],null]}`,
+			[]string{"nested[0][1].port", "nested[1][0].port", "nested[1][1].port"},
+		},
+		{
+			`{"pair":[{"port":1},{"port":2}],` + full + `,"mapped":{"k":[]}}`,
+			[]string{"mapped.k[0].port"},
+		},
+		// Nil pointers and fields without a required one hold nothing to
+		// miss.
+		{`{"pair":[{"port":1},{"port":2}],` + full + `,"pointers":[],"plain":[]}`, nil},
+	})
+
+	// A member left out is reported, bounded as any other report.
+	var decoded requiredArrays
+
+	got, omitted := missingFieldsOf([]byte(`{}`), &decoded, nil)
+	if len(got) != maxReportedPaths || got[0] != "pair[0].port" ||
+		got[2] != "wide[0].port" || omitted != 42-maxReportedPaths {
+		t.Errorf("missingFieldsOf({}) = %v (%d omitted), want the first %d of 42",
+			got, omitted, maxReportedPaths)
+	}
+
+	err := Unmarshal([]byte(`{"pair":[{"port":1}],`+full+`}`), &decoded, nil)
+	if !errors.Is(err, spm.ErrMissingField) || err.Error() != `missing field "pair[1].port"` {
+		t.Errorf("Unmarshal = %v, want missing field \"pair[1].port\"", err)
+	}
+}
+
 // unknownFieldsStrictly reports the unknown members of raw the way Unmarshal
 // and the spm command find them: only where Decode names one on its way
 // through.

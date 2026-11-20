@@ -215,6 +215,11 @@ func detectionGoldenCases() []goldenCase {
 		// something at once.
 		goldenCmd("merge_seccomp_unknown_field", 0, "merge --strategy union",
 			"testdata/seccomp_unknown_field.json"),
+		// A lone surrogate escape in an element of a stdin array is named
+		// at its byte in the array, which the line and column of a decode
+		// error count too.
+		goldenCmd("validate_seccomp_stdin_surrogate", 0, "validate --type seccomp --quiet").
+			withStdin("testdata/seccomp_stdin_surrogate.json"),
 	}
 }
 
@@ -270,6 +275,18 @@ func failureGoldenCases() []goldenCase {
 		goldenCmd("usage_unknown_command", exitUsage, testBogus),
 		goldenCmd("usage_unknown_flag", exitUsage, "validate -real.json"),
 		goldenCmd("usage_empty_argument", exitUsage, "validate", ""),
+		// A flag value is escaped as a file name is, U+3164 included,
+		// which prints as nothing and which %q writes as it is.
+		goldenCmd("usage_unknown_type_invisible", exitUsage, "validate --type",
+			"seccomp\u3164", testdataSeccompA),
+		goldenCmd("usage_unknown_format_invisible", exitUsage, "validate --format",
+			"json\u3164", testdataSeccompA),
+		goldenCmd("usage_bad_abi_invisible", exitUsage, "validate --abi",
+			"6\u3164", testdataLandlockA),
+		goldenCmd("usage_bad_abi_too_large", exitUsage,
+			"validate --abi 9223372036854775808", testdataLandlockA),
+		goldenCmd("usage_unknown_validate_mode_invisible", exitUsage,
+			"merge --type seccomp --validate", "strict\u3164", testdataSeccompA),
 	}
 }
 

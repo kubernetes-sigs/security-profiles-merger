@@ -744,8 +744,10 @@ type LoweredPath struct {
 	// its own rule on Path. Every such grant then comes from a rule on
 	// Ancestor or between it and Path.
 	Ancestor string
-	// Input is the index of the input whose rule is on Ancestor, the first
-	// where several have one, numbered as Intersect numbers its inputs.
+	// Input is the index, numbered as Intersect numbers its inputs, of the
+	// first input whose rule on Ancestor grants a right that input lowered
+	// onto Path; where Ancestor is not "/", a right its rule on "/" does
+	// not grant.
 	Input int
 	// InRoot reports that Ancestor is "/" and no rule of the result grants
 	// FSAccessRefer, so Path may be opened with RESOLVE_IN_ROOT alone,

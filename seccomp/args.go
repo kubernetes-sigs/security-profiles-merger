@@ -342,11 +342,18 @@ func condImplies(strong, weak specs.LinuxSeccompArg) bool {
 
 // rangeImplies is condImplies for a condition that matches a range of
 // values, if any: it implies a range holding its own, and that the argument
-// is not a value outside it.
+// is not a value outside it. A range of one value, "a0 < 1" or "a0 <= 0",
+// is that value spelled another way, and implies what "a0 == 0" implies:
+// read apart, a filter seen to cover "a0 == 0" but not "a0 < 1" made a merge
+// of three inputs depend on their order.
 func rangeImplies(strong, weak specs.LinuxSeccompArg) bool {
 	low, high, ok := condInterval(strong)
 	if !ok {
 		return false
+	}
+
+	if low == high {
+		return condHolds(weak, low)
 	}
 
 	if weak.Op == specs.OpNotEqual {

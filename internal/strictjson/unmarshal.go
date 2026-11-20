@@ -42,7 +42,11 @@ const Space = " \t\r\n"
 // but whitespace behind the document
 // (spm.ErrUnexpectedData). A document that is not a JSON object is refused
 // too (spm.ErrNotAnObject): encoding/json decodes null into a struct as
-// nothing at all, which would make it an empty profile.
+// nothing at all, which would make it an empty profile. A required member
+// is also missing in the elements of a Go array a document gives fewer
+// elements for, or none, and in a struct embedded through a pointer once
+// the document names any member of it, since the decoder fills both with
+// zero values.
 //
 // Every message is bounded (see merge.BoundedText), since the decoder quotes
 // back literals whose length the document chooses.

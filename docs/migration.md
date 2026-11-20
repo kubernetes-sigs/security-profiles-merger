@@ -74,9 +74,11 @@ unknown architecture matches `ErrUnknownArch` as well.
 - **`Intersect` refuses an input listing an architecture of the other byte
   order** (`ErrMixedByteOrder`), and `Union` may refuse a result in which
   libseccomp would lose the rules of an architecture (`ErrLostRules`).
-- **`Union` no longer depends on the input order** where two clauses with
-  one result spell the same filter, such as `a0 < 1` and `a0 == 0`: it
-  keeps the same one whichever input comes first.
+- **`Union` of two inputs no longer depends on their order** where two
+  clauses with one result spell the same filter, such as `a0 < 1` and
+  `a0 == 0`: it keeps the same one whichever input comes first. With three
+  or more inputs, which merge pairwise, the order can still change how
+  tight a result of either merge is, never its guarantee.
 - **Write a result with `seccomp.Marshal`**, which keeps an empty
   `"flags": []` that `json.Marshal` drops (see
   [Extra steps after Intersect](integration.md#extra-steps-after-intersect)).

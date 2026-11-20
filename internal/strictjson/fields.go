@@ -33,10 +33,10 @@ import (
 
 // invalidUTF8 reports the first byte of raw that does not start a valid
 // UTF-8 sequence, or the first \u escape that spells half a surrogate pair,
-// or nil when there is neither. encoding/json replaces both with U+FFFD, so
-// two profiles whose syscall names differ only in them decode to the same
-// name and merge into one rule; in an artifact, a name spelled that way is a
-// sign the bytes were crafted.
+// as a *UTF8Error, or nil when there is neither. encoding/json replaces both
+// with U+FFFD, so two profiles whose syscall names differ only in them
+// decode to the same name and merge into one rule; in an artifact, a name
+// spelled that way is a sign the bytes were crafted.
 func invalidUTF8(raw []byte) error {
 	if utf8.Valid(raw) {
 		offset := loneSurrogateEscape(raw)
@@ -44,7 +44,7 @@ func invalidUTF8(raw []byte) error {
 			return nil
 		}
 
-		return fmt.Errorf("%w (lone surrogate escape at byte %d)", spm.ErrInvalidUTF8, offset)
+		return &UTF8Error{Offset: offset, Escape: true}
 	}
 
 	offset := 0
@@ -58,8 +58,30 @@ func invalidUTF8(raw []byte) error {
 		offset += size
 	}
 
-	return fmt.Errorf("%w (first at byte %d)", spm.ErrInvalidUTF8, offset)
+	return &UTF8Error{Offset: offset, Escape: false}
 }
+
+// UTF8Error is spm.ErrInvalidUTF8 at a byte offset of a document, which
+// the command moves to count bytes of the stdin array a document is an
+// element of.
+type UTF8Error struct {
+	// Offset is the offset of the byte, or of the escape, in the document.
+	Offset int
+	// Escape reports a \u escape that spells half a surrogate pair rather
+	// than a byte that is not valid UTF-8.
+	Escape bool
+}
+
+func (e *UTF8Error) Error() string {
+	if e.Escape {
+		return fmt.Sprintf("%v (lone surrogate escape at byte %d)", spm.ErrInvalidUTF8, e.Offset)
+	}
+
+	return fmt.Sprintf("%v (first at byte %d)", spm.ErrInvalidUTF8, e.Offset)
+}
+
+// Unwrap returns spm.ErrInvalidUTF8.
+func (e *UTF8Error) Unwrap() error { return spm.ErrInvalidUTF8 }
 
 // loneSurrogateEscape returns the offset of the first \u escape in raw that
 // names a surrogate without its other half, or -1. A backslash only occurs
@@ -399,17 +421,18 @@ type visibleField struct {
 	// field is the field itself and owner the struct type declaring it.
 	field reflect.StructField
 	owner reflect.Type
-	// viaPointer reports whether the field sits in a struct embedded
-	// through a pointer, at any depth.
-	viaPointer bool
+	// gate is the index sequence of the innermost struct embedded through
+	// a pointer that holds the field, at any depth, or nil for none.
+	gate []int
 }
 
 // embeddedStruct is a struct type visibleFields looks into, as embedded at
 // the index sequence of index.
 type embeddedStruct struct {
-	typ        reflect.Type
-	index      []int
-	viaPointer bool
+	typ   reflect.Type
+	index []int
+	// gate is as for visibleField, for the fields of the struct.
+	gate []int
 }
 
 // visibleFields returns the fields encoding/json decodes the members of an
@@ -427,7 +450,7 @@ func visibleFields(typ reflect.Type) []visibleField {
 		count   map[reflect.Type]int
 	)
 
-	next := []embeddedStruct{{typ: typ, index: nil, viaPointer: false}}
+	next := []embeddedStruct{{typ: typ, index: nil, gate: nil}}
 	nextCount := map[reflect.Type]int{}
 	visited := map[reflect.Type]bool{}
 
@@ -490,18 +513,19 @@ func ownFields(outer embeddedStruct) ([]visibleField, []embeddedStruct) {
 		}
 
 		if name == "" && field.Anonymous && fieldType.Kind() == reflect.Struct {
-			embedded = append(embedded, embeddedStruct{
-				typ:        fieldType,
-				index:      index,
-				viaPointer: outer.viaPointer || field.Type.Kind() == reflect.Pointer,
-			})
+			gate := outer.gate
+			if field.Type.Kind() == reflect.Pointer {
+				gate = index
+			}
+
+			embedded = append(embedded, embeddedStruct{typ: fieldType, index: index, gate: gate})
 
 			continue
 		}
 
 		fields = append(fields, visibleField{
 			name: cmp.Or(name, field.Name), tagged: name != "", index: index,
-			field: field, owner: outer.typ, viaPointer: outer.viaPointer,
+			field: field, owner: outer.typ, gate: outer.gate,
 		})
 	}
 
