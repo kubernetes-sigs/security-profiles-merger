@@ -22,7 +22,7 @@ The same code means the same thing in every subcommand:
 | Code | Meaning |
 |------|---------|
 | `0` | Success. For `diff`, the two profiles are equal |
-| `1` | The profile is bad: it is empty, does not parse, does not validate, cannot be read (a missing or unreadable file), or its output could not be written. For `diff`, `1` means *different* and nothing else |
+| `1` | The profile is bad: it is empty, does not parse, is not of the type `--type` names or the other inputs reveal, has no type that can be detected, does not validate, cannot be read (a missing or unreadable file), or its output could not be written. For `diff`, `1` means *different* and nothing else |
 | `2` | Usage error, listed below. For `diff`, every failure, since `1` is taken |
 
 Usage errors, which exit `2`:
@@ -31,7 +31,7 @@ Usage errors, which exit `2`:
   `--validate` mode;
 - a missing `--strategy`, or flags that cannot be combined;
 - an unexpected argument, such as `spm version extra` or
-  `spm help merge extra`;
+  `spm help merge extra`, or an empty file argument;
 - a `--validate` list whose length does not match the inputs;
 - `--arch` for a profile type that has no architectures, or for `validate`
   without `--artifact` or `--strict`, whose checks it does not change;
@@ -42,15 +42,23 @@ Usage errors, which exit `2`:
   more than 1000 profiles in total (each element of a stdin array counts, and
   so does each file beside it);
 - stdin named twice (`spm merge - -`);
-- a profile type that cannot be detected, that the inputs disagree on, or
-  that an input does not hold, whether `--type` names it or the other inputs
-  reveal it: members of another type, or members none of which the type
-  knows, such as a profile wrapped in an object of another format.
+- inputs that disagree on the profile type, each holding the members of
+  another one, which blames none of them; an input holding the members of
+  two types, or of another type than `--type` names, or members none of
+  which the type knows, such as a profile wrapped in an object of another
+  format, is a bad profile instead.
 
 The split is between "you invoked it wrong", which no profile can cause, and
 "the profile is wrong", which is the answer the command was asked for. An
 input past the limits is discovered while reading, but exits `2`: the profile
 was never read, so nothing about it is known to be wrong.
+
+A bad profile fails on its own: the other inputs are still read, checked and
+reported, and the run exits `1` at the end. When both come up in one run,
+the profile wins: once an input has failed, `merge` and `validate` exit `1`
+even if a usage error follows, such as an `--arch` the type does not take or
+inputs that disagree on the type, so the exit code of a bad input does not
+depend on the inputs beside it. `diff` exits `2` for both.
 
 ## Merge profiles
 
@@ -66,14 +74,15 @@ there. Every top-level field counts, not only `defaultAction`: a profile of
 `syscalls` alone is a seccomp profile. Inputs that mix profile types are
 rejected, since merging them would drop whatever the chosen type has no field
 for. One document that carries the members of two types is rejected the same
-way (`error: <input> mixes profile types (seccomp and apparmor), use --type`)
+way (`error: <input>: mixes profile types (seccomp and apparmor), use --type`)
 rather than resolved by a fixed precedence, which could validate an AppArmor
 profile that carries a `defaultAction` member as an almost empty seccomp
 profile. An input whose members reveal no type defers to the others only
 when it holds no member at all: one holding only members another format
 knows, such as a profile wrapped in an object, would decode into an empty
 profile of the type the others reveal, and is rejected as it is under
-`--type` (`error: <input> holds no member of an apparmor profile`).
+`--type` (`error: <input>: holds no member of an apparmor profile`). Every
+input that fails detection is reported.
 
 Input order decides the seccomp tie-breaks: `errnoRet` follows the earlier
 input where the actions tie, and an intersection takes the listener from the
@@ -99,7 +108,8 @@ spm merge --type seccomp --strategy intersect --validate default,artifact \
   baseline.json artifact.json
 ```
 
-The merge only runs if every input passes. The baseline gets `default`, as
+The merge only runs if every input passes, and every input that fails is
+reported, under `default` as well. The baseline gets `default`, as
 in the library flow: the seccomp defaults runtimes ship fail `strict`, which
 also rejects `SCMP_ACT_NOTIFY` and the listener settings. `artifact` refuses
 what `UnmarshalStrict` refuses, a member the profile type has no field for
@@ -237,27 +247,39 @@ either occurrence. A seccomp condition may leave out its `value` and
 strictness flag, so it warns about all of these but a repeated member and
 still prints its verdict.
 
-Every error and warning names the input it came from: a file by its path as
-written, stdin by `stdin`, and one element of a JSON array on stdin by
-`stdin[i]`. A file name is quoted, with its bytes escaped, only when it holds
-a character that does not print as itself, such as a control byte; spaces and
-punctuation in a name are left alone.
+Every error and warning line names the input it came from: a file by its
+path as written, stdin by `stdin`, and one element of a JSON array on stdin
+by `stdin[i]`. A profile that fails several checks is reported on one line
+per problem, each starting with `error: <input>:`, so that `grep` for an
+input finds all of them. A file name is quoted, with its bytes escaped, only
+when it holds a character that does not print as itself, such as a control
+byte; spaces and punctuation in a name are left alone.
 
 ```
-error: parsing baseline.json: decoding failed: unexpected end of JSON input
+error: baseline.json: line 11, column 4: unexpected end of JSON input
+error: baseline.json: line 4, column 35: syscalls[0].action: want a string, got number
 warning: stdin[2]: unknown field "syscalls[0].comment"
-error: artifact.json: syscall entry 0 action: unknown seccomp action "SCMP_ACT_BOGUS"
+warning: stdin[2]: misspelled field "syscalls[0].Names" (want "names")
+error: artifact.json: syscalls[0].action: "SCMP_ACT_BOGUS": unknown seccomp action
+error: artifact.json: syscalls[1].args[0].index: 9: syscall arg index out of range (max 5)
 ```
 
 Every validation mode names the input this way, the default one included: a
 failure the merge functions would report as "profile 1" is reported here as
 the file, or as `stdin[i]` for an element of an array on stdin, since a
-position is not something a caller can act on.
+position is not something a caller can act on. Every input is checked, so
+one run names every input that fails, whether it cannot be parsed, decoded
+or validated, and the inputs that can be are still checked. A document that
+cannot be decoded is reported at its line and byte column, counted in the
+file or, for an element of a stdin array, in the array.
 
-A field path names each member as `object.member` and each element of a list
-as `list[i]`. A member name that cannot be a plain path segment, which no
-profile has, is bracketed and quoted instead, as in `["a.b"]`, so that one
-path always names one member.
+Problems are named by the field path of the member they are about, as the
+JSON document spells it. A field path names each member as `object.member`
+and each element of a list as `list[i]`. A member name that cannot be a
+plain path segment, which no profile has, is bracketed and quoted instead,
+as in `["a.b"]`, so that one path always names one member. The rest of a
+validation failure follows the shape the library gives it (see
+[Validation levels](api.md#validation-levels)).
 
 Profiles can also be read from stdin, as a single profile or a JSON array of
 profiles:
@@ -293,8 +315,11 @@ would otherwise.
 
 Validation writes the profiles on success (exit 0) and prints errors to
 stderr when a profile is invalid or cannot be read (exit 1); usage errors
-exit 2, as listed under [Exit codes](#exit-codes). `--quiet` writes no
-profile on success:
+exit 2, as listed under [Exit codes](#exit-codes). The profiles are written
+in the shape they came in: a single profile, from a file or stdin, as an
+object, and several, or a JSON array on stdin even of one element, as an
+array, so that `spm validate < profiles.json | jq '.[]'` works whatever the
+array holds. `--quiet` writes no profile on success:
 
 ```sh
 spm validate --type seccomp --quiet profile.json

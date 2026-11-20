@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
@@ -71,9 +72,10 @@ func unreadFields(typ reflect.Type, read []string) []int {
 }
 
 // reportSetFields reports each field of the struct value at one of the
-// indices that holds anything but its zero value.
+// indices that holds anything but its zero value, by the JSON path of the
+// member, which path, the path of the value, starts.
 func reportSetFields(
-	errs *merge.Collector, value reflect.Value, unread []int, context func() string,
+	errs *merge.Collector, value reflect.Value, unread []int, path func() string,
 ) {
 	for _, idx := range unread {
 		if value.Field(idx).IsZero() {
@@ -81,37 +83,68 @@ func reportSetFields(
 		}
 
 		errs.Report(func() error {
-			return fmt.Errorf(
-				"%s: %w: %s", context(), ErrUnsupportedSpecField, value.Type().Field(idx).Name,
-			)
+			field := value.Type().Field(idx)
+			member := memberPath(path(), &field)
+
+			return fmt.Errorf("%s: %w", member, ErrUnsupportedSpecField)
 		})
 	}
 }
 
-// validateSpecFields reports the fields of the profile, its syscall entries
-// and their conditions that this package does not read (see
-// ErrUnsupportedSpecField). With the runtime-spec this package is built
-// against there are none, and it looks at nothing.
-func validateSpecFields(profile *specs.LinuxSeccomp) error {
-	if len(unreadProfileFields)+len(unreadSyscallFields)+len(unreadArgFields) == 0 {
-		return nil
+// memberPath returns the JSON path of the member a struct field fills, in
+// the value at path, which is empty for the profile itself.
+func memberPath(path string, field *reflect.StructField) string {
+	name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+	if name == "" {
+		name = field.Name
 	}
 
+	if path == "" {
+		return name
+	}
+
+	return path + "." + name
+}
+
+// reportUnreadProfileFields reports the fields of the profile this package
+// does not read (see ErrUnsupportedSpecField). With the runtime-spec this
+// package is built against there are none, and it looks at nothing.
+func reportUnreadProfileFields(errs *merge.Collector, profile *specs.LinuxSeccomp) {
+	if len(unreadProfileFields) > 0 {
+		reportSetFields(errs, reflect.ValueOf(profile).Elem(), unreadProfileFields,
+			func() string { return "" })
+	}
+}
+
+// reportUnreadEntryFields reports the fields of the syscall entry at idx and
+// of its conditions that this package does not read, as
+// reportUnreadProfileFields does for the profile.
+func reportUnreadEntryFields(errs *merge.Collector, idx int, entry *specs.LinuxSyscall) {
+	if len(unreadSyscallFields) > 0 {
+		reportSetFields(errs, reflect.ValueOf(entry).Elem(), unreadSyscallFields,
+			func() string { return fmt.Sprintf("syscalls[%d]", idx) })
+	}
+
+	if len(unreadArgFields) == 0 {
+		return
+	}
+
+	for argIdx := range entry.Args {
+		reportSetFields(errs, reflect.ValueOf(&entry.Args[argIdx]).Elem(), unreadArgFields,
+			func() string { return fmt.Sprintf("syscalls[%d].args[%d]", idx, argIdx) })
+	}
+}
+
+// validateSpecFields reports the fields of the profile, its syscall entries
+// and their conditions that this package does not read, which Validate
+// reports among the rest of what it finds.
+func validateSpecFields(profile *specs.LinuxSeccomp) error {
 	var errs merge.Collector
 
-	reportSetFields(&errs, reflect.ValueOf(profile).Elem(), unreadProfileFields,
-		func() string { return "profile" })
+	reportUnreadProfileFields(&errs, profile)
 
 	for idx := range profile.Syscalls {
-		entry := &profile.Syscalls[idx]
-
-		reportSetFields(&errs, reflect.ValueOf(entry).Elem(), unreadSyscallFields,
-			func() string { return fmt.Sprintf("syscall entry %d", idx) })
-
-		for argIdx := range entry.Args {
-			reportSetFields(&errs, reflect.ValueOf(&entry.Args[argIdx]).Elem(), unreadArgFields,
-				func() string { return fmt.Sprintf("syscall entry %d arg %d", idx, argIdx) })
-		}
+		reportUnreadEntryFields(&errs, idx, &profile.Syscalls[idx])
 	}
 
 	return errs.Err()

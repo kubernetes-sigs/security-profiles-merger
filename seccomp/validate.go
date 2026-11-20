@@ -17,6 +17,7 @@ limitations under the License.
 package seccomp
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"maps"
@@ -248,76 +249,31 @@ func Validate(profile *specs.LinuxSeccomp) error {
 
 	if !isKnownAction(profile.DefaultAction) {
 		errs.Report(func() error {
-			return unknownActionError(profile.DefaultAction, "default action")
+			return unknownActionError(profile.DefaultAction, "defaultAction")
 		})
 	}
 
-	errs.Add(validateSyscallArgs(profile.Syscalls))
-	errs.Add(validateSyscallNames(profile.Syscalls, hasNUL))
-	errs.Add(validateArchitectures(profile.Architectures))
-	errs.Add(validateFlags(profile.Flags))
-	errs.Add(validateNotifySupport(profile))
-	errs.Add(validateSpecFields(profile))
-
-	for idx := range profile.Syscalls {
-		if len(profile.Syscalls[idx].Names) == 0 {
-			errs.Report(func() error {
-				return fmt.Errorf("syscall entry %d: %w", idx, ErrEmptySyscallNames)
-			})
-		}
-
-		if slices.Contains(profile.Syscalls[idx].Names, "") {
-			errs.Report(func() error {
-				return fmt.Errorf("syscall entry %d: %w", idx, ErrEmptySyscallName)
-			})
-		}
-
-		if action := profile.Syscalls[idx].Action; !isKnownAction(action) {
-			errs.Report(func() error {
-				return unknownActionError(action, fmt.Sprintf("syscall entry %d action", idx))
-			})
-		}
+	// runc refuses SCMP_ACT_NOTIFY as the default action ("SCMP_ACT_NOTIFY
+	// cannot be used as default action"); see validateEntry for the rest.
+	if profile.DefaultAction == specs.ActNotify {
+		errs.Report(func() error {
+			return fmt.Errorf("defaultAction: %w", ErrNotifyUnsupported)
+		})
 	}
 
-	return errs.Err()
-}
-
-// validateNotifySupport rejects SCMP_ACT_NOTIFY where runc refuses to load
-// it: as the default action ("SCMP_ACT_NOTIFY cannot be used as default
-// action"), on the write syscall, which the listener needs to answer a
-// notification, and without a listenerPath to hand the notification to.
-// libseccomp itself accepts all three, so these are runc constraints, and a
-// profile that hits one fails container creation rather than producing a
-// weaker filter.
-//
-// The listener is required here rather than left to the merge because a
-// profile that notifies into nothing is not loadable on its own, and the
-// merge would otherwise have to choose between rewriting the action, which
-// silently drops the caller's supervisor, and refusing a profile Validate
-// accepted. With the requirement, the listener travels with every input that
-// notifies, and the merge takes it from the first input that sets one, so no
-// result can notify without one (see resolveListener).
-func validateNotifySupport(profile *specs.LinuxSeccomp) error {
-	var errs merge.Collector
+	validateArchitecturesAndFlags(&errs, profile)
+	reportUnreadProfileFields(&errs, profile)
 
 	notifies := false
 
-	scanNotify(profile, func() {
-		errs.Report(func() error {
-			return fmt.Errorf("default action: %w", ErrNotifyUnsupported)
-		})
-	}, func(idx int, entry *specs.LinuxSyscall) {
-		notifies = true
+	// Each entry is checked whole before the next, so the report names the
+	// problems in the order the profile holds them.
+	for idx := range profile.Syscalls {
+		entry := &profile.Syscalls[idx]
+		notifies = notifies || entry.Action == specs.ActNotify
 
-		if slices.Contains(entry.Names, notifyWriteSyscall) {
-			errs.Report(func() error {
-				return fmt.Errorf(
-					"syscall entry %d action: %w (on %s)",
-					idx, ErrNotifyUnsupported, notifyWriteSyscall,
-				)
-			})
-		}
-	})
+		validateEntry(&errs, idx, entry)
+	}
 
 	// Reported once for the profile: the listener is a profile-wide setting,
 	// so naming every entry that notifies would repeat one problem.
@@ -347,22 +303,146 @@ func validateListenerFlags(profile *specs.LinuxSeccomp) error {
 		return entry.Action == specs.ActNotify
 	})
 
-	if !notifies && slices.Contains(profile.Flags, specs.LinuxSeccompFlagWaitKillableRecv) {
+	if idx := slices.Index(profile.Flags, specs.LinuxSeccompFlagWaitKillableRecv); idx >= 0 &&
+		!notifies {
 		errs.Report(func() error {
 			return fmt.Errorf(
-				"flag %s: %w (no entry applies SCMP_ACT_NOTIFY)",
-				specs.LinuxSeccompFlagWaitKillableRecv, ErrNotifyUnsupported,
+				"flags[%d]: %s: %w (no entry applies SCMP_ACT_NOTIFY)",
+				idx, merge.QuoteBounded(string(specs.LinuxSeccompFlagWaitKillableRecv)),
+				ErrNotifyUnsupported,
 			)
 		})
 	}
 
-	if profile.ListenerPath != "" && slices.Contains(profile.Flags, flagTsync) {
+	if idx := slices.Index(profile.Flags, flagTsync); idx >= 0 && profile.ListenerPath != "" {
 		errs.Report(func() error {
-			return fmt.Errorf("flag %s: %w (with a listenerPath)", flagTsync, ErrNotifyUnsupported)
+			return fmt.Errorf(
+				"flags[%d]: %s: %w (with a listenerPath)",
+				idx, merge.QuoteBounded(string(flagTsync)), ErrNotifyUnsupported,
+			)
 		})
 	}
 
 	return errs.Err()
+}
+
+// validateArchitecturesAndFlags reports the architectures and flags this
+// package does not know.
+func validateArchitecturesAndFlags(errs *merge.Collector, profile *specs.LinuxSeccomp) {
+	for idx, arch := range profile.Architectures {
+		if !isKnownArch(arch) {
+			errs.Report(func() error {
+				return fmt.Errorf(
+					"architectures[%d]: %s: %w",
+					idx,
+					merge.QuoteBounded(string(arch)),
+					ErrUnknownArch,
+				)
+			})
+		}
+	}
+
+	for idx, flag := range profile.Flags {
+		if !isKnownFlag(flag) {
+			errs.Report(func() error {
+				return fmt.Errorf(
+					"flags[%d]: %s: %w", idx, merge.QuoteBounded(string(flag)), ErrUnknownFlag,
+				)
+			})
+		}
+	}
+}
+
+// validateEntry reports what Validate rejects in the syscall entry at idx:
+// no names, an empty name or one holding a NUL, an unknown action, an
+// unknown operator or an argument index out of range, and SCMP_ACT_NOTIFY
+// where runc refuses to load it.
+//
+// runc refuses SCMP_ACT_NOTIFY on the write syscall, which the listener
+// needs to answer a notification, and without a listenerPath to hand the
+// notification to, which Validate reports once for the profile. libseccomp
+// itself accepts both, so these are runc constraints, and a profile that
+// hits one fails container creation rather than producing a weaker filter.
+//
+// The listener is required here rather than left to the merge because a
+// profile that notifies into nothing is not loadable on its own, and the
+// merge would otherwise have to choose between rewriting the action, which
+// silently drops the caller's supervisor, and refusing a profile Validate
+// accepted. With the requirement, the listener travels with every input that
+// notifies, and the merge takes it from the first input that sets one, so no
+// result can notify without one (see resolveListener).
+func validateEntry(errs *merge.Collector, idx int, entry *specs.LinuxSyscall) {
+	if len(entry.Names) == 0 {
+		errs.Report(func() error {
+			return fmt.Errorf("syscalls[%d].names: %w", idx, ErrEmptySyscallNames)
+		})
+	}
+
+	for nameIdx, name := range entry.Names {
+		switch {
+		case name == "":
+			errs.Report(func() error {
+				return fmt.Errorf("syscalls[%d].names[%d]: %w", idx, nameIdx, ErrEmptySyscallName)
+			})
+		case hasNUL(name):
+			errs.Report(func() error {
+				return invalidNameError(idx, nameIdx, name)
+			})
+		}
+	}
+
+	if !isKnownAction(entry.Action) {
+		errs.Report(func() error {
+			return unknownActionError(entry.Action, fmt.Sprintf("syscalls[%d].action", idx))
+		})
+	}
+
+	if entry.Action == specs.ActNotify && slices.Contains(entry.Names, notifyWriteSyscall) {
+		errs.Report(func() error {
+			return fmt.Errorf(
+				"syscalls[%d].action: %w (on %s)", idx, ErrNotifyUnsupported, notifyWriteSyscall,
+			)
+		})
+	}
+
+	validateArgs(errs, idx, entry.Args)
+	reportUnreadEntryFields(errs, idx, entry)
+}
+
+// validateArgs reports the unknown operators and the argument indices out of
+// range among the arguments of the entry at idx.
+func validateArgs(errs *merge.Collector, idx int, args []specs.LinuxSeccompArg) {
+	for argIdx, arg := range args {
+		if !isKnownOperator(arg.Op) {
+			errs.Report(func() error {
+				return fmt.Errorf(
+					"syscalls[%d].args[%d].op: %s: %w",
+					idx, argIdx, merge.QuoteBounded(string(arg.Op)), ErrUnknownOperator,
+				)
+			})
+		}
+
+		if arg.Index > maxSyscallArgIndex {
+			errs.Report(func() error {
+				return fmt.Errorf(
+					"syscalls[%d].args[%d].index: %d: %w (max %d)",
+					idx, argIdx, arg.Index, ErrArgIndexOutOfRange, maxSyscallArgIndex,
+				)
+			})
+		}
+	}
+}
+
+// invalidNameError reports the syscall name at nameIdx of the entry at idx
+// as invalid.
+func invalidNameError(idx, nameIdx int, name string) error {
+	return fmt.Errorf(
+		"syscalls[%d].names[%d]: %s: %w",
+		idx,
+		nameIdx,
+		merge.QuoteBounded(name),
+		ErrInvalidSyscallName,
+	)
 }
 
 // ValidateStrict is the strictest of the three: it rejects everything
@@ -488,7 +568,7 @@ func validateValueWidth(profile *specs.LinuxSeccomp, native specs.Arch) error {
 			if wideArg(canonicalArg(arg)) {
 				errs.Report(func() error {
 					return fmt.Errorf(
-						"syscall entry %d arg %d: %w (value %#x, valueTwo %#x)",
+						"syscalls[%d].args[%d]: %w (value %#x, valueTwo %#x)",
 						idx, argIdx, ErrValueTooWide, arg.Value, arg.ValueTwo,
 					)
 				})
@@ -560,7 +640,10 @@ func validateErrnoRange(profile *specs.LinuxSeccomp) error {
 	if ret != nil && errnoSignificant(profile.DefaultAction) && *ret > maxErrno {
 		errs.Report(func() error {
 			return fmt.Errorf(
-				"defaultErrnoRet: %w (%d, max %d)", ErrErrnoOutOfRange, *ret, maxErrno,
+				"defaultErrnoRet: %d: %w (max %d)",
+				*ret,
+				ErrErrnoOutOfRange,
+				maxErrno,
 			)
 		})
 	}
@@ -572,8 +655,11 @@ func validateErrnoRange(profile *specs.LinuxSeccomp) error {
 		if ret != nil && errnoSignificant(entry.Action) && *ret > maxErrno {
 			errs.Report(func() error {
 				return fmt.Errorf(
-					"syscall entry %d errnoRet: %w (%d, max %d)",
-					idx, ErrErrnoOutOfRange, *ret, maxErrno,
+					"syscalls[%d].errnoRet: %d: %w (max %d)",
+					idx,
+					*ret,
+					ErrErrnoOutOfRange,
+					maxErrno,
 				)
 			})
 		}
@@ -590,8 +676,12 @@ func validateUnusedValueTwo(profile *specs.LinuxSeccomp) error {
 			if arg.ValueTwo != 0 && arg.Op != specs.OpMaskedEqual {
 				errs.Report(func() error {
 					return fmt.Errorf(
-						"syscall entry %d arg %d: %w (%s)",
-						idx, argIdx, ErrUnusedValueTwo, merge.QuoteBounded(string(arg.Op)),
+						"syscalls[%d].args[%d].valueTwo: %d: %w (op %s)",
+						idx,
+						argIdx,
+						arg.ValueTwo,
+						ErrUnusedValueTwo,
+						merge.QuoteBounded(string(arg.Op)),
 					)
 				})
 			}
@@ -607,8 +697,9 @@ func validateUnusedErrnoRet(profile *specs.LinuxSeccomp) error {
 	if profile.DefaultErrnoRet != nil && !errnoSignificant(profile.DefaultAction) {
 		errs.Report(func() error {
 			return fmt.Errorf(
-				"defaultErrnoRet: %w (%s)",
-				ErrUnusedErrnoRet, merge.QuoteBounded(string(profile.DefaultAction)),
+				"defaultErrnoRet: %d: %w (defaultAction %s)",
+				*profile.DefaultErrnoRet, ErrUnusedErrnoRet,
+				merge.QuoteBounded(string(profile.DefaultAction)),
 			)
 		})
 	}
@@ -618,8 +709,11 @@ func validateUnusedErrnoRet(profile *specs.LinuxSeccomp) error {
 		if entry.ErrnoRet != nil && !errnoSignificant(entry.Action) {
 			errs.Report(func() error {
 				return fmt.Errorf(
-					"syscall entry %d errnoRet: %w (%s)",
-					idx, ErrUnusedErrnoRet, merge.QuoteBounded(string(entry.Action)),
+					"syscalls[%d].errnoRet: %d: %w (action %s)",
+					idx,
+					*entry.ErrnoRet,
+					ErrUnusedErrnoRet,
+					merge.QuoteBounded(string(entry.Action)),
 				)
 			})
 		}
@@ -944,7 +1038,7 @@ func validateLostRules(profile *specs.LinuxSeccomp, native specs.Arch) error {
 
 	err := unionRulesFor(native).settleAbsentSyscalls(loaded)
 	if err != nil {
-		return fmt.Errorf("syscall entries: %w", err)
+		return fmt.Errorf("syscalls: %w", err)
 	}
 
 	return nil
@@ -998,7 +1092,10 @@ func validateSyscallRules(profile *specs.LinuxSeccomp, native specs.Arch) error 
 func validateProfileSize(profile *specs.LinuxSeccomp) error {
 	if entries := len(profile.Syscalls); entries > MaxArtifactEntries {
 		return fmt.Errorf(
-			"profile: %w (%d, max %d)", ErrTooManyProfileEntries, entries, MaxArtifactEntries,
+			"syscalls: %d entries: %w (max %d)",
+			entries,
+			ErrTooManyProfileEntries,
+			MaxArtifactEntries,
 		)
 	}
 
@@ -1009,8 +1106,8 @@ func validateProfileSize(profile *specs.LinuxSeccomp) error {
 		if names > MaxArtifactNamesPerEntry {
 			errs.Report(func() error {
 				return fmt.Errorf(
-					"syscall entry %d: %w (%d, max %d)",
-					idx, ErrTooManyNamesPerEntry, names, MaxArtifactNamesPerEntry,
+					"syscalls[%d].names: %d names: %w (max %d)",
+					idx, names, ErrTooManyNamesPerEntry, MaxArtifactNamesPerEntry,
 				)
 			})
 		}
@@ -1020,8 +1117,7 @@ func validateProfileSize(profile *specs.LinuxSeccomp) error {
 	if total > MaxArtifactRules {
 		errs.Report(func() error {
 			return fmt.Errorf(
-				"profile: %w (%d, max %d)",
-				ErrTooManyRules, total, MaxArtifactRules,
+				"syscalls: %d rules: %w (max %d)", total, ErrTooManyRules, MaxArtifactRules,
 			)
 		})
 	}
@@ -1056,9 +1152,9 @@ func (c *ruleChecker) checkCounts() {
 	for _, name := range over {
 		c.errs.Report(func() error {
 			return fmt.Errorf(
-				"syscall %s: %w (%d, max %d)",
-				merge.QuoteBounded(name), ErrTooManyRulesPerSyscall,
-				c.counts[name], MaxArtifactRulesPerSyscall,
+				"syscalls: %s in %d rules: %w (max %d)",
+				merge.QuoteBounded(name), c.counts[name], ErrTooManyRulesPerSyscall,
+				MaxArtifactRulesPerSyscall,
 			)
 		})
 	}
@@ -1069,7 +1165,7 @@ func (c *ruleChecker) conflict(idx int, name string) {
 
 	c.errs.Report(func() error {
 		return fmt.Errorf(
-			"syscall entry %d: %w for %s", idx, ErrConflictingEntries, merge.QuoteBounded(name),
+			"syscalls[%d]: %s: %w", idx, merge.QuoteBounded(name), ErrConflictingEntries,
 		)
 	})
 }
@@ -1216,17 +1312,12 @@ func validateSyscallNames(syscalls []specs.LinuxSyscall, invalid func(string) bo
 	var errs merge.Collector
 
 	for idx := range syscalls {
-		for _, name := range syscalls[idx].Names {
+		for nameIdx, name := range syscalls[idx].Names {
 			if !invalid(name) {
 				continue
 			}
 
-			errs.Report(func() error {
-				return fmt.Errorf(
-					"syscall entry %d: %s: %w",
-					idx, merge.QuoteBounded(name), ErrInvalidSyscallName,
-				)
-			})
+			errs.Report(func() error { return invalidNameError(idx, nameIdx, name) })
 		}
 	}
 
@@ -1254,36 +1345,21 @@ func hasControlByte(name string) bool {
 func validateNoNotify(profile *specs.LinuxSeccomp) error {
 	var errs merge.Collector
 
-	scanNotify(profile, func() {
-		errs.Report(func() error {
-			return fmt.Errorf("default action: %w", ErrNotifyNotAllowed)
-		})
-	}, func(idx int, _ *specs.LinuxSyscall) {
-		errs.Report(func() error {
-			return fmt.Errorf("syscall entry %d action: %w", idx, ErrNotifyNotAllowed)
-		})
-	})
-
-	return errs.Err()
-}
-
-// scanNotify finds where a profile applies SCMP_ACT_NOTIFY, for the checks
-// that refuse it where runc does and in an artifact: it calls onDefault when
-// the default action is SCMP_ACT_NOTIFY, and onEntry with every entry that
-// applies it, in order.
-func scanNotify(
-	profile *specs.LinuxSeccomp,
-	onDefault func(), onEntry func(idx int, entry *specs.LinuxSyscall),
-) {
 	if profile.DefaultAction == specs.ActNotify {
-		onDefault()
+		errs.Report(func() error {
+			return fmt.Errorf("defaultAction: %w", ErrNotifyNotAllowed)
+		})
 	}
 
 	for idx := range profile.Syscalls {
 		if profile.Syscalls[idx].Action == specs.ActNotify {
-			onEntry(idx, &profile.Syscalls[idx])
+			errs.Report(func() error {
+				return fmt.Errorf("syscalls[%d].action: %w", idx, ErrNotifyNotAllowed)
+			})
 		}
 	}
+
+	return errs.Err()
 }
 
 func validateEntryCount(profile *specs.LinuxSeccomp) error {
@@ -1301,8 +1377,8 @@ func validateEntryCount(profile *specs.LinuxSeccomp) error {
 		if counts[name] > MaxArtifactEntriesPerSyscall {
 			errs.Report(func() error {
 				return fmt.Errorf(
-					"syscall %s: %w (%d, max %d)",
-					merge.QuoteBounded(name), ErrTooManyEntriesPerSyscall, counts[name],
+					"syscalls: %s in %d entries: %w (max %d)",
+					merge.QuoteBounded(name), counts[name], ErrTooManyEntriesPerSyscall,
 					MaxArtifactEntriesPerSyscall,
 				)
 			})
@@ -1327,10 +1403,12 @@ func validateNoListener(profile *specs.LinuxSeccomp) error {
 		})
 	}
 
-	if slices.Contains(profile.Flags, specs.LinuxSeccompFlagWaitKillableRecv) {
+	if idx := slices.Index(profile.Flags, specs.LinuxSeccompFlagWaitKillableRecv); idx >= 0 {
 		errs.Report(func() error {
 			return fmt.Errorf(
-				"flag %s: %w", specs.LinuxSeccompFlagWaitKillableRecv, ErrListenerNotAllowed,
+				"flags[%d]: %s: %w",
+				idx, merge.QuoteBounded(string(specs.LinuxSeccompFlagWaitKillableRecv)),
+				ErrListenerNotAllowed,
 			)
 		})
 	}
@@ -1339,15 +1417,45 @@ func validateNoListener(profile *specs.LinuxSeccomp) error {
 }
 
 // validateDuplicateSyscallNames reports each duplicated syscall name once,
-// listing every entry that names it, and separately when a name repeats
-// within a single entry.
+// at the second entry that names it and listing every entry that does, and
+// separately at each entry that repeats a name within itself. The reports
+// come in the order of the entries they are at.
 func validateDuplicateSyscallNames(syscalls []specs.LinuxSyscall) error {
-	type occurrence struct {
-		entries    []int
-		repeatedIn []int
+	seen := nameOccurrences(syscalls)
+
+	var errs merge.Collector
+
+	for _, current := range duplicateReports(seen) {
+		errs.Report(func() error {
+			if current.within {
+				return fmt.Errorf(
+					"syscalls[%d]: %s: %w (repeated within the entry)",
+					current.entry, merge.QuoteBounded(current.name), ErrDuplicateSyscallName,
+				)
+			}
+
+			return fmt.Errorf(
+				"syscalls[%d]: %s: %w (named by entries %s)",
+				current.entry, merge.QuoteBounded(current.name), ErrDuplicateSyscallName,
+				formatEntries(seen[current.name].entries),
+			)
+		})
 	}
 
-	seen := make(map[string]*occurrence)
+	return errs.Err()
+}
+
+// nameOccurrence is where one syscall name occurs in a profile.
+type nameOccurrence struct {
+	// entries lists the entries naming it, each once and in order.
+	entries []int
+	// repeatedIn lists the entries naming it more than once, in order.
+	repeatedIn []int
+}
+
+// nameOccurrences maps every syscall name of the entries to where it occurs.
+func nameOccurrences(syscalls []specs.LinuxSyscall) map[string]*nameOccurrence {
+	seen := make(map[string]*nameOccurrence)
 
 	for idx, sc := range syscalls {
 		inEntry := make(map[string]struct{}, len(sc.Names))
@@ -1355,7 +1463,7 @@ func validateDuplicateSyscallNames(syscalls []specs.LinuxSyscall) error {
 		for _, name := range sc.Names {
 			current, ok := seen[name]
 			if !ok {
-				current = &occurrence{entries: nil, repeatedIn: nil}
+				current = &nameOccurrence{entries: nil, repeatedIn: nil}
 				seen[name] = current
 			}
 
@@ -1376,32 +1484,58 @@ func validateDuplicateSyscallNames(syscalls []specs.LinuxSyscall) error {
 		}
 	}
 
-	var errs merge.Collector
+	return seen
+}
 
-	for _, name := range slices.Sorted(maps.Keys(seen)) {
-		current := seen[name]
+// nameDuplicate is one report of validateDuplicateSyscallNames.
+type nameDuplicate struct {
+	entry int
+	name  string
+	// within reports a name repeated within the entry, rather than one
+	// several entries use.
+	within bool
+}
 
+// duplicateReports lists the reports of validateDuplicateSyscallNames in the
+// order of the entries they are at: one per name that several entries use,
+// and one per entry that repeats a name, so at most as many as the profile
+// holds names.
+func duplicateReports(seen map[string]*nameOccurrence) []nameDuplicate {
+	var found []nameDuplicate
+
+	for name, current := range seen {
 		if len(current.entries) > 1 {
-			errs.Report(func() error {
-				return fmt.Errorf(
-					"syscall %s in entries %s: %w",
-					merge.QuoteBounded(name), formatEntries(current.entries),
-					ErrDuplicateSyscallName,
-				)
-			})
+			found = append(
+				found,
+				nameDuplicate{entry: current.entries[1], name: name, within: false},
+			)
 		}
 
 		for _, idx := range current.repeatedIn {
-			errs.Report(func() error {
-				return fmt.Errorf(
-					"syscall %s repeated within entry %d: %w",
-					merge.QuoteBounded(name), idx, ErrDuplicateSyscallName,
-				)
-			})
+			found = append(found, nameDuplicate{entry: idx, name: name, within: true})
 		}
 	}
 
-	return errs.Err()
+	slices.SortFunc(found, func(left, right nameDuplicate) int {
+		return cmp.Or(
+			cmp.Compare(left.entry, right.entry),
+			strings.Compare(left.name, right.name),
+			// Several entries naming a name are reported before the
+			// entry repeating it within itself.
+			cmp.Compare(boolRank(left.within), boolRank(right.within)),
+		)
+	})
+
+	return found
+}
+
+// boolRank orders false before true.
+func boolRank(value bool) int {
+	if value {
+		return 1
+	}
+
+	return 0
 }
 
 // maxListedEntries bounds how many entry indices formatEntries lists. One
@@ -1442,7 +1576,7 @@ func isKnownAction(action specs.LinuxSeccompAction) bool {
 // error a runtime may log. The caller builds it only for an action
 // isKnownAction refuses, and only while the report has room for it.
 func unknownActionError(action specs.LinuxSeccompAction, context string) error {
-	return fmt.Errorf("%s: %w %s", context, ErrUnknownAction, merge.QuoteBounded(string(action)))
+	return fmt.Errorf("%s: %s: %w", context, merge.QuoteBounded(string(action)), ErrUnknownAction)
 }
 
 func isKnownOperator(op specs.LinuxSeccompOperator) bool {
@@ -1485,98 +1619,35 @@ func isKnownFlag(flag specs.LinuxSeccompFlag) bool {
 	}
 }
 
-func validateArchitectures(archs []specs.Arch) error {
-	var errs merge.Collector
-
-	for _, arch := range archs {
-		if !isKnownArch(arch) {
-			errs.Report(func() error {
-				return fmt.Errorf(
-					"architecture: %w %s", ErrUnknownArch, merge.QuoteBounded(string(arch)),
-				)
-			})
-		}
-	}
-
-	return errs.Err()
-}
-
-func validateFlags(flags []specs.LinuxSeccompFlag) error {
-	var errs merge.Collector
-
-	for _, flag := range flags {
-		if !isKnownFlag(flag) {
-			errs.Report(func() error {
-				return fmt.Errorf("flag: %w %s", ErrUnknownFlag, merge.QuoteBounded(string(flag)))
-			})
-		}
-	}
-
-	return errs.Err()
-}
-
+// validateDuplicateArchitectures reports every architecture the list
+// repeats.
 func validateDuplicateArchitectures(archs []specs.Arch) error {
-	seen := make(map[specs.Arch]struct{}, len(archs))
-
 	var errs merge.Collector
 
-	for _, arch := range archs {
-		if _, ok := seen[arch]; ok {
-			errs.Report(func() error {
-				return fmt.Errorf(
-					"architecture: %w %s", ErrDuplicateArch, merge.QuoteBounded(string(arch)),
-				)
-			})
-		} else {
-			seen[arch] = struct{}{}
-		}
-	}
+	merge.ReportDuplicates(&errs, len(archs),
+		func(idx int) (specs.Arch, bool) { return archs[idx], true },
+		func(idx, first int) error {
+			return fmt.Errorf(
+				"architectures[%d]: %s: %w (also at architectures[%d])",
+				idx, merge.QuoteBounded(string(archs[idx])), ErrDuplicateArch, first,
+			)
+		})
 
 	return errs.Err()
 }
 
+// validateDuplicateFlags reports every flag the list repeats.
 func validateDuplicateFlags(flags []specs.LinuxSeccompFlag) error {
-	seen := make(map[specs.LinuxSeccompFlag]struct{}, len(flags))
-
 	var errs merge.Collector
 
-	for _, flag := range flags {
-		if _, ok := seen[flag]; ok {
-			errs.Report(func() error {
-				return fmt.Errorf("flag: %w %s", ErrDuplicateFlag, merge.QuoteBounded(string(flag)))
-			})
-		} else {
-			seen[flag] = struct{}{}
-		}
-	}
-
-	return errs.Err()
-}
-
-func validateSyscallArgs(syscalls []specs.LinuxSyscall) error {
-	var errs merge.Collector
-
-	for idx, sc := range syscalls {
-		for argIdx, arg := range sc.Args {
-			if !isKnownOperator(arg.Op) {
-				errs.Report(func() error {
-					return fmt.Errorf(
-						"syscall entry %d arg %d: %w %s",
-						idx, argIdx, ErrUnknownOperator, merge.QuoteBounded(string(arg.Op)),
-					)
-				})
-			}
-
-			if arg.Index > maxSyscallArgIndex {
-				errs.Report(func() error {
-					return fmt.Errorf(
-						"syscall entry %d arg %d: %w %d",
-						idx, argIdx, ErrArgIndexOutOfRange, arg.Index,
-					)
-				})
-			}
-		}
-	}
+	merge.ReportDuplicates(&errs, len(flags),
+		func(idx int) (specs.LinuxSeccompFlag, bool) { return flags[idx], true },
+		func(idx, first int) error {
+			return fmt.Errorf(
+				"flags[%d]: %s: %w (also at flags[%d])",
+				idx, merge.QuoteBounded(string(flags[idx])), ErrDuplicateFlag, first,
+			)
+		})
 
 	return errs.Err()
 }

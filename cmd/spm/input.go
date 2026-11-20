@@ -50,7 +50,7 @@ var (
 	errStdinTooLarge = fmt.Errorf("stdin input exceeds %d bytes", maxInputSize)
 	errFileTooLarge  = fmt.Errorf("file exceeds %d byte limit", maxInputSize)
 	errInputTooLarge = fmt.Errorf("inputs exceed %d bytes in total", maxTotalInputSize)
-	errDecode        = errors.New("decoding failed")
+	errEmptyArgument = errors.New("empty file argument (use - for stdin)")
 )
 
 // stdinName is how an input read from stdin is named in errors and
@@ -70,6 +70,37 @@ type profileInput struct {
 	name string
 	// data holds the profile's raw JSON.
 	data []byte
+	// source is the document data was read from, which for an element of a
+	// stdin array is the array, and offset is where data starts in it. A
+	// line and column are counted in source, so that they point into what
+	// the caller holds; a nil source is data itself.
+	source []byte
+	offset int
+	// inArray reports an element of a stdin array, which validate writes
+	// back as an array however many elements it holds.
+	inArray bool
+}
+
+// newInput returns the input of a document read whole, from a file or
+// stdin.
+func newInput(name string, data []byte) profileInput {
+	return profileInput{name: name, data: data, source: nil, offset: 0, inArray: false}
+}
+
+// position returns where the byte at offset of the input's data sits in the
+// document it was read from, as "line L, column C", counting both from one
+// and the column in bytes.
+func (input *profileInput) position(offset int64) string {
+	source := input.source
+	if source == nil {
+		source = input.data
+	}
+
+	at := min(max(int(offset), 0)+input.offset, len(source))
+	line := bytes.Count(source[:at], []byte("\n")) + 1
+	column := at - (bytes.LastIndexByte(source[:at], '\n') + 1) + 1
+
+	return fmt.Sprintf("line %d, column %d", line, column)
 }
 
 // readErrorExit returns the exit code for a readInputs failure. The
@@ -78,7 +109,7 @@ type profileInput struct {
 func readErrorExit(err error) int {
 	for _, sentinel := range []error{
 		errDuplicateStdin, errTooManyFiles, errTooManyStdin, errTooManyInputs,
-		errFileTooLarge, errStdinTooLarge, errInputTooLarge,
+		errFileTooLarge, errStdinTooLarge, errInputTooLarge, errEmptyArgument,
 	} {
 		if errors.Is(err, sentinel) {
 			return exitUsage
@@ -126,13 +157,13 @@ func readInputs(paths []string, stdin io.Reader) ([]profileInput, error) {
 
 			result = append(result, items...)
 		} else {
-			data, err := readFileWithLimit(path)
+			input, err := readFileInput(path)
 			if err != nil {
-				return nil, fmt.Errorf("reading %s: %w", merge.SafeName(path), err)
+				return nil, err
 			}
 
-			added = len(data)
-			result = append(result, profileInput{name: path, data: data})
+			added = len(input.data)
+			result = append(result, input)
 		}
 
 		total += added
@@ -142,6 +173,22 @@ func readInputs(paths []string, stdin io.Reader) ([]profileInput, error) {
 	}
 
 	return result, nil
+}
+
+// readFileInput reads the profile of a file argument.
+func readFileInput(path string) (profileInput, error) {
+	// An empty argument names no file; os.Open would report it as one that
+	// does not exist, under an empty name.
+	if path == "" {
+		return newInput("", nil), errEmptyArgument
+	}
+
+	data, err := readFileWithLimit(path)
+	if err != nil {
+		return newInput(path, nil), fmt.Errorf("reading %s: %w", merge.SafeName(path), err)
+	}
+
+	return newInput(path, data), nil
 }
 
 // readStdinArgument reads the profiles of a "-" argument given beside others
@@ -234,7 +281,7 @@ func readFromStdin(reader io.Reader) ([]profileInput, error) {
 		return array, nil
 	}
 
-	return []profileInput{{name: stdinName, data: data}}, nil
+	return []profileInput{newInput(stdinName, data)}, nil
 }
 
 // readStdinArray reads a JSON array of profiles, naming each element by its
@@ -259,26 +306,52 @@ func readStdinArray(data []byte) ([]profileInput, error) {
 		return nil, errTooManyStdin
 	}
 
-	var array []json.RawMessage
-
 	// A document that is not an array is a single profile, which the caller
 	// reads from the same bytes, so the decoder's complaint about it says
 	// nothing here.
-	//nolint:nilerr // not an array: the caller reads a single profile
-	if json.Unmarshal(data, &array) != nil {
+	if !json.Valid(data) {
 		return nil, nil
 	}
 
-	if len(array) == 0 {
+	result, err := splitArray(data)
+	if err != nil {
+		return nil, nil //nolint:nilerr // not an array: the caller reads a single profile
+	}
+
+	if len(result) == 0 {
 		return nil, errEmptyInput
 	}
 
-	result := make([]profileInput, len(array))
-	for idx, item := range array {
-		result[idx] = profileInput{
-			name: stdinName + "[" + strconv.Itoa(idx) + "]",
-			data: item,
+	return result, nil
+}
+
+// splitArray returns the elements of a valid JSON array, each named by its
+// index and placed at its offset in the array.
+func splitArray(data []byte) ([]profileInput, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+
+	_, err := decoder.Token()
+	if err != nil {
+		return nil, err //nolint:wrapcheck // the caller reads a single profile
+	}
+
+	var result []profileInput
+
+	for decoder.More() {
+		var item json.RawMessage
+
+		err = decoder.Decode(&item)
+		if err != nil {
+			return nil, err //nolint:wrapcheck // the caller reads a single profile
 		}
+
+		result = append(result, profileInput{
+			name:    stdinName + "[" + strconv.Itoa(len(result)) + "]",
+			data:    item,
+			source:  data,
+			offset:  int(decoder.InputOffset()) - len(item),
+			inArray: true,
+		})
 	}
 
 	return result, nil
@@ -297,7 +370,7 @@ func countArrayElements(data []byte) (int, bool, error) {
 
 	token, err := decoder.Token()
 	if err != nil {
-		//nolint:wrapcheck // the caller reports it through decodeError
+		//nolint:wrapcheck // the caller reads a single profile
 		return 0, false, err
 	}
 
@@ -331,7 +404,7 @@ func skipValue(decoder *json.Decoder) error {
 	for {
 		token, err := decoder.Token()
 		if err != nil {
-			//nolint:wrapcheck // the caller reports it through decodeError
+			//nolint:wrapcheck // the caller reads a single profile
 			return err
 		}
 

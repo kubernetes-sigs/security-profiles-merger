@@ -207,7 +207,7 @@ if err := seccomp.ValidateArtifact(artifact); err != nil {
 }
 effective, err := seccomp.Intersect(baseline, artifact)
 if err != nil {
-    return err // an *spm.InputError names the input that failed
+    return err // an *spm.InputError names each input that failed
 }
 ```
 

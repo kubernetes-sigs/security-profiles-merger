@@ -1,0 +1,45 @@
+error: flag provided but not defined: -real.json
+Usage: spm validate [options] [files...]
+
+Validate one or more security profiles.
+Reads from stdin when no files are provided: a single profile, or a JSON
+array of profiles. A file argument of - reads stdin beside the files.
+Flags must precede file arguments, and -- ends them.
+Exit status: 0 when every profile is valid, 1 when one is invalid, of
+another type, or cannot be read, or the output cannot be written, 2 on a
+usage error; 1 when a usage error comes up after a profile was found
+invalid.
+Writes the validated profiles on success, in the shape they came in: a
+single profile as an object, and several, or a JSON array on stdin even of
+one element, as an array. --quiet writes no profile and notes no
+auto-detected profile type, and --no-detect-note drops that note while
+still writing the profiles. Errors and warnings always go to stderr.
+--quiet cannot be combined with --output or --format, nor --strict with
+--artifact.
+
+--arch names the native seccomp architecture of the node that loads the
+profiles, which decides what --artifact and --strict accept: a value above
+32 bits is refused where that node covers a 32-bit architecture. It
+defaults to the architecture this program runs on, so the same profile can
+pass here and fail on another machine; pass a name such as SCMP_ARCH_X86_64
+for the target node, or --arch none for a node of unknown architecture,
+which refuses such a value whatever the profile lists. The default checks do
+not depend on it, so it needs --artifact or --strict.
+
+Options:
+  --arch string
+    	seccomp architecture of the node that loads the profiles, for --artifact or --strict: native, none, or a name such as SCMP_ARCH_X86_64 (default "native")
+  --artifact
+    	validate as an artifact, the untrusted profile a container runtime pulls, rejecting unknown, repeated and misspelled fields and invalid UTF-8
+  --format string
+    	output format: json, human (default "json")
+  --no-detect-note
+    	do not note an auto-detected profile type on stderr; the validated profiles, errors and warnings still go to their usual streams
+  --output string
+    	write output to file (default: stdout, not with --quiet)
+  --quiet
+    	write no profile on success and note no auto-detected type; errors and warnings still go to stderr (not with --output or --format)
+  --strict
+    	use strict validation, which also rejects unknown and misspelled fields and invalid UTF-8 (not with --artifact)
+  --type string
+    	profile type: seccomp, apparmor, landlock (auto-detected if omitted)

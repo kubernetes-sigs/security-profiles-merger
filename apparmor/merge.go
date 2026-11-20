@@ -79,8 +79,9 @@ type InputError = spm.InputError
 // narrower than its inputs call for (see the Cost bounds section).
 //
 // Each input is validated as the Validation section of the package
-// documentation describes, and a failure is returned as an InputError
-// naming the input.
+// documentation describes, and every one that fails is reported as an
+// InputError naming the input: the error is that InputError for one, and
+// the InputErrors joined in input order for several.
 func Intersect(profiles ...*Profile) (*Profile, error) {
 	matchers := newMatcherCache()
 	exceeded := false
@@ -141,13 +142,14 @@ func foldProfiles(
 	// normalized copy it compared, which the merge goes on with.
 	normalized := make([]*Profile, len(profiles))
 
-	for idx, profile := range profiles {
+	err := merge.CheckInputs(profiles, func(idx int, profile *Profile) error {
 		norm, err := validateMergeInput(profile, matchers)
-		if err != nil {
-			return nil, &spm.InputError{Index: idx, Err: err}
-		}
-
 		normalized[idx] = norm
+
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	for _, profile := range normalized {
@@ -246,25 +248,25 @@ func unifyAliasSpellings(profiles []*Profile, matchers *matcherCache) {
 	}
 }
 
-// pathLists yields every list of paths a profile holds, named after its
-// field, as a pointer through which the caller may read the list, rewrite
+// pathLists yields every list of paths a profile holds, named by its JSON
+// path, as a pointer through which the caller may read the list, rewrite
 // its elements or replace it. A section the profile omits holds no list.
 func pathLists(profile *Profile) iter.Seq2[string, *[]string] {
 	return func(yield func(string, *[]string) bool) {
 		if profile.Executable != nil {
-			if !yield("AllowedExecutables", &profile.Executable.AllowedExecutables) ||
-				!yield("AllowedLibraries", &profile.Executable.AllowedLibraries) {
+			if !yield(allowedExecutablesPath, &profile.Executable.AllowedExecutables) ||
+				!yield(allowedLibrariesPath, &profile.Executable.AllowedLibraries) {
 				return
 			}
 		}
 
 		if profile.Filesystem != nil {
-			if !yield("ReadOnlyPaths", &profile.Filesystem.ReadOnlyPaths) ||
-				!yield("WriteOnlyPaths", &profile.Filesystem.WriteOnlyPaths) {
+			if !yield(readOnlyPathsPath, &profile.Filesystem.ReadOnlyPaths) ||
+				!yield(writeOnlyPathsPath, &profile.Filesystem.WriteOnlyPaths) {
 				return
 			}
 
-			yield("ReadWritePaths", &profile.Filesystem.ReadWritePaths)
+			yield(readWritePathsPath, &profile.Filesystem.ReadWritePaths)
 		}
 	}
 }

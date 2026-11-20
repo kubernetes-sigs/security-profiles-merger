@@ -143,29 +143,53 @@ const MaxPathLen = spm.MaxPathLen
 // KEP-6061 recommends runtimes accept hold a few dozen rules.
 const MaxArtifactRules = 1024
 
-// fieldRef names a profile field, or an element of it when idx is not
-// negative, in error messages. It is formatted only when an error is
-// reported, so validating a large profile does not build a string per rule.
+// fieldRef names a list of rights in error messages by its JSON path: a
+// list of the profile itself, or one of the rule at index rule of the rule
+// list rules. It is formatted only when an error is reported, so validating
+// a large profile does not build a string per rule.
 type fieldRef struct {
+	rules string
+	rule  int
 	field string
-	idx   int
 }
 
-const noIndex = -1
-
 func (r fieldRef) String() string {
-	if r.idx == noIndex {
+	if r.rules == "" {
 		return r.field
 	}
 
-	return fmt.Sprintf("%s[%d]", r.field, r.idx)
+	return fmt.Sprintf("%s[%d].%s", r.rules, r.rule, r.field)
 }
 
-func handledFSRef() fieldRef       { return fieldRef{field: "HandledAccessFS", idx: noIndex} }
-func handledNetRef() fieldRef      { return fieldRef{field: "HandledAccessNet", idx: noIndex} }
-func scopedRef() fieldRef          { return fieldRef{field: "Scoped", idx: noIndex} }
-func pathRuleRef(idx int) fieldRef { return fieldRef{field: "PathRules", idx: idx} }
-func netRuleRef(idx int) fieldRef  { return fieldRef{field: "NetRules", idx: idx} }
+// at returns the JSON path of the element at idx of the list.
+func (r fieldRef) at(idx int) string {
+	return fmt.Sprintf("%s[%d]", r, idx)
+}
+
+// The JSON names of the rule lists, which error messages start their paths
+// with.
+const (
+	pathRulesName = "pathRules"
+	netRulesName  = "netRules"
+)
+
+func handledFSRef() fieldRef  { return fieldRef{rules: "", rule: 0, field: "handledAccessFs"} }
+func handledNetRef() fieldRef { return fieldRef{rules: "", rule: 0, field: "handledAccessNet"} }
+func scopedRef() fieldRef     { return fieldRef{rules: "", rule: 0, field: "scoped"} }
+
+func pathRuleRef(idx int) fieldRef {
+	return fieldRef{rules: pathRulesName, rule: idx, field: "accessFs"}
+}
+
+func netRuleRef(idx int) fieldRef {
+	return fieldRef{rules: netRulesName, rule: idx, field: "accessNet"}
+}
+
+// rulePath returns the JSON path of a member of the rule at idx of the rule
+// list rules, such as "pathRules[1].path".
+func rulePath(rules string, idx int, member string) string {
+	return fmt.Sprintf("%s[%d].%s", rules, idx, member)
+}
 
 // Validate checks what the merge needs: a profile must contain only known
 // access right values and valid paths. Paths must not be empty, longer than
@@ -248,7 +272,9 @@ func collectProfile(report *merge.Collector, profile *Profile, tier validationTi
 		clean, problem := validatePath(rule.Path)
 		if problem != pathValid {
 			report.Report(func() error {
-				return fmt.Errorf("%s: %w", pathRuleRef(idx), problem.err(rule.Path))
+				return fmt.Errorf(
+					"%s: %w", rulePath(pathRulesName, idx, "path"), problem.err(rule.Path),
+				)
 			})
 		}
 
@@ -285,28 +311,34 @@ func validateDuplicates(report *merge.Collector, profile *Profile, cleaned []str
 	// Rejected paths, whose cleaned entry is empty, are skipped, and paths
 	// are compared cleaned, so that "/etc" and "//etc" are reported as
 	// duplicates just as the merge functions would combine them.
-	validateDuplicateRules(report, len(profile.PathRules),
+	merge.ReportDuplicates(report, len(profile.PathRules),
 		func(idx int) (string, bool) { return cleaned[idx], cleaned[idx] != "" },
-		func(idx int) error {
-			return fmt.Errorf("%s: path %s: %w",
-				pathRuleRef(idx), merge.QuoteBounded(profile.PathRules[idx].Path), ErrDuplicateRule)
+		func(idx, first int) error {
+			return fmt.Errorf("%s: %s: %w (also at %s)",
+				rulePath(pathRulesName, idx, "path"),
+				merge.QuoteBounded(profile.PathRules[idx].Path), ErrDuplicateRule,
+				rulePath(pathRulesName, first, "path"))
 		})
-	validateDuplicateRules(report, len(profile.NetRules),
+	merge.ReportDuplicates(report, len(profile.NetRules),
 		func(idx int) (uint16, bool) { return profile.NetRules[idx].Port, true },
-		func(idx int) error {
-			return fmt.Errorf("%s: port %d: %w",
-				netRuleRef(idx), profile.NetRules[idx].Port, ErrDuplicateRule)
+		func(idx, first int) error {
+			return fmt.Errorf("%s: %d: %w (also at %s)",
+				rulePath(netRulesName, idx, "port"), profile.NetRules[idx].Port,
+				ErrDuplicateRule, rulePath(netRulesName, first, "port"))
 		})
 }
 
 func validateRights[T ~string](
 	report *merge.Collector, context fieldRef, rights []T, known func(T) bool,
 ) {
-	for _, right := range rights {
+	for idx, right := range rights {
 		if !known(right) {
 			report.Report(func() error {
 				return fmt.Errorf(
-					"%s: %w %s", context, ErrUnknownRight, merge.QuoteBounded(string(right)),
+					"%s: %s: %w",
+					context.at(idx),
+					merge.QuoteBounded(string(right)),
+					ErrUnknownRight,
 				)
 			})
 		}
@@ -339,7 +371,7 @@ func (p pathProblem) err(path string) error {
 	case pathParent:
 		return fmt.Errorf("%s: %w", merge.QuoteBounded(path), ErrParentPath)
 	case pathDot:
-		return fmt.Errorf("%s resolves to %q: %w", merge.QuoteBounded(path), ".", ErrEmptyPath)
+		return fmt.Errorf("%s: %w (resolves to %q)", merge.QuoteBounded(path), ErrEmptyPath, ".")
 	case pathValid:
 	}
 
@@ -515,8 +547,8 @@ func ValidateArtifact(profile *Profile) error {
 func validateRuleCount(profile *Profile) error {
 	count := len(profile.PathRules) + len(profile.NetRules)
 	if count > MaxArtifactRules {
-		return fmt.Errorf("%d rules, at most %d: %w",
-			count, MaxArtifactRules, ErrTooManyRules)
+		return fmt.Errorf("%s, %s: %d rules: %w (max %d)",
+			pathRulesName, netRulesName, count, ErrTooManyRules, MaxArtifactRules)
 	}
 
 	return nil
@@ -723,7 +755,7 @@ func (o Options) validate(profile *Profile, tier validationTier) error {
 // checkABI reports a version below ABIV1, which names no kernel.
 func (o Options) checkABI() error {
 	if o.ABI < ABIV1 {
-		return fmt.Errorf("%w: v%d (the first is v%d)", ErrUnknownABIVersion, o.ABI, ABIV1)
+		return fmt.Errorf("v%d: %w (the first is v%d)", o.ABI, ErrUnknownABIVersion, ABIV1)
 	}
 
 	return nil
@@ -768,7 +800,7 @@ func abiErrors[T ~string](
 	report *merge.Collector, context fieldRef, rights []T, abi ABIVersion,
 	table map[T]ABIVersion,
 ) {
-	for _, right := range rights {
+	for idx, right := range rights {
 		needed, known := table[right]
 		if !known || needed <= abi {
 			continue
@@ -776,8 +808,9 @@ func abiErrors[T ~string](
 
 		report.Report(func() error {
 			return fmt.Errorf(
-				"%s: right %s: %w (needs v%d, have v%d)",
-				context, merge.QuoteBounded(string(right)), ErrUnsupportedABIRight, needed, abi,
+				"%s: %s: %w (needs v%d, have v%d)",
+				context.at(idx), merge.QuoteBounded(string(right)), ErrUnsupportedABIRight,
+				needed, abi,
 			)
 		})
 	}
@@ -802,7 +835,10 @@ func validateLoadable(report *merge.Collector, profile *Profile) {
 		if len(rule.AccessFS) == 0 {
 			report.Report(func() error {
 				return fmt.Errorf(
-					"%s: %s: %w", pathRuleRef(idx), merge.QuoteBounded(rule.Path), ErrEmptyRule,
+					"%s: %w (path %s)",
+					pathRuleRef(idx),
+					ErrEmptyRule,
+					merge.QuoteBounded(rule.Path),
 				)
 			})
 		}
@@ -813,7 +849,7 @@ func validateLoadable(report *merge.Collector, profile *Profile) {
 	for idx, rule := range profile.NetRules {
 		if len(rule.AccessNet) == 0 {
 			report.Report(func() error {
-				return fmt.Errorf("%s: port %d: %w", netRuleRef(idx), rule.Port, ErrEmptyRule)
+				return fmt.Errorf("%s: %w (port %d)", netRuleRef(idx), ErrEmptyRule, rule.Port)
 			})
 		}
 
@@ -836,7 +872,14 @@ func validateLoadablePath(report *merge.Collector, idx int, path string) {
 		if problem.failed {
 			report.Report(func() error {
 				return fmt.Errorf(
-					"%s: %s: %w", pathRuleRef(idx), merge.QuoteBounded(path), problem.sentinel,
+					"%s: %s: %w",
+					rulePath(
+						pathRulesName,
+						idx,
+						"path",
+					),
+					merge.QuoteBounded(path),
+					problem.sentinel,
 				)
 			})
 		}
@@ -861,12 +904,12 @@ func hasTrailingSlash(path string) bool {
 func validateHandled[T ~string](
 	report *merge.Collector, context fieldRef, rights []T, handled map[T]struct{},
 ) {
-	for _, right := range rights {
+	for idx, right := range rights {
 		if _, ok := handled[right]; !ok {
 			report.Report(func() error {
 				return fmt.Errorf(
-					"%s: right %s: %w",
-					context,
+					"%s: %s: %w",
+					context.at(idx),
 					merge.QuoteBounded(string(right)),
 					ErrUnhandledRight,
 				)
@@ -876,45 +919,15 @@ func validateHandled[T ~string](
 }
 
 // validateDuplicateRights reports every right of the list that an earlier
-// one repeats. The set of rights seen starts empty rather than sized for the
-// list, since a list of repeated rights holds few distinct ones.
+// one repeats.
 func validateDuplicateRights[T ~string](report *merge.Collector, context fieldRef, rights []T) {
-	seen := make(map[T]struct{})
-
-	for _, right := range rights {
-		if _, ok := seen[right]; ok {
-			report.Report(func() error {
-				return fmt.Errorf(
-					"%s: right %s: %w",
-					context,
-					merge.QuoteBounded(string(right)),
-					ErrDuplicateRight,
-				)
-			})
-		}
-
-		seen[right] = struct{}{}
-	}
-}
-
-// validateDuplicateRules reports each of count rules whose key an earlier
-// rule has. A rule without a key, for which key reports false, is skipped;
-// duplicate builds the failure for a rule.
-func validateDuplicateRules[Key comparable](
-	report *merge.Collector, count int, key func(int) (Key, bool), duplicate func(int) error,
-) {
-	seen := make(map[Key]struct{}, count)
-
-	for idx := range count {
-		ruleKey, ok := key(idx)
-		if !ok {
-			continue
-		}
-
-		if _, dup := seen[ruleKey]; dup {
-			report.Report(func() error { return duplicate(idx) })
-		}
-
-		seen[ruleKey] = struct{}{}
-	}
+	merge.ReportDuplicates(report, len(rights),
+		func(idx int) (T, bool) { return rights[idx], true },
+		func(idx, first int) error {
+			return fmt.Errorf(
+				"%s: %s: %w (also at %s)",
+				context.at(idx), merge.QuoteBounded(string(rights[idx])), ErrDuplicateRight,
+				context.at(first),
+			)
+		})
 }

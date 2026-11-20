@@ -58,8 +58,8 @@ func ExampleValidate() {
 	profile := &apparmor.Profile{
 		Executable: nil,
 		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig},
-			WriteOnlyPaths: []string{pathEtcConfig},
+			ReadOnlyPaths:  []string{"/"},
+			WriteOnlyPaths: []string{"/"},
 			ReadWritePaths: nil,
 		},
 		Network:      nil,
@@ -70,7 +70,7 @@ func ExampleValidate() {
 	fmt.Println(err)
 
 	// Output:
-	// path "/etc/config" in both ReadOnlyPaths and WriteOnlyPaths: duplicate path across filesystem categories
+	// filesystem.writeOnlyPaths[0]: "/": duplicate path across filesystem categories (also at filesystem.readOnlyPaths[0])
 }
 
 func ExampleValidate_emptyCapability() {
@@ -87,13 +87,13 @@ func ExampleValidate_emptyCapability() {
 	fmt.Println(err)
 
 	// Output:
-	// AllowedCapabilities[1]: empty capability
+	// capability.allowedCapabilities[1]: empty capability
 }
 
 func ExampleValidateStrict() {
 	profile := &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{pathEtcConfig, pathEtcConfig},
+			AllowedExecutables: []string{"/bin/sh", "/bin/sh"},
 			AllowedLibraries:   nil,
 		},
 		Filesystem:   nil,
@@ -105,7 +105,7 @@ func ExampleValidateStrict() {
 	fmt.Println(err)
 
 	// Output:
-	// AllowedExecutables[1]: "/etc/config": duplicate executable path
+	// executable.allowedExecutables[1]: "/bin/sh": duplicate executable path (also at executable.allowedExecutables[0])
 }
 
 func ExampleFormatProfile() {

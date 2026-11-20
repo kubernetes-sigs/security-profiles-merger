@@ -68,7 +68,7 @@ func TestValidateUnknownDefaultAction(t *testing.T) {
 		t.Fatalf("expected ErrUnknownAction, got: %v", err)
 	}
 
-	if !strings.Contains(err.Error(), "default action") {
+	if !strings.Contains(err.Error(), "defaultAction") {
 		t.Errorf("error should mention the default action: %v", err)
 	}
 }
@@ -89,7 +89,7 @@ func TestValidateUnknownSyscallAction(t *testing.T) {
 		t.Fatalf("expected ErrUnknownAction, got: %v", err)
 	}
 
-	if !strings.Contains(err.Error(), "syscall entry 1") {
+	if !strings.Contains(err.Error(), "syscalls[1]") {
 		t.Errorf("error should name the offending entry: %v", err)
 	}
 }
@@ -115,15 +115,15 @@ func TestValidateMultipleErrors(t *testing.T) {
 	}
 
 	msg := err.Error()
-	if !strings.Contains(msg, "default action") {
+	if !strings.Contains(msg, "defaultAction") {
 		t.Errorf("error should mention default action: %v", err)
 	}
 
-	if !strings.Contains(msg, "syscall entry 0") {
+	if !strings.Contains(msg, "syscalls[0]") {
 		t.Errorf("error should mention syscall entry 0: %v", err)
 	}
 
-	if !strings.Contains(msg, "syscall entry 1") {
+	if !strings.Contains(msg, "syscalls[1]") {
 		t.Errorf("error should mention syscall entry 1: %v", err)
 	}
 }
@@ -304,7 +304,7 @@ func TestValidateRejectsNotifyOnWrite(t *testing.T) {
 		t.Fatalf("expected ErrNotifyUnsupported, got: %v", err)
 	}
 
-	if !strings.Contains(err.Error(), "syscall entry 1") {
+	if !strings.Contains(err.Error(), "syscalls[1]") {
 		t.Errorf("error should mention syscall entry 1: %v", err)
 	}
 
@@ -798,7 +798,7 @@ func TestValidateArtifactRejectsNotifyDefaultAction(t *testing.T) {
 		t.Fatalf("expected ErrNotifyNotAllowed, got: %v", err)
 	}
 
-	if !strings.Contains(err.Error(), "default action") {
+	if !strings.Contains(err.Error(), "defaultAction") {
 		t.Errorf("error should mention default action: %v", err)
 	}
 
@@ -824,7 +824,7 @@ func TestValidateArtifactRejectsNotifySyscall(t *testing.T) {
 		t.Fatalf("expected ErrNotifyNotAllowed, got: %v", err)
 	}
 
-	if !strings.Contains(err.Error(), "syscall entry 1") {
+	if !strings.Contains(err.Error(), "syscalls[1]") {
 		t.Errorf("error should mention syscall entry 1: %v", err)
 	}
 }
@@ -982,7 +982,7 @@ func TestValidateErrnoRange(t *testing.T) {
 			t.Errorf("%s: expected ErrErrnoOutOfRange, got: %v", name, err)
 		}
 
-		for _, want := range []string{"defaultErrnoRet", "syscall entry 0 errnoRet"} {
+		for _, want := range []string{"defaultErrnoRet", "syscalls[0].errnoRet"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("%s: error should mention %s: %v", name, want, err)
 			}
@@ -1049,7 +1049,10 @@ func TestValidateStrictReportsDuplicateOncePerName(t *testing.T) {
 		t.Errorf("duplicate reported %d times, want once: %v", got, err)
 	}
 
-	if !strings.Contains(err.Error(), "repeated within entry 0") {
+	if !strings.Contains(
+		err.Error(),
+		`syscalls[0]: "read": duplicate syscall name (repeated within the entry)`,
+	) {
 		t.Errorf("error should point at the entry: %v", err)
 	}
 }
@@ -1073,7 +1076,10 @@ func TestValidateStrictAttributesRepetitionToItsEntry(t *testing.T) {
 		t.Fatalf("expected ErrDuplicateSyscallName, got: %v", err)
 	}
 
-	for _, want := range []string{"entries 0 and 2", "repeated within entry 2"} {
+	for _, want := range []string{
+		`syscalls[2]: "read": duplicate syscall name (named by entries 0 and 2)`,
+		`syscalls[2]: "read": duplicate syscall name (repeated within the entry)`,
+	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error should contain %q: %v", want, err)
 		}
@@ -1161,7 +1167,7 @@ func TestValidateStrictUnusedErrnoRet(t *testing.T) {
 		t.Fatalf("expected ErrUnusedErrnoRet, got: %v", err)
 	}
 
-	for _, want := range []string{"defaultErrnoRet", "syscall entry 0 errnoRet"} {
+	for _, want := range []string{"defaultErrnoRet", "syscalls[0].errnoRet"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q should mention %q", err, want)
 		}
@@ -1324,7 +1330,7 @@ func TestValidateArtifactConflictingEntries(t *testing.T) {
 			// Once, not once per rule the entry loads: a syscall is
 			// reported at the first entry that conflicts and then left
 			// alone.
-			want := `syscall entry 1: conflicting entries for "read"`
+			want := `syscalls[1]: "read": conflicting entries`
 			if got := strings.Count(err.Error(), want); got != 1 {
 				t.Errorf("error %q should contain %q once, got %d", err, want, got)
 			}
@@ -1831,5 +1837,106 @@ func TestUnmarshalStrictNilProfile(t *testing.T) {
 	err := seccomp.UnmarshalStrict([]byte(`{"defaultAction":"SCMP_ACT_ERRNO"}`), nil)
 	if !errors.Is(err, seccomp.ErrNilProfile) {
 		t.Errorf("UnmarshalStrict(nil) = %v, want ErrNilProfile", err)
+	}
+}
+
+// TestValidateReportsInProfileOrder covers the order and shape of a report:
+// each entry is checked whole before the next, after the profile-wide
+// members, and every failure names the JSON path of the member, the value
+// and the sentinel, with what else says why in parentheses.
+func TestValidateReportsInProfileOrder(t *testing.T) {
+	t.Parallel()
+
+	profile := &specs.LinuxSeccomp{
+		DefaultAction: "SCMP_ACT_BOGUS",
+		Architectures: []specs.Arch{"SCMP_ARCH_BOGUS"},
+		Flags:         []specs.LinuxSeccompFlag{"SECCOMP_FILTER_FLAG_BOGUS"},
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{"read", "", "re\x00ad"}, Action: "SCMP_ACT_BOGUS"},
+			{
+				Names:  []string{"write"},
+				Action: specs.ActAllow,
+				Args:   []specs.LinuxSeccompArg{{Index: 9, Op: "SCMP_CMP_BOGUS"}},
+			},
+			{Names: nil, Action: specs.ActNotify},
+		},
+	}
+
+	err := seccomp.Validate(profile)
+
+	want := strings.Join([]string{
+		`defaultAction: "SCMP_ACT_BOGUS": unknown seccomp action`,
+		`architectures[0]: "SCMP_ARCH_BOGUS": unknown architecture`,
+		`flags[0]: "SECCOMP_FILTER_FLAG_BOGUS": unknown seccomp flag`,
+		`syscalls[0].names[1]: empty syscall name`,
+		`syscalls[0].names[2]: "re\x00ad": invalid syscall name`,
+		`syscalls[0].action: "SCMP_ACT_BOGUS": unknown seccomp action`,
+		`syscalls[1].args[0].op: "SCMP_CMP_BOGUS": unknown seccomp operator`,
+		`syscalls[1].args[0].index: 9: syscall arg index out of range (max 5)`,
+		`syscalls[2].names: syscall entry has no names`,
+		`listenerPath: SCMP_ACT_NOTIFY without a listener`,
+	}, "\n")
+	if err == nil || err.Error() != want {
+		t.Errorf("Validate =\n%v\nwant\n%s", err, want)
+	}
+}
+
+// TestValidateArtifactMessages pins the shape of the failures only the
+// artifact and strict checks report.
+func TestValidateArtifactMessages(t *testing.T) {
+	t.Parallel()
+
+	big, ret := uint(99999), uint(1)
+
+	profile := &specs.LinuxSeccomp{
+		DefaultAction:   specs.ActErrno,
+		DefaultErrnoRet: &big,
+		Architectures:   []specs.Arch{specs.ArchX86_64, specs.ArchX86_64},
+		Flags: []specs.LinuxSeccompFlag{
+			specs.LinuxSeccompFlagLog, specs.LinuxSeccompFlagLog,
+		},
+		Syscalls: []specs.LinuxSyscall{{
+			Names:    []string{"read"},
+			Action:   specs.ActAllow,
+			ErrnoRet: &ret,
+			Args: []specs.LinuxSeccompArg{
+				{Index: 0, Value: 1, ValueTwo: 2, Op: specs.OpEqualTo},
+			},
+		}},
+	}
+
+	err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateStrict(profile)
+
+	want := strings.Join([]string{
+		`architectures[1]: "SCMP_ARCH_X86_64": duplicate architecture (also at architectures[0])`,
+		`flags[1]: "SECCOMP_FILTER_FLAG_LOG": duplicate seccomp flag (also at flags[0])`,
+		`defaultErrnoRet: 99999: errno out of range (max 4095)`,
+		`syscalls[0].errnoRet: 1: errnoRet is only used by SCMP_ACT_ERRNO and SCMP_ACT_TRACE ` +
+			`(action "SCMP_ACT_ALLOW")`,
+		`syscalls[0].args[0].valueTwo: 2: valueTwo is only used by SCMP_CMP_MASKED_EQ ` +
+			`(op "SCMP_CMP_EQ")`,
+	}, "\n")
+	if err == nil || err.Error() != want {
+		t.Errorf("ValidateStrictForArch =\n%v\nwant\n%s", err, want)
+	}
+}
+
+// TestValidateStrictListenerFlagMessages pins the shape of the portability
+// rules ValidateStrict adds for the flags next to the listener settings:
+// the flag by its position, its name, the sentinel, and why.
+func TestValidateStrictListenerFlagMessages(t *testing.T) {
+	t.Parallel()
+
+	err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateStrict(&specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Flags: []specs.LinuxSeccompFlag{
+			specs.LinuxSeccompFlagLog, specs.LinuxSeccompFlagWaitKillableRecv,
+		},
+	})
+
+	want := `flags[1]: "SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV": ` +
+		`SCMP_ACT_NOTIFY is not supported here (no entry applies SCMP_ACT_NOTIFY)`
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("ValidateStrict = %v, want it to contain %s", err, want)
 	}
 }

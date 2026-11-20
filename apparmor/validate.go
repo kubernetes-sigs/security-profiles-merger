@@ -383,7 +383,7 @@ func (check *validator) structure(
 	for context, paths := range pathLists(profile) {
 		rejectPaths(&lengths, context, *paths, func(path string) bool {
 			return len(path) > maxGlobPatternLen
-		}, ErrPathTooLong, false)
+		}, ErrPathTooLong, showLength)
 	}
 
 	err := lengths.Err()
@@ -408,8 +408,8 @@ func (check *validator) structure(
 	for context, paths := range pathLists(profile) {
 		check.reject(context, *paths, func(path string) bool {
 			return path == ""
-		}, ErrEmptyPath, false)
-		check.reject(context, *paths, referencesVariable, ErrUnsupportedVariable, true)
+		}, ErrEmptyPath, showNothing)
+		check.reject(context, *paths, referencesVariable, ErrUnsupportedVariable, showQuoted)
 	}
 
 	if profile.Filesystem != nil {
@@ -490,11 +490,11 @@ func ValidateStrict(profile *Profile) error {
 		executables, libraries := normalizedExecutables(profile, normalized)
 
 		check.listDuplicates(
-			"AllowedExecutables", profile.Executable.AllowedExecutables,
+			allowedExecutablesPath, profile.Executable.AllowedExecutables,
 			executables, ErrDuplicateExecutablePath,
 		)
 		check.listDuplicates(
-			"AllowedLibraries", profile.Executable.AllowedLibraries,
+			allowedLibrariesPath, profile.Executable.AllowedLibraries,
 			libraries, ErrDuplicateExecutablePath,
 		)
 	}
@@ -592,20 +592,20 @@ func validatePathCount(profile *Profile) error {
 	}
 
 	if count > MaxArtifactPaths {
-		return fmt.Errorf("%d paths, at most %d: %w",
-			count, MaxArtifactPaths, ErrTooManyPaths)
+		return fmt.Errorf("%s: %d paths: %w (max %d)",
+			pathListsScope, count, ErrTooManyPaths, MaxArtifactPaths)
 	}
 
 	if patternBytes > MaxArtifactPatternBytes {
-		return fmt.Errorf("%d bytes of glob patterns, at most %d: %w",
-			patternBytes, MaxArtifactPatternBytes, ErrTooManyPatternBytes)
+		return fmt.Errorf("%s: %d bytes: %w (max %d)",
+			pathListsScope, patternBytes, ErrTooManyPatternBytes, MaxArtifactPatternBytes)
 	}
 
 	if profile.Capabilities != nil &&
 		len(profile.Capabilities.AllowedCapabilities) > MaxArtifactCapabilities {
-		return fmt.Errorf("%d capabilities, at most %d: %w",
-			len(profile.Capabilities.AllowedCapabilities),
-			MaxArtifactCapabilities, ErrTooManyCapabilities)
+		return fmt.Errorf("%s: %d capabilities: %w (max %d)",
+			allowedCapabilitiesPath, len(profile.Capabilities.AllowedCapabilities),
+			ErrTooManyCapabilities, MaxArtifactCapabilities)
 	}
 
 	return nil
@@ -650,13 +650,13 @@ func (check *validator) loadablePaths(profile, normalizedProfile *Profile) {
 
 		check.reject(context, paths, func(path string) bool {
 			return path != "" && path[0] != '/'
-		}, ErrRelativePath, true)
-		check.reject(context, paths, hasUnquotableChar, ErrUnquotablePath, true)
-		check.reject(context, paths, hasNul, ErrNulInPath, true)
+		}, ErrRelativePath, showQuoted)
+		check.reject(context, paths, hasUnquotableChar, ErrUnquotablePath, showQuoted)
+		check.reject(context, paths, hasNul, ErrNulInPath, showQuoted)
 		check.globStatus(context, normalized)
 		check.reject(context, normalized, func(path string) bool {
 			return dotComponentIn(path, check.matchers.matcher(path))
-		}, ErrDotComponent, true)
+		}, ErrDotComponent, showQuoted)
 	}
 }
 
@@ -785,12 +785,39 @@ func dotComponent(text string) bool {
 	}
 }
 
-// rejectPaths reports every path for which reject holds, quoting the path
-// unless quote is false. A failure is formatted only while the report has
-// room for it.
+// The JSON paths of the lists of a profile, which error messages name an
+// entry by, as in "filesystem.readOnlyPaths[2]".
+const (
+	allowedExecutablesPath  = "executable.allowedExecutables"
+	allowedLibrariesPath    = "executable.allowedLibraries"
+	readOnlyPathsPath       = "filesystem.readOnlyPaths"
+	writeOnlyPathsPath      = "filesystem.writeOnlyPaths"
+	readWritePathsPath      = "filesystem.readWritePaths"
+	allowedCapabilitiesPath = "capability.allowedCapabilities"
+	// pathListsScope names the sections whose path lists a profile-wide
+	// limit counts together.
+	pathListsScope = "executable, filesystem"
+)
+
+// shownValue is how a failure about a path shows the path.
+type shownValue int
+
+const (
+	// showQuoted quotes the path, bounded.
+	showQuoted shownValue = iota
+	// showNothing leaves the path out, for one whose text says nothing,
+	// such as an empty one or a pattern of hundreds of alternatives.
+	showNothing
+	// showLength shows the length of the path rather than the path, for
+	// one too long to show.
+	showLength
+)
+
+// rejectPaths reports every path for which reject holds, showing the path as
+// show says. A failure is formatted only while the report has room for it.
 func rejectPaths(
 	report *merge.Collector,
-	context string, paths []string, reject func(string) bool, sentinel error, quote bool,
+	context string, paths []string, reject func(string) bool, sentinel error, show shownValue,
 ) {
 	for idx, path := range paths {
 		if !reject(path) {
@@ -798,22 +825,24 @@ func rejectPaths(
 		}
 
 		report.Report(func() error {
-			if quote {
-				return fmt.Errorf(
-					"%s[%d]: %s: %w", context, idx, merge.QuoteBounded(path), sentinel,
-				)
+			switch show {
+			case showNothing:
+				return fmt.Errorf("%s[%d]: %w", context, idx, sentinel)
+			case showLength:
+				return fmt.Errorf("%s[%d]: %d bytes: %w", context, idx, len(path), sentinel)
+			case showQuoted:
 			}
 
-			return fmt.Errorf("%s[%d]: %w", context, idx, sentinel)
+			return fmt.Errorf("%s[%d]: %s: %w", context, idx, merge.QuoteBounded(path), sentinel)
 		})
 	}
 }
 
 // reject reports every path for which reject holds, as rejectPaths does.
 func (check *validator) reject(
-	context string, paths []string, reject func(string) bool, sentinel error, quote bool,
+	context string, paths []string, reject func(string) bool, sentinel error, show shownValue,
 ) {
-	rejectPaths(&check.report, context, paths, reject, sentinel, quote)
+	rejectPaths(&check.report, context, paths, reject, sentinel, show)
 }
 
 // referencesVariable reports whether a path references an AppArmor
@@ -999,15 +1028,15 @@ func (check *validator) capabilitySpelling(caps []string) {
 		check.report.Report(func() error {
 			if check.strict {
 				return fmt.Errorf(
-					"AllowedCapabilities[%d]: %s: %w, so an %w",
-					idx, merge.QuoteBounded(name), ErrInvalidCapabilityName,
-					ErrUnknownCapability,
+					"%s[%d]: %s: %w, so an %w",
+					allowedCapabilitiesPath, idx, merge.QuoteBounded(name),
+					ErrInvalidCapabilityName, ErrUnknownCapability,
 				)
 			}
 
 			return fmt.Errorf(
-				"AllowedCapabilities[%d]: %s: %w",
-				idx, merge.QuoteBounded(name), ErrInvalidCapabilityName,
+				"%s[%d]: %s: %w",
+				allowedCapabilitiesPath, idx, merge.QuoteBounded(name), ErrInvalidCapabilityName,
 			)
 		})
 	}
@@ -1043,7 +1072,7 @@ func (check *validator) globStatus(context string, paths []string) {
 		matcher := check.matchers.matcher(pattern)
 
 		return matcher.status == globInvalid || matcher.misleading()
-	}, ErrInvalidGlob, true)
+	}, ErrInvalidGlob, showQuoted)
 
 	check.reject(context, paths, func(pattern string) bool {
 		matcher := check.matchers.matcher(pattern)
@@ -1051,7 +1080,7 @@ func (check *validator) globStatus(context string, paths []string) {
 		tooComplex := matcher.status == globTooComplex || matcher.status == globUncompiled
 
 		return tooComplex && !matcher.misleading()
-	}, ErrGlobTooComplex, false)
+	}, ErrGlobTooComplex, showNothing)
 }
 
 // filesystemDuplicates reports the paths listed in more than one category
@@ -1067,32 +1096,39 @@ func (check *validator) filesystemDuplicates(
 		name            string
 		raw, normalized []string
 	}{
-		{"ReadOnlyPaths", rules.ReadOnlyPaths, normalized.ReadOnlyPaths},
-		{"WriteOnlyPaths", rules.WriteOnlyPaths, normalized.WriteOnlyPaths},
-		{"ReadWritePaths", rules.ReadWritePaths, normalized.ReadWritePaths},
+		{readOnlyPathsPath, rules.ReadOnlyPaths, normalized.ReadOnlyPaths},
+		{writeOnlyPathsPath, rules.WriteOnlyPaths, normalized.WriteOnlyPaths},
+		{readWritePathsPath, rules.ReadWritePaths, normalized.ReadWritePaths},
 	}
 
-	seen := make(map[pathKey]string)
+	// Each path is mapped to the last entry that lists it, which is the
+	// one a later category's entry is reported against.
+	type entry struct {
+		category string
+		idx      int
+	}
 
-	for _, path := range categories[0].normalized {
-		seen[check.matchers.key(path)] = categories[0].name
+	seen := make(map[pathKey]entry)
+
+	for idx, path := range categories[0].normalized {
+		seen[check.matchers.key(path)] = entry{category: categories[0].name, idx: idx}
 	}
 
 	for _, category := range categories[1:] {
 		for idx, path := range category.normalized {
 			key := check.matchers.key(path)
 
-			if earlier, ok := seen[key]; ok && earlier != category.name {
+			if earlier, ok := seen[key]; ok && earlier.category != category.name {
 				check.report.Report(func() error {
 					return fmt.Errorf(
-						"path %s in both %s and %s: %w",
-						merge.QuoteBounded(category.raw[idx]), earlier, category.name,
-						ErrDuplicatePath,
+						"%s[%d]: %s: %w (also at %s[%d])",
+						category.name, idx, merge.QuoteBounded(category.raw[idx]),
+						ErrDuplicatePath, earlier.category, earlier.idx,
 					)
 				})
 			}
 
-			seen[key] = category.name
+			seen[key] = entry{category: category.name, idx: idx}
 		}
 	}
 
@@ -1111,28 +1147,22 @@ func (check *validator) emptyCapabilities(caps []string) {
 	for idx, capability := range caps {
 		if capability == "" {
 			check.report.Report(func() error {
-				return fmt.Errorf("AllowedCapabilities[%d]: %w", idx, ErrEmptyCapability)
+				return fmt.Errorf("%s[%d]: %w", allowedCapabilitiesPath, idx, ErrEmptyCapability)
 			})
 		}
 	}
 }
 
 func (check *validator) duplicateCapabilities(caps []string) {
-	seen := make(map[string]struct{}, len(caps))
-
-	for idx, name := range caps {
-		upper := asciiUpper(name)
-		if _, ok := seen[upper]; ok {
-			check.report.Report(func() error {
-				return fmt.Errorf(
-					"AllowedCapabilities[%d]: %s: %w",
-					idx, merge.QuoteBounded(name), ErrDuplicateCapability,
-				)
-			})
-		}
-
-		seen[upper] = struct{}{}
-	}
+	merge.ReportDuplicates(&check.report, len(caps),
+		func(idx int) (string, bool) { return asciiUpper(caps[idx]), true },
+		func(idx, first int) error {
+			return fmt.Errorf(
+				"%s[%d]: %s: %w (also at %s[%d])",
+				allowedCapabilitiesPath, idx, merge.QuoteBounded(caps[idx]),
+				ErrDuplicateCapability, allowedCapabilitiesPath, first,
+			)
+		})
 }
 
 // capabilityNames reports the names outside the known set. A name that is
@@ -1147,8 +1177,8 @@ func (check *validator) capabilityNames(caps []string) {
 
 		check.report.Report(func() error {
 			return fmt.Errorf(
-				"AllowedCapabilities[%d]: %s: %w",
-				idx, merge.QuoteBounded(name), ErrUnknownCapability,
+				"%s[%d]: %s: %w",
+				allowedCapabilitiesPath, idx, merge.QuoteBounded(name), ErrUnknownCapability,
 			)
 		})
 	}
@@ -1159,19 +1189,12 @@ func (check *validator) capabilityNames(caps []string) {
 // paths of raw normalized, which is what is compared, while raw is what is
 // reported.
 func (check *validator) listDuplicates(context string, raw, normalized []string, sentinel error) {
-	seen := make(map[pathKey]struct{}, len(normalized))
-
-	for idx, path := range normalized {
-		key := check.matchers.key(path)
-
-		if _, ok := seen[key]; ok {
-			check.report.Report(func() error {
-				return fmt.Errorf(
-					"%s[%d]: %s: %w", context, idx, merge.QuoteBounded(raw[idx]), sentinel,
-				)
-			})
-		}
-
-		seen[key] = struct{}{}
-	}
+	merge.ReportDuplicates(&check.report, len(normalized),
+		func(idx int) (pathKey, bool) { return check.matchers.key(normalized[idx]), true },
+		func(idx, first int) error {
+			return fmt.Errorf(
+				"%s[%d]: %s: %w (also at %s[%d])",
+				context, idx, merge.QuoteBounded(raw[idx]), sentinel, context, first,
+			)
+		})
 }

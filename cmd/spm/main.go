@@ -123,7 +123,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case flagHelp, "-h":
 		return printHelp(usage, stdout, stderr)
 	default:
-		_, _ = fmt.Fprintf(stderr, "unknown command: %s\n\n%s", merge.SafeName(args[0]), usage)
+		_, _ = fmt.Fprintf(
+			stderr,
+			"error: unknown command: %s\n\n%s",
+			merge.SafeName(args[0]),
+			usage,
+		)
 
 		return exitUsage
 	}
@@ -153,7 +158,12 @@ func runHelp(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		// overview, as "spm help help" does.
 		return printHelp(usage, stdout, stderr)
 	default:
-		_, _ = fmt.Fprintf(stderr, "unknown command: %s\n\n%s", merge.SafeName(args[0]), usage)
+		_, _ = fmt.Fprintf(
+			stderr,
+			"error: unknown command: %s\n\n%s",
+			merge.SafeName(args[0]),
+			usage,
+		)
 
 		return exitUsage
 	}

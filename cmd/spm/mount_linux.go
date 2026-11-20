@@ -32,6 +32,13 @@ import (
 // so asking needs no access the write does not, and a FIFO put at path does
 // not hold the question up.
 func isMountedFile(path string) bool {
+	return mountedFileWith(path, mountID)
+}
+
+// mountedFileWith is isMountedFile with the function that reads the mount of
+// an open file, which a test replaces: mounting a file over another takes
+// privileges a test does not have.
+func mountedFileWith(path string, mountOf func(*os.File) (int, bool)) bool {
 	file, err := openRegular(path, 0)
 	if err != nil {
 		return false
@@ -48,8 +55,8 @@ func isMountedFile(path string) bool {
 
 	defer func() { _ = dir.Close() }()
 
-	fileMount, fileOK := mountID(file)
-	dirMount, dirOK := mountID(dir)
+	fileMount, fileOK := mountOf(file)
+	dirMount, dirOK := mountOf(dir)
 
 	return fileOK && dirOK && fileMount != dirMount
 }

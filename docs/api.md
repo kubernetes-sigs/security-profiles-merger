@@ -67,6 +67,26 @@ architecture whenever it is known.
 `landlock.Options` names the kernel's ABI version and adds its check to
 every level; it has no zero value to use, since 0 names no version.
 
+A validator reports each failure on a line of its own, shaped as
+`<path>: <value>: <sentinel>`, with what else explains it in parentheses.
+The path is the JSON path of the member, as the document spells it, and the
+value is quoted when it is a string and left out where the sentinel already
+says it:
+
+```
+syscalls[1].args[0].index: 9: syscall arg index out of range (max 5)
+filesystem.readOnlyPaths[2]: "@{HOME}/notes": AppArmor variables are not supported
+pathRules[2].path: "//etc": duplicate rule (also at pathRules[0].path)
+```
+
+`seccomp.Validate` reports in the order the profile holds what it reports
+on, an entry at a time, except that a notification listener missing from
+the profile is reported last, after every entry. Counts name the lists they
+count, as in `pathRules, netRules: 2000 rules: too many rules (max 1024)`.
+The text is for people: match the sentinels with
+`errors.Is` rather than parsing it (see
+[reading a validation error](integration.md#reading-a-validation-error)).
+
 ## Concurrency
 
 Every exported function of `seccomp`, `apparmor` and `landlock` is safe to
@@ -101,7 +121,7 @@ one of the three packages arbitrarily.
 | Name | Description |
 |------|-------------|
 | `SliceDiff[T]` | Added and removed items in a set-like slice, each sorted; a diff field of this type is nil when the lists are equal |
-| `InputError` | Returned by every `Intersect` and `Union` when an input is nil or fails validation, and by `Diff` when one is nil: `Index` is its position among the arguments, `Err` what was wrong with it. Match it with `errors.As` to tell a bad artifact from a bad baseline; `errors.Is` sees through it to the sentinels. The errors a merge returns without it are listed under [Errors outside an InputError](integration.md#errors-outside-an-inputerror) |
+| `InputError` | Returned by every `Intersect` and `Union` for each input that is nil or fails validation, joined in input order when several do, and by `Diff` when one is nil: `Index` is its position among the arguments, `Err` what was wrong with it. Match it with `errors.As`, which finds the first, to tell a bad artifact from a bad baseline; `errors.Is` sees through it to the sentinels. See [reading a validation error](integration.md#reading-a-validation-error); the errors a merge returns without it are listed under [Errors outside an InputError](integration.md#errors-outside-an-inputerror) |
 | `MaxPathLen` | 4095, the longest path `apparmor` and `landlock` accept: `PATH_MAX` less its terminating NUL |
 
 These sentinels are shared: `errors.Is` against the one here matches an error

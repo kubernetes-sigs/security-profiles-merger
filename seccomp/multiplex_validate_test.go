@@ -166,7 +166,7 @@ func TestValidateArtifactMultiplexedNamesLoadedEntry(t *testing.T) {
 	}}, profile.Syscalls...)
 
 	err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(profile)
-	if err == nil || !strings.Contains(err.Error(), "syscall entry 1:") {
+	if err == nil || !strings.Contains(err.Error(), "syscalls[1]:") {
 		t.Fatalf("expected the report to name entry 1, got %v", err)
 	}
 }

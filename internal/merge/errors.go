@@ -213,3 +213,55 @@ func (l *limitedError) add(err error) {
 
 	l.omitted++
 }
+
+// ReportDuplicates reports each of count items whose key an earlier item
+// has. An item without a key, for which key reports false, is skipped.
+// duplicate builds the failure for the item at idx, given the index of the
+// first item with the same key, and is called only while the report has
+// room for it (see Collector.Report).
+//
+// The set of keys seen starts empty rather than sized for count: a list
+// that repeats one key many times holds few distinct ones.
+func ReportDuplicates[Key comparable](
+	report *Collector, count int, key func(idx int) (Key, bool),
+	duplicate func(idx, first int) error,
+) {
+	seen := make(map[Key]int)
+
+	for idx := range count {
+		itemKey, ok := key(idx)
+		if !ok {
+			continue
+		}
+
+		first, dup := seen[itemKey]
+		if !dup {
+			seen[itemKey] = idx
+
+			continue
+		}
+
+		report.Report(func() error { return duplicate(idx, first) })
+	}
+}
+
+// CheckInputs runs check on every profile, in order, and returns the
+// failures as one error, each an *spm.InputError naming the profile's
+// index: nil when every profile passed, the InputError itself when one
+// failed, and otherwise the InputErrors in input order, joined and bounded
+// as a Collector joins and bounds them. errors.As finds the first, and a
+// caller unwrapping the result with Unwrap() []error reaches every one
+// kept; past MaxJoinedErrors failing profiles the result matches
+// spm.ErrMoreProblems.
+func CheckInputs[T any](profiles []*T, check func(idx int, profile *T) error) error {
+	var report Collector
+
+	for idx, profile := range profiles {
+		err := check(idx, profile)
+		if err != nil {
+			report.Report(func() error { return &spm.InputError{Index: idx, Err: err} })
+		}
+	}
+
+	return report.Err()
+}

@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -41,6 +42,17 @@ import (
 // no absolute paths, no output that depends on the machine. The diff cases
 // pass --arch so that a seccomp comparison does not depend on the
 // architecture the test runs on.
+// The fixtures several failure cases share.
+const (
+	testdataAppArmorInvalid = "testdata/apparmor_invalid.json"
+	testdataLandlockInvalid = "testdata/landlock_invalid.json"
+	testdataSeccompInvalid  = "testdata/seccomp_invalid.json"
+
+	testdataSeccompTruncated = "testdata/seccomp_truncated.json"
+	testdataSeccompTypeError = "testdata/seccomp_type_error.json"
+	testdataInvalidAction    = "testdata/invalid_action.json"
+)
+
 var update = flag.Bool(
 	"update",
 	false,
@@ -580,10 +592,159 @@ func richGoldenCases() []goldenCase {
 	}
 }
 
+// failureGoldenCases pins what a reader sees when something is wrong: the
+// validation failures of each profile type, a merge of several bad inputs,
+// decode errors, and usage errors. Their stdout is empty; stderr is what
+// they are about.
+func failureGoldenCases() []goldenCase {
+	return []goldenCase{
+		{
+			name:       "validate apparmor invalid",
+			args:       []string{cmdValidate, flagType, typeAppArmor, testdataAppArmorInvalid},
+			stdinFile:  "",
+			wantCode:   1,
+			golden:     "testdata/validate_apparmor_invalid.golden",
+			wantStderr: true,
+		},
+		{
+			name: "validate apparmor invalid strict",
+			args: []string{
+				cmdValidate, flagType, typeAppArmor, flagStrict, testdataAppArmorInvalid,
+			},
+			stdinFile:  "",
+			wantCode:   1,
+			golden:     "testdata/validate_apparmor_invalid_strict.golden",
+			wantStderr: true,
+		},
+		{
+			// The misspelled member is a warning in the default mode, and
+			// names the field its JSON spelling stands for.
+			name:       "validate landlock invalid",
+			args:       []string{cmdValidate, flagType, typeLandlock, testdataLandlockInvalid},
+			stdinFile:  "",
+			wantCode:   1,
+			golden:     "testdata/validate_landlock_invalid.golden",
+			wantStderr: true,
+		},
+		{
+			name: "validate landlock invalid strict",
+			args: []string{
+				cmdValidate, flagType, typeLandlock, flagStrict,
+				"testdata/landlock_invalid_strict.json",
+			},
+			stdinFile:  "",
+			wantCode:   1,
+			golden:     "testdata/validate_landlock_invalid_strict.golden",
+			wantStderr: true,
+		},
+		{
+			name:       "validate seccomp invalid",
+			args:       []string{cmdValidate, flagType, typeSeccomp, testdataSeccompInvalid},
+			stdinFile:  "",
+			wantCode:   1,
+			golden:     "testdata/validate_seccomp_invalid.golden",
+			wantStderr: true,
+		},
+		{
+			// Every bad input is named, not only the first.
+			name: "merge seccomp several invalid inputs",
+			args: []string{
+				cmdMerge, flagType, typeSeccomp, flagStrategy, strategyUnion,
+				testdataSeccompInvalid, testdataSeccompA, testdataInvalidAction,
+			},
+			stdinFile:  "",
+			wantCode:   1,
+			golden:     "testdata/merge_seccomp_invalid.golden",
+			wantStderr: true,
+		},
+		{
+			// An input that does not parse, one that does not decode and
+			// one that does not validate are all named, in input order.
+			name: "validate seccomp inputs failing at every stage",
+			args: []string{
+				cmdValidate, flagType, typeSeccomp, testdataSeccompTruncated,
+				testdataSeccompTypeError, testdataInvalidAction,
+			},
+			stdinFile:  "",
+			wantCode:   1,
+			golden:     "testdata/validate_seccomp_every_stage.golden",
+			wantStderr: true,
+		},
+		{
+			// An input of another type fails as an input, and the others
+			// are still validated.
+			name: "validate seccomp beside a landlock input",
+			args: []string{
+				cmdValidate, flagType, typeSeccomp, testdataSeccompInvalid,
+				"testdata/landlock_a.json",
+			},
+			stdinFile:  "",
+			wantCode:   1,
+			golden:     "testdata/validate_seccomp_other_type.golden",
+			wantStderr: true,
+		},
+		{
+			name: "merge seccomp inputs failing at every stage",
+			args: []string{
+				cmdMerge, flagStrategy, strategyUnion, testdataSeccompTruncated,
+				testdataSeccompTypeError, testdataSeccompA, testdataInvalidAction,
+			},
+			stdinFile:  "",
+			wantCode:   1,
+			golden:     "testdata/merge_seccomp_every_stage.golden",
+			wantStderr: true,
+		},
+		{
+			name: "validate seccomp type error",
+			args: []string{
+				cmdValidate, flagType, typeSeccomp, testdataSeccompTypeError,
+			},
+			stdinFile:  "",
+			wantCode:   1,
+			golden:     "testdata/validate_seccomp_type_error.golden",
+			wantStderr: true,
+		},
+		{
+			name:       "validate syntax error",
+			args:       []string{cmdValidate, "testdata/seccomp_syntax_error.json"},
+			stdinFile:  "",
+			wantCode:   1,
+			golden:     "testdata/validate_syntax_error.golden",
+			wantStderr: true,
+		},
+		{
+			name:       "unknown command",
+			args:       []string{testBogus},
+			stdinFile:  "",
+			wantCode:   exitUsage,
+			golden:     "testdata/usage_unknown_command.golden",
+			wantStderr: true,
+		},
+		{
+			name:       "unknown flag",
+			args:       []string{cmdValidate, "-real.json"},
+			stdinFile:  "",
+			wantCode:   exitUsage,
+			golden:     "testdata/usage_unknown_flag.golden",
+			wantStderr: true,
+		},
+		{
+			name:       "empty file argument",
+			args:       []string{cmdValidate, ""},
+			stdinFile:  "",
+			wantCode:   exitUsage,
+			golden:     "testdata/usage_empty_argument.golden",
+			wantStderr: true,
+		},
+	}
+}
+
 func TestGolden(t *testing.T) {
 	t.Parallel()
 
-	for _, testCase := range append(basicGoldenCases(), richGoldenCases()...) {
+	cases := slices.Concat(basicGoldenCases(), richGoldenCases(), failureGoldenCases())
+
+	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 

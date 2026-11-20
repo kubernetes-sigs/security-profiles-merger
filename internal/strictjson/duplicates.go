@@ -78,7 +78,7 @@ type documentScan struct {
 	duplicates, missing pathCollector
 }
 
-// DuplicateKeys returns the paths of object members that occur more than
+// duplicateKeys returns the paths of object members that occur more than
 // once in the same object, at any depth, in document order and each once.
 // encoding/json decodes each occurrence into what the one before it filled,
 // so a later scalar or array replaces the earlier one while a later object
@@ -90,7 +90,7 @@ type documentScan struct {
 // where encoding/json fills one field from both. Every object in a profile
 // decodes into a struct, so the comparison applies at every depth. raw must
 // be valid JSON; the scan stops at the first syntax error.
-func DuplicateKeys(raw []byte) ([]string, int) {
+func duplicateKeys(raw []byte) ([]string, int) {
 	return scanDocument(raw, nil, nil).duplicates.result()
 }
 
@@ -102,35 +102,47 @@ func DuplicateKeys(raw []byte) ([]string, int) {
 // a value whose type has required fields, so the rest of a document costs
 // the missing-member check nothing.
 func scanDocument(raw []byte, target reflect.Type, required *Required) *documentScan {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	// Numbers are kept as text: they only need to be skipped, and a value
-	// out of the float64 range must not stop the scan.
-	decoder.UseNumber()
+	state := newScanState(target, required, nil)
+	state.run(raw)
 
-	state := scanState{
-		stack:    nil,
-		target:   target,
-		required: required,
-		scan: documentScan{
-			duplicates: pathCollector{paths: nil, omitted: 0},
-			missing:    pathCollector{paths: nil, omitted: 0},
-		},
-	}
+	return &state.scan
+}
 
-	for {
-		token, err := decoder.Token()
-		if err != nil {
-			// A document the decoder read must not read as one without
-			// missing members because the scan could not finish it.
-			if target != nil && !errors.Is(err, io.EOF) {
-				state.scan.missing.add(unreadableDocument)
-			}
+// PathAt returns the JSON path of the value of raw that holds the byte
+// before offset, such as "syscalls[0].action", and the offset the value
+// starts at. encoding/json reports a value of the wrong type
+// (json.UnmarshalTypeError) at the end of a literal, or just past the
+// opening bracket of an object or array, so that byte is the value's own;
+// the error's Field names the value too, but spells it differently from one
+// Go release to the next. The path is built as duplicateKeys builds one, by
+// the same read of the document's tokens. It is "" for the document itself,
+// and the offset -1 where raw does not reach offset or is not valid JSON up
+// to it.
+func PathAt(raw []byte, offset int64) (string, int64) {
+	path, start := "", int64(-1)
 
-			return &state.scan
+	state := newScanState(nil, nil, func(stack []*scanFrame, after, end int64) bool {
+		if end < offset {
+			return true
 		}
 
-		state.next(token)
+		path, start = memberPath(stack), valueStart(raw, after)
+
+		return false
+	})
+	state.run(raw)
+
+	return path, start
+}
+
+// valueStart returns the offset of the first byte from offset on that is
+// none of the whitespace, colon or comma JSON puts between two tokens.
+func valueStart(raw []byte, offset int64) int64 {
+	for offset < int64(len(raw)) && strings.IndexByte(jsonSpace+":,", raw[offset]) >= 0 {
+		offset++
 	}
+
+	return offset
 }
 
 // scanState is scanDocument under way: the open objects and arrays, the
@@ -140,11 +152,70 @@ type scanState struct {
 	stack    []*scanFrame
 	target   reflect.Type
 	required *Required
-	scan     documentScan
+	// onValue, where it is not nil, is passed every token that starts a
+	// value, with the stack it sits in, its innermost frame at that value,
+	// where the token before it ended and where it ends; the scan stops
+	// when it returns false.
+	onValue func(stack []*scanFrame, after, end int64) bool
+	scan    documentScan
 }
 
-// next reads one token.
-func (state *scanState) next(token json.Token) {
+// newScanState returns a scan of a document against target, nil to look
+// for no missing members, passing every token that starts a value to
+// onValue, where it is not nil (see scanState).
+func newScanState(
+	target reflect.Type, required *Required,
+	onValue func(stack []*scanFrame, after, end int64) bool,
+) *scanState {
+	return &scanState{
+		stack:    nil,
+		target:   target,
+		required: required,
+		onValue:  onValue,
+		scan: documentScan{
+			duplicates: pathCollector{paths: nil, wants: nil, omitted: 0},
+			missing:    pathCollector{paths: nil, wants: nil, omitted: 0},
+		},
+	}
+}
+
+// run reads the document token by token, until its end, its first syntax
+// error, or onValue stopping it.
+func (state *scanState) run(raw []byte) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	// Numbers are kept as text: they only need to be skipped, and a value
+	// out of the float64 range must not stop the scan.
+	decoder.UseNumber()
+
+	for {
+		after := decoder.InputOffset()
+
+		token, err := decoder.Token()
+		if err != nil {
+			// A document the decoder read must not read as one without
+			// missing members because the scan could not finish it.
+			if state.target != nil && !errors.Is(err, io.EOF) {
+				state.scan.missing.add(unreadableDocument)
+			}
+
+			return
+		}
+
+		if !state.next(token, after, decoder.InputOffset()) {
+			return
+		}
+	}
+}
+
+// valueStarted passes a token that starts a value, spanning after to end,
+// to onValue, and reports whether the scan goes on.
+func (state *scanState) valueStarted(after, end int64) bool {
+	return state.onValue == nil || state.onValue(state.stack, after, end)
+}
+
+// next reads one token, which spans after to end, and reports whether the
+// scan goes on.
+func (state *scanState) next(token json.Token, after, end int64) bool {
 	var top *scanFrame
 	if len(state.stack) > 0 {
 		top = state.stack[len(state.stack)-1]
@@ -175,10 +246,20 @@ func (state *scanState) next(token json.Token) {
 		top.startValue()
 		top.markNamed()
 
+		if !state.valueStarted(after, end) {
+			return false
+		}
+
 		state.stack = append(state.stack, newScanFrame(delim == '{', child, state.required))
 	default:
 		state.scalar(top, token)
+
+		if !state.valueStarted(after, end) {
+			return false
+		}
 	}
+
+	return true
 }
 
 // scalar reads a value that is neither an object nor an array.
@@ -287,8 +368,8 @@ func (frame *scanFrame) addKey(key string) bool {
 
 		if frame.typ.Kind() == reflect.Map {
 			frame.child = frame.typ.Elem()
-		} else if fieldType, ok, _ := fieldsOf(frame.typ).lookup(key); ok {
-			frame.child = fieldType
+		} else if field, ok, _ := fieldsOf(frame.typ).lookup(key); ok {
+			frame.child = field.typ
 		}
 	}
 
@@ -368,9 +449,9 @@ func memberPath(stack []*scanFrame) string {
 	return path
 }
 
-// MaxReportedPaths is the number of field paths one message lists, the same
+// maxReportedPaths is the number of field paths one message lists, the same
 // ceiling the library puts on the failures it joins.
-const MaxReportedPaths = merge.MaxJoinedErrors
+const maxReportedPaths = merge.MaxJoinedErrors
 
 // pathCollector gathers the field paths of one message, bounded the way the
 // library bounds its own joined failures: past merge.MaxJoinedErrors it
@@ -379,7 +460,10 @@ const MaxReportedPaths = merge.MaxJoinedErrors
 // whole ancestry, so an unbounded collector turns a profile of a few hundred
 // kilobytes into hundreds of megabytes of warning.
 type pathCollector struct {
-	paths   []string
+	paths []string
+	// wants holds, for a collector of misspelled members, the spelling of
+	// the field the member at the same index of paths stands for.
+	wants   []string
 	omitted int
 }
 
@@ -392,9 +476,22 @@ func (c *pathCollector) add(path string) {
 	c.addLazily(func() string { return path })
 }
 
+// addWant is add for a misspelled member, with the spelling of the field it
+// stands for.
+func (c *pathCollector) addWant(path, want string) {
+	if len(c.paths) >= maxReportedPaths {
+		c.omitted++
+
+		return
+	}
+
+	c.paths = append(c.paths, path)
+	c.wants = append(c.wants, want)
+}
+
 // addLazily is add for a path that is only worth building when it is kept.
 func (c *pathCollector) addLazily(path func() string) {
-	if len(c.paths) >= MaxReportedPaths {
+	if len(c.paths) >= maxReportedPaths {
 		c.omitted++
 
 		return
@@ -440,11 +537,17 @@ func foldRune(char rune) rune {
 // when there are several, as in `unknown fields "a", "b"`. Each path is
 // quoted with a length bound and omitted counts the ones the collector left
 // out, so that the message a runtime logs is bounded however the document
-// that produced it was shaped.
-func fieldPathsError(kind error, paths []string, omitted int) error {
+// that produced it was shaped. A path with a non-empty entry in wants is
+// followed by the spelling it stands for, as in `"Syscalls" (want
+// "syscalls")`.
+func fieldPathsError(kind error, paths, wants []string, omitted int) error {
 	quoted := make([]string, len(paths))
 	for idx, field := range paths {
 		quoted[idx] = merge.QuoteBounded(field)
+
+		if idx < len(wants) && wants[idx] != "" {
+			quoted[idx] += " (want " + merge.QuoteBounded(wants[idx]) + ")"
+		}
 	}
 
 	if len(paths) == 1 && omitted == 0 {

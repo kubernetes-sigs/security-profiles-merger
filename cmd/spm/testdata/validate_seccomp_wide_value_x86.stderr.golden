@@ -1,1 +1,1 @@
-error: testdata/seccomp_wide_value.json: syscall entry 0 arg 0: argument value above 32 bits on a 32-bit architecture (value 0x100000000, valueTwo 0x0)
+error: testdata/seccomp_wide_value.json: syscalls[0].args[0]: argument value above 32 bits on a 32-bit architecture (value 0x100000000, valueTwo 0x0)

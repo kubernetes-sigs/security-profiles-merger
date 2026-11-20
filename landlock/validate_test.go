@@ -183,8 +183,8 @@ func TestValidateMultipleErrors(t *testing.T) {
 	msg := err.Error()
 
 	for _, want := range []string{
-		"HandledAccessFS", "HandledAccessNet",
-		"PathRules[0]", "NetRules[0]",
+		`handledAccessFs[0]: "bogus_fs"`, `handledAccessNet[0]: "bogus_net"`,
+		`pathRules[0].accessFs[0]: "read_bogus"`, `netRules[0].accessNet[0]: "bind_bogus"`,
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error should mention %s: %v", want, err)
@@ -591,7 +591,7 @@ func TestValidateStrictReportsDuplicateRights(t *testing.T) {
 			"scope", func(profile *landlock.Profile) {
 				profile.Scoped = []landlock.ScopeRight{landlock.ScopeSignal, landlock.ScopeSignal}
 			},
-			`Scoped: right "signal"`,
+			`scoped[1]: "signal"`,
 		},
 		{
 			"handled filesystem right", func(profile *landlock.Profile) {
@@ -599,7 +599,7 @@ func TestValidateStrictReportsDuplicateRights(t *testing.T) {
 					landlock.FSAccessReadFile, landlock.FSAccessReadFile,
 				}
 			},
-			`HandledAccessFS: right "read_file"`,
+			`handledAccessFs[1]: "read_file"`,
 		},
 		{
 			"handled network right", func(profile *landlock.Profile) {
@@ -607,7 +607,7 @@ func TestValidateStrictReportsDuplicateRights(t *testing.T) {
 					landlock.NetAccessBindTCP, landlock.NetAccessBindTCP,
 				}
 			},
-			`HandledAccessNet: right "bind_tcp"`,
+			`handledAccessNet[1]: "bind_tcp"`,
 		},
 		{
 			"network rule right", func(profile *landlock.Profile) {
@@ -618,7 +618,7 @@ func TestValidateStrictReportsDuplicateRights(t *testing.T) {
 					},
 				}}
 			},
-			`NetRules[0]: right "bind_tcp"`,
+			`netRules[0].accessNet[1]: "bind_tcp"`,
 		},
 		{
 			"path rule right", func(profile *landlock.Profile) {
@@ -629,7 +629,7 @@ func TestValidateStrictReportsDuplicateRights(t *testing.T) {
 					},
 				}}
 			},
-			`PathRules[0]: right "read_file"`,
+			`pathRules[0].accessFs[1]: "read_file"`,
 		},
 	} {
 		profile := empty()
@@ -1136,7 +1136,7 @@ func TestOptionsValidateReportsNetworkRuleRights(t *testing.T) {
 		t.Errorf("Options{v4}.Validate() names connect_send_udp %d times, want 2: %v", got, err)
 	}
 
-	if !strings.Contains(err.Error(), "NetRules[0]") {
+	if !strings.Contains(err.Error(), "netRules[0].accessNet[1]") {
 		t.Errorf("Options{v4}.Validate() does not name the network rule: %v", err)
 	}
 
@@ -1577,7 +1577,7 @@ func TestValidateArtifactRejectsTrailingSlashes(t *testing.T) {
 	err = landlock.ValidateArtifact(
 		fsProfile(read, landlock.PathRule{Path: "/srv/f/", AccessFS: read}),
 	)
-	if want := `PathRules[0]: "/srv/f/": path ends in "/" or "/."`; err == nil ||
+	if want := `pathRules[0].path: "/srv/f/": path ends in "/" or "/."`; err == nil ||
 		err.Error() != want {
 		t.Errorf("ValidateArtifact = %v, want %q", err, want)
 	}
@@ -1623,7 +1623,7 @@ func TestValidateArtifactRejectsInvalidUTF8Paths(t *testing.T) {
 		err := validate(profile)
 		if !errors.Is(err, landlock.ErrInvalidUTF8Path) {
 			t.Errorf("%s = %v, want ErrInvalidUTF8Path", name, err)
-		} else if want := `PathRules[0]: "/srv/caf\xe9": path is not valid UTF-8`; err.Error() != want {
+		} else if want := `pathRules[0].path: "/srv/caf\xe9": path is not valid UTF-8`; err.Error() != want {
 			t.Errorf("%s = %q, want %q", name, err, want)
 		}
 	}
@@ -1698,5 +1698,66 @@ func TestOptionsAddTheABICheckToEveryLevel(t *testing.T) {
 			errors.Is(err, landlock.ErrUnsupportedABIRight) {
 			t.Errorf("Options{v4}.%s past the limit = %v, want ErrTooManyRules alone", name, err)
 		}
+	}
+}
+
+// TestValidateMessages pins the shape every failure shares: the JSON path of
+// the member, the value, the sentinel, and what else says why in
+// parentheses.
+func TestValidateMessages(t *testing.T) {
+	t.Parallel()
+
+	read := []landlock.FSAccessRight{landlock.FSAccessReadFile}
+	connect := []landlock.NetAccessRight{landlock.NetAccessConnectTCP}
+
+	profile := &landlock.Profile{
+		HandledAccessFS:  read,
+		HandledAccessNet: connect,
+		Scoped:           nil,
+		PathRules: []landlock.PathRule{
+			{Path: "/a\x00b", AccessFS: read},
+			{Path: "./", AccessFS: read},
+			{Path: "", AccessFS: read},
+			{Path: "/srv", AccessFS: nil},
+		},
+		NetRules: []landlock.NetRule{
+			{Port: 443, AccessNet: connect},
+			{Port: 443, AccessNet: nil},
+		},
+	}
+
+	err := landlock.ValidateStrict(profile)
+
+	want := strings.Join([]string{
+		`pathRules[0].path: "/a\x00b": path contains a NUL byte`,
+		`pathRules[1].path: "./": empty path (resolves to ".")`,
+		`pathRules[2].path: empty path`,
+		`netRules[1].port: 443: duplicate rule (also at netRules[0].port)`,
+		`pathRules[1].path: "./": relative path (must be absolute)`,
+		`pathRules[3].accessFs: rule grants no access right (path "/srv")`,
+		`netRules[1].accessNet: rule grants no access right (port 443)`,
+	}, "\n")
+	if err == nil || err.Error() != want {
+		t.Errorf("ValidateStrict =\n%v\nwant\n%s", err, want)
+	}
+
+	many := &landlock.Profile{
+		HandledAccessFS:  nil,
+		HandledAccessNet: connect,
+		Scoped:           nil,
+		PathRules:        nil,
+		NetRules:         make([]landlock.NetRule, landlock.MaxArtifactRules+1),
+	}
+
+	err = landlock.ValidateArtifact(many)
+	if want := "pathRules, netRules: 1025 rules: too many rules (max 1024)"; err == nil ||
+		err.Error() != want {
+		t.Errorf("ValidateArtifact of too many rules = %v, want %s", err, want)
+	}
+
+	_, err = landlock.Options{ABI: 0}.Downgrade(profile)
+	if want := "v0: unknown Landlock ABI version (the first is v1)"; err == nil ||
+		err.Error() != want {
+		t.Errorf("Options{v0}.Downgrade() = %v, want %s", err, want)
 	}
 }

@@ -60,7 +60,7 @@ const (
 // produces. It names the input rather than its position among the
 // arguments, which a "-" expanding a stdin array makes hard to count.
 func parsingError(name string) string {
-	return "error: parsing " + name + ": "
+	return "error: " + name + ": "
 }
 
 func TestNoArgs(t *testing.T) {
@@ -74,52 +74,6 @@ func TestNoArgs(t *testing.T) {
 
 	if !strings.Contains(stderr, "Usage:") {
 		t.Errorf("stderr should contain usage, got: %s", stderr)
-	}
-}
-
-func TestVersion(t *testing.T) {
-	t.Parallel()
-
-	for _, flag := range []string{"version", "--version", "-v"} {
-		code, stdout, _ := runCapture(t, []string{flag}, nil)
-
-		if code != 0 {
-			t.Fatalf("flag %q: exit code = %d, want 0", flag, code)
-		}
-
-		if !strings.Contains(stdout, "spm ") {
-			t.Errorf("flag %q: stdout should contain version, got: %s", flag, stdout)
-		}
-	}
-}
-
-func TestHelp(t *testing.T) {
-	t.Parallel()
-
-	for _, flag := range []string{flagHelp, "-h", cmdHelp} {
-		code, stdout, _ := runCapture(t, []string{flag}, nil)
-
-		if code != 0 {
-			t.Fatalf("flag %q: exit code = %d, want 0", flag, code)
-		}
-
-		if !strings.Contains(stdout, "Usage:") {
-			t.Errorf("flag %q: stdout should contain usage, got: %s", flag, stdout)
-		}
-	}
-}
-
-func TestUnknownCommand(t *testing.T) {
-	t.Parallel()
-
-	code, _, stderr := runCapture(t, []string{testBogus}, nil)
-
-	if code != exitUsage {
-		t.Fatalf("exit code = %d, want %d", code, exitUsage)
-	}
-
-	if !strings.Contains(stderr, "unknown command") {
-		t.Errorf("stderr should mention unknown command, got: %s", stderr)
 	}
 }
 
@@ -144,10 +98,7 @@ func runCapture(
 func rawInputs(docs ...string) []profileInput {
 	inputs := make([]profileInput, len(docs))
 	for idx, doc := range docs {
-		inputs[idx] = profileInput{
-			name: "profile" + strconv.Itoa(idx) + ".json",
-			data: []byte(doc),
-		}
+		inputs[idx] = newInput("profile"+strconv.Itoa(idx)+".json", []byte(doc))
 	}
 
 	return inputs

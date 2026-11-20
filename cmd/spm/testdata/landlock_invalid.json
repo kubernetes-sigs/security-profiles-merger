@@ -1,0 +1,8 @@
+{
+  "handledAccessFS": ["read_file", "write_file"],
+  "handledAccessNet": ["bind_tcp", "fly_tcp"],
+  "pathRules": [
+    {"path": "/usr", "accessFs": ["read_file", "fly"]},
+    {"path": "/srv/../etc", "accessFs": ["read_file"]}
+  ]
+}

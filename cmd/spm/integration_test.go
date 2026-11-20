@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"flag"
 	"io"
 	"os"
 	"os/exec"
@@ -38,21 +39,33 @@ import (
 // combined capture cannot tell a profile written to a pipe from a warning
 // written to a log.
 
+// runMainEnv makes the test binary run main instead of the tests, so that
+// the tests below can run the command as a process of its own without
+// building it a second time. A binary built with -cover writes its counters
+// to the directory GOCOVERDIR names, which go test merges into the coverage
+// of the package, so what these tests run counts towards it.
+const runMainEnv = "SPM_TEST_RUN_MAIN"
+
+// The binary the tests below run, found once and shared by all of them.
 var (
-	testBinary         string
-	testBinaryDir      string
-	testBinaryOnce     sync.Once
-	errTestBinaryBuild error
+	testBinary     string
+	testBinaryDir  string
+	testBinaryOnce sync.Once
+	// testBinaryIsSelf reports that testBinary is this test binary, run
+	// with runMainEnv set.
+	testBinaryIsSelf bool
+	errTestBinary    error
 )
 
 func TestMain(m *testing.M) {
+	if os.Getenv(runMainEnv) == "1" {
+		main()
+	}
+
 	code := m.Run()
 
-	// The binary is built once and shared by every test below, so it
-	// outlives any one of their temporary directories and is removed here
-	// instead. os.MkdirTemp is used rather than a fixed name under
-	// os.TempDir: on a shared /tmp a predictable path can be created by
-	// someone else first.
+	// A binary built for the tests outlives any one of their temporary
+	// directories, so it is removed here instead.
 	if testBinaryDir != "" {
 		_ = os.RemoveAll(testBinaryDir)
 	}
@@ -60,52 +73,141 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func buildTestBinary(t *testing.T) string {
+// findTestBinary returns the binary the tests run: this test binary, run
+// again, where that works. It does not where the binary cannot be executed
+// directly, such as one for another architecture run through qemu-user
+// without binfmt_misc, or one started through the dynamic loader, which
+// os.Executable then names. A binary is built instead there, and the test
+// skipped only where that is impossible too.
+func findTestBinary(t *testing.T) string {
 	t.Helper()
 
 	testBinaryOnce.Do(func() {
-		// Not t.TempDir(): the binary is shared by every test below, so it
-		// must outlive the one that happened to build it. TestMain removes
-		// the directory once they have all finished.
-		dir, err := os.MkdirTemp("", "spm-integration-") //nolint:usetesting // shared across tests
-		if err != nil {
-			errTestBinaryBuild = err
+		self, err := os.Executable()
+		if err == nil && runsMain(t, self) {
+			testBinary, testBinaryIsSelf = self, true
 
 			return
 		}
 
-		name := "spm"
-		if runtime.GOOS == "windows" {
-			name += ".exe"
-		}
-
-		binary := filepath.Join(dir, name)
-
-		cmd := exec.CommandContext(t.Context(), "go", "build", "-o", binary, ".")
-		cmd.Stderr = os.Stderr
-
-		errTestBinaryBuild = cmd.Run()
-		if errTestBinaryBuild == nil {
-			testBinaryDir = dir
-			testBinary = binary
-
-			return
-		}
-
-		_ = os.RemoveAll(dir)
+		testBinary, errTestBinary = buildTestBinary(t)
 	})
 
-	if errTestBinaryBuild != nil {
-		t.Fatalf("building test binary: %v", errTestBinaryBuild)
+	if errors.Is(errTestBinary, exec.ErrNotFound) {
+		t.Skipf(
+			"this test binary cannot run itself, and no go command builds one: %v",
+			errTestBinary,
+		)
+	}
+
+	if errTestBinary != nil {
+		t.Fatalf("building test binary: %v", errTestBinary)
 	}
 
 	return testBinary
 }
 
+// runsMain reports whether the binary, run with runMainEnv set, runs main.
+func runsMain(t *testing.T, binary string) bool {
+	t.Helper()
+
+	cmd := exec.CommandContext(t.Context(), binary, cmdVersion)
+	cmd.Env = selfEnv(t)
+
+	out, err := cmd.Output()
+
+	return err == nil && strings.HasPrefix(string(out), "spm ")
+}
+
+// buildTestBinary builds the command into a directory TestMain removes.
+func buildTestBinary(t *testing.T) (string, error) {
+	t.Helper()
+
+	goCommand, err := exec.LookPath("go")
+	if err != nil {
+		return "", err //nolint:wrapcheck // the caller tests for exec.ErrNotFound
+	}
+
+	// Not t.TempDir(): the binary is shared by every test below, so it must
+	// outlive the one that happened to build it. os.MkdirTemp rather than a
+	// fixed name: on a shared /tmp a predictable path can be taken first.
+	dir, err := os.MkdirTemp("", "spm-integration-") //nolint:usetesting // shared across tests
+	if err != nil {
+		return "", err //nolint:wrapcheck // reported as the build failure
+	}
+
+	name := "spm"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+
+	binary := filepath.Join(dir, name)
+
+	// The binary runs on this machine, whatever GOOS and GOARCH the test
+	// binary was built for, such as one run through qemu-user with -exec.
+	host, err := exec.CommandContext(t.Context(), goCommand, "env", "GOHOSTOS", "GOHOSTARCH").
+		Output()
+	if err != nil {
+		_ = os.RemoveAll(dir)
+
+		return "", err //nolint:wrapcheck // reported as the build failure
+	}
+
+	hostOS, hostArch, _ := strings.Cut(strings.TrimSpace(string(host)), "\n")
+
+	cmd := exec.CommandContext(t.Context(), goCommand, "build", "-o", binary, ".")
+
+	cmd.Env = append(os.Environ(), "GOOS="+hostOS, "GOARCH="+strings.TrimSpace(hostArch))
+	cmd.Stderr = os.Stderr
+
+	err = cmd.Run()
+	if err != nil {
+		_ = os.RemoveAll(dir)
+
+		return "", err //nolint:wrapcheck // reported as the build failure
+	}
+
+	testBinaryDir = dir
+
+	return binary, nil
+}
+
 func spmCommand(t *testing.T, args ...string) *exec.Cmd {
 	t.Helper()
 
-	return exec.CommandContext(t.Context(), buildTestBinary(t), args...)
+	cmd := exec.CommandContext(t.Context(), findTestBinary(t), args...)
+
+	if testBinaryIsSelf {
+		cmd.Env = selfEnv(t)
+	}
+
+	return cmd
+}
+
+// selfEnv returns the environment this test binary runs main in. A binary
+// built with -cover writes its counters to GOCOVERDIR, and warns on stderr
+// without it: go test names the directory to merge them from, and a test
+// binary run without one gets a directory of its own, whose counters are
+// dropped.
+func selfEnv(t *testing.T) []string {
+	t.Helper()
+
+	env := append(os.Environ(), runMainEnv+"=1")
+
+	coverDir := ""
+	if dir := flag.Lookup("test.gocoverdir"); dir != nil {
+		coverDir = dir.Value.String()
+	}
+
+	if coverDir == "" && testing.CoverMode() != "" {
+		coverDir = t.TempDir()
+	}
+
+	if coverDir != "" {
+		env = append(env, "GOCOVERDIR="+coverDir)
+	}
+
+	return env
 }
 
 // spmResult is one real process run, with its two streams kept apart.
@@ -146,18 +248,20 @@ func runSPM(t *testing.T, stdin io.Reader, args ...string) spmResult {
 func TestIntegrationVersion(t *testing.T) {
 	t.Parallel()
 
-	got := runSPM(t, nil, cmdVersion)
+	for _, alias := range []string{cmdVersion, "--version", "-v"} {
+		got := runSPM(t, nil, alias)
 
-	if got.code != 0 {
-		t.Fatalf("exit code = %d, want 0: %s", got.code, got.stderr)
-	}
+		if got.code != 0 {
+			t.Fatalf("%s: exit code = %d, want 0: %s", alias, got.code, got.stderr)
+		}
 
-	if !strings.HasPrefix(got.stdout, "spm ") {
-		t.Errorf("stdout = %q, want the version", got.stdout)
-	}
+		if !strings.HasPrefix(got.stdout, "spm ") {
+			t.Errorf("%s: stdout = %q, want the version", alias, got.stdout)
+		}
 
-	if got.stderr != "" {
-		t.Errorf("stderr = %q, want nothing", got.stderr)
+		if got.stderr != "" {
+			t.Errorf("%s: stderr = %q, want nothing", alias, got.stderr)
+		}
 	}
 }
 
@@ -166,20 +270,22 @@ func TestIntegrationHelp(t *testing.T) {
 
 	// Requested help is output, not an error, so it goes to stdout where it
 	// can be piped to a pager.
-	got := runSPM(t, nil, flagHelp)
+	for _, alias := range []string{flagHelp, "-h", cmdHelp} {
+		got := runSPM(t, nil, alias)
 
-	if got.code != 0 {
-		t.Fatalf("exit code = %d, want 0: %s", got.code, got.stderr)
-	}
-
-	for _, want := range []string{"Usage:", cmdVersion, cmdMerge, cmdValidate, cmdDiff} {
-		if !strings.Contains(got.stdout, want) {
-			t.Errorf("stdout = %q, want it to mention %q", got.stdout, want)
+		if got.code != 0 {
+			t.Fatalf("%s: exit code = %d, want 0: %s", alias, got.code, got.stderr)
 		}
-	}
 
-	if got.stderr != "" {
-		t.Errorf("stderr = %q, want nothing", got.stderr)
+		for _, want := range []string{"Usage:", cmdVersion, cmdMerge, cmdValidate, cmdDiff} {
+			if !strings.Contains(got.stdout, want) {
+				t.Errorf("%s: stdout = %q, want it to mention %q", alias, got.stdout, want)
+			}
+		}
+
+		if got.stderr != "" {
+			t.Errorf("%s: stderr = %q, want nothing", alias, got.stderr)
+		}
 	}
 }
 
@@ -380,7 +486,7 @@ func TestIntegrationInputErrors(t *testing.T) {
 			name:     "malformed JSON",
 			args:     []string{cmdValidate, flagType, typeSeccomp, malformed},
 			wantCode: 1,
-			wantErr:  "parsing",
+			wantErr:  "line 1, column 2: invalid character",
 			skip:     false,
 		},
 		{
@@ -491,9 +597,9 @@ func TestIntegrationExitCodes(t *testing.T) {
 			want: 2,
 		},
 		{
-			name: "an ambiguous profile is 2",
+			name: "an ambiguous profile is 1",
 			args: []string{cmdValidate, "testdata/ambiguous_type.json"},
-			want: 2,
+			want: 1,
 		},
 		{
 			name: "the wrong number of diff inputs is 2",

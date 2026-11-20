@@ -1,0 +1,12 @@
+{
+  "executable": {
+    "allowedExecutables": ["/usr/bin/bash", "bin/sh", "/usr/bin/bash"]
+  },
+  "filesystem": {
+    "readOnlyPaths": ["/etc", "/etc/./passwd", "@{HOME}/notes"],
+    "writeOnlyPaths": ["/etc"]
+  },
+  "capability": {
+    "allowedCapabilities": ["CHOWN", "", "chown", "NET BIND", "FLY"]
+  }
+}

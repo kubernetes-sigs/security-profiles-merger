@@ -1,0 +1,14 @@
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "defaultErrnoRet": 99999,
+  "architectures": ["SCMP_ARCH_X86_64", "SCMP_ARCH_BOGUS"],
+  "syscalls": [
+    {"names": ["read", ""], "action": "SCMP_ACT_BOGUS"},
+    {
+      "names": ["write"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [{"index": 9, "value": 1, "op": "SCMP_CMP_BOGUS"}]
+    },
+    {"names": [], "action": "SCMP_ACT_ALLOW"}
+  ]
+}

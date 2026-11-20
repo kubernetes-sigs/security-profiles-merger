@@ -116,14 +116,16 @@ func diffInputs(
 ) int {
 	// Exit code 1 means "different" for diff, so unparsable input is a
 	// usage error like every other diff failure.
-	kind, code := resolveKind(opts.profileType, inputs, exitUsage, opts.noDetectNote, stderr)
+	kind, report, code := resolveKind(
+		opts.profileType, inputs, exitUsage, opts.noDetectNote, stderr,
+	)
 	if code != 0 {
 		return code
 	}
 
 	var out bytes.Buffer
 
-	code = kind.diff(inputs, arch, opts.format, &out, stderr)
+	code = kind.diff(inputs, report, arch, opts.format, &out, stderr)
 	if code != 0 && code != exitDiff {
 		return code
 	}
@@ -180,16 +182,18 @@ func readDiffInputs(
 
 func diffProfiles[T any, D any](
 	inputs []profileInput,
+	report *inputReport,
 	format string,
 	diffFn func(*T, *T) (*D, error),
 	formatFn func(*D) string,
 	equalFn func(*D) bool,
 	stdout, stderr io.Writer,
 ) int {
-	profiles, err := unmarshalAll[T](inputs, lenientDecode(len(inputs)), stderr)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+	profiles := unmarshalAll[T](inputs, make([]bool, len(inputs)), report)
 
+	report.flush(stderr)
+
+	if report.anyFailed() {
 		return exitUsage
 	}
 
