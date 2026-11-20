@@ -84,12 +84,21 @@ func TestReadmeExamples(t *testing.T) {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			t.Parallel()
 
-			resolved := make([]string, len(args))
-			for idx, arg := range args {
-				resolved[idx] = arg
+			resolved := make([]string, 0, len(args)+2)
+			for _, arg := range args {
 				if strings.HasPrefix(arg, "examples/") {
-					resolved[idx] = filepath.Join(repoRoot, filepath.FromSlash(arg))
+					arg = filepath.Join(repoRoot, filepath.FromSlash(arg))
 				}
+
+				resolved = append(resolved, arg)
+			}
+
+			// The seccomp examples list x86 architectures, which an
+			// intersection refuses on a node of the other byte order, so
+			// a seccomp merge runs for an amd64 node wherever the test
+			// runs.
+			if args[0] == cmdMerge && slices.Contains(args, typeSeccomp) {
+				resolved = slices.Insert(resolved, 1, "--"+flagNameArch, archPrefix+"X86_64")
 			}
 
 			var stdout, stderr bytes.Buffer
@@ -133,9 +142,16 @@ func TestExamplesAreArtifacts(t *testing.T) {
 
 			var stdout, stderr bytes.Buffer
 
-			code := run(
-				[]string{cmdValidate, "--artifact", "--quiet", path}, nil, &stdout, &stderr,
-			)
+			args := []string{cmdValidate, "--artifact", "--quiet"}
+
+			// The seccomp examples list x86 architectures, which a node of
+			// the other byte order cannot load, so they are checked for an
+			// amd64 node wherever the test runs.
+			if strings.HasPrefix(filepath.Base(path), typeSeccomp) {
+				args = append(args, "--"+flagNameArch, archPrefix+"X86_64")
+			}
+
+			code := run(append(args, path), nil, &stdout, &stderr)
 			if code != 0 || stderr.Len() != 0 {
 				t.Fatalf("exit code %d; stderr:\n%s", code, stderr.String())
 			}

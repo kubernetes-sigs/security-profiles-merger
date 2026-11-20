@@ -102,6 +102,61 @@ var multiplexingArchitectures = map[specs.Arch]bool{
 	specs.ArchSHEB:    true,
 }
 
+// byteOrder is the byte order of an architecture. The zero value is none,
+// for an architecture this package does not know.
+type byteOrder int
+
+const (
+	littleEndian byteOrder = iota + 1
+	bigEndian
+)
+
+// String names the byte order.
+func (order byteOrder) String() string {
+	switch order {
+	case littleEndian:
+		return "little-endian"
+	case bigEndian:
+		return "big-endian"
+	default:
+		return "unknown byte order"
+	}
+}
+
+// byteOrders gives the byte order of every architecture this package knows,
+// each stated, so that one missing from it is caught rather than taken for
+// either. libseccomp keeps one byte order per filter and refuses an
+// architecture of the other one with EDOM, so a runtime fails to load a
+// profile listing an architecture whose byte order differs from the native
+// architecture's.
+//
+//nolint:gochecknoglobals // immutable lookup table
+var byteOrders = map[specs.Arch]byteOrder{
+	specs.ArchX86:         littleEndian,
+	specs.ArchX86_64:      littleEndian,
+	specs.ArchX32:         littleEndian,
+	specs.ArchARM:         littleEndian,
+	specs.ArchAARCH64:     littleEndian,
+	specs.ArchMIPS:        bigEndian,
+	specs.ArchMIPS64:      bigEndian,
+	specs.ArchMIPS64N32:   bigEndian,
+	specs.ArchMIPSEL:      littleEndian,
+	specs.ArchMIPSEL64:    littleEndian,
+	specs.ArchMIPSEL64N32: littleEndian,
+	specs.ArchPPC:         bigEndian,
+	specs.ArchPPC64:       bigEndian,
+	specs.ArchPPC64LE:     littleEndian,
+	specs.ArchS390:        bigEndian,
+	specs.ArchS390X:       bigEndian,
+	specs.ArchPARISC:      bigEndian,
+	specs.ArchPARISC64:    bigEndian,
+	specs.ArchRISCV64:     littleEndian,
+	specs.ArchLOONGARCH64: littleEndian,
+	specs.ArchM68K:        bigEndian,
+	specs.ArchSH:          littleEndian,
+	specs.ArchSHEB:        bigEndian,
+}
+
 // runningArchitecture returns the native architecture of the running
 // program, or the empty Arch where it has none.
 func runningArchitecture() specs.Arch {

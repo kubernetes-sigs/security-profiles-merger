@@ -102,8 +102,9 @@ var (
 	ErrUnsupportedVariable = errors.New("AppArmor variables are not supported")
 
 	// ErrRelativePath is returned by ValidateStrict and ValidateArtifact
-	// when a path does not start with "/". AppArmor file rules must use
-	// absolute paths.
+	// when a path does not start with "/", also where an escape such as
+	// `\x2f` spells its first "/". AppArmor file rules must use absolute
+	// paths, and the merges read such a path as naming no file.
 	ErrRelativePath = spm.ErrRelativePath
 
 	// ErrUnquotablePath is returned by ValidateStrict and ValidateArtifact
@@ -650,9 +651,7 @@ func (check *validator) loadablePaths(profile, normalizedProfile *Profile) {
 
 		idx++
 
-		check.reject(context, paths, func(path string) bool {
-			return path != "" && path[0] != '/'
-		}, ErrRelativePath, showQuoted)
+		check.reject(context, paths, relativePath, ErrRelativePath, showQuoted)
 		check.reject(context, paths, hasUnquotableChar, ErrUnquotablePath, showQuoted)
 		check.reject(context, paths, hasNul, ErrNulInPath, showQuoted)
 		check.globStatus(context, normalized)

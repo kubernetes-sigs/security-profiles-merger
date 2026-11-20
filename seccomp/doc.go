@@ -161,8 +161,10 @@ limitations under the License.
 // which ValidateStrict rejects with [ErrDuplicateSyscallName].
 // [ValidateArtifact] accepts such entries, but also applies what it applies
 // to an artifact, such as the listener rules and the limits, which a result
-// need not meet: a baseline's listener carries into it, and a union can
-// exceed the limits its inputs met.
+// need not meet: a baseline's listener carries into it, a union can
+// exceed the limits its inputs met, and a union keeps an architecture of
+// another byte order than the node's, which [Intersect] refuses
+// ([ErrMixedByteOrder]).
 //
 // Argument conditions are compared as libseccomp evaluates them: valueTwo
 // is only read for SCMP_CMP_MASKED_EQ, where libseccomp masks it with value,
@@ -173,11 +175,12 @@ limitations under the License.
 // # Intersection
 //
 // For each call, [Intersect] picks the more restrictive action of the
-// inputs. Filters on different argument indices are conjoined into one
-// entry, identical filters are kept, several entries for one syscall (an OR
-// of filters) are preserved, and filters that provably never overlap (arg0
-// == 1 and arg0 == 2) produce no shared entry. Two different conditions on
-// one argument are conjoined where one implies the other, as the one that
+// inputs, except on an architecture it drops (see below). Filters on
+// different argument indices are conjoined into one entry, identical
+// filters are kept, several entries for one syscall (an OR of filters) are
+// preserved, and filters that provably never overlap (arg0 == 1 and
+// arg0 == 2) produce no shared entry. Two different conditions on one
+// argument are conjoined where one implies the other, as the one that
 // says more: arg0 == 2 against arg0 != 40 is arg0 == 2, and arg0 < 5
 // against arg0 <= 10 is arg0 < 5. Implication is only read off values that
 // fit 32 bits, which mean the same on every architecture. Where the exact
@@ -187,6 +190,22 @@ limitations under the License.
 // never permits a call that any input denies, as libseccomp evaluates the
 // inputs and the result; the one exception is a defect of libseccomp the
 // merge does not model, described in the Architectures section.
+//
+// Where [Intersect] drops an architecture from the list, to keep values
+// above 32 bits, a multiplexer or the defect from deciding calls there (see
+// the Architectures section), libseccomp answers every call of that
+// architecture with its action for an unlisted architecture, SCMP_ACT_KILL,
+// which kills the calling thread. That denies the call, so the result
+// still permits nothing an input denies, but it is not always the more
+// restrictive action: where the inputs answer a call with
+// SCMP_ACT_KILL_PROCESS, the result kills only the thread. Intersecting
+// {SCMP_ACT_KILL_PROCESS; x86_64, x86; read ALLOW} with the same profile
+// allowing read only if a0 == 0x100000001 drops x86, so every x86 call,
+// read included, kills the thread rather than the process. A profile has
+// no member that sets the action for an unlisted architecture, so the
+// merge cannot keep SCMP_ACT_KILL_PROCESS there. An architecture whose byte
+// order differs from the native architecture's is never dropped: Intersect
+// refuses the input listing it (see the Architectures section).
 //
 // The result is conservative rather than exact where filters interact: a
 // conditional entry is lowered by every overlapping entry of the other side,
@@ -240,9 +259,12 @@ limitations under the License.
 // conflicting rather than unifying them.
 //
 // [Validate] does not range-check errnoRet; [ValidateStrict] and
-// [ValidateArtifact] reject values above 4095 on actions that return them.
-// runc and crun load only the lower 16 bits of errnoRet, and the merges and
-// [Diff] read a value the same way: 65537 is EPERM, so an entry carrying it
+// [ValidateArtifact] reject the values libseccomp refuses, with which a
+// runtime fails to load the profile: 4095 (the kernel's MAX_ERRNO) and
+// above on SCMP_ACT_ERRNO, and above 65535 on SCMP_ACT_TRACE, whose value
+// is a 16-bit message for the tracer rather than an errno. runc and crun
+// load only the lower 16 bits of errnoRet, and the merges and [Diff] read
+// a value the same way: 65537 is EPERM, so an entry carrying it
 // against a default errno of 1 is one a runtime skips for equaling the
 // default, and it hides no other rule of its syscall. Results spell an
 // errno as it is loaded. [Diff] compares a default errno as loaded too, but
@@ -257,10 +279,24 @@ limitations under the License.
 // empty list means "native only" and a non-empty list "native plus these".
 // A list need not name the native architecture, and a profile listing only
 // foreign architectures is valid. [Validate] accepts every architecture the
-// runtime-spec names. runc knows no parisc, m68k or sh and refuses a profile
-// listing one, while crun resolves the name through libseccomp. [Intersect]
-// takes the plain set intersection of the lists, which may be empty, less
-// the architectures it drops as described below. [Union] combines them. The
+// runtime-spec names. libseccomp keeps one byte order per filter, though,
+// and refuses an architecture of the other one with EDOM, so a runtime
+// fails to load a profile listing s390x, ppc64, big-endian MIPS, parisc,
+// m68k or sheb on a little-endian node, or a little-endian architecture on
+// a big-endian one. [ValidateArtifact] reports such an architecture
+// ([ErrMixedByteOrder]); where the native architecture is not known, it
+// reports a list mixing the two byte orders, which loads on no node.
+// Where the native architecture is known, [Intersect] refuses an input
+// listing such an architecture, as an [InputError] wrapping
+// [ErrMixedByteOrder], rather than drop the architecture: the input does
+// not load on the node, and the result without it would, applying rules
+// written for another architecture. [Union] keeps every architecture an
+// input covers, so a union of inputs listing one fails to load as they do.
+// Where the native architecture is not known, neither merge looks at the
+// byte order. runc knows no parisc, m68k or sh and refuses a profile listing
+// one, while crun resolves the name through libseccomp. [Intersect] takes
+// the plain set intersection of the lists, which may be empty, less the
+// architectures it drops as described below. [Union] combines them. The
 // set the union covers is exact, but the behavior on an architecture only
 // one input lists is not the rule-by-rule union: there the other input's
 // filter applies libseccomp's action for an unlisted architecture,
@@ -329,17 +365,19 @@ limitations under the License.
 // lose. The merges settle the shapes of the rules first, so they may accept
 // such a profile, and can produce the shape from inputs that do not have it,
 // which is what they check their result for. A rule on a syscall no covered
-// architecture has applies to no call and is dropped, which is exact.
-// Otherwise [Intersect] drops an architecture, as it does below: x32 where
-// it pairs with x86_64, or x86_64 where x32 is named native, the affected
-// one where it is not native, and otherwise the listed architectures on
-// which the offending syscall applies. [Union] cannot drop one and refuses
-// with [ErrLostRules], as [Intersect] does where nothing can be dropped.
-// Where the native architecture is not known, the runtime may add any
-// architecture a Go program runs on, so each is checked as native, a rule
-// goes only where no architecture has its syscall, x32 is the only
-// architecture that can be dropped, and dropping the last listed one is
-// refused.
+// architecture has applies to no call, and the merges drop it, which is
+// exact. The validators keep it: a runtime loading the profile as written
+// keeps it under the number libseccomp makes up, and it is what the block
+// then tests first. Otherwise [Intersect] drops an architecture, as it
+// does below: x32 where it pairs with x86_64, or x86_64 where x32 is named
+// native, the affected one where it is not native, and otherwise the
+// listed architectures on which the offending syscall applies. [Union]
+// cannot drop one and refuses with [ErrLostRules], as [Intersect] does where
+// nothing can be dropped. Where the native architecture is not known, the
+// runtime may add any architecture a Go program runs on, so each is checked
+// as native, a rule goes only where no architecture has its syscall, x32 is
+// the only architecture that can be dropped, and dropping the last listed
+// one is refused.
 //
 // On a 32-bit architecture (x86, x32, arm, 32-bit and n32 MIPS, ppc, s390,
 // parisc, m68k, sh), libseccomp compares only the lower 32 bits of each

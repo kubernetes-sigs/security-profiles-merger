@@ -1284,3 +1284,30 @@ func TestPathIdentityIsSharedByDiffAndValidate(t *testing.T) {
 		t.Errorf("Union kept %d paths, want one spelling", len(got.ReadOnlyPaths))
 	}
 }
+
+// TestDiffRelativeLiteral checks that a literal whose text does not start
+// with "/" is not the absolute path its escapes decode to: the parser reads
+// `\x2fetc/passwd` as relative, and rejects it, so a profile listing it does
+// not grant "/etc/passwd". Two relative spellings of one name are one rule.
+func TestDiffRelativeLiteral(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		left, right string
+		equal       bool
+	}{
+		{left: `\x2fetc/passwd`, right: "/etc/passwd", equal: false},
+		{left: `\/etc/passwd`, right: "/etc/passwd", equal: false},
+		{left: `\x2fetc/passwd`, right: `\/etc/passwd`, equal: true},
+	} {
+		diff, err := apparmor.Diff(readOnly(testCase.left), readOnly(testCase.right))
+		if err != nil {
+			t.Fatalf("Diff(%q, %q): %v", testCase.left, testCase.right, err)
+		}
+
+		if diff.Equal != testCase.equal {
+			t.Errorf("Diff(%q, %q) = %s, want equal %t",
+				testCase.left, testCase.right, apparmor.FormatDiff(diff), testCase.equal)
+		}
+	}
+}

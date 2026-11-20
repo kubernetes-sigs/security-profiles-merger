@@ -3,7 +3,7 @@
   "defaultErrnoRet": 13,
   "architectures": [
     "SCMP_ARCH_X86_64",
-    "SCMP_ARCH_S390X"
+    "SCMP_ARCH_RISCV64"
   ],
   "flags": [
     "SECCOMP_FILTER_FLAG_LOG"

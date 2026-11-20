@@ -115,7 +115,9 @@ func FuzzMergesKeepRulesOnEveryArchitecture(f *testing.F) {
 			"union":     seccomp.Options.Union,
 		} {
 			result, err := merge(forNode(native), left, right)
-			if errors.Is(err, seccomp.ErrLostRules) {
+			// Intersect also refuses an input listing an architecture of
+			// another byte order than the node's, as the lists do on s390x.
+			if errors.Is(err, seccomp.ErrLostRules) || errors.Is(err, seccomp.ErrMixedByteOrder) {
 				continue
 			}
 

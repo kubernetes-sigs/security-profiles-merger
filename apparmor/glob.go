@@ -158,8 +158,11 @@ type globMatcher struct {
 	// empty for a literal, for a path past the length limit, and for a
 	// pattern the port cannot translate.
 	fragment string
-	// relative reports a translated pattern that does not start with "/";
-	// it is false for a literal and for a pattern the port cannot translate.
+	// relative reports a translated pattern or a literal whose text does
+	// not start with "/". The parser reads no file rule from either, so a
+	// relative literal names no file, even where its escapes decode to an
+	// absolute name, as `\x2fetc/passwd` and `\/etc/passwd` do. It is false
+	// for a pattern the port cannot translate.
 	relative bool
 	// starStarForm reports a pattern that is its literal prefix followed
 	// by "**", which starStar reports once the pattern is compiled.
@@ -241,9 +244,25 @@ func literalMatcher(path string) *globMatcher {
 
 		escapedNegation: false,
 		fragment:        "",
-		relative:        false,
+		relative:        relativePath(path),
 		starStarForm:    false,
 	}
+}
+
+// relativePath reports whether the text of a path does not start with "/",
+// before any escape is decoded: the parser reads no file rule from such a
+// path, whether its escapes spell a "/" there or not. The empty path is
+// left to the check that reports it.
+func relativePath(path string) bool {
+	return path != "" && path[0] != '/'
+}
+
+// relativeLiteral reports a literal whose text does not start with "/",
+// which names no file however its escapes decode (see globMatcher.relative):
+// it matches no pattern, equals no absolute path, and an intersection drops
+// it, as it drops a relative pattern.
+func (matcher *globMatcher) relativeLiteral() bool {
+	return matcher.kind == kindLiteral && matcher.relative
 }
 
 // analyzePattern runs a path through the parser port and compiles the
@@ -276,7 +295,10 @@ func analyzePattern(pattern string, compile bool) *globMatcher {
 	matcher.prefix = matcher.literal[:strings.LastIndexByte(matcher.literal, '/')+1]
 
 	if conv.kind == kindLiteral {
+		// The text decides, not the decoded name: `\/etc/passwd` is
+		// relative to the parser, as `\/etc/*` is.
 		matcher.status = globUsable
+		matcher.relative = relativePath(pattern)
 
 		return matcher
 	}
@@ -287,7 +309,7 @@ func analyzePattern(pattern string, compile bool) *globMatcher {
 		return matcher
 	}
 
-	translateGlob(matcher, conv, pattern[0] != '/')
+	translateGlob(matcher, conv, relativePath(pattern))
 
 	if compile {
 		compileMatcher(matcher)
@@ -707,7 +729,10 @@ func IsGlobPattern(path string) bool {
 // limit, is identified by its text, since patterns that match nothing are
 // not thereby the same rule. A relative pattern matches nothing either, but
 // it has an expression two spellings of it share, and is identified by
-// that, apart from every absolute pattern.
+// that, apart from every absolute pattern. A relative literal is identified
+// by its name apart from every absolute literal in the same way, so
+// `\x2fetc/passwd`, which the parser reads as relative, is not
+// "/etc/passwd", while `\/etc/passwd` is another spelling of the former.
 //
 // The three are told apart by kind, never by text alone: the expression a
 // pattern translates to is itself a string some other path may spell, and
@@ -737,7 +762,7 @@ const (
 func matcherKey(path string, matcher *globMatcher) pathKey {
 	switch {
 	case matcher.kind == kindLiteral:
-		return pathKey{kind: keyName, relative: false, text: matcher.literal}
+		return pathKey{kind: keyName, relative: matcher.relative, text: matcher.literal}
 	case matcher.fragment != "":
 		return pathKey{kind: keyExpression, relative: matcher.relative, text: matcher.fragment}
 	default:
@@ -971,6 +996,11 @@ func (side *fsSide) size() sideSize {
 func (side *fsSide) grants(literal fsPathEntry, budget *matchBudget) (fsPermission, bool) {
 	var granted fsPermission
 
+	// A relative literal names no file, so no pattern covers it.
+	if literal.matcher.relativeLiteral() {
+		return granted, true
+	}
+
 	within := side.byPrefix.candidates(literal.matcher.literal, budget, func(pattern string) bool {
 		entry := side.globs[pattern]
 		if entry.matcher.matchesMapped(literal.mapped) {
@@ -1028,17 +1058,18 @@ func buildFsSide(perms map[string]fsPermission, matchers *matcherCache) fsSide {
 	return side
 }
 
-// dropUnusableGlobs returns the paths without the glob patterns that match
-// nothing, reusing the slice when there are none. It returns nil when it
-// drops every path, as a pairwise intersection does. A pattern only matched
-// word for word is kept, as a pairwise intersection keeps it with itself.
-func dropUnusableGlobs(paths []string, matchers *matcherCache) []string {
+// dropUnusablePaths returns the paths without the glob patterns that match
+// nothing and the relative literals, which name no file, reusing the slice
+// when there are none. It returns nil when it drops every path, as a
+// pairwise intersection does. A pattern only matched word for word is kept,
+// as a pairwise intersection keeps it with itself.
+func dropUnusablePaths(paths []string, matchers *matcherCache) []string {
 	unusable := func(path string) bool {
-		if !matchers.isGlob(path) {
-			return false
-		}
-
 		matcher := matchers.matcher(path)
+
+		if matcher.kind == kindLiteral {
+			return matcher.relativeLiteral()
+		}
 
 		return !matcher.usable() && !matcher.verbatimOnly()
 	}

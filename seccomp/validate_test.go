@@ -215,6 +215,60 @@ func TestValidateSyscallNameSpelling(t *testing.T) {
 	if !errors.Is(err, seccomp.ErrInvalidSyscallName) {
 		t.Errorf("ValidateArtifact: expected ErrInvalidSyscallName, got: %v", err)
 	}
+
+	// Nor does a name that is not valid UTF-8, which JSON writes out with
+	// U+FFFD in its place and UnmarshalStrict refuses in a document.
+	invalid := named("mount\xff")
+
+	err = seccomp.Validate(invalid)
+	if err != nil {
+		t.Errorf("Validate should accept a name that is not valid UTF-8: %v", err)
+	}
+
+	err = seccomp.ValidateArtifact(invalid)
+
+	want := `syscalls[0].names[1]: "mount\xff": invalid syscall name`
+	if !errors.Is(err, seccomp.ErrInvalidSyscallName) || err.Error() != want {
+		t.Errorf("ValidateArtifact = %v, want %s", err, want)
+	}
+}
+
+// TestValidateRejectsInvalidUTF8Listener checks that a listenerPath or
+// listenerMetadata that is not valid UTF-8 fails Validate, and so the
+// merges: written out as JSON for the runtime, "/run/x\xff" reads
+// "/run/x\uFFFD", so the runtime would hand its notifications to another
+// socket than the profile names.
+func TestValidateRejectsInvalidUTF8Listener(t *testing.T) {
+	t.Parallel()
+
+	profile := &specs.LinuxSeccomp{
+		DefaultAction:    specs.ActErrno,
+		ListenerPath:     "/run/x\xff",
+		ListenerMetadata: "id=\xfe",
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{"read"}, Action: specs.ActNotify},
+		},
+	}
+
+	err := seccomp.Validate(profile)
+
+	want := `listenerPath: "/run/x\xff": listener setting is not valid UTF-8` + "\n" +
+		`listenerMetadata: "id=\xfe": listener setting is not valid UTF-8`
+	if !errors.Is(err, seccomp.ErrInvalidUTF8Listener) || err.Error() != want {
+		t.Errorf("Validate =\n%v\nwant\n%s", err, want)
+	}
+
+	_, err = seccomp.Intersect(profile)
+	if !errors.Is(err, seccomp.ErrInvalidUTF8Listener) {
+		t.Errorf("Intersect = %v, want ErrInvalidUTF8Listener", err)
+	}
+
+	profile.ListenerPath, profile.ListenerMetadata = "/run/x\u00ff", "id=\u00fe"
+
+	err = seccomp.Validate(profile)
+	if err != nil {
+		t.Errorf("Validate of a valid listener: %v", err)
+	}
 }
 
 func TestIntersectRefusesNULInSyscallName(t *testing.T) {
@@ -494,24 +548,138 @@ func TestValidateStrictUnknownArch(t *testing.T) {
 func TestValidateStrictAllKnownArchs(t *testing.T) {
 	t.Parallel()
 
-	profile := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Architectures: []specs.Arch{
-			specs.ArchX86, specs.ArchX86_64, specs.ArchX32,
-			specs.ArchARM, specs.ArchAARCH64,
-			specs.ArchMIPS, specs.ArchMIPS64, specs.ArchMIPS64N32,
-			specs.ArchMIPSEL, specs.ArchMIPSEL64, specs.ArchMIPSEL64N32,
-			specs.ArchPPC, specs.ArchPPC64, specs.ArchPPC64LE,
-			specs.ArchS390, specs.ArchS390X,
-			specs.ArchPARISC, specs.ArchPARISC64,
-			specs.ArchRISCV64, specs.ArchLOONGARCH64,
-			specs.ArchM68K, specs.ArchSH, specs.ArchSHEB,
-		},
+	little := []specs.Arch{
+		specs.ArchX86, specs.ArchX86_64, specs.ArchX32,
+		specs.ArchARM, specs.ArchAARCH64,
+		specs.ArchMIPSEL, specs.ArchMIPSEL64, specs.ArchMIPSEL64N32,
+		specs.ArchPPC64LE, specs.ArchRISCV64, specs.ArchLOONGARCH64, specs.ArchSH,
+	}
+	big := []specs.Arch{
+		specs.ArchMIPS, specs.ArchMIPS64, specs.ArchMIPS64N32,
+		specs.ArchPPC, specs.ArchPPC64, specs.ArchS390, specs.ArchS390X,
+		specs.ArchPARISC, specs.ArchPARISC64, specs.ArchM68K, specs.ArchSHEB,
 	}
 
-	err := seccomp.ValidateStrict(profile)
+	// Validate does not depend on the node, and knows every architecture.
+	err := seccomp.Validate(&specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Architectures: append(slices.Clone(little), big...),
+	})
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("Validate: unexpected error: %v", err)
+	}
+
+	// ValidateStrict accepts every architecture of the node's byte order.
+	for native, archs := range map[specs.Arch][]specs.Arch{
+		specs.ArchX86_64: little,
+		specs.ArchS390X:  big,
+	} {
+		err := seccomp.Options{Arch: native}.ValidateStrict(&specs.LinuxSeccomp{
+			DefaultAction: specs.ActErrno,
+			Architectures: archs,
+		})
+		if err != nil {
+			t.Errorf("%s: unexpected error: %v", native, err)
+		}
+	}
+}
+
+// TestValidateArtifactByteOrder checks that an architecture whose byte
+// order differs from the node's is reported: libseccomp keeps one byte
+// order per filter, and refuses s390x next to a native x86_64 with EDOM, so
+// a runtime fails to load the profile.
+func TestValidateArtifactByteOrder(t *testing.T) {
+	t.Parallel()
+
+	profile := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Architectures: []specs.Arch{specs.ArchAARCH64, specs.ArchS390X, specs.ArchPPC64},
+		Syscalls:      []specs.LinuxSyscall{{Names: []string{"read"}, Action: specs.ActAllow}},
+	}
+
+	for name, check := range map[string]func(*specs.LinuxSeccomp) error{
+		"ValidateArtifact": seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact,
+		"ValidateStrict":   seccomp.Options{Arch: specs.ArchX86_64}.ValidateStrict,
+	} {
+		err := check(profile)
+		if !errors.Is(err, seccomp.ErrMixedByteOrder) {
+			t.Fatalf("%s: expected ErrMixedByteOrder, got: %v", name, err)
+		}
+
+		want := `architectures[1]: "SCMP_ARCH_S390X": architecture of another byte order ` +
+			`(big-endian, native SCMP_ARCH_X86_64 is little-endian)` + "\n" +
+			`architectures[2]: "SCMP_ARCH_PPC64": architecture of another byte order ` +
+			`(big-endian, native SCMP_ARCH_X86_64 is little-endian)`
+		if err.Error() != want {
+			t.Errorf("%s =\n%v\nwant\n%s", name, err, want)
+		}
+	}
+
+	// On a big-endian node the little-endian one is the foreign one.
+	err := seccomp.Options{Arch: specs.ArchS390X}.ValidateArtifact(profile)
+
+	want := `architectures[0]: "SCMP_ARCH_AARCH64": architecture of another byte order ` +
+		`(little-endian, native SCMP_ARCH_S390X is big-endian)`
+	if err == nil || err.Error() != want {
+		t.Errorf("ValidateArtifact for s390x = %v, want %s", err, want)
+	}
+
+	// Validate does not depend on the node.
+	err = seccomp.Validate(profile)
+	if err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+}
+
+// TestValidateArtifactByteOrderForUnknownNode checks that where the node is
+// not known, a list mixing the byte orders, which loads on no node, is
+// reported once, naming the architectures of both, whichever comes first,
+// and that one of a single byte order, which may load, is not.
+func TestValidateArtifactByteOrderForUnknownNode(t *testing.T) {
+	t.Parallel()
+
+	const want = `architectures: architecture of another byte order (big-endian ` +
+		`"SCMP_ARCH_S390X" next to little-endian "SCMP_ARCH_X86", "SCMP_ARCH_X86_64")`
+
+	for _, archs := range [][]specs.Arch{
+		{specs.ArchS390X, specs.ArchX86, specs.ArchX86_64},
+		{specs.ArchX86, specs.ArchS390X, specs.ArchX86_64},
+	} {
+		err := seccomp.Options{Arch: ""}.ValidateArtifact(&specs.LinuxSeccomp{
+			DefaultAction: specs.ActErrno,
+			Architectures: archs,
+		})
+		if !errors.Is(err, seccomp.ErrMixedByteOrder) || err.Error() != want {
+			t.Errorf("ValidateArtifact(%v) for no node =\n%v\nwant\n%s", archs, err, want)
+		}
+	}
+
+	err := seccomp.Options{Arch: ""}.ValidateArtifact(&specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Architectures: []specs.Arch{specs.ArchS390X, specs.ArchPPC64},
+	})
+	if err != nil {
+		t.Errorf("ValidateArtifact for no node of a big-endian list: %v", err)
+	}
+}
+
+// TestValidateArtifactReportsForeignArchitectureOnce checks that a foreign
+// architecture listed twice is reported once for its byte order, at its
+// first position, next to the duplicate.
+func TestValidateArtifactReportsForeignArchitectureOnce(t *testing.T) {
+	t.Parallel()
+
+	err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(&specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Architectures: []specs.Arch{specs.ArchS390X, specs.ArchX86_64, specs.ArchS390X},
+	})
+
+	want := `architectures[2]: "SCMP_ARCH_S390X": duplicate architecture ` +
+		`(also at architectures[0])` + "\n" +
+		`architectures[0]: "SCMP_ARCH_S390X": architecture of another byte order ` +
+		`(big-endian, native SCMP_ARCH_X86_64 is little-endian)`
+	if err == nil || err.Error() != want {
+		t.Errorf("ValidateArtifact =\n%v\nwant\n%s", err, want)
 	}
 }
 
@@ -744,7 +912,8 @@ func TestValidateArtifactValid(t *testing.T) {
 		},
 	}
 
-	err := seccomp.ValidateArtifact(profile)
+	// On a node of the byte order of the architectures listed.
+	err := littleEndianNode().ValidateArtifact(profile)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -962,8 +1131,11 @@ func TestValidateArtifactEntryCount(t *testing.T) {
 func TestValidateErrnoRange(t *testing.T) {
 	t.Parallel()
 
-	tooBig := uint(4096)
-	atLimit := uint(4095)
+	// libseccomp refuses SCMP_ACT_ERRNO(4095), the kernel's MAX_ERRNO, as a
+	// rule's action and as the default, so 4094 is the largest errno a
+	// runtime loads.
+	tooBig := uint(4095)
+	atLimit := uint(4094)
 
 	over := &specs.LinuxSeccomp{
 		DefaultAction:   specs.ActErrno,
@@ -982,9 +1154,12 @@ func TestValidateErrnoRange(t *testing.T) {
 			t.Errorf("%s: expected ErrErrnoOutOfRange, got: %v", name, err)
 		}
 
-		for _, want := range []string{"defaultErrnoRet", "syscalls[0].errnoRet"} {
+		for _, want := range []string{
+			"defaultErrnoRet: 4095: errno out of range (max 4094 for SCMP_ACT_ERRNO)",
+			"syscalls[0].errnoRet: 4095: errno out of range (max 4094 for SCMP_ACT_ERRNO)",
+		} {
 			if !strings.Contains(err.Error(), want) {
-				t.Errorf("%s: error should mention %s: %v", name, want, err)
+				t.Errorf("%s: error should contain %q: %v", name, want, err)
 			}
 		}
 	}
@@ -1005,6 +1180,45 @@ func TestValidateErrnoRange(t *testing.T) {
 	err = seccomp.ValidateArtifact(limit)
 	if err != nil {
 		t.Errorf("errno at the limit should validate: %v", err)
+	}
+}
+
+// TestValidateTraceMessageRange checks that the value of SCMP_ACT_TRACE is
+// read as the 16-bit message for the tracer it is, which libseccomp accepts
+// whole, rather than as an errno capped below MAX_ERRNO.
+func TestValidateTraceMessageRange(t *testing.T) {
+	t.Parallel()
+
+	traced := func(ret uint) *specs.LinuxSeccomp {
+		return &specs.LinuxSeccomp{
+			DefaultAction:   specs.ActTrace,
+			DefaultErrnoRet: &ret,
+			Syscalls: []specs.LinuxSyscall{
+				{Names: []string{syscallWrite}, Action: specs.ActErrno},
+				{Names: []string{"read"}, Action: specs.ActTrace, ErrnoRet: &ret},
+			},
+		}
+	}
+
+	for _, ret := range []uint{4095, 5000, 65535} {
+		err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateStrict(traced(ret))
+		if err != nil {
+			t.Errorf("SCMP_ACT_TRACE with message %d should validate: %v", ret, err)
+		}
+	}
+
+	err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(traced(65536))
+	if !errors.Is(err, seccomp.ErrErrnoOutOfRange) {
+		t.Fatalf("expected ErrErrnoOutOfRange, got: %v", err)
+	}
+
+	for _, want := range []string{
+		"defaultErrnoRet: 65536: errno out of range (max 65535 for SCMP_ACT_TRACE)",
+		"syscalls[1].errnoRet: 65536: errno out of range (max 65535 for SCMP_ACT_TRACE)",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should contain %q: %v", want, err)
+		}
 	}
 }
 
@@ -1744,12 +1958,85 @@ func TestValidateArtifactReportsLostRules(t *testing.T) {
 		t.Errorf("Validate = %v, want nil", err)
 	}
 
-	// Without arm, the rule on open applies to no call and goes.
+	// Without arm, the rule on open applies to no call, and the merges drop
+	// it. A runtime loading the profile as written keeps it all the same,
+	// under a number libseccomp makes up, and tests it first, so the
+	// validators still report it.
 	profile.Architectures = []specs.Arch{specs.ArchAARCH64}
 
-	err = aarch64.ValidateArtifact(profile)
+	_, err = aarch64.Union(profile)
 	if err != nil {
-		t.Errorf("Options{aarch64}.ValidateArtifact(aarch64 only) = %v, want nil", err)
+		t.Errorf("Options{aarch64}.Union(aarch64 only) = %v, want a result", err)
+	}
+
+	err = aarch64.ValidateArtifact(profile)
+	if !errors.Is(err, seccomp.ErrLostRules) {
+		t.Errorf("Options{aarch64}.ValidateArtifact(aarch64 only) = %v, want ErrLostRules", err)
+	}
+}
+
+// TestValidateArtifactKeepsRulesThatApplyNowhere covers profiles whose
+// offending rule is on a syscall no covered architecture has. The merges
+// drop such a rule, which decides nothing, but a runtime loading the profile
+// as written keeps it under a number libseccomp makes up, tests it first,
+// and loses the rules of the block, so the validators judge the profile with
+// it. The first profile is the one TestLibseccompLosesRulesBehindAnAbsentSyscall
+// checks libseccomp against, with aarch64 listed next to a native x86_64:
+// neither has socketcall. In the second, neither x86_64 nor x32 has ipc, and
+// a block of either loses the rules of both.
+func TestValidateArtifactKeepsRulesThatApplyNowhere(t *testing.T) {
+	t.Parallel()
+
+	x86_64 := seccomp.Options{Arch: specs.ArchX86_64}
+
+	socket := profileOf(specs.ActAllow,
+		filtered("socketcall", specs.ActErrno),
+		filtered("socket", specs.ActErrno, arg(0, specs.OpEqualTo, 40)),
+	)
+	socket.Architectures = []specs.Arch{specs.ArchAARCH64}
+
+	ipc := profileOf(specs.ActKill,
+		filtered("ipc", specs.ActTrap),
+		filtered("msgsnd", specs.ActTrap,
+			arg(1, specs.OpNotEqual, 5), arg(2, specs.OpLessEqual, 1)),
+	)
+	ipc.Architectures = []specs.Arch{specs.ArchX32}
+
+	for name, profile := range map[string]*specs.LinuxSeccomp{
+		"socketcall": socket,
+		"ipc":        ipc,
+	} {
+		for validator, validate := range map[string]func(
+			seccomp.Options, *specs.LinuxSeccomp,
+		) error{
+			"ValidateArtifact": seccomp.Options.ValidateArtifact,
+			"ValidateStrict":   seccomp.Options.ValidateStrict,
+		} {
+			err := validate(x86_64, profile)
+			if !errors.Is(err, seccomp.ErrLostRules) {
+				t.Errorf("%s: %s = %v, want ErrLostRules", name, validator, err)
+			}
+		}
+
+		// The merges drop the rule that applies nowhere, and keep the
+		// architectures.
+		for merger, mergeFor := range map[string]func(
+			seccomp.Options, ...*specs.LinuxSeccomp,
+		) (*specs.LinuxSeccomp, error){
+			"Intersect": seccomp.Options.Intersect,
+			"Union":     seccomp.Options.Union,
+		} {
+			result, err := mergeFor(x86_64, profile)
+			if err != nil {
+				t.Fatalf("%s: %s = %v, want a result", name, merger, err)
+			}
+
+			if len(result.Syscalls) != 1 ||
+				!slices.Equal(result.Architectures, profile.Architectures) {
+				t.Errorf("%s: %s = %s, want the one rule that applies somewhere",
+					name, merger, seccomp.FormatProfile(result))
+			}
+		}
 	}
 }
 
@@ -1910,7 +2197,7 @@ func TestValidateArtifactMessages(t *testing.T) {
 	want := strings.Join([]string{
 		`architectures[1]: "SCMP_ARCH_X86_64": duplicate architecture (also at architectures[0])`,
 		`flags[1]: "SECCOMP_FILTER_FLAG_LOG": duplicate seccomp flag (also at flags[0])`,
-		`defaultErrnoRet: 99999: errno out of range (max 4095)`,
+		`defaultErrnoRet: 99999: errno out of range (max 4094 for SCMP_ACT_ERRNO)`,
 		`syscalls[0].errnoRet: 1: errnoRet is only used by SCMP_ACT_ERRNO and SCMP_ACT_TRACE ` +
 			`(action "SCMP_ACT_ALLOW")`,
 		`syscalls[0].args[0].valueTwo: 2: valueTwo is only used by SCMP_CMP_MASKED_EQ ` +

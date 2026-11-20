@@ -114,18 +114,52 @@ const decimalBase = 10
 
 // writeArgsKey writes the key sortedArgsKey returns to builder. The numbers
 // are formatted into a buffer on the stack rather than into a string each.
+//
+// The operator is escaped (see writeEscaped): Diff validates nothing, so
+// an operator may hold any byte, and spelled bare, one holding the
+// separators would spell two conditions, as "SCMP_CMP_EQ:1:0;1:SCMP_CMP_EQ"
+// against 2 spells a0 == 1 && a1 == 2, which made two different rules one.
+// Escaped, every key reads back as one list of conditions, while a known
+// operator, which holds no separator, is written as it is, so the keys of
+// valid conditions, which also order the clauses of a result, are the same
+// as unescaped.
 func writeArgsKey(builder *strings.Builder, args []specs.LinuxSeccompArg) {
 	var digits [20]byte
 
 	for _, arg := range args {
 		builder.Write(strconv.AppendUint(digits[:0], uint64(arg.Index), decimalBase))
 		builder.WriteByte(':')
-		builder.WriteString(string(arg.Op))
+		writeEscaped(builder, string(arg.Op), argKeySpecials)
 		builder.WriteByte(':')
 		builder.Write(strconv.AppendUint(digits[:0], arg.Value, decimalBase))
 		builder.WriteByte(':')
 		builder.Write(strconv.AppendUint(digits[:0], arg.ValueTwo, decimalBase))
 		builder.WriteByte(';')
+	}
+}
+
+// argKeySpecials are the bytes writeArgsKey escapes in an operator: its
+// separators and the escape itself.
+const argKeySpecials = `\:;`
+
+// writeEscaped writes text with a backslash before every byte of specials,
+// which holds the backslash itself, so that a key holding it reads back
+// the same way whatever bytes it holds: the text ends at the first special
+// byte without a backslash before it. Text without a special byte, which is
+// every known operator and action, is written as it is.
+func writeEscaped(builder *strings.Builder, text, specials string) {
+	if !strings.ContainsAny(text, specials) {
+		builder.WriteString(text)
+
+		return
+	}
+
+	for idx := range len(text) {
+		if strings.IndexByte(specials, text[idx]) >= 0 {
+			builder.WriteByte('\\')
+		}
+
+		builder.WriteByte(text[idx])
 	}
 }
 

@@ -414,6 +414,10 @@ func richGoldenCases() []goldenCase {
 			wantStderr: false,
 		},
 		{
+			// Intersect refuses an input listing an architecture of
+			// another byte order than the node's, and the inputs list
+			// little-endian ones, so the node is named for the golden to
+			// hold on a big-endian host too.
 			name: "merge seccomp rich intersect",
 			args: []string{
 				cmdMerge,
@@ -421,6 +425,8 @@ func richGoldenCases() []goldenCase {
 				typeSeccomp,
 				flagStrategy,
 				strategyIntersect,
+				flagArch,
+				"SCMP_ARCH_X86_64",
 				"testdata/seccomp_rich_a.json",
 				"testdata/seccomp_rich_b.json",
 			},

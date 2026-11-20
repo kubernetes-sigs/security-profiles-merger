@@ -20,6 +20,7 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -1250,6 +1251,25 @@ func TestValidateRejectsLongPaths(t *testing.T) {
 		_, err := mergeFn(profile, fsProfile(read))
 		if !errors.Is(err, landlock.ErrPathTooLong) {
 			t.Errorf("%s = %v, want ErrPathTooLong", name, err)
+		}
+	}
+
+	// An oversized path is reported for its length alone, however much of
+	// what the artifact checks look for it also holds: they do not scan it.
+	for _, oversized := range []string{
+		"/" + strings.Repeat("a", 5000) + "\xff",
+		strings.Repeat("a", 5000) + "/",
+	} {
+		profile := fsProfile(read, landlock.PathRule{Path: oversized, AccessFS: read})
+
+		for _, name := range []string{"ValidateStrict", "ValidateArtifact"} {
+			err := validators[name](profile)
+
+			want := "pathRules[0].path: " + strconv.Itoa(len(oversized)) +
+				" bytes: path exceeds 4095 bytes"
+			if err == nil || err.Error() != want {
+				t.Errorf("%s(%d bytes) = %v, want %s", name, len(oversized), err, want)
+			}
 		}
 	}
 }

@@ -295,9 +295,10 @@ func collectMultiplexRules(
 	return rules
 }
 
-// actionKey formats the action and the filter of a clause.
+// actionKey formats the action and the filter of a clause, leaving out its
+// errno.
 func actionKey(current clause) string {
-	return string(current.action) + "|" + sortedArgsKey(current.args)
+	return resultKey(current.action, nil, current.args)
 }
 
 // multiplexInput is one input of a merge, read for the multiplexer path.

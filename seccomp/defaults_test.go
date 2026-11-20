@@ -118,8 +118,9 @@ func TestCRIODefaultRestated(t *testing.T) {
 	t.Parallel()
 
 	profile := loadDefault(t, "crio-amd64-restated.json")
+	amd64 := seccomp.Options{Arch: specs.ArchX86_64}
 
-	err := seccomp.ValidateArtifact(profile)
+	err := amd64.ValidateArtifact(profile)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -127,13 +128,22 @@ func TestCRIODefaultRestated(t *testing.T) {
 	for _, native := range []specs.Arch{
 		specs.ArchX86_64, specs.ArchAARCH64, specs.ArchPPC64LE, specs.ArchS390X,
 	} {
-		if diff := selfDiff(t, native, profile); !diff.Equal {
+		// The architectures the profile lists are little-endian, which a
+		// big-endian node cannot load, and Intersect refuses them there, so
+		// s390x reads the rules on its own.
+		read := profile
+		if native == specs.ArchS390X {
+			read = seccomp.Clone(profile)
+			read.Architectures = nil
+		}
+
+		if diff := selfDiff(t, native, read); !diff.Equal {
 			t.Errorf("%s: expected the restated default to be read exactly, got %s",
 				native, seccomp.FormatDiff(diff))
 		}
 	}
 
-	merged, err := seccomp.Intersect(profile, &specs.LinuxSeccomp{
+	merged, err := amd64.Intersect(profile, &specs.LinuxSeccomp{
 		DefaultAction: specs.ActAllow,
 		Architectures: profile.Architectures,
 	})

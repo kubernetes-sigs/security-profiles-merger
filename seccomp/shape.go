@@ -219,7 +219,9 @@ func resultKey(
 	var builder strings.Builder
 
 	builder.Grow(len(action) + len(args)*argKeyBytes + len("||"))
-	builder.WriteString(string(action))
+	// Escaped, as the operators are (see writeArgsKey): Diff validates
+	// nothing, so an action may hold the separator.
+	writeEscaped(&builder, string(action), `\|`)
 	builder.WriteByte('|')
 
 	if errnoRet != nil {

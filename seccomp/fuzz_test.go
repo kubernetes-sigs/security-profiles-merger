@@ -433,6 +433,12 @@ func fuzzMerge(
 		defErrnoR, errno1R, errno2R,
 	)
 
+	// Intersect refuses an input listing an architecture of another byte
+	// order than the node's, which most masks name, so both inputs keep to
+	// the host's byte order, as a profile that loads there does.
+	left.Architectures = nativeByteOrder(left.Architectures, 0)
+	right.Architectures = nativeByteOrder(right.Architectures, 0)
+
 	result, err := cfg.merge(left, right)
 	if err != nil {
 		t.Fatal(err)
@@ -841,6 +847,23 @@ func assertSyscallsDiffSwapped(
 	}
 }
 
+// nativeByteOrder returns the architectures of the byte order of the
+// running program, unless bit 31 of the mask they were drawn from is set.
+// ValidateArtifact and Intersect refuse an architecture of the other byte
+// order, which most masks name, so the fuzz tests drop those, and
+// FuzzValidateArtifact keeps them where the mask asks for them, so that the
+// checks past the refusal are reached and the refusal is too.
+func nativeByteOrder(archs []specs.Arch, mask uint32) []specs.Arch {
+	native, known := seccomp.NativeArchitecture()
+	if !known || mask&(1<<31) != 0 {
+		return archs
+	}
+
+	return slices.DeleteFunc(archs, func(arch specs.Arch) bool {
+		return seccomp.BigEndian(arch) != seccomp.BigEndian(native)
+	})
+}
+
 // FuzzValidateArtifact fuzzes the check a runtime applies to a profile it
 // did not author, which is the entry point KEP-6061 points at untrusted
 // input. Beyond crashes and hangs it pins the contract callers rely on: a
@@ -867,7 +890,7 @@ func FuzzValidateArtifact(f *testing.F) {
 		"read", "write",
 		true, false, uint64(0), uint64(0),
 		uint32(0x13), uint8(0x07),
-		uint16(4095), uint16(4096), uint16(1),
+		uint16(4094), uint16(4095), uint16(1),
 	)
 
 	f.Fuzz(func(
@@ -886,6 +909,8 @@ func FuzzValidateArtifact(f *testing.F) {
 			archMask, flagMask,
 			defErrno, errno1, errno2,
 		)
+
+		profile.Architectures = nativeByteOrder(profile.Architectures, archMask)
 
 		if seccomp.ValidateArtifact(profile) != nil {
 			return

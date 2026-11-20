@@ -128,11 +128,13 @@ spm merge --strategy intersect baseline.json > settled.json &&
 `--arch` names the native seccomp architecture of the node that loads the
 result, which a seccomp merge result depends on (see
 [What the models leave out](integration.md#what-the-models-leave-out)). It
-decides how the 32-bit and multiplexing architectures are settled, and which
-argument values the `artifact` and `strict` checks accept. It defaults to the
-architecture `spm` runs on (`--arch native`), so the same inputs can merge
-differently on another machine; a control plane merging for a node of
-another architecture passes its name:
+decides how the 32-bit and multiplexing architectures are settled, which
+architectures of the other byte order an intersection refuses in an input,
+and which argument values and architectures the `artifact` and `strict`
+checks accept. It defaults to the architecture `spm` runs on
+(`--arch native`), so the same inputs can merge differently on another
+machine; a control plane merging for a node of another architecture passes
+its name:
 
 ```sh
 spm merge --type seccomp --strategy intersect --validate default,artifact \
@@ -144,10 +146,13 @@ known. The merge and the `artifact` and `strict` checks then take the node to
 be any architecture Go runs on, 32-bit and multiplexing ones included, so the
 result is safe on every node but keeps fewer rules than one settled for a
 known 64-bit node, and a value above 32 bits fails the checks whatever the
-profile lists. The flag takes the values `diff --arch` takes and sets the
-`Arch` of the `seccomp.Options` the merge and the checks run with:
-`seccomp.NativeHost` for `native`, the empty `Arch` for `none`, and the name
-otherwise. It is a usage error for an AppArmor or Landlock merge.
+profile lists. The byte order is the exception: with no node to compare with,
+an intersection accepts architectures of either byte order, and the checks
+refuse only a list mixing the two, while one of a single byte order loads
+only on nodes of that byte order. The flag takes the values `diff --arch`
+takes and sets the `Arch` of the `seccomp.Options` the merge and the checks
+run with: `seccomp.NativeHost` for `native`, the empty `Arch` for `none`, and
+the name otherwise. It is a usage error for an AppArmor or Landlock merge.
 
 Profiles can also be read from stdin, as a single profile or a JSON array of
 profiles, and `-` reads stdin alongside file arguments:
@@ -225,14 +230,22 @@ person wrote; they cannot be combined. Both refuse what the library's
 fails a runtime that decodes the artifact with the library.
 
 `--arch` names the native seccomp architecture of the node that loads the
-profiles, as `merge --arch` does. It matters to `--artifact` and `--strict`,
-which refuse an argument value above 32 bits where the node covers a 32-bit
-architecture: without it, the same profile passes `spm validate --artifact`
-on an x86-64 machine and fails on an x86 one. With `--arch none` they take
-the node to be any architecture Go runs on and refuse such a value
-everywhere. The default checks do not
-depend on the architecture, so `--arch` without one of the two flags is a
-usage error rather than a flag that does nothing.
+profiles, as `merge --arch` does. It matters to `--artifact` and `--strict`
+in two ways. They refuse an argument value above 32 bits where the node
+covers a 32-bit architecture: without `--arch`, the same profile passes
+`spm validate --artifact` on an x86-64 machine and fails on an x86 one. And
+they refuse a listed architecture whose byte order differs from the node's,
+which libseccomp cannot load next to it: a profile listing
+`SCMP_ARCH_X86_64`, as the seccomp profiles in `examples/` and the README
+walkthrough do, fails `validate --artifact` on an s390x or other big-endian
+machine unless `--arch` names an x86-64 node, and so does a seccomp
+`merge --strategy intersect` of them, which refuses such an input. With
+`--arch none` they take
+the node to be any architecture Go runs on and refuse a value above 32 bits
+everywhere, but refuse only an architecture list mixing the two byte
+orders. The default checks do not depend on the architecture, so `--arch`
+without one of the two flags is a usage error rather than a flag that does
+nothing.
 
 ```sh
 spm validate --type seccomp --artifact --arch SCMP_ARCH_X86 artifact.json

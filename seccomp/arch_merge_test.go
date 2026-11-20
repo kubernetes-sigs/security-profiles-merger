@@ -19,6 +19,7 @@ package seccomp_test
 import (
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -37,6 +38,30 @@ import (
 // given one, the empty Arch for one that is not known.
 func forNode(native specs.Arch) seccomp.Options {
 	return seccomp.Options{Arch: native}
+}
+
+// littleEndianNode returns the options for the node the tests run on
+// where it is little-endian, and for an x86-64 node otherwise. A test of a
+// profile listing little-endian architectures runs with it, so that it
+// takes the native path of the host on amd64, arm64 and ppc64le, while a
+// big-endian host, which cannot load those architectures, checks it as an
+// x86-64 node would.
+func littleEndianNode() seccomp.Options {
+	native, known := seccomp.NativeArchitecture()
+	if known && !seccomp.BigEndian(native) {
+		return seccomp.Options{Arch: seccomp.NativeHost}
+	}
+
+	return seccomp.Options{Arch: specs.ArchX86_64}
+}
+
+// errorText returns the message of err, or "" for nil.
+func errorText(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	return err.Error()
 }
 
 // on sets the architectures a profile lists.
@@ -140,6 +165,127 @@ func TestIntersectDropsNarrowArchitecturesForWideValues(t *testing.T) {
 	), specs.ArchX86_64)
 
 	requireEqualProfiles(t, result, want)
+}
+
+// TestIntersectDropsArchitectureUnderKillProcess pins what the Intersection
+// section of the package documentation says about a dropped architecture:
+// its calls get libseccomp's action for an unlisted architecture,
+// SCMP_ACT_KILL, which kills the thread, where both inputs kill the
+// process. The call is denied either way, but the action is not the more
+// restrictive one of the inputs there.
+func TestIntersectDropsArchitectureUnderKillProcess(t *testing.T) {
+	t.Parallel()
+
+	baseline := on(profileOf(specs.ActKillProcess,
+		filtered("read", specs.ActAllow),
+	), specs.ArchX86_64, specs.ArchX86)
+	artifact := on(profileOf(specs.ActKillProcess,
+		filtered("read", specs.ActAllow, arg(0, specs.OpEqualTo, 1<<32|1)),
+	), specs.ArchX86_64, specs.ArchX86)
+
+	result, err := seccomp.Options{Arch: specs.ArchX86_64}.Intersect(baseline, artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	requireEqualProfiles(t, result, on(profileOf(specs.ActKillProcess,
+		filtered("read", specs.ActAllow, arg(0, specs.OpEqualTo, 1<<32|1)),
+	), specs.ArchX86_64))
+}
+
+// TestIntersectRefusesArchitecturesOfTheOtherByteOrder checks that on a
+// known node Intersect refuses an input listing an architecture of the
+// other byte order, which libseccomp cannot load next to the native one,
+// naming that input, rather than drop the architecture and return a result
+// that loads where the input does not. Union keeps every architecture an
+// input covers, and with the node not known both merges accept the list.
+func TestIntersectRefusesArchitecturesOfTheOtherByteOrder(t *testing.T) {
+	t.Parallel()
+
+	mixed := on(profileOf(specs.ActErrno, filtered("read", specs.ActAllow)),
+		specs.ArchX86_64, specs.ArchAARCH64, specs.ArchS390X, specs.ArchPPC64)
+
+	for _, testCase := range []struct {
+		native specs.Arch
+		clean  *specs.LinuxSeccomp
+		want   string
+	}{
+		{
+			native: specs.ArchS390X,
+			clean:  on(profileOf(specs.ActErrno), specs.ArchS390X),
+			want: `architectures[0]: "SCMP_ARCH_X86_64": architecture of another byte order ` +
+				`(little-endian, native SCMP_ARCH_S390X is big-endian)`,
+		},
+		{
+			native: specs.ArchX86_64,
+			clean:  on(profileOf(specs.ActErrno), specs.ArchX86_64),
+			want: `architectures[2]: "SCMP_ARCH_S390X": architecture of another byte order ` +
+				`(big-endian, native SCMP_ARCH_X86_64 is little-endian)`,
+		},
+	} {
+		node := seccomp.Options{Arch: testCase.native}
+
+		for _, inputs := range [][]*specs.LinuxSeccomp{
+			{mixed},
+			{testCase.clean, mixed},
+			{mixed, testCase.clean},
+		} {
+			checkByteOrderRefused(t, node, inputs, slices.Index(inputs, mixed), testCase.want)
+		}
+
+		union, err := node.Union(mixed, testCase.clean)
+		if err != nil || len(union.Architectures) != len(mixed.Architectures) {
+			t.Errorf("%s: Union = %s, %v, want every architecture kept",
+				testCase.native, seccomp.FormatProfile(union), err)
+		}
+	}
+
+	result, err := seccomp.Options{Arch: ""}.Intersect(mixed, mixed)
+	if err != nil || len(result.Architectures) != len(mixed.Architectures) {
+		t.Errorf("Options{}.Intersect = %s, %v, want every architecture kept",
+			seccomp.FormatProfile(result), err)
+	}
+}
+
+// checkByteOrderRefused checks that Intersect refuses the input at index
+// for an architecture of another byte order, with the message want.
+func checkByteOrderRefused(
+	t *testing.T, node seccomp.Options, inputs []*specs.LinuxSeccomp, index int, want string,
+) {
+	t.Helper()
+
+	result, err := node.Intersect(inputs...)
+
+	var inputErr *seccomp.InputError
+	if !errors.As(err, &inputErr) || inputErr.Index != index ||
+		!errors.Is(err, seccomp.ErrMixedByteOrder) || !strings.Contains(err.Error(), want) {
+		t.Errorf("%s: Intersect of %d inputs = %s, %v, want input %d refused with %s",
+			node.Arch, len(inputs), seccomp.FormatProfile(result), err, index, want)
+	}
+}
+
+// TestIntersectRefusesOnlyForeignByteOrder covers inputs listing only an
+// architecture of the other byte order. Neither loads on the node, and
+// dropping the architecture would leave a filter of the native architecture
+// alone that does, applying rules written for another architecture, so
+// Intersect refuses every such input.
+func TestIntersectRefusesOnlyForeignByteOrder(t *testing.T) {
+	t.Parallel()
+
+	amd64 := seccomp.Options{Arch: specs.ArchX86_64}
+	profile := on(profileOf(specs.ActErrno, filtered("read", specs.ActAllow)), specs.ArchS390X)
+
+	_, err := amd64.Intersect(profile)
+
+	var inputErr *seccomp.InputError
+	if !errors.As(err, &inputErr) || inputErr.Index != 0 ||
+		!errors.Is(err, seccomp.ErrMixedByteOrder) {
+		t.Errorf("Intersect(single) = %v, want input 0 refused with ErrMixedByteOrder", err)
+	}
+
+	_, err = amd64.Intersect(profile, seccomp.Clone(profile))
+	checkInputErrors(t, "Intersect(pair)", err, []int{0, 1},
+		[]error{seccomp.ErrMixedByteOrder, seccomp.ErrMixedByteOrder})
 }
 
 func TestIntersectCollapsesWideValuesOnNarrowNative(t *testing.T) {
@@ -749,19 +895,15 @@ func TestNativeHostIsThePlainFunctions(t *testing.T) {
 
 	baseline, artifact := wideValuePair()
 
-	plain, err := seccomp.Intersect(baseline, artifact)
-	if err != nil {
-		t.Fatalf("Intersect: %v", err)
-	}
+	// The pair lists x86 architectures, which a big-endian host refuses,
+	// so the two are compared by their errors as well.
+	plain, plainErr := seccomp.Intersect(baseline, artifact)
+	host, hostErr := seccomp.Options{Arch: seccomp.NativeHost}.Intersect(baseline, artifact)
 
-	host, err := seccomp.Options{Arch: seccomp.NativeHost}.Intersect(baseline, artifact)
-	if err != nil {
-		t.Fatalf("Options{NativeHost}.Intersect: %v", err)
-	}
-
-	if seccomp.FormatProfile(plain) != seccomp.FormatProfile(host) {
-		t.Errorf("Options{NativeHost}.Intersect = %s, Intersect = %s",
-			seccomp.FormatProfile(host), seccomp.FormatProfile(plain))
+	if seccomp.FormatProfile(plain) != seccomp.FormatProfile(host) ||
+		errorText(plainErr) != errorText(hostErr) {
+		t.Errorf("Options{NativeHost}.Intersect = %s, %v, Intersect = %s, %v",
+			seccomp.FormatProfile(host), hostErr, seccomp.FormatProfile(plain), plainErr)
 	}
 
 	native, known := seccomp.NativeArchitecture()

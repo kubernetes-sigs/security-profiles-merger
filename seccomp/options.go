@@ -96,9 +96,10 @@ func (o Options) Diff(left, right *specs.LinuxSeccomp) (*ProfileDiff, error) {
 // ValidateArtifact is ValidateArtifact for the node the options name. The
 // native architecture decides whether the filter covers a 32-bit
 // architecture, and so whether a value above 32 bits is reported
-// (ErrValueTooWide), and whether it covers an architecture that multiplexes
+// (ErrValueTooWide), whether it covers an architecture that multiplexes
 // socket and SysV IPC calls, which decides the conflicts reported on the
-// multiplexers (ErrConflictingEntries).
+// multiplexers (ErrConflictingEntries), and which listed architectures
+// have another byte order than the node's (ErrMixedByteOrder).
 func (o Options) ValidateArtifact(profile *specs.LinuxSeccomp) error {
 	native, err := o.native()
 	if err != nil {

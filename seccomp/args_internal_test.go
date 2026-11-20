@@ -518,3 +518,42 @@ func TestArgsCoverAndDisjointStayLinear(t *testing.T) {
 		t.Error("long filters differing in their last condition compare wrongly")
 	}
 }
+
+// TestArgsKeyEscapesOnlyWhatItMust checks that the key of known operators
+// is spelled as it always was, since it also orders the clauses of a
+// result, and that an operator holding the separators or the escape is
+// escaped, so that it cannot spell the key of other conditions.
+func TestArgsKeyEscapesOnlyWhatItMust(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		args []specs.LinuxSeccompArg
+		want string
+	}{
+		{
+			args: []specs.LinuxSeccompArg{
+				{Index: 0, Value: 0xf0, ValueTwo: 0x10, Op: specs.OpMaskedEqual},
+				{Index: 1, Value: 2, ValueTwo: 0, Op: specs.OpNotEqual},
+			},
+			want: "0:SCMP_CMP_MASKED_EQ:240:16;1:SCMP_CMP_NE:2:0;",
+		},
+		{
+			args: []specs.LinuxSeccompArg{
+				{Index: 0, Value: 2, ValueTwo: 0, Op: `SCMP_CMP_EQ:1:0;1:SCMP_CMP_EQ`},
+			},
+			want: `0:SCMP_CMP_EQ\:1\:0\;1\:SCMP_CMP_EQ:2:0;`,
+		},
+		{
+			args: []specs.LinuxSeccompArg{{Index: 0, Value: 1, ValueTwo: 0, Op: `a\`}},
+			want: `0:a\\:1:0;`,
+		},
+	} {
+		if got := sortedArgsKey(testCase.args); got != testCase.want {
+			t.Errorf("sortedArgsKey(%v) = %q, want %q", testCase.args, got, testCase.want)
+		}
+	}
+
+	if got, want := resultKey(`SCMP_ACT_ALLOW|1`, nil, nil), `SCMP_ACT_ALLOW\|1||`; got != want {
+		t.Errorf("resultKey = %q, want %q", got, want)
+	}
+}

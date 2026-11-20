@@ -340,3 +340,27 @@ func TestValidateArtifactRefusesTooManyEntriesFirst(t *testing.T) {
 		}
 	}
 }
+
+// TestEveryArchitectureHasAByteOrder checks that byteOrders states the byte
+// order of exactly the architectures this package knows, so that one added
+// to syscallArchitectures is not silently taken for either byte order.
+func TestEveryArchitectureHasAByteOrder(t *testing.T) {
+	t.Parallel()
+
+	for _, arch := range syscallArchitectures {
+		if order := byteOrders[arch]; order != littleEndian && order != bigEndian {
+			t.Errorf("%s has no byte order", arch)
+		}
+	}
+
+	if len(byteOrders) != len(syscallArchitectures) {
+		t.Errorf("byteOrders holds %d architectures, syscallArchitectures %d",
+			len(byteOrders), len(syscallArchitectures))
+	}
+
+	for arch := range byteOrders {
+		if !isKnownArch(arch) {
+			t.Errorf("byteOrders names %s, which this package does not know", arch)
+		}
+	}
+}
