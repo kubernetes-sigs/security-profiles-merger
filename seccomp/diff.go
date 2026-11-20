@@ -569,7 +569,7 @@ func groupOrder(clauses []clause, keys map[siblingKey]bool) map[siblingKey][]gro
 	seen := make(map[filed]struct{})
 
 	for _, current := range clauses {
-		result := resultKey(current.action, current.errnoRet, "")
+		result := resultKey(current.action, current.errnoRet, nil)
 
 		for _, arg := range current.args {
 			nodes, count := siblingNodes(arg)
@@ -934,7 +934,7 @@ func buildSyscallMap(
 // syscallEntryKey formats the fields equalSyscallEntry compares, so that
 // entries compare equal exactly when their keys do.
 func syscallEntryKey(entry SyscallEntry) string {
-	return resultKey(entry.Action, entry.ErrnoRet, sortedArgsKey(entry.Args))
+	return resultKey(entry.Action, entry.ErrnoRet, entry.Args)
 }
 
 func entriesToDetails(entries []SyscallEntry) []SyscallDetail {

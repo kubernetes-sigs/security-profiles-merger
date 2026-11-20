@@ -29,7 +29,8 @@ We have full documentation on how to get started contributing here:
   `make lint` and `make test-libseccomp`; see
   [Local Development](#local-development).
 - Nothing else for the Makefile: it runs the pinned golangci-lint through
-  `go run`, and mdtoc, govulncheck, zeitgeist, actionlint and gorelease
+  `go run` (which needs Go 1.26 or newer, see below), and mdtoc,
+  govulncheck, zeitgeist, actionlint and gorelease
   through `go tool` from their own module, `hack/tools/go.mod`. The targets
   that run those tools need a Go at least as new as that module's `go`
   line, since the go command picks its toolchain from `go.mod` alone. CI
@@ -62,11 +63,13 @@ The codebase is organized in layers:
   comparable element type, and `DiffSlice` with ordered element types only,
   since it sorts its results; `NewSliceDiff` builds an `spm.SliceDiff`, nil
   for equal lists, and `WriteSliceDiff` formats one for string-like types,
-  skipping a nil one. `ClonePtr` copies an optional value and `IsAbsPath`
-  handles Linux profile paths on any host. All three profile packages merge
-  through `Fold`; seccomp passes it a clone function that normalizes, since a
-  single profile is normalized rather than merged. It also holds the bounds
-  on what an error reports (`JoinLimited`, `BoundedError`, `QuoteBounded`)
+  skipping a nil one. `ClonePtr` copies an optional value. All three profile
+  packages merge through `Fold`, which returns a single profile as it is
+  and stops at the first error a merge returns: apparmor and landlock fold
+  copies they own, apparmor ends the fold past its budget, and seccomp
+  normalizes a single profile rather than merging it. It also holds the
+  bounds on what an error reports (`Collector`, `BoundedError`,
+  `QuoteBounded`)
   and the quoting of profile values for output (`SafeText`, `SafeName`).
 - `internal/strictjson/` finds what `encoding/json` accepts silently and an
   artifact must not carry: repeated members, members no field reads, members
@@ -174,7 +177,7 @@ make verify-upstream     # fail if a pinned tool version is behind upstream
 make govulncheck         # run govulncheck
 make api-report          # report API changes since the latest release
 make tidy                # run go mod tidy on go.mod and hack/tools/go.mod
-make clean               # remove build artifacts
+make clean               # remove build artifacts and the release snapshot
 ```
 
 Build the binary with `make build`, or give `go build` an output path: a bare
@@ -188,10 +191,15 @@ Notes on the targets:
   `run.build-tags` to `libseccomp`, so the linter loads the cgo bridge behind
   that tag. Any version does for linting. The default `make` target and
   `make verify` run `lint`, so they need the headers too.
+- `make lint` builds golangci-lint from source with `go run`, and its
+  `go.mod` requires Go 1.26: it needs that Go or a newer one on `PATH`, or a
+  `GOTOOLCHAIN` that lets the go command fetch it. CI installs the release
+  binary of the same version instead.
 - `make test-libseccomp` needs cgo and the libseccomp headers. Set
   `LIBSECCOMP_VERSION` to require a particular version, as CI does.
 - `make verify` rewrites `go.mod`, `hack/tools/go.mod` and the goldens in
-  place before checking that nothing changed.
+  place before checking that nothing changed, and so runs its steps one at
+  a time even under `make -j`.
 - `make verify-syscalls` downloads the `syscalls.csv` of each libseccomp
   release the seccomp guard covers, so it needs network access and `curl`.
 - `make report-upstream` and `make verify-upstream` need `GITHUB_TOKEN`.
@@ -215,13 +223,16 @@ does not install or a machine it does not have:
 | `test / macos-latest / floor go`, `test / macos-latest / release go`, `test / windows-latest / floor go`, `test / windows-latest / release go` | `go test -count=1 ./...` | a macOS or Windows machine, and for `release go` the Go pinned as `GO_VERSION` in the workflows |
 | `test / linux-386` | `GOARCH=386 CGO_ENABLED=0 go test -count=1 ./...` | nothing more on amd64 |
 | `test / linux-arm64` | `CGO_ENABLED=0 go test -count=1 ./...` | an arm64 machine |
-| `vet / linux-<arch>` | `GOOS=linux GOARCH=<arch> go vet ./...` | nothing more |
+| `test / linux-<arch> (qemu)` | `GOARCH=<arch> CGO_ENABLED=0 go test -short -count=1 ./...` | qemu-user with binfmt_misc for s390x, ppc64le or arm |
+| `vet / <os>-<arch>` | `GOOS=<os> GOARCH=<arch> go vet ./...` | nothing more |
 | `test / bounds` | `go test -count=1 ./...` | nothing more; it runs without the race detector and coverage |
 | `test / release go` | `go test -count=1 ./...` | the Go pinned as `GO_VERSION` in the workflows |
 | `fuzz / <target>` | `make fuzz` | time |
 | `benchmark / <package>` | `make bench` | time |
-| `test-libseccomp / <version>` | `make test-libseccomp`, then `SPM_LIBSECCOMP_OPTIMIZE=2 make test-libseccomp TESTFLAGS='-run Libseccomp'` | cgo and that libseccomp version |
+| `test-libseccomp / <version>`, `test-libseccomp / 2.6.1 / <arch>` | `make test-libseccomp`, then `SPM_LIBSECCOMP_OPTIMIZE=2 make test-libseccomp TESTFLAGS='-run Libseccomp'` | cgo and that libseccomp version, built for arm64 or for 386 (`GOARCH=386 CC="gcc -m32"`) |
+| `benchmark / matrix` | nothing | the packages declaring benchmarks match the benchmark matrix in `ci.yml` |
 | `api / gorelease` | `make api-report` | a clean working tree; the job only reports |
+| `apparmor-parser` | `go test -count=1 -tags apparmor_parser -run TestTranslationAgreesWithApparmorParser ./apparmor/` | `apparmor_parser` on `PATH` or named by `SPM_APPARMOR_PARSER` |
 
 ### Golden files
 
@@ -277,10 +288,18 @@ merge should keep all three passing:
   permits more than an input libseccomp loads, and `Union` never less. An
   evaluator written from a mistaken reading of libseccomp would agree with the
   merge and still be wrong; this is what catches that. CI runs these tests
-  against libseccomp 2.5.5 and 2.6.1, each built from a checksum-pinned
-  release tarball, and `TestLibseccompVersion` reads the version out of the
-  loaded library and fails unless it is the one that was built, so a run
-  always names the version that answered.
+  against libseccomp 2.5.4, 2.5.5, 2.6.0 and 2.6.1 on amd64, and against
+  2.6.1 on arm64 and 386 as well, each built from a checksum-pinned release
+  tarball, and `TestLibseccompVersion` reads the version out of the loaded
+  library and fails unless it is the one that was built, so a run always
+  names the version that answered. On a 386 build the tests whose
+  expectations come from the evaluator skip, since it models a 64-bit
+  native architecture that calls every syscall directly; the merge
+  differentials run there as everywhere. libseccomp 2.5.2 is left out: it
+  evaluates some binary trees differently, and the merges do not support
+  releases older than 2.5.4. The syscall placement table
+  (`seccomp/syscalls.go`) still covers 2.5.2, since knowing more releases
+  only makes the check for lost rules more cautious.
 
 ## Mentorship
 

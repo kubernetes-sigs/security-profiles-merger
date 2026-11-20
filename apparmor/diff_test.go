@@ -20,12 +20,12 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 )
 
 func TestDiffNil(t *testing.T) {
@@ -1223,22 +1223,24 @@ func TestDiffComparesRulesNotSpellings(t *testing.T) {
 func TestDiffAllocatesInProportionToItsInput(t *testing.T) {
 	path := "/" + strings.Repeat(`\x41/`, 1<<18)
 
-	var before, after runtime.MemStats
+	var (
+		diff *apparmor.ProfileDiff
+		err  error
+	)
 
-	runtime.ReadMemStats(&before)
+	allocated := testutil.AllocatedBytes(func() {
+		diff, err = apparmor.Diff(readOnly(path), readOnly("/etc/passwd"))
+	})
 
-	diff, err := apparmor.Diff(readOnly(path), readOnly("/etc/passwd"))
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	runtime.ReadMemStats(&after)
 
 	if diff.Equal {
 		t.Fatal("Diff reports the profiles equal")
 	}
 
-	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 8*uint64(len(path)) {
+	if allocated > 8*uint64(len(path)) {
 		t.Errorf("Diff of a %d-byte path allocated %d bytes", len(path), allocated)
 	}
 }

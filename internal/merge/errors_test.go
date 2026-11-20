@@ -124,35 +124,46 @@ func TestBoundedTextKeepsInvalidUTF8(t *testing.T) {
 	}
 }
 
-func TestJoinLimitedBelowTheLimit(t *testing.T) {
+// join collects errs with Collector.Add, the way a validator joins the
+// reports of its checks.
+func join(errs ...error) error {
+	var collector merge.Collector
+	for _, err := range errs {
+		collector.Add(err)
+	}
+
+	return collector.Err()
+}
+
+func TestCollectorBelowTheLimit(t *testing.T) {
 	t.Parallel()
 
-	err := merge.JoinLimited(errFirst, nil, errSecond)
+	err := join(errFirst, nil, errSecond)
 
 	if !errors.Is(err, errFirst) || !errors.Is(err, errSecond) {
-		t.Fatalf("JoinLimited lost an error: %v", err)
+		t.Fatalf("join lost an error: %v", err)
 	}
 
 	if strings.Contains(err.Error(), "more problems") {
-		t.Errorf("JoinLimited reported an elision it did not make: %v", err)
+		t.Errorf("join reported an elision it did not make: %v", err)
 	}
 }
 
-func TestJoinLimitedAllNil(t *testing.T) {
+func TestCollectorAllNil(t *testing.T) {
 	t.Parallel()
 
-	err := merge.JoinLimited(nil, nil, nil)
+	err := join(nil, nil, nil)
 	if err != nil {
-		t.Errorf("JoinLimited(nil...) = %v, want nil", err)
+		t.Errorf("join(nil...) = %v, want nil", err)
 	}
 
-	err = merge.JoinLimited()
+	err = join()
 	if err != nil {
-		t.Errorf("JoinLimited() = %v, want nil", err)
+		t.Errorf("join() = %v, want nil", err)
 	}
 }
 
-func TestJoinLimitedCountsWhatItOmits(t *testing.T) {
+func TestCollectorCountsWhatItOmits(t *testing.T) {
 	t.Parallel()
 
 	const total = merge.MaxJoinedErrors + 17
@@ -162,28 +173,28 @@ func TestJoinLimitedCountsWhatItOmits(t *testing.T) {
 		errs = append(errs, fmt.Errorf("%w %d", errProblem, idx))
 	}
 
-	err := merge.JoinLimited(errs...)
+	err := join(errs...)
 
 	lines := strings.Count(err.Error(), "\n") + 1
 	if want := merge.MaxJoinedErrors + 1; lines != want {
-		t.Errorf("JoinLimited of %d errors reported %d lines, want %d", total, lines, want)
+		t.Errorf("join of %d errors reported %d lines, want %d", total, lines, want)
 	}
 
 	if !errors.Is(err, errs[0]) {
-		t.Errorf("JoinLimited dropped the first error: %v", err)
+		t.Errorf("join dropped the first error: %v", err)
 	}
 
 	if errors.Is(err, errs[total-1]) {
-		t.Errorf("JoinLimited kept an error past the limit: %v", err)
+		t.Errorf("join kept an error past the limit: %v", err)
 	}
 
 	if !errors.Is(err, spm.ErrMoreProblems) {
-		t.Errorf("JoinLimited error = %q, want it to report the omission", err.Error())
+		t.Errorf("join error = %q, want it to report the omission", err.Error())
 	}
 
 	want := fmt.Sprintf("%d ", total-merge.MaxJoinedErrors)
 	if !strings.Contains(err.Error(), want) {
-		t.Errorf("JoinLimited error = %q, want it to count %q", err.Error(), want)
+		t.Errorf("join error = %q, want it to count %q", err.Error(), want)
 	}
 }
 
@@ -213,12 +224,12 @@ func TestDeduplicateSliceNeverAliasesTheInput(t *testing.T) {
 	}
 }
 
-// TestJoinLimitedBoundsANestedReport covers a report built from reports. A
+// TestCollectorBoundsANestedReport covers a report built from reports. A
 // validator joins the failures of its checks, each of which has joined its
 // own, and the bound has to hold for the whole: counted once per check, a
 // profile of a hundred thousand empty names produced nine megabytes of
 // report that did not even match ErrMoreProblems.
-func TestJoinLimitedBoundsANestedReport(t *testing.T) {
+func TestCollectorBoundsANestedReport(t *testing.T) {
 	t.Parallel()
 
 	group := func(count int) error {
@@ -227,12 +238,12 @@ func TestJoinLimitedBoundsANestedReport(t *testing.T) {
 			errs[idx] = fmt.Errorf("failure %d", idx) //nolint:err113 // test data
 		}
 
-		return merge.JoinLimited(errs...)
+		return join(errs...)
 	}
 
 	sentinel := errors.New("sentinel") //nolint:err113 // test data
 
-	report := merge.JoinLimited(group(1000), group(5), sentinel, group(1000))
+	report := join(group(1000), group(5), sentinel, group(1000))
 
 	lines := strings.Count(report.Error(), "\n") + 1
 	if lines != merge.MaxJoinedErrors+1 {
@@ -249,7 +260,7 @@ func TestJoinLimitedBoundsANestedReport(t *testing.T) {
 	}
 
 	// A report inside the bound lists everything and claims no omission.
-	small := merge.JoinLimited(group(3), sentinel)
+	small := join(group(3), sentinel)
 	if errors.Is(small, spm.ErrMoreProblems) || !errors.Is(small, sentinel) {
 		t.Errorf("small report = %v", small)
 	}
@@ -347,7 +358,7 @@ func TestCollectorBuildsOnlyWhatItKeeps(t *testing.T) {
 	}
 }
 
-func TestCollectorMatchesJoinLimited(t *testing.T) {
+func TestCollectorEmptyAndSingle(t *testing.T) {
 	t.Parallel()
 
 	var empty merge.Collector
@@ -365,23 +376,6 @@ func TestCollectorMatchesJoinLimited(t *testing.T) {
 	err = single.Err()
 	if err == nil || err.Error() != errFirst.Error() || errors.Unwrap(err) != nil {
 		t.Errorf("Collector of one failure = %v, want the failure itself", err)
-	}
-
-	nested := make([]error, 0, merge.MaxJoinedErrors+1)
-	for range merge.MaxJoinedErrors + 1 {
-		nested = append(nested, errProblem)
-	}
-
-	var flattened merge.Collector
-
-	flattened.Add(errFirst)
-	flattened.Add(merge.JoinLimited(nested...))
-
-	want := merge.JoinLimited(errFirst, merge.JoinLimited(nested...))
-
-	got := flattened.Err()
-	if got.Error() != want.Error() {
-		t.Errorf("Collector flattened a nested report to %q, want %q", got, want)
 	}
 }
 

@@ -829,7 +829,7 @@ func validateLoadablePath(report *merge.Collector, idx int, path string) {
 		failed   bool
 		sentinel error
 	}{
-		{path != "" && !merge.IsAbsPath(path), ErrRelativePath},
+		{path != "" && !strings.HasPrefix(path, "/"), ErrRelativePath},
 		{hasTrailingSlash(path), ErrTrailingSlash},
 		{!utf8.ValidString(path), ErrInvalidUTF8Path},
 	} {
@@ -855,7 +855,7 @@ func hasTrailingSlash(path string) bool {
 
 	cleaned, problem := validatePath(path)
 
-	return problem == pathValid && merge.IsAbsPath(path) && cleaned != rootPath
+	return problem == pathValid && strings.HasPrefix(path, "/") && cleaned != rootPath
 }
 
 func validateHandled[T ~string](

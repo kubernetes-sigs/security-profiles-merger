@@ -281,24 +281,33 @@ limitations under the License.
 // does not combine with a little-endian architecture in one filter, and
 // are inferred from the probed ones.
 //
+// The evaluation model is checked against libseccomp 2.5.4, 2.5.5, 2.6.0
+// and 2.6.1, and the merges are sound for a node linking one of those or a
+// newer release. libseccomp 2.5.2 compiles some rule sets into a binary
+// tree that evaluates differently from those releases, so a merge result
+// can permit more (intersection) or less (union) than an input there, and
+// releases older than 2.5.4 are not supported. The table of where each
+// release places a syscall (see below) also covers 2.5.2, which only makes
+// the check for lost rules more cautious.
+//
 // One thing libseccomp does there is a defect rather than a reading, which
 // the merges keep their results clear of rather than follow: libseccomp
-// 2.5.5 and 2.6.1 load the syscall number in the code of the syscall they
-// test first in an architecture's block, and leave that code out when the
-// architecture lacks the syscall, which libseccomp then keeps under a
-// number it makes up. The rules of that architecture then apply to no call,
-// and every call gets the default action. A block tests first the syscall
-// whose rules compile to the fewest comparisons, and one the architecture
-// has wins a tie, so this takes a profile in which every rule on a syscall
-// the architecture has is conditional and some rule on one it lacks is
-// cheaper, as "socketcall" with one unconditional rule and "socket" with a
-// conditional one are on x86_64. Every architecture keeps such a syscall
-// except where it multiplexes the socket and SysV IPC syscalls, which keeps
-// only a multiplexed one it has no number for (as x86 does "accept"), and
-// x86_64 and x32 are affected only together: one alone loads the number
-// before any syscall is tested. Together they share one AUDIT_ARCH value
-// and are told apart by that number, so a block of either that tests a
-// syscall its architecture lacks first, as x32 does with
+// 2.5.2, 2.5.4, 2.5.5, 2.6.0 and 2.6.1 load the syscall number in the code
+// of the syscall they test first in an architecture's block, and leave that
+// code out when the architecture lacks the syscall, which libseccomp then
+// keeps under a number it makes up. The rules of that architecture then
+// apply to no call, and every call gets the default action. A block tests
+// first the syscall whose rules compile to the fewest comparisons, and one
+// the architecture has wins a tie, so this takes a profile in which every
+// rule on a syscall the architecture has is conditional and some rule on one
+// it lacks is cheaper, as "socketcall" with one unconditional rule and
+// "socket" with a conditional one are on x86_64. Every architecture keeps
+// such a syscall except where it multiplexes the socket and SysV IPC
+// syscalls, which keeps only a multiplexed one it has no number for (as x86
+// does "accept"), and x86_64 and x32 are affected only together: one alone
+// loads the number before any syscall is tested. Together they share one
+// AUDIT_ARCH value and are told apart by that number, so a block of either
+// that tests a syscall its architecture lacks first, as x32 does with
 // "set_thread_area", loses the rules of the other block as well, even when
 // it holds no rule of its own to lose. It does not happen where libseccomp
 // sorts into a binary tree, which runc asks for above 32 syscall names and
@@ -312,23 +321,21 @@ limitations under the License.
 // permit what an input denies. [Intersect] and [Union] therefore check every
 // covered architecture of their result against a table of where libseccomp
 // places each syscall, generated from the syscall tables of libseccomp
-// 2.5.5 and 2.6.1 and combined so that it errs safe for both. That is the
-// range of libseccomp releases the check holds for: an older release lacks
-// syscalls the table takes it to have, such as fchmodat2 and futex_waitv in
-// 2.5.2, and a block can then test one of those first without the merge
-// seeing it, so a node loading a result through libseccomp before 2.5.5 is
-// not covered. [ValidateArtifact] and [ValidateStrict] report a profile
-// that has the shape as written ([ErrLostRules]), whose rules a runtime
-// loading it would lose. The merges settle the shapes of the rules first,
-// so they may accept such a profile, and can produce the shape from inputs
-// that do not have it, which is what they check their result for. A rule on a
-// syscall no covered architecture has applies to no call and is dropped,
-// which is exact. Otherwise [Intersect] drops an architecture, as it does
-// below: x32 where it pairs with x86_64, or x86_64 where x32 is named
-// native, the affected one where it is not native, and otherwise the
-// listed architectures on which the offending syscall applies. [Union] cannot drop one and refuses with
-// [ErrLostRules], as [Intersect] does where nothing can be dropped. Where
-// the native architecture is not known, the runtime may add any
+// 2.5.2, 2.5.4, 2.5.5, 2.6.0 and 2.6.1 and combined so that it errs safe for
+// all of them, so the check holds on a node linking any of those releases or
+// a newer one (the merges as a whole need 2.5.4, see above).
+// [ValidateArtifact] and [ValidateStrict] report a profile that has the
+// shape as written ([ErrLostRules]), whose rules a runtime loading it would
+// lose. The merges settle the shapes of the rules first, so they may accept
+// such a profile, and can produce the shape from inputs that do not have it,
+// which is what they check their result for. A rule on a syscall no covered
+// architecture has applies to no call and is dropped, which is exact.
+// Otherwise [Intersect] drops an architecture, as it does below: x32 where
+// it pairs with x86_64, or x86_64 where x32 is named native, the affected
+// one where it is not native, and otherwise the listed architectures on
+// which the offending syscall applies. [Union] cannot drop one and refuses
+// with [ErrLostRules], as [Intersect] does where nothing can be dropped.
+// Where the native architecture is not known, the runtime may add any
 // architecture a Go program runs on, so each is checked as native, a rule
 // goes only where no architecture has its syscall, x32 is the only
 // architecture that can be dropped, and dropping the last listed one is
@@ -538,7 +545,14 @@ limitations under the License.
 // which the rules of each such pair are added. Where that order differs,
 // the syscall is reported as changed with each side's rules listed in the
 // order a runtime adds them, rather than sorted, which would list the same
-// rules on both sides.
+// rules on both sides. Which pairs count follows how libseccomp compiles
+// them for a 64-bit native architecture, which compares both 32-bit halves
+// of a value. A 32-bit native compares only the lower half, so Diff may
+// report an order difference that a 32-bit node's filter does not depend
+// on, such as a mask next to an equality that differ only in their upper
+// halves. The pairs only a 32-bit native orders, whose values differ above
+// 32 bits, are ones Diff compares already, since it pairs conditions by
+// their lower halves as well.
 // Architectures are compared with the native architecture implied on both
 // sides.
 //
@@ -549,15 +563,15 @@ limitations under the License.
 // libseccomp from losing the rules of an architecture (see the
 // Architectures section), and a profile setting
 // SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV keeps a rule that notifies (see the
-// Listener section). Otherwise it reports what the merge settled. A profile listing x86 next to x86_64 with personality
-// SCMP_ACT_KILL_PROCESS if SCMP_CMP_MASKED_EQ(a0, 0xffffffff00000000, 0)
-// and then personality SCMP_ACT_ALLOW is in a safe shape, yet the diff
-// reports personality as changed from SCMP_ACT_ALLOW to
-// SCMP_ACT_KILL_PROCESS. Diff compares the rules a
-// runtime adds, not whether libseccomp accepts them: outside the case above
-// where the order decides a call, two profiles holding the same rules in a
-// different order compare equal although libseccomp may refuse one of them
-// with EEXIST, which depends on the order.
+// Listener section). Otherwise it reports what the merge settled. A profile
+// listing x86 next to x86_64 with personality SCMP_ACT_KILL_PROCESS if
+// SCMP_CMP_MASKED_EQ(a0, 0xffffffff00000000, 0) and then personality
+// SCMP_ACT_ALLOW is in a safe shape, yet the diff reports personality as
+// changed from SCMP_ACT_ALLOW to SCMP_ACT_KILL_PROCESS. Diff compares the
+// rules a runtime adds, not whether libseccomp accepts them: outside the
+// case above where the order decides a call, two profiles holding the same
+// rules in a different order compare equal although libseccomp may refuse
+// one of them with EEXIST, which depends on the order.
 //
 // A syscall past the read budget (see the Cost bounds section) is listed by
 // the two actions a collapse of it could pick rather than by its rules.

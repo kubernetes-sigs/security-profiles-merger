@@ -49,8 +49,10 @@ const (
 	// files in. The parent creates it and removes it when the pool closes,
 	// since a worker it kills never gets to remove its own.
 	compileScratchEnv = "SPM_LIBSECCOMP_COMPILE_SCRATCH"
-	// compileTimeout is far above what any compile in these tests takes, so
-	// only a compile that does not return at all hits it.
+	// compileTimeout is far above what any compile in these tests takes.
+	// A compile that exceeds it either never returns or ran on a heavily
+	// loaded machine, which is why compile retries it once before it
+	// reports a hang.
 	compileTimeout = 5 * time.Second
 )
 
@@ -300,9 +302,22 @@ func (p *compilerPool) close() {
 }
 
 // compile builds the profile with libseccomp in a worker. It returns
-// errCompileHang when libseccomp does not return, errRuleConflict when it
-// refuses a rule with EEXIST, and errCompileFailed for anything else.
+// errCompileHang when libseccomp does not return twice in a row,
+// errRuleConflict when it refuses a rule with EEXIST, and errCompileFailed
+// for anything else. A compile past the timeout is retried once, in a fresh
+// worker, so that a compile a loaded machine delays is not taken for one
+// libseccomp never finishes, which the tests leave out of the comparison.
 func (p *compilerPool) compile(profile *specs.LinuxSeccomp) ([]libseccomp.Instruction, error) {
+	prog, err := p.compileOnce(profile)
+	if errors.Is(err, errCompileHang) {
+		prog, err = p.compileOnce(profile)
+	}
+
+	return prog, err
+}
+
+// compileOnce is one attempt of compile.
+func (p *compilerPool) compileOnce(profile *specs.LinuxSeccomp) ([]libseccomp.Instruction, error) {
 	worker, err := p.acquire()
 	if err != nil {
 		return nil, err

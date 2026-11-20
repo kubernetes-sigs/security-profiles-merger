@@ -161,8 +161,8 @@ func TestDiffDefaultAction(t *testing.T) {
 func TestDiffArchitectures(t *testing.T) {
 	t.Parallel()
 
-	// Architectures no test host runs on, since the native one is implied
-	// on both sides and never reported.
+	// The native architecture is implied on both sides and never reported,
+	// so the diff is taken for an x86_64 node, which lists none of these.
 	left := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
 		Architectures: []specs.Arch{specs.ArchMIPS, specs.ArchARM},
@@ -172,7 +172,7 @@ func TestDiffArchitectures(t *testing.T) {
 		Architectures: []specs.Arch{specs.ArchMIPS, specs.ArchPPC64},
 	}
 
-	diff, err := seccomp.Diff(left, right)
+	diff, err := seccomp.Options{Arch: specs.ArchX86_64}.Diff(left, right)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1873,5 +1873,48 @@ func TestDiffOrderReadsTheLoadedRules(t *testing.T) {
 		seccomp.FormatDiff(alone) != seccomp.FormatDiff(diff) {
 		t.Errorf("Diff = %s, want %s as for the unconditional rule alone",
 			seccomp.FormatDiff(diff), seccomp.FormatDiff(alone))
+	}
+}
+
+// TestDiffSummarizesOneSide covers a syscall past the read budget on the
+// right side only, which is compared by the entries that load it as one
+// summarized on both sides is.
+func TestDiffSummarizesOneSide(t *testing.T) {
+	t.Parallel()
+
+	left := profileOf(specs.ActErrno,
+		filtered(syscallRead, specs.ActAllow, arg(0, specs.OpEqualTo, 1)))
+
+	diff, err := seccomp.Diff(left, manyReadRules(66000, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const want = "Diff{~read:([0]SCMP_CMP_EQ:1)->SCMP_ACT_ALLOW->SCMP_ACT_ALLOW}"
+	if got := seccomp.FormatDiff(diff); got != want {
+		t.Errorf("FormatDiff = %s, want %s", got, want)
+	}
+}
+
+// TestFormatDiffJoinsTheRulesOfAChangedSyscall covers a changed syscall
+// holding more than one rule on a side, which are joined by commas.
+func TestFormatDiffJoinsTheRulesOfAChangedSyscall(t *testing.T) {
+	t.Parallel()
+
+	left := profileOf(specs.ActErrno,
+		filtered(syscallRead, specs.ActAllow, arg(0, specs.OpEqualTo, 1)),
+		filtered(syscallRead, specs.ActAllow, arg(0, specs.OpEqualTo, 2)))
+	right := profileOf(specs.ActErrno,
+		filtered(syscallRead, specs.ActAllow, arg(0, specs.OpEqualTo, 1)))
+
+	diff, err := seccomp.Diff(left, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const want = "Diff{~read:([0]SCMP_CMP_EQ:1)->SCMP_ACT_ALLOW," +
+		"([0]SCMP_CMP_EQ:2)->SCMP_ACT_ALLOW->([0]SCMP_CMP_EQ:1)->SCMP_ACT_ALLOW}"
+	if got := seccomp.FormatDiff(diff); got != want {
+		t.Errorf("FormatDiff = %s, want %s", got, want)
 	}
 }

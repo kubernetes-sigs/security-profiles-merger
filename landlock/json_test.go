@@ -19,6 +19,7 @@ package landlock_test
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -156,56 +157,73 @@ func TestJSONRoundTripEmptyAccessLists(t *testing.T) {
 func TestUnmarshalStrict(t *testing.T) {
 	t.Parallel()
 
+	// A failure is named by its sentinel and the path of the member, or
+	// for what the decoder itself refuses by the decoder's error.
 	tests := map[string]struct {
-		data    string
-		wantErr bool
+		data  string
+		want  error
+		where string
+		// typeError is a failure the decoder reports as a type mismatch.
+		typeError bool
 	}{
 		"a known document": {
-			data:    `{"handledAccessFs":["read_file"],"pathRules":[{"path":"/etc"}]}`,
-			wantErr: false,
+			`{"handledAccessFs":["read_file"],"pathRules":[{"path":"/etc"}]}`, nil, "", false,
 		},
-		"an empty object": {data: `{}`, wantErr: false},
+		"an empty object": {`{}`, nil, "", false},
 		"an unknown top level member": {
-			data:    `{"handledAccessFs":["read_file"],"handledAccessIoctl":["dev"]}`,
-			wantErr: true,
+			`{"handledAccessFs":["read_file"],"handledAccessIoctl":["dev"]}`,
+			landlock.ErrUnknownField, `"handledAccessIoctl"`, false,
 		},
 		"an unknown member of a path rule": {
-			data:    `{"pathRules":[{"path":"/etc","accessFsExtra":["read_file"]}]}`,
-			wantErr: true,
+			`{"pathRules":[{"path":"/etc","accessFsExtra":["read_file"]}]}`,
+			landlock.ErrUnknownField, `"pathRules[0].accessFsExtra"`, false,
 		},
 		"an unknown member of a net rule": {
-			data:    `{"netRules":[{"port":80,"accessNetExtra":["bind_tcp"]}]}`,
-			wantErr: true,
+			`{"netRules":[{"port":80,"accessNetExtra":["bind_tcp"]}]}`,
+			landlock.ErrUnknownField, `"netRules[0].accessNetExtra"`, false,
 		},
 		"a net rule without a port": {
-			data:    `{"handledAccessNet":["bind_tcp"],"netRules":[{"accessNet":["bind_tcp"]}]}`,
-			wantErr: true,
+			`{"handledAccessNet":["bind_tcp"],"netRules":[{"accessNet":["bind_tcp"]}]}`,
+			landlock.ErrMissingField, `"netRules[0].port"`, false,
 		},
 		"a net rule with a null port": {
-			data:    `{"netRules":[{"port":null,"accessNet":["bind_tcp"]}]}`,
-			wantErr: true,
+			`{"netRules":[{"port":null,"accessNet":["bind_tcp"]}]}`,
+			landlock.ErrMissingField, `"netRules[0].port"`, false,
 		},
 		"a null net rule": {
-			data:    `{"handledAccessNet":["bind_tcp"],"netRules":[null]}`,
-			wantErr: true,
+			`{"handledAccessNet":["bind_tcp"],"netRules":[null]}`,
+			landlock.ErrMissingField, `"netRules[0].port"`, false,
 		},
 		"a net rule on port 0": {
-			data:    `{"handledAccessNet":["bind_tcp"],"netRules":[{"port":0,"accessNet":["bind_tcp"]}]}`,
-			wantErr: false,
+			`{"handledAccessNet":["bind_tcp"],"netRules":[{"port":0,"accessNet":["bind_tcp"]}]}`,
+			nil, "", false,
 		},
-		"a wrongly typed member": {data: `{"handledAccessFs":"read_file"}`, wantErr: true},
-		"a truncated document":   {data: `{"handledAccessFs":[`, wantErr: true},
-		"no document":            {data: ``, wantErr: true},
-		"a second document":      {data: `{}{}`, wantErr: true},
-		"trailing whitespace":    {data: "{}\n", wantErr: false},
+		"a wrongly typed member": {`{"handledAccessFs":"read_file"}`, nil, "", true},
+		"a truncated document":   {`{"handledAccessFs":[`, io.ErrUnexpectedEOF, "", false},
+		"no document":            {``, io.EOF, "", false},
+		"a second document":      {`{}{}`, landlock.ErrUnexpectedData, "", false},
+		"trailing whitespace":    {"{}\n", nil, "", false},
 	}
 
 	for name, test := range tests {
 		var profile landlock.Profile
 
 		err := landlock.UnmarshalStrict([]byte(test.data), &profile)
-		if (err != nil) != test.wantErr {
-			t.Errorf("%s: UnmarshalStrict = %v, want an error: %v", name, err, test.wantErr)
+
+		var typeError *json.UnmarshalTypeError
+
+		switch {
+		case test.typeError:
+			if !errors.As(err, &typeError) {
+				t.Errorf("%s: UnmarshalStrict = %v, want a type error", name, err)
+			}
+		case test.want == nil && err != nil:
+			t.Errorf("%s: UnmarshalStrict = %v, want nil", name, err)
+		case test.want == nil:
+		case !errors.Is(err, test.want):
+			t.Errorf("%s: UnmarshalStrict = %v, want %v", name, err, test.want)
+		case !strings.Contains(err.Error(), test.where):
+			t.Errorf("%s: UnmarshalStrict = %q, want it to name %s", name, err, test.where)
 		}
 	}
 

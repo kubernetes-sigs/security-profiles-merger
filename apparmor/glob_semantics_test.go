@@ -251,6 +251,10 @@ func TestDoubleStarNarrowsOnlyGlobsBelowItsPrefix(t *testing.T) {
 		// keeps because someone typed one star too many.
 		{"/etc/***", "/etc/*", true},
 		{"/etc/**/", "/etc/*/", false},
+		// A "**" that does not start a component is no "<prefix>**":
+		// "/etc/foo**" matches no name under "/etc/" outside "foo".
+		{"/etc/foo**", "/etc/bar*", false},
+		{"/etc/foo**", "/etc/*.conf", false},
 		{"/etc/**", `/etc/\/foo/*`, false},
 		{"/etc/**", `/etc/foo/\/*`, false},
 		{"/**", `/etc/\/*`, false},

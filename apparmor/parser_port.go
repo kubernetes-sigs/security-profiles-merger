@@ -17,6 +17,7 @@ limitations under the License.
 package apparmor
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -820,14 +821,14 @@ func (parser *regexParser) term() bool {
 	parser.pos = end
 
 	if !token.special {
-		parser.out.WriteString(byteFragment(token.char))
+		writeByteFragment(&parser.out, token.char)
 
 		return true
 	}
 
 	switch token.char {
 	case '^', '-', ']':
-		parser.out.WriteString(byteFragment(token.char))
+		writeByteFragment(&parser.out, token.char)
 
 		return true
 	case '[':
@@ -969,7 +970,7 @@ func (parser *regexParser) closeClass(members *[byteValues]bool, negated bool) b
 
 	parser.pos++
 
-	parser.out.WriteString(classFragment(members, negated))
+	writeClassFragment(&parser.out, members, negated)
 
 	return true
 }
@@ -977,15 +978,17 @@ func (parser *regexParser) closeClass(members *[byteValues]bool, negated bool) b
 // neverMatchFragment is a Go regex fragment that matches nothing.
 const neverMatchFragment = `[^\x00-\x{10FFFF}]`
 
-// classFragment renders a byte set as a Go character class over the runes
-// 0 to 255. A negated libapparmor_re class matches every byte outside the
-// set.
-func classFragment(members *[byteValues]bool, negated bool) string {
-	var builder strings.Builder
+// writeClassFragment renders a byte set as a Go character class over the
+// runes 0 to 255. A negated libapparmor_re class matches every byte outside
+// the set.
+func writeClassFragment(out *strings.Builder, members *[byteValues]bool, negated bool) {
+	if !slices.Contains(members[:], !negated) {
+		out.WriteString(neverMatchFragment)
 
-	builder.WriteByte('[')
+		return
+	}
 
-	empty := true
+	out.WriteByte('[')
 
 	for low := 0; low < byteValues; {
 		if members[low] == negated {
@@ -999,48 +1002,47 @@ func classFragment(members *[byteValues]bool, negated bool) string {
 			high++
 		}
 
-		empty = false
-
-		builder.WriteString(runeEscape(byte(low)))
+		writeRuneEscape(out, byte(low))
 
 		if high > low {
-			builder.WriteByte('-')
-			builder.WriteString(runeEscape(byte(high)))
+			out.WriteByte('-')
+			writeRuneEscape(out, byte(high))
 		}
 
 		low = high + 1
 	}
 
-	if empty {
-		return neverMatchFragment
-	}
-
-	builder.WriteByte(']')
-
-	return builder.String()
+	out.WriteByte(']')
 }
 
-// runeEscape renders a byte as a Go regex rune escape.
-func runeEscape(char byte) string {
-	return `\x{` + strconv.FormatUint(uint64(char), hexBase) + `}`
+// writeRuneEscape renders a byte as a Go regex rune escape.
+func writeRuneEscape(out *strings.Builder, char byte) {
+	var digits [2]byte
+
+	out.WriteString(`\x{`)
+	out.Write(strconv.AppendUint(digits[:0], uint64(char), hexBase))
+	out.WriteByte('}')
 }
 
-// byteFragment renders a literal byte for a Go regex.
-func byteFragment(char byte) string {
+// writeByteFragment renders a literal byte for a Go regex.
+func writeByteFragment(out *strings.Builder, char byte) {
 	if char < utf8.RuneSelf && char > ' ' && char != 0x7f {
-		return quoteByte(char)
+		writeQuotedByte(out, char)
+
+		return
 	}
 
-	return runeEscape(char)
+	writeRuneEscape(out, char)
 }
 
-// quoteByte escapes a printable ASCII byte if Go's regex syntax needs it.
-func quoteByte(char byte) string {
+// writeQuotedByte writes a printable ASCII byte, escaped if Go's regex
+// syntax needs it.
+func writeQuotedByte(out *strings.Builder, char byte) {
 	if strings.IndexByte(`\.+*?()|[]{}^$`, char) >= 0 {
-		return `\` + string(rune(char))
+		out.WriteByte('\\')
 	}
 
-	return string(rune(char))
+	out.WriteByte(char)
 }
 
 // latin1 maps every byte of a name to the rune of the same value, which is

@@ -72,7 +72,8 @@ func selfDiff(t *testing.T, native specs.Arch, profile *specs.LinuxSeccomp) *sec
 // TestCRIODefaultNeedsRestating pins what the integration guide says about
 // the CRI-O default (containers/common, rendered on amd64): ValidateArtifact
 // names its setns, clone and socket entries, and an intersection with it
-// alone settles clone and socket, so a baseline built from it loses both.
+// alone settles clone and socket, so a baseline built from it loses both,
+// while its other repeated syscalls are read exactly.
 func TestCRIODefaultNeedsRestating(t *testing.T) {
 	t.Parallel()
 
@@ -98,6 +99,12 @@ func TestCRIODefaultNeedsRestating(t *testing.T) {
 	for _, name := range []string{"clone", "socket"} {
 		if !strings.Contains(text, name) {
 			t.Errorf("expected the diff to name %s, got %s", name, text)
+		}
+	}
+
+	for _, name := range []string{"personality", "setns", "writev"} {
+		if strings.Contains(text, name) {
+			t.Errorf("expected the diff not to name %s, got %s", name, text)
 		}
 	}
 }
@@ -146,4 +153,151 @@ func TestCRIODefaultRestated(t *testing.T) {
 			t.Errorf("expected %s to stay allowed, got %s", name, seccomp.FormatProfile(merged))
 		}
 	}
+}
+
+// TestDefaultsRepeatSyscalls pins what the integration guide says about the
+// Moby, containerd and CRI-O defaults: each lists one syscall in several
+// entries, which ValidateStrict reports. The defaults are rendered for amd64,
+// so they are checked for an x86_64 node wherever the test runs.
+func TestDefaultsRepeatSyscalls(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		file     string
+		repeated []string
+	}{
+		{file: "moby-amd64.json", repeated: []string{"personality", "socket"}},
+		{file: "containerd-amd64.json", repeated: []string{"personality", "socket"}},
+		{file: "crio-amd64.json", repeated: []string{"clone", "personality", "setns", "socket"}},
+	} {
+		t.Run(test.file, func(t *testing.T) {
+			t.Parallel()
+
+			err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateStrict(loadDefault(t, test.file))
+			if !errors.Is(err, seccomp.ErrDuplicateSyscallName) {
+				t.Fatalf("expected duplicate syscall names, got %v", err)
+			}
+
+			for _, name := range test.repeated {
+				if !strings.Contains(err.Error(), "syscall "+strconv.Quote(name)+" in entries") {
+					t.Errorf("expected %s to be named, got %v", name, err)
+				}
+			}
+		})
+	}
+}
+
+// TestMobyAndContainerdDefaultsPass pins what the integration guide says
+// about the Moby and containerd defaults: unlike the CRI-O default they pass
+// as they are, since ValidateArtifact accepts them and the merge reads them
+// exactly, their repeated syscalls included. x86 as the node's architecture
+// covers socket going through socketcall.
+func TestMobyAndContainerdDefaultsPass(t *testing.T) {
+	t.Parallel()
+
+	for _, file := range []string{"moby-amd64.json", "containerd-amd64.json"} {
+		t.Run(file, func(t *testing.T) {
+			t.Parallel()
+
+			profile := loadDefault(t, file)
+
+			err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(profile)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			for _, native := range []specs.Arch{specs.ArchX86_64, specs.ArchX86} {
+				if diff := selfDiff(t, native, profile); !diff.Equal {
+					t.Errorf("%s: expected the default to be read exactly, got %s",
+						native, seccomp.FormatDiff(diff))
+				}
+			}
+		})
+	}
+}
+
+// TestMobyAndContainerdDefaultSocketRules pins what the integration guide
+// says about the socket rules of the Moby and containerd defaults: one range
+// and single-value equalities on the first argument, all ALLOW, which pass
+// as they are, also on their own, where socket goes through socketcall.
+func TestMobyAndContainerdDefaultSocketRules(t *testing.T) {
+	t.Parallel()
+
+	for _, file := range []string{"moby-amd64.json", "containerd-amd64.json"} {
+		t.Run(file, func(t *testing.T) {
+			t.Parallel()
+
+			profile := loadDefault(t, file)
+			rules := socketRules(t, profile)
+
+			socket := &specs.LinuxSeccomp{
+				DefaultAction:    profile.DefaultAction,
+				DefaultErrnoRet:  profile.DefaultErrnoRet,
+				Architectures:    profile.Architectures,
+				Flags:            nil,
+				ListenerPath:     "",
+				ListenerMetadata: "",
+				Syscalls:         rules,
+			}
+
+			err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(socket)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			for _, native := range []specs.Arch{specs.ArchX86_64, specs.ArchX86} {
+				if diff := selfDiff(t, native, socket); !diff.Equal {
+					t.Errorf("%s: expected the socket rules to be read exactly, got %s",
+						native, seccomp.FormatDiff(diff))
+				}
+			}
+		})
+	}
+}
+
+// socketRules returns the entries of a profile naming socket, and fails
+// unless each is a single-name ALLOW with one condition on the first
+// argument, one of them a range and the others equalities.
+func socketRules(t *testing.T, profile *specs.LinuxSeccomp) []specs.LinuxSyscall {
+	t.Helper()
+
+	var (
+		rules              []specs.LinuxSyscall
+		ranges, equalities int
+	)
+
+	for _, entry := range profile.Syscalls {
+		if !slices.Contains(entry.Names, "socket") {
+			continue
+		}
+
+		rules = append(rules, entry)
+
+		if !allowsOnFirstArgument(entry) {
+			t.Errorf("expected one ALLOW condition on the first argument, got %+v", entry)
+
+			continue
+		}
+
+		if op := entry.Args[0].Op; op == specs.OpLessThan {
+			ranges++
+		} else if op == specs.OpEqualTo {
+			equalities++
+		} else {
+			t.Errorf("expected a range or an equality, got %+v", entry)
+		}
+	}
+
+	if ranges != 1 || equalities == 0 {
+		t.Fatalf("expected one range and equalities, got %d and %d", ranges, equalities)
+	}
+
+	return rules
+}
+
+// allowsOnFirstArgument reports whether an entry names one syscall and
+// allows it under one condition on the first argument.
+func allowsOnFirstArgument(entry specs.LinuxSyscall) bool {
+	return len(entry.Names) == 1 && entry.Action == specs.ActAllow &&
+		len(entry.Args) == 1 && entry.Args[0].Index == 0
 }

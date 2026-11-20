@@ -1824,3 +1824,12 @@ func TestValidateArtifactReportsLostRulesOfRepeatedIndices(t *testing.T) {
 		}
 	}
 }
+
+func TestUnmarshalStrictNilProfile(t *testing.T) {
+	t.Parallel()
+
+	err := seccomp.UnmarshalStrict([]byte(`{"defaultAction":"SCMP_ACT_ERRNO"}`), nil)
+	if !errors.Is(err, seccomp.ErrNilProfile) {
+		t.Errorf("UnmarshalStrict(nil) = %v, want ErrNilProfile", err)
+	}
+}

@@ -176,9 +176,6 @@ type fuzzAppArmorMergeConfig struct {
 	checkCap  fuzzAppArmorCheckFunc
 	checkNet  fuzzAppArmorCheckFunc
 	checkExec fuzzAppArmorCheckFunc
-	// globIdempotent enables the Merge(X,X) == Merge(X) check for profiles
-	// with globs.
-	globIdempotent bool
 }
 
 func fuzzAppArmorMerge(
@@ -206,12 +203,12 @@ func fuzzAppArmorMerge(
 	assertSectionsPresent(t, result)
 	cfg.checkCap(t, result, left, right)
 	cfg.checkNet(t, result, left, right)
-	checkGlobSafeProperties(t, cfg, left, right, result)
+	checkStructuralProperties(t, cfg, left, right, result)
 
-	// Glob subsumption rearranges paths across categories, breaking structural equality.
+	// A glob of one input narrows or covers the paths of the other, so the
+	// result holds paths neither input spells as such.
 	if !profileHasGlobs(left) && !profileHasGlobs(right) {
 		cfg.checkExec(t, result, left, right)
-		checkStructuralProperties(t, cfg, left, right, result)
 	}
 }
 
@@ -248,7 +245,7 @@ func checkStructuralProperties(
 	}
 
 	if !reflect.DeepEqual(result, commuted) {
-		t.Error("Merge(L,R) != Merge(R,L)")
+		t.Errorf("Merge(L,R) = %s, Merge(R,L) = %s", result, commuted)
 	}
 
 	single, err := cfg.merge(left)
@@ -262,56 +259,6 @@ func checkStructuralProperties(
 	}
 
 	if !reflect.DeepEqual(idempotent, single) {
-		t.Error("Merge(X,X) should equal Merge(X)")
-	}
-}
-
-func checkGlobSafeProperties(
-	t *testing.T,
-	cfg fuzzAppArmorMergeConfig,
-	left, right, result *apparmor.Profile,
-) {
-	t.Helper()
-
-	// The merge of the same two profiles succeeded a moment ago, so an
-	// error here is the asymmetry the check exists to find rather than a
-	// reason to stop checking.
-	commuted, err := cfg.merge(right, left)
-	if err != nil {
-		t.Fatalf("merge(L,R) succeeded but merge(R,L) failed: %v", err)
-	}
-
-	if !reflect.DeepEqual(result.Capabilities, commuted.Capabilities) {
-		t.Error("capabilities not commutative")
-	}
-
-	if !reflect.DeepEqual(result.Network, commuted.Network) {
-		t.Error("network not commutative")
-	}
-
-	single, err := cfg.merge(left)
-	if err != nil {
-		t.Fatalf("merge(L,R) succeeded but merge(L) failed: %v", err)
-	}
-
-	idempotent, err := cfg.merge(left, left)
-	if err != nil {
-		t.Fatalf("merge(L,R) succeeded but merge(L,L) failed: %v", err)
-	}
-
-	if !reflect.DeepEqual(single.Capabilities, idempotent.Capabilities) {
-		t.Error("capabilities not idempotent")
-	}
-
-	if !reflect.DeepEqual(single.Network, idempotent.Network) {
-		t.Error("network not idempotent")
-	}
-
-	// An intersection with itself keeps exactly what a single profile's
-	// intersection keeps, globs included. A union may move a literal into
-	// another category a glob of the profile shares with it, so it is
-	// only checked for profiles without globs.
-	if cfg.globIdempotent && !reflect.DeepEqual(single, idempotent) {
 		t.Errorf("Merge(X,X) = %s, Merge(X) = %s", idempotent, single)
 	}
 }
@@ -484,8 +431,9 @@ func assertExecSuperset(
 	}
 }
 
-// pathSet renders a list of paths as the rules they spell, since a merge
-// keeps one spelling per rule and it need not be the one an input used.
+// pathIdentitySet renders a list of paths as the rules they spell, since a
+// merge keeps one spelling per rule and it need not be the one an input
+// used.
 func pathIdentitySet(paths []string) map[string]struct{} {
 	set := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
@@ -529,11 +477,10 @@ func FuzzAppArmorIntersect(f *testing.F) {
 	addAppArmorFuzzSeeds(f)
 
 	cfg := fuzzAppArmorMergeConfig{
-		merge:          apparmor.Intersect,
-		checkCap:       assertCapsSubset,
-		checkNet:       assertNetIntersect,
-		checkExec:      assertExecSubset,
-		globIdempotent: true,
+		merge:     apparmor.Intersect,
+		checkCap:  assertCapsSubset,
+		checkNet:  assertNetIntersect,
+		checkExec: assertExecSubset,
 	}
 
 	f.Fuzz(func(
@@ -554,11 +501,10 @@ func FuzzAppArmorUnion(f *testing.F) {
 	addAppArmorFuzzSeeds(f)
 
 	cfg := fuzzAppArmorMergeConfig{
-		merge:          apparmor.Union,
-		checkCap:       assertCapsSuperset,
-		checkNet:       assertNetUnion,
-		checkExec:      assertExecSuperset,
-		globIdempotent: false,
+		merge:     apparmor.Union,
+		checkCap:  assertCapsSuperset,
+		checkNet:  assertNetUnion,
+		checkExec: assertExecSuperset,
 	}
 
 	f.Fuzz(func(
@@ -795,8 +741,8 @@ func assertArtifactPath(t *testing.T, context, entry string) {
 		)
 	}
 
-	// A consumer renders and logs the paths it accepted, so none
-	// may carry a character that is not printable.
+	// A consumer renders and logs the paths it accepted, so none may carry a
+	// character that is not printable.
 	if strings.ContainsFunc(entry, func(char rune) bool {
 		return char != utf8.RuneError && !merge.PrintsAsItself(char)
 	}) {
@@ -805,8 +751,8 @@ func assertArtifactPath(t *testing.T, context, entry string) {
 		)
 	}
 
-	// An unusable pattern matches nothing, so an intersection
-	// would drop it without a trace.
+	// An unusable pattern matches nothing, so an intersection would drop it
+	// without a trace.
 	if apparmor.IsGlobPattern(entry) && !apparmor.MatcherUsable(entry) {
 		t.Errorf(
 			"%s: ValidateArtifact accepted the unusable pattern %q", context, entry,

@@ -180,8 +180,8 @@ func foldProfiles(
 
 	// The normalized profiles are fresh copies owned by this call, so a
 	// single profile needs no further clone.
-	result, err := merge.Fold(normalized, ownedProfile, func(a, b *Profile) (*Profile, error) {
-		return mergeTwo(a, b), nil
+	result, err := merge.Fold(normalized, func(left, right *Profile) (*Profile, error) {
+		return mergeTwo(left, right), nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("merge: %w", err)
@@ -193,8 +193,6 @@ func foldProfiles(
 
 	return result, nil
 }
-
-func ownedProfile(profile *Profile) *Profile { return profile }
 
 // checkMergeBudget refuses inputs whose merge would cost more than
 // maxMergeWork. It runs after validation and before anything is merged, and

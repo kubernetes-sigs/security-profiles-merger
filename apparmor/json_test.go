@@ -18,6 +18,7 @@ package apparmor_test
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -235,5 +236,14 @@ func TestUnmarshalStrictReplacesTheProfile(t *testing.T) {
 
 	if !reflect.DeepEqual(profile, held()) {
 		t.Errorf("a failed decode changed the profile to %+v", profile)
+	}
+}
+
+func TestUnmarshalStrictNilProfile(t *testing.T) {
+	t.Parallel()
+
+	err := apparmor.UnmarshalStrict([]byte(`{}`), nil)
+	if !errors.Is(err, apparmor.ErrNilProfile) {
+		t.Errorf("UnmarshalStrict(nil) = %v, want ErrNilProfile", err)
 	}
 }

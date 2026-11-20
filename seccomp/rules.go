@@ -645,7 +645,11 @@ func (m ruleMerger) forInput(input *specs.LinuxSeccomp) ruleMerger {
 // clause to every call (see settleInputs). The default applies to no call
 // of such a syscall on any architecture, so the collapse picks between the
 // two clauses alone. It reports false when the pick equals the default,
-// which then decides the syscall as the pick would.
+// which then decides the syscall as the pick would. The pick is one of the
+// two clauses, and collectRules drops every clause equal to the default it
+// is given, so that happens only for a default other than the one the rules
+// were collected with; the check costs one comparison and keeps the syscall
+// from being emitted as a rule equal to the default.
 func (m ruleMerger) settleNarrowFirst(current *syscallRules, def *clause) bool {
 	first := current.narrowFirst
 	if !m.narrowCovered || first == nil || first.sameResult(*current.unconditional) {
@@ -991,15 +995,21 @@ func sortClauses(clauses []clause) []clause {
 		keyed[idx] = keyedClause{key: sortedArgsKey(clauses[idx].args), clause: clauses[idx]}
 	}
 
+	return sortKeyedClauses(clauses[:0], keyed)
+}
+
+// sortKeyedClauses sorts clauses whose keys are known by them and appends
+// the clauses in that order to dst.
+func sortKeyedClauses(dst []clause, keyed []keyedClause) []clause {
 	slices.SortFunc(keyed, func(a, b keyedClause) int {
 		return cmp.Compare(a.key, b.key)
 	})
 
 	for idx := range keyed {
-		clauses[idx] = keyed[idx].clause
+		dst = append(dst, keyed[idx].clause)
 	}
 
-	return clauses
+	return dst
 }
 
 // clauseKeys returns the argument key of every clause, computed once.
@@ -1109,7 +1119,9 @@ func (m ruleMerger) collapseClauses(clauses []clause, fallback *clause) []clause
 		}, *fallback)
 	}
 
-	result := make([]clause, 0, len(order))
+	// The keys groupByArgs computed are kept with the clauses, so sorting
+	// them builds none again.
+	result := make([]keyedClause, 0, len(order))
 
 	for _, key := range order {
 		current := byArgs[key]
@@ -1117,10 +1129,12 @@ func (m ruleMerger) collapseClauses(clauses []clause, fallback *clause) []clause
 			continue
 		}
 
-		result = append(result, current)
+		result = append(result, keyedClause{key: key, clause: current})
 	}
 
-	return sortClauses(pruneDominated(result))
+	result = pruneDominated(result)
+
+	return sortKeyedClauses(make([]clause, 0, len(result)), result)
 }
 
 // pruneDominated drops clauses that can never decide a call under the
@@ -1137,18 +1151,18 @@ func (m ruleMerger) collapseClauses(clauses []clause, fallback *clause) []clause
 // it is skipped. Pruning only removes clauses that never decide a call, so
 // skipping it leaves the result less minimal but unchanged in what it
 // permits.
-func pruneDominated(clauses []clause) []clause {
+func pruneDominated(clauses []keyedClause) []keyedClause {
 	if len(clauses) > maxPruneClauses {
 		return clauses
 	}
 
-	kept := make([]clause, 0, len(clauses))
+	kept := make([]keyedClause, 0, len(clauses))
 
 	for idx, current := range clauses {
 		dominated := false
 
 		for otherIdx, other := range clauses {
-			if otherIdx != idx && dominates(other, current, otherIdx < idx) {
+			if otherIdx != idx && dominates(other.clause, current.clause, otherIdx < idx) {
 				dominated = true
 
 				break

@@ -4,7 +4,8 @@
 # once a week whether the pin is still the current release. An outdated pin
 # is news rather than an error of this repository: the report goes to one
 # tracking issue, with a comment whenever it changes, the issue is closed
-# once the pins are current, and only a check that cannot run fails.
+# once the pins are current, and only a check that cannot run fails. The
+# same schedule runs govulncheck, which fails on a finding.
 name: dependency-updates
 
 on:
@@ -33,6 +34,27 @@ env:
   ISSUE_LABEL: dependency-updates
 
 jobs:
+  # ci.yml runs govulncheck on every push and pull request, but a
+  # vulnerability published while nothing is merged would otherwise go
+  # unreported until the next one. It runs under the Go the release is built
+  # with, as in ci.yml, and a finding fails the run.
+  govulncheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: hack/tools/go.sum
+      - run: make govulncheck
+        env:
+          GOTOOLCHAIN: local
+
   # The check runs code it downloads (zeitgeist), so it gets a token that
   # can only read; the issue is handled by a job of its own.
   upstream:

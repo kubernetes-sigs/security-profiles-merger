@@ -130,7 +130,8 @@ func TestFormatEntries(t *testing.T) {
 }
 
 // failingProfile returns a profile in which every one of count repetitions
-// fails every check validatorsPastTheLimit runs, most of them several times.
+// fails every check TestValidatorsDoNotBuildFailuresPastTheLimit runs, most
+// of them several times.
 func failingProfile(count int) *specs.LinuxSeccomp {
 	one, large := uint(1), uint(maxErrno+1)
 

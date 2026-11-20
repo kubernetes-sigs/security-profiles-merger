@@ -481,7 +481,7 @@ func TestIntersectAtPairwiseBudgetIsFast(t *testing.T) {
 		}
 	}
 
-	if elapsed := time.Since(start); testutil.UninstrumentedRun() && elapsed > generousBudget {
+	if elapsed := time.Since(start); testutil.CheckWallClock() && elapsed > generousBudget {
 		t.Errorf("merges took %s, want well under %s", elapsed, generousBudget)
 	}
 }
@@ -653,7 +653,7 @@ func TestValidateArtifactStaysFastOnHugeEntries(t *testing.T) {
 
 	// Coverage counters slow these loops several times over, so the bound
 	// is only checked without coverage.
-	if elapsed := time.Since(start); testutil.UninstrumentedRun() && elapsed > generousBudget {
+	if elapsed := time.Since(start); testutil.CheckWallClock() && elapsed > generousBudget {
 		t.Errorf("validation took %s, want well under %s", elapsed, generousBudget)
 	}
 }

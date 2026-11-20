@@ -171,7 +171,7 @@ func TestIntersectArtifactSizedContestedProfile(t *testing.T) {
 
 	// Coverage counters slow these loops several times over, so the bound
 	// is only checked without coverage.
-	if elapsed := time.Since(start); testutil.UninstrumentedRun() && elapsed > generousBudget {
+	if elapsed := time.Since(start); testutil.CheckWallClock() && elapsed > generousBudget {
 		t.Errorf("merge took %s, want well under %s", elapsed, generousBudget)
 	}
 
@@ -371,7 +371,7 @@ func TestMergeBoundsMultiNameExpansion(t *testing.T) {
 
 		// Coverage counters and the race detector slow this several times
 		// over, so the bound is only checked without them.
-		if elapsed := time.Since(start); testutil.UninstrumentedRun() &&
+		if elapsed := time.Since(start); testutil.CheckWallClock() &&
 			elapsed > generousBudget {
 			t.Errorf("%s took %s, want well under %s", direction.name, elapsed, generousBudget)
 		}
@@ -438,7 +438,7 @@ func TestMergeBoundsRepeatedMultiplexedName(t *testing.T) {
 			t.Fatalf("%s: unexpected error: %v", direction.name, err)
 		}
 
-		if elapsed := time.Since(start); testutil.UninstrumentedRun() &&
+		if elapsed := time.Since(start); testutil.CheckWallClock() &&
 			elapsed > generousBudget {
 			t.Errorf("%s took %s, want well under %s", direction.name, elapsed, generousBudget)
 		}
@@ -487,7 +487,7 @@ func TestValidateStrictBoundsDuplicateReport(t *testing.T) {
 		t.Fatalf("expected ErrDuplicateSyscallName, got: %v", err)
 	}
 
-	if elapsed := time.Since(start); testutil.UninstrumentedRun() && elapsed > generousBudget {
+	if elapsed := time.Since(start); testutil.CheckWallClock() && elapsed > generousBudget {
 		t.Errorf("ValidateStrict took %s, want well under %s", elapsed, generousBudget)
 	}
 
@@ -516,7 +516,7 @@ func TestValidateArtifactRejectsMultiNameExpansion(t *testing.T) {
 	start := time.Now()
 	err := seccomp.ValidateArtifact(profile)
 
-	if elapsed := time.Since(start); testutil.UninstrumentedRun() && elapsed > generousBudget {
+	if elapsed := time.Since(start); testutil.CheckWallClock() && elapsed > generousBudget {
 		t.Errorf("validation took %s, want well under %s", elapsed, generousBudget)
 	}
 

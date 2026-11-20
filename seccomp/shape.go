@@ -206,23 +206,30 @@ func isRangeOp(op specs.LinuxSeccompOperator) bool {
 // clauseKey formats everything that distinguishes two clauses: the result
 // and the argument filter.
 func clauseKey(current clause) string {
-	return resultKey(current.action, current.errnoRet, sortedArgsKey(current.args))
+	return resultKey(current.action, current.errnoRet, current.args)
 }
 
-// resultKey formats an action, its errno and the key of an argument filter,
-// which is what tells two rules of one syscall apart.
-func resultKey(action specs.LinuxSeccompAction, errnoRet *uint, args string) string {
+// resultKey formats an action, its errno and the key of an argument filter
+// that is already sorted and canonical (see sortedArgsKey), which is what
+// tells two rules of one syscall apart. It builds the whole key in one
+// buffer.
+func resultKey(
+	action specs.LinuxSeccompAction, errnoRet *uint, args []specs.LinuxSeccompArg,
+) string {
 	var builder strings.Builder
 
+	builder.Grow(len(action) + len(args)*argKeyBytes + len("||"))
 	builder.WriteString(string(action))
 	builder.WriteByte('|')
 
 	if errnoRet != nil {
-		builder.WriteString(strconv.FormatUint(uint64(*errnoRet), 10))
+		var digits [20]byte
+
+		builder.Write(strconv.AppendUint(digits[:0], uint64(*errnoRet), decimalBase))
 	}
 
 	builder.WriteByte('|')
-	builder.WriteString(args)
+	writeArgsKey(&builder, args)
 
 	return builder.String()
 }

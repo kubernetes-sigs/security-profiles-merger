@@ -18,26 +18,12 @@ package landlock_test
 
 import (
 	"fmt"
-	"runtime"
 	"strings"
 	"testing"
 
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 	"sigs.k8s.io/security-profiles-merger/landlock"
 )
-
-// allocatedBytes returns how many bytes run allocates. The count is read
-// from the runtime, which counts every goroutine, so it is only meaningful
-// in a test that is not parallel: those run before any parallel test
-// resumes, with nothing else allocating alongside.
-func allocatedBytes(run func()) uint64 {
-	var before, after runtime.MemStats
-
-	runtime.ReadMemStats(&before)
-	run()
-	runtime.ReadMemStats(&after)
-
-	return after.TotalAlloc - before.TotalAlloc
-}
 
 // assertLinear fails the test unless doubling the size at most about
 // doubles what measure allocates. Allocations are measured rather than time,
@@ -50,8 +36,8 @@ func assertLinear(t *testing.T, what string, size int, measure func(size int) fu
 	// that grow in steps.
 	const maxGrowth = 3
 
-	small := allocatedBytes(measure(size))
-	large := allocatedBytes(measure(2 * size))
+	small := testutil.AllocatedBytes(measure(size))
+	large := testutil.AllocatedBytes(measure(2 * size))
 
 	if large > maxGrowth*small {
 		t.Errorf("%s allocated %d bytes for %d and %d bytes for %d, want at most %dx",
@@ -65,7 +51,7 @@ func assertLinear(t *testing.T, what string, size int, measure func(size int) fu
 // collecting the ancestors' rights as a list per rule made the intersection
 // allocate in the square of the rules: six gigabytes at the limit.
 //
-//nolint:paralleltest // allocatedBytes needs the runtime to itself
+//nolint:paralleltest // AllocatedBytes needs the runtime to itself
 func TestIntersectNestedRulesScaleLinearly(t *testing.T) {
 	all := knownRights(landlock.FSAccessRights())
 	baseline := fsProfile(all,
@@ -101,7 +87,7 @@ func TestIntersectNestedRulesScaleLinearly(t *testing.T) {
 // concatenating each into the rights gathered so far allocated in the
 // square of the rules.
 //
-//nolint:paralleltest // allocatedBytes needs the runtime to itself
+//nolint:paralleltest // AllocatedBytes needs the runtime to itself
 func TestDiffDuplicateRulesScaleLinearly(t *testing.T) {
 	assertLinear(t, "Diff", 2048, func(size int) func() {
 		profile := fsProfile(nil)

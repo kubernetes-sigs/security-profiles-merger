@@ -25,14 +25,15 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
 
-// libseccomp 2.5.5 and 2.6.1 emit the instruction that loads the syscall
-// number in the code of the syscall an architecture's block tests first,
-// and leave that code out when the syscall is one the architecture lacks,
-// which libseccomp keeps in the block under a number it makes up. Every
-// rule of the block then compares against a value that is no syscall
-// number, and every call of the architecture gets the default action. The
-// merges keep their results out of that shape (see settleAbsentSyscalls and
-// the Architectures section of the package documentation).
+// libseccomp 2.5.2, 2.5.4, 2.5.5, 2.6.0 and 2.6.1 emit the instruction that
+// loads the syscall number in the code of the syscall an architecture's
+// block tests first, and leave that code out when the syscall is one the
+// architecture lacks, which libseccomp keeps in the block under a number it
+// makes up. Every rule of the block then compares against a value that is no
+// syscall number, and every call of the architecture gets the default
+// action. The merges keep their results out of that shape (see
+// settleAbsentSyscalls and the Architectures section of the package
+// documentation).
 //
 // A block tests its syscalls in the order of how many comparisons their
 // rules compile to, fewest first, and a syscall the architecture has wins a
@@ -49,7 +50,8 @@ import (
 // other pair of architectures shares an AUDIT_ARCH value.
 //
 // All of it was read from the programs libseccomp 2.6.1 compiles, and the
-// libseccomp tests of this package keep checking it there and on 2.5.5.
+// libseccomp tests of this package keep checking it on every release the
+// placement table below combines.
 
 // syscallPlacement is where libseccomp places a rule on one syscall, per
 // architecture, as bits of syscallArchitectures: under the number of the
@@ -59,10 +61,10 @@ import (
 // it lacks; a multiplexing one keeps only a multiplexed syscall it has no
 // number for and drops the rest when the rule is added.
 //
-// syscallPlacements combines libseccomp 2.5.5 and 2.6.1, the releases
-// runtimes link, which disagree where one knows a syscall or a number the
-// other does not. Each decision reads the combination that errs safe for
-// both:
+// syscallPlacements combines libseccomp 2.5.2, 2.5.4, 2.5.5, 2.6.0 and
+// 2.6.1, the releases runtimes link, which disagree where one knows a
+// syscall or a number another does not. Each decision reads the combination
+// that errs safe for all of them:
 //
 //   - which syscall a block tests first is decided among those direct and
 //     viaMux name, which hold where every release places the rule so: a
@@ -72,13 +74,14 @@ import (
 //   - whether a block has rules at stake, its own or its partner's, reads
 //     reach, which holds where any release places the rule under its
 //     number or on the multiplexer: a rule only 2.6.1 knows is lost on a
-//     node that links 2.6.1;
+//     node that links 2.6.1, and one 2.5.2 does not know is not loaded at
+//     all on a node that links 2.5.2;
 //   - whether a rule applies to no call of the filter, and so can go, and
 //     which architectures an offending syscall applies on, read reach too.
 //
 // It is generated from the syscalls.csv each release ships in its source
 // tree, so that it does not depend on the architecture it is generated on:
-// make verify-syscalls fetches both files, regenerates syscalls.go with
+// make verify-syscalls fetches the files, regenerates syscalls.go with
 // SPM_SYSCALL_CSV_DIR naming their directory, and fails when the result
 // differs from the file checked in.
 type syscallPlacement struct {
@@ -439,6 +442,12 @@ func (s *absentSettler) losingBlock(covered []specs.Arch) (specs.Arch, []string)
 // rules kept for lacking a gone syscall loses those from its tally, which
 // is exact, since every entry naming that syscall goes; any other block an
 // entry placed something in is tallied afresh when it is next needed.
+//
+// Every entry of a merge result names one syscall until regroupSyscalls
+// joins them, but an entry naming several is read whole all the same: the
+// names that do not go mark the blocks they are kept in stale too, since
+// the entry takes their rules with it. An entry naming none places nothing
+// and stays.
 func (s *absentSettler) dropRules(gone map[string]bool) {
 	var stale uint32
 

@@ -542,11 +542,13 @@ func validateWith(
 // ValidateArtifact that do not depend on trust: duplicate architectures and
 // flags, and out-of-range errno values.
 func validateWellFormed(profile *specs.LinuxSeccomp) error {
-	return merge.JoinLimited(
-		validateDuplicateArchitectures(profile.Architectures),
-		validateDuplicateFlags(profile.Flags),
-		validateErrnoRange(profile),
-	)
+	var errs merge.Collector
+
+	errs.Add(validateDuplicateArchitectures(profile.Architectures))
+	errs.Add(validateDuplicateFlags(profile.Flags))
+	errs.Add(validateErrnoRange(profile))
+
+	return errs.Err()
 }
 
 // validateErrnoRange checks errno values where a runtime reads them; values
@@ -902,9 +904,12 @@ type syscallRuleState struct {
 // rules are checked.
 func syscallRuleCheck(native specs.Arch) profileCheck {
 	return func(profile *specs.LinuxSeccomp) error {
-		return merge.JoinLimited(
-			validateSyscallRules(profile, native), validateLostRules(profile, native),
-		)
+		var errs merge.Collector
+
+		errs.Add(validateSyscallRules(profile, native))
+		errs.Add(validateLostRules(profile, native))
+
+		return errs.Err()
 	}
 }
 

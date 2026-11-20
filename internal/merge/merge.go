@@ -16,43 +16,34 @@ limitations under the License.
 
 // Package merge holds what the three profile packages and the command share
 // beyond the public spm package: the generic merge primitives (Fold and the
-// slice helpers), the bounds on error reports (JoinLimited, BoundedError,
+// slice helpers), the bounds on error reports (Collector, BoundedError,
 // QuoteBounded), the quoting of profile values for output (SafeText,
 // SafeName) and the bounded output of the formatters (Builder).
 package merge
 
 import (
 	"cmp"
-	"path"
 	"slices"
 
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
-// Fold merges a slice of profiles using pairwise reduction. A single profile
-// is cloned; two or more are merged left to right. Profiles must be non-nil:
-// callers validate them, reporting ErrNilProfile with the index, before
-// folding.
-func Fold[T any](
-	profiles []*T,
-	clone func(*T) *T,
-	mergeFn func(*T, *T) (*T, error),
-) (*T, error) {
+// Fold merges a slice of profiles left to right with mergeFn, stopping at
+// the first error it returns. A single profile is returned as it is, so a
+// caller that must not hand back its input copies it. An empty slice
+// reports spm.ErrNoProfiles. Profiles must be non-nil: callers validate
+// them, reporting ErrNilProfile with the index, before folding.
+func Fold[T any](profiles []*T, mergeFn func(*T, *T) (*T, error)) (*T, error) {
 	if len(profiles) == 0 {
 		return nil, spm.ErrNoProfiles
 	}
 
-	if len(profiles) == 1 {
-		return clone(profiles[0]), nil
-	}
+	result := profiles[0]
 
-	result, err := mergeFn(profiles[0], profiles[1])
-	if err != nil {
-		return nil, err
-	}
+	for _, profile := range profiles[1:] {
+		var err error
 
-	for idx := 2; idx < len(profiles); idx++ {
-		result, err = mergeFn(result, profiles[idx])
+		result, err = mergeFn(result, profile)
 		if err != nil {
 			return nil, err
 		}
@@ -192,13 +183,6 @@ func UnionSlice[T comparable](left, right []T) []T {
 // smallUnion is the combined length up to which UnionSlice scans instead of
 // hashing.
 const smallUnion = 16
-
-// IsAbsPath reports whether a profile path starts at the root. Profile paths
-// are Linux paths whatever the host is, so this uses slash semantics rather
-// than the host's path separator.
-func IsAbsPath(profilePath string) bool {
-	return path.IsAbs(profilePath)
-}
 
 // ClonePtr returns a shallow copy of the pointed-to value, or nil if ptr is nil.
 func ClonePtr[T any](ptr *T) *T {

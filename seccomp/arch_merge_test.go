@@ -46,24 +46,8 @@ func on(profile *specs.LinuxSeccomp, archs ...specs.Arch) *specs.LinuxSeccomp {
 	return profile
 }
 
-// requireWideNative skips a test that assumes the running program's
-// architecture compares full 64-bit values and calls the socket syscalls
-// directly, which every platform CI runs the tests on does.
-func requireWideNative(t *testing.T) {
-	t.Helper()
-
-	native, _ := seccomp.NativeArchitecture()
-	if slices.Contains([]specs.Arch{
-		specs.ArchX86, specs.ArchARM, specs.ArchMIPS, specs.ArchMIPSEL,
-		specs.ArchPPC64, specs.ArchPPC64LE, specs.ArchS390X,
-	}, native) {
-		t.Skipf("native architecture %s is 32-bit or multiplexes", native)
-	}
-}
-
 func TestValidateArtifactRejectsWideValueOn32Bit(t *testing.T) {
 	t.Parallel()
-	requireWideNative(t)
 
 	wideEntry := filtered("personality", specs.ActAllow, arg(0, specs.OpEqualTo, 1<<32|5))
 
@@ -75,13 +59,13 @@ func TestValidateArtifactRejectsWideValueOn32Bit(t *testing.T) {
 	} {
 		profile := on(profileOf(specs.ActErrno, wideEntry), archs...)
 
-		err := seccomp.ValidateArtifact(profile)
+		err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(profile)
 		if !errors.Is(err, seccomp.ErrValueTooWide) {
 			t.Errorf("ValidateArtifact(%s) = %v, want ErrValueTooWide",
 				seccomp.FormatProfile(profile), err)
 		}
 
-		err = seccomp.ValidateStrict(profile)
+		err = seccomp.Options{Arch: specs.ArchX86_64}.ValidateStrict(profile)
 		if !errors.Is(err, seccomp.ErrValueTooWide) {
 			t.Errorf("ValidateStrict(%s) = %v, want ErrValueTooWide",
 				seccomp.FormatProfile(profile), err)
@@ -91,7 +75,6 @@ func TestValidateArtifactRejectsWideValueOn32Bit(t *testing.T) {
 
 func TestValidateArtifactAcceptsWideValueWithout32Bit(t *testing.T) {
 	t.Parallel()
-	requireWideNative(t)
 
 	for _, profile := range []*specs.LinuxSeccomp{
 		// No 32-bit architecture is covered.
@@ -107,7 +90,7 @@ func TestValidateArtifactAcceptsWideValueWithout32Bit(t *testing.T) {
 			}),
 		), specs.ArchX86),
 	} {
-		err := seccomp.ValidateArtifact(profile)
+		err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(profile)
 		if err != nil {
 			t.Errorf("ValidateArtifact(%s) = %v, want nil", seccomp.FormatProfile(profile), err)
 		}
@@ -119,7 +102,7 @@ func TestValidateArtifactAcceptsWideValueWithout32Bit(t *testing.T) {
 		filtered("personality", specs.ActAllow, masked(0, 1<<32, 1<<32)),
 	), specs.ArchX86)
 
-	err := seccomp.ValidateArtifact(profile)
+	err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(profile)
 	if !errors.Is(err, seccomp.ErrValueTooWide) {
 		t.Errorf("ValidateArtifact(%s) = %v, want ErrValueTooWide",
 			seccomp.FormatProfile(profile), err)
@@ -144,11 +127,10 @@ func wideValuePair() (*specs.LinuxSeccomp, *specs.LinuxSeccomp) {
 
 func TestIntersectDropsNarrowArchitecturesForWideValues(t *testing.T) {
 	t.Parallel()
-	requireWideNative(t)
 
 	baseline, artifact := wideValuePair()
 
-	result, err := seccomp.Intersect(baseline, artifact)
+	result, err := seccomp.Options{Arch: specs.ArchX86_64}.Intersect(baseline, artifact)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,11 +162,10 @@ func TestIntersectCollapsesWideValuesOnNarrowNative(t *testing.T) {
 
 func TestUnionCollapsesWideValuesOn32Bit(t *testing.T) {
 	t.Parallel()
-	requireWideNative(t)
 
 	baseline, artifact := wideValuePair()
 
-	result, err := seccomp.Union(baseline, artifact)
+	result, err := seccomp.Options{Arch: specs.ArchX86_64}.Union(baseline, artifact)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,13 +180,12 @@ func TestUnionCollapsesWideValuesOn32Bit(t *testing.T) {
 
 func TestMergeKeepsWideValuesWithout32Bit(t *testing.T) {
 	t.Parallel()
-	requireWideNative(t)
 
 	baseline, artifact := wideValuePair()
 	baseline.Architectures = []specs.Arch{specs.ArchX86_64}
 	artifact.Architectures = []specs.Arch{specs.ArchX86_64}
 
-	result, err := seccomp.Intersect(baseline, artifact)
+	result, err := seccomp.Options{Arch: specs.ArchX86_64}.Intersect(baseline, artifact)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,11 +211,10 @@ func socketPair(archs ...specs.Arch) (*specs.LinuxSeccomp, *specs.LinuxSeccomp) 
 
 func TestIntersectDropsMultiplexingArchitectures(t *testing.T) {
 	t.Parallel()
-	requireWideNative(t)
 
 	baseline, artifact := socketPair(specs.ArchX86_64, specs.ArchX86, specs.ArchPPC64LE)
 
-	result, err := seccomp.Intersect(baseline, artifact)
+	result, err := seccomp.Options{Arch: specs.ArchX86_64}.Intersect(baseline, artifact)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +241,6 @@ func TestIntersectCollapsesMultiplexedOnMultiplexingNative(t *testing.T) {
 
 func TestUnionCollapsesMultiplexed(t *testing.T) {
 	t.Parallel()
-	requireWideNative(t)
 
 	// The artifact allows socketcall(SYS_SOCKET, ...) for every family, so
 	// the union may not deny socket(2) for family 3 there, and socket(2)
@@ -274,7 +252,7 @@ func TestUnionCollapsesMultiplexed(t *testing.T) {
 		filtered("socket", specs.ActErrno, arg(0, specs.OpEqualTo, 3)),
 	)
 
-	result, err := seccomp.Union(artifact, baseline)
+	result, err := seccomp.Options{Arch: specs.ArchX86_64}.Union(artifact, baseline)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -839,5 +817,72 @@ func TestOptionsValidateStrictAcceptsOnlyWhatArtifactAccepts(t *testing.T) {
 	err := seccomp.Options{Arch: specs.ArchAARCH64}.ValidateStrict(profile)
 	if err != nil {
 		t.Errorf("Options{aarch64}.ValidateStrict = %v, want nil", err)
+	}
+}
+
+// TestMultiplexerSettlesOnAMultiplexingNative covers the multiplexer path on
+// a node whose native architecture multiplexes the socket syscalls, which a
+// merge cannot drop from the result and settles by collapsing instead.
+// Without the libseccomp tag nothing else runs these paths on an amd64 host.
+func TestMultiplexerSettlesOnAMultiplexingNative(t *testing.T) {
+	t.Parallel()
+
+	one, enosys := uint(1), uint(38)
+	s390x := []specs.Arch{specs.ArchS390X}
+
+	for _, test := range []struct {
+		name        string
+		left, right *specs.LinuxSeccomp
+		want        string
+	}{
+		{
+			// The result has no socketcall rule: the direct intersection
+			// drops the left's, which allows less than the default. But a
+			// socketcall the left's conditional rule does not match can
+			// reach its socket rule, so the default is no longer on the
+			// safe side of every input there, and socketcall gets a rule.
+			name: "default past a conditional multiplexer",
+			left: &specs.LinuxSeccomp{
+				DefaultAction: specs.ActErrno, Architectures: s390x,
+				Syscalls: []specs.LinuxSyscall{
+					filtered("socketcall", specs.ActAllow, arg(1, specs.OpEqualTo, 7)),
+					filtered("socket", specs.ActKill),
+				},
+			},
+			right: &specs.LinuxSeccomp{DefaultAction: specs.ActErrno, Architectures: s390x},
+			want:  "Profile{default:SCMP_ACT_ERRNO arch:SCMP_ARCH_S390X socket,socketcall->SCMP_ACT_KILL}",
+		},
+		{
+			// An unconditional socketcall rule differing from the default
+			// in its errno only is dropped where the multiplexed rules
+			// then decide no sub-call less safely. Here the socket rule
+			// would kill a call both inputs answer with ENOSYS, so the
+			// rule stays.
+			name: "multiplexer rule a multiplexed rule may not replace",
+			left: &specs.LinuxSeccomp{
+				DefaultAction: specs.ActErrno, DefaultErrnoRet: &one, Architectures: s390x,
+				Syscalls: []specs.LinuxSyscall{
+					{Names: []string{"socketcall"}, Action: specs.ActErrno, ErrnoRet: &enosys},
+					filtered("socket", specs.ActKill),
+				},
+			},
+			right: nil,
+			want: "Profile{default:SCMP_ACT_ERRNO arch:SCMP_ARCH_S390X " +
+				"socket->SCMP_ACT_KILL socketcall->SCMP_ACT_ERRNO(errno:38)}",
+		},
+	} {
+		right := test.right
+		if right == nil {
+			right = test.left
+		}
+
+		result, err := seccomp.Options{Arch: specs.ArchS390X}.Intersect(test.left, right)
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+
+		if got := seccomp.FormatProfile(result); got != test.want {
+			t.Errorf("%s:\n got %s\nwant %s", test.name, got, test.want)
+		}
 	}
 }

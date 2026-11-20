@@ -144,7 +144,7 @@ func TestDuplicateKeysBoundsPathWork(t *testing.T) {
 
 	paths, omitted := DuplicateKeys([]byte(document.String()))
 
-	if elapsed := time.Since(start); testutil.UninstrumentedRun() && elapsed > generousBudget {
+	if elapsed := time.Since(start); testutil.CheckWallClock() && elapsed > generousBudget {
 		t.Errorf("DuplicateKeys took %s, want well under %s", elapsed, generousBudget)
 	}
 
@@ -416,6 +416,29 @@ func TestUnknownFieldsPrefersShallowerField(t *testing.T) {
 	)
 	if len(got) != 0 {
 		t.Errorf("UnknownFields = %v, want none", got)
+	}
+}
+
+// walkTags holds the fields encoding/json reads by their Go name or not at
+// all, which no profile type has.
+type walkTags struct {
+	Untagged string
+	Skipped  string `json:"-"`
+	hidden   string
+}
+
+func TestUnknownFieldsFollowsTheDecodersNames(t *testing.T) {
+	t.Parallel()
+
+	_ = walkTags{Untagged: "", Skipped: "", hidden: ""}.hidden
+
+	// An untagged field is read by its Go name, ignoring case; a field
+	// tagged "-" and an unexported one are never read.
+	got, _ := UnknownFields(
+		[]byte(`{"untagged":"","Skipped":"","hidden":""}`), reflect.TypeFor[walkTags](),
+	)
+	if want := []string{"Skipped", "hidden"}; !slices.Equal(got, want) {
+		t.Errorf("UnknownFields = %v, want %v", got, want)
 	}
 }
 

@@ -32,7 +32,7 @@ import (
 // size its author chose.
 const MaxQuotedBytes = 64
 
-// MaxJoinedErrors bounds how many errors JoinLimited reports individually.
+// MaxJoinedErrors bounds how many errors a Collector reports individually.
 // Validation collects every failure, and a profile can hold as many failures
 // as it holds entries, so the count needs a ceiling for the same reason the
 // individual values do.
@@ -104,42 +104,16 @@ func (b *boundedError) Error() string { return BoundedText(b.err.Error()) }
 
 func (b *boundedError) Unwrap() error { return b.err }
 
-// JoinLimited joins up to MaxJoinedErrors non-nil errors, following them with
-// a count of the ones it left out. It returns nil when every error is nil and
-// the error itself when exactly one is non-nil, matching errors.Join.
+// Collector gathers up to MaxJoinedErrors failures into one report,
+// followed by a count of the ones it left out. Report builds a failure only
+// while the report has room for it: a profile with a million bad entries
+// would otherwise cost a million formatted messages for a report that shows
+// 32 of them. The zero value is ready to use.
 //
-// A result of JoinLimited given as one of the errors is flattened into the
-// list rather than counted as one: validators build their report from the
-// reports of their checks, and the bound has to hold for the whole of it,
-// not once per check.
-//
-// The omitted errors stay omitted: a caller that needs to match one with
+// The omitted failures stay omitted: a caller that needs to match one with
 // errors.Is must not rely on a failure past the limit being present. A
-// truncated result matches spm.ErrMoreProblems, so the truncation itself is
+// truncated report matches spm.ErrMoreProblems, so the truncation itself is
 // visible rather than silent.
-func JoinLimited(errs ...error) error {
-	var report limitedError
-
-	for _, err := range errs {
-		report.add(err)
-	}
-
-	switch {
-	case len(report.kept) == 0:
-		return nil
-	case len(report.kept) == 1 && report.omitted == 0:
-		return report.kept[0]
-	default:
-		return &report
-	}
-}
-
-// Collector gathers failures under the same bound as JoinLimited, but builds
-// a failure only while the report has room for it. JoinLimited receives
-// errors that are already formatted, so a profile with a million bad entries
-// costs a million formatted messages for a report that shows 32 of them;
-// Report skips the formatting once the report is full and only counts the
-// failure. The zero value is ready to use.
 type Collector struct {
 	report limitedError
 }
@@ -158,16 +132,18 @@ func (c *Collector) Report(build func() error) {
 	c.report.omitted++
 }
 
-// Add adds err, flattening a result of JoinLimited or Collector.Err into the
-// report as JoinLimited does. A nil err is ignored.
+// Add adds err. A report from Collector.Err is flattened into this one
+// rather than counted as one failure: validators build their report from the
+// reports of their checks, and the bound has to hold for the whole of it,
+// not once per check. A nil err is ignored.
 func (c *Collector) Add(err error) {
 	c.report.add(err)
 }
 
-// Err returns the collected report with the semantics of JoinLimited: nil
-// when nothing failed, the failure itself when exactly one did and nothing
-// was omitted, and otherwise a report that matches spm.ErrMoreProblems when
-// it left failures out.
+// Err returns the collected report: nil when nothing failed, as
+// errors.Join returns, the failure itself when exactly one did and nothing
+// was omitted, and otherwise a report that also matches spm.ErrMoreProblems
+// when it left failures out.
 func (c *Collector) Err() error {
 	switch {
 	case len(c.report.kept) == 0 && c.report.omitted == 0:
@@ -181,7 +157,7 @@ func (c *Collector) Err() error {
 	}
 }
 
-// limitedError is the result of JoinLimited: the failures it kept and how
+// limitedError is the report Collector.Err returns: the failures it kept and how
 // many it left out.
 type limitedError struct {
 	kept    []error

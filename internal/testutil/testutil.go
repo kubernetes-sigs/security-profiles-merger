@@ -19,10 +19,19 @@ package testutil
 
 import "testing"
 
+// CheckWallClock reports whether a test should check a wall-clock bound: the
+// test binary runs without coverage counters, without the race detector and
+// without -short. The first two multiply the cost of a loop several times
+// over, and -short is how CI runs the suite under emulation, which does the
+// same, so a wall-clock bound says nothing about the algorithmic cost it is
+// meant to pin under any of them.
+func CheckWallClock() bool {
+	return UninstrumentedRun() && !testing.Short()
+}
+
 // UninstrumentedRun reports whether the test binary runs without coverage
-// counters and without the race detector. Both multiply the cost of a loop
-// several times over, so a wall-clock bound says nothing about the
-// algorithmic cost it is meant to pin while either is on.
+// counters and without the race detector, which both add work and
+// allocations of their own that vary from run to run.
 func UninstrumentedRun() bool {
 	return testing.CoverMode() == "" && !raceDetectorEnabled
 }

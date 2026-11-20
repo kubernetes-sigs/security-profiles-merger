@@ -135,10 +135,6 @@ type strategy interface {
 func foldProfiles(
 	profiles []*Profile, matchers *matcherCache, mergeOp strategy,
 ) (*Profile, error) {
-	if len(profiles) == 0 {
-		return nil, fmt.Errorf("merge: %w", ErrNoProfiles)
-	}
-
 	// The caller's profiles are validated as written, so that a failure
 	// names the caller's index and spelling, and an oversized path is
 	// refused before anything is normalized. Validation returns the
@@ -171,7 +167,7 @@ func foldProfiles(
 
 	// The normalized profiles are copies this call owns, so a single
 	// profile needs no further clone.
-	result, err := merge.Fold(normalized, ownedProfile, func(a, b *Profile) (*Profile, error) {
+	result, err := merge.Fold(normalized, func(a, b *Profile) (*Profile, error) {
 		merged := mergeTwo(a, b, mergeOp)
 
 		return merged, mergeOp.budgetErr()
@@ -184,10 +180,6 @@ func foldProfiles(
 
 	return result, nil
 }
-
-// ownedProfile is the clone function merge.Fold calls for a single profile:
-// the profiles Fold receives here are copies the call already owns.
-func ownedProfile(profile *Profile) *Profile { return profile }
 
 // canonicalizeAliases folds the paths of one list that spell the same rule
 // into one entry, keeping the simplest spelling. Two such spellings differ

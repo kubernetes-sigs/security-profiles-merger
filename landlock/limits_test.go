@@ -24,6 +24,7 @@ import (
 	"strings"
 	"testing"
 
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 	"sigs.k8s.io/security-profiles-merger/landlock"
 )
 
@@ -184,7 +185,7 @@ func TestMergeBudgetCountsInputsTimesRules(t *testing.T) {
 // slice of cleaned paths per input and its error, however many rules the
 // inputs hold.
 //
-//nolint:paralleltest // allocatedBytes needs the runtime to itself
+//nolint:paralleltest // AllocatedBytes needs the runtime to itself
 func TestMergePastTheBudgetDoesNoWork(t *testing.T) {
 	profile := portsProfile(2048)
 
@@ -195,7 +196,7 @@ func TestMergePastTheBudgetDoesNoWork(t *testing.T) {
 
 	var err error
 
-	allocated := allocatedBytes(func() { _, err = landlock.Union(inputs...) })
+	allocated := testutil.AllocatedBytes(func() { _, err = landlock.Union(inputs...) })
 
 	if !errors.Is(err, landlock.ErrBudgetExceeded) {
 		t.Fatalf("Union = %v, want ErrBudgetExceeded", err)

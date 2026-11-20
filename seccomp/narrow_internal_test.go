@@ -71,3 +71,34 @@ func TestSettleWithArchitecturesRebuildsWithout32Bit(t *testing.T) {
 		t.Errorf("architectures = %v, want x86 dropped", result.Architectures)
 	}
 }
+
+// TestSettleNarrowFirstLeavesTheDefaultToDecide covers a pick equal to the
+// default, which collectRules never leaves since it drops such clauses:
+// settleNarrowFirst reports it, so that settleInputs drops the syscall
+// rather than emit a rule the default already applies.
+func TestSettleNarrowFirstLeavesTheDefaultToDecide(t *testing.T) {
+	t.Parallel()
+
+	allow := clause{action: specs.ActAllow, errnoRet: nil, args: nil}
+	kill := clause{action: specs.ActKill, errnoRet: nil, args: nil}
+
+	merger := intersectRulesFor(specs.ArchX86_64)
+	merger.narrowCovered = true
+
+	rules := func() *syscallRules {
+		return &syscallRules{
+			unconditional: &allow, conditional: nil, summary: nil, narrowFirst: &kill,
+		}
+	}
+
+	if merger.settleNarrowFirst(rules(), &kill) {
+		t.Error("a pick equal to the default was kept")
+	}
+
+	errno := clause{action: specs.ActErrno, errnoRet: nil, args: nil}
+
+	current := rules()
+	if !merger.settleNarrowFirst(current, &errno) || !current.unconditional.sameResult(kill) {
+		t.Errorf("under another default the pick is %v, want %v", current.unconditional, kill)
+	}
+}

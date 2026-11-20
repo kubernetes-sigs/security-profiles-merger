@@ -64,6 +64,13 @@ changelog:
   use: github-native
 
 # A tag with a prerelease suffix, such as v0.6.0-rc.1, is published as a
-# prerelease rather than as the latest release.
+# prerelease rather than as the latest release. The release is created as a
+# draft: release.yml publishes it after attesting the provenance of what it
+# holds and verifying its signature, so that nothing is public before both.
 release:
   prerelease: auto
+  draft: true
+  # A run that failed after creating the draft leaves it behind, and the
+  # next run must not add a second draft for the same tag that the publish
+  # step might pick instead.
+  replace_existing_draft: true

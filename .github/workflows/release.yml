@@ -3,10 +3,16 @@ name: release
 on:
   push:
     tags:
-      - "v*"
+      - "v[0-9]*"
 
 permissions:
   contents: read
+
+# Two pushes of the same tag must not publish over each other, and a release
+# under way must finish: a cancelled one can leave a draft behind.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   # A tag can be pushed at any commit, so this workflow runs the gate
@@ -72,3 +78,20 @@ jobs:
             dist/spm_*/spm.exe
             dist/spm_*.sbom.json
             dist/checksums.txt
+      # The command README.md gives users, so that a release whose
+      # signature they could not verify is never published.
+      - name: Verify the checksums signature
+        run: |
+          set -euo pipefail
+          cosign verify-blob \
+            --bundle dist/checksums.txt.sigstore.json \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp '^https://github.com/kubernetes-sigs/security-profiles-merger/\.github/workflows/release\.yml@refs/tags/v' \
+            dist/checksums.txt
+      # goreleaser leaves the release a draft (see .goreleaser.yml), so it
+      # becomes visible only once its provenance is attested and its
+      # signature verifies.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"

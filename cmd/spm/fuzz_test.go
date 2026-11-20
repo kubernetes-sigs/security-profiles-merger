@@ -24,10 +24,10 @@ import (
 )
 
 // The CLI walks the same bytes a runtime pulls from an OCI artifact, before
-// any profile package sees them: it detects the profile type, reports the
-// members repeated within one object, and reports the members the profile
-// type has no field for. These targets fuzz those walkers, which recurse
-// over attacker-shaped JSON.
+// any profile package sees them, to detect the profile type. This target
+// fuzzes that walk, which recurses over attacker-shaped JSON. The walkers
+// that report repeated and unknown members live in internal/strictjson,
+// which fuzzes them itself.
 
 // FuzzDetectProfileType checks the type detection: it must terminate, answer
 // with types the CLI knows or nothing at all, and report a conflict for one

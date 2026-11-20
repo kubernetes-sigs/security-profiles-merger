@@ -45,9 +45,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The module has one dependency, so the cache setup-go keys on go.sum
+      # would hold little and, keyed on a go.sum that rarely changes, never
+      # refresh. This job and the others that build no tool (vet-arch,
+      # test-arch, test-emulated, apparmor-parser, golden and syscalls) go
+      # without it.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
       - run: make build
 
   # .golangci.yml enables the libseccomp build tag, so this job also
@@ -97,7 +103,10 @@ jobs:
       # A pull request from a fork gets no secrets, so the upload has
       # nothing to authenticate with. Coverage is a report, not a gate:
       # the threshold in verify-coverage above is the gate.
-      - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+      # A tag run, which release.yml makes, has no token either and
+      # reports nothing a pull request or main has not.
+      - if: github.ref_type != 'tag'
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         continue-on-error: true
         with:
           files: build/coverage.out
@@ -107,9 +116,11 @@ jobs:
   # The algorithmic bounds in the suite only assert wall-clock limits when
   # neither coverage nor the race detector is instrumenting the code, so the
   # job above measures nothing. This one runs the same tests plain on the
-  # floor Go and amd64; test / release go, test / linux-<arch> and the test
-  # jobs on macOS and Windows run uninstrumented as well, so the bounds are
-  # a real assertion there too.
+  # floor Go and amd64; test / release go, test / linux-386,
+  # test / linux-arm64 and the test jobs on macOS and Windows run
+  # uninstrumented as well, so the bounds are a real assertion there too.
+  # The emulated test / linux-<arch> (qemu) jobs run with -short, which
+  # turns the bounds off.
   test-bounds:
     name: test / bounds
     runs-on: ubuntu-latest
@@ -143,8 +154,7 @@ jobs:
   # calls reads those rules a second way. The jobs above only ever run as
   # amd64, so the suite also runs where that needs no emulation: as 386 on
   # the same runners, which is both 32-bit and multiplexing, and on an arm64
-  # runner. s390x and ppc64le would need qemu, under which the wall-clock
-  # bounds of the suite do not hold, so those are only vetted below.
+  # runner. s390x, ppc64le and arm need qemu, see test-emulated.
   test-arch:
     name: test / linux-${{ matrix.goarch }}
     runs-on: ${{ matrix.runner }}
@@ -164,23 +174,27 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
       - env:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: go test -count=1 ./...
 
-  # The runners are all 64-bit, so a word-size mistake compiles here and
-  # breaks for whoever vendors the library into a 32-bit build. Nothing is
-  # executed, so no emulation is needed; these are the architectures
-  # Kubernetes ships and seccomp/arch.go maps.
-  vet-arch:
-    name: vet / linux-${{ matrix.goarch }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  # The rest of the architectures the seccomp merges read differently, and
+  # the 32-bit arm, run under qemu user emulation. Emulation slows the suite
+  # several times over, so it runs with -short, which turns off the
+  # wall-clock bounds (see testutil.CheckWallClock); the algorithms are
+  # bounded by the jobs that run natively.
+  test-emulated:
+    name: test / linux-${{ matrix.goarch }} (qemu)
+    # Pinned rather than ubuntu-latest: the job depends on the image's
+    # qemu-user-static and binfmt-support packages.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        goarch: ["386", "arm", "arm64", "s390x", "ppc64le"]
+        goarch: [s390x, ppc64le, arm]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -188,8 +202,49 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
+      # binfmt_misc runs a foreign test binary through qemu, so go test
+      # needs no exec wrapper.
+      - run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static binfmt-support
       - env:
-          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: go test -short -count=1 -timeout=30m ./...
+
+  # The runners are all 64-bit, so a word-size mistake compiles here and
+  # breaks for whoever vendors the library into a 32-bit build. Nothing is
+  # executed, so no emulation is needed; these are the architectures
+  # Kubernetes ships and seccomp/arch.go maps. NetBSD compiles
+  # cmd/spm/nofollow_netbsd.go, which no other job builds. FreeBSD adds no
+  # file of its own; it keeps a BSD in the set the Unix files are checked
+  # on besides macOS, which a change aimed at NetBSD could break.
+  vet-arch:
+    name: vet / ${{ matrix.goos }}-${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux]
+        goarch: ["386", "arm", "arm64", "s390x", "ppc64le"]
+        include:
+          - goos: netbsd
+            goarch: amd64
+          - goos: freebsd
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - env:
+          GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
           set -euo pipefail
@@ -203,10 +258,18 @@ jobs:
   # The versions are built from their release tarballs rather than taken from
   # the runner image: the whole safe-shape model rests on what libseccomp
   # compiles, so which version answered has to be recorded, not inherited.
-  # Add a version here when libseccomp releases one.
+  # Add a version here when libseccomp releases one, and to SYSCALL_CSVS in
+  # the Makefile, which TestGenerateSyscallTable checks against its own list.
+  # SYSCALL_CSVS also lists 2.5.2, which is not run here: it evaluates some
+  # binary trees differently, and the merges support 2.5.4 and newer (see
+  # the Architectures section of the seccomp package documentation).
+  #
+  # Several tests read the native architecture, which decides how the
+  # merges settle 32-bit comparisons and socketcall, so the newest release
+  # also runs on an arm64 runner and as 386, built with -m32 on amd64.
   test-libseccomp:
-    name: test-libseccomp / ${{ matrix.version }}
-    runs-on: ubuntu-latest
+    name: test-libseccomp / ${{ matrix.version }}${{ matrix.arch != 'amd64' && format(' / {0}', matrix.arch) || '' }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     env:
       LIBSECCOMP_PREFIX: ${{ github.workspace }}/.libseccomp
@@ -214,10 +277,30 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - version: "2.5.4"
+            sha256: d82902400405cf0068574ef3dc1fe5f5926207543ba1ae6f8e7a1576351dcbdb
+            arch: amd64
+            runner: ubuntu-latest
           - version: "2.5.5"
             sha256: 248a2c8a4d9b9858aa6baf52712c34afefcf9c9e94b76dce02c1c9aa25fb3375
+            arch: amd64
+            runner: ubuntu-latest
+          - version: "2.6.0"
+            sha256: 83b6085232d1588c379dc9b9cae47bb37407cf262e6e74993c61ba72d2a784dc
+            arch: amd64
+            runner: ubuntu-latest
           - version: "2.6.1"
             sha256: 501f66c667225d53791b97e1d7cf85ab764c297d04881f60f38f451c4b0ee1be
+            arch: amd64
+            runner: ubuntu-latest
+          - version: "2.6.1"
+            sha256: 501f66c667225d53791b97e1d7cf85ab764c297d04881f60f38f451c4b0ee1be
+            arch: arm64
+            runner: ubuntu-24.04-arm
+          - version: "2.6.1"
+            sha256: 501f66c667225d53791b97e1d7cf85ab764c297d04881f60f38f451c4b0ee1be
+            arch: "386"
+            runner: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -225,6 +308,21 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      # The 386 run builds libseccomp and the test binary for 32 bits on
+      # the amd64 runner, which runs them natively. configure and cgo both
+      # take the compiler from CC, so -m32 rides on it and configure keeps
+      # its default -g -O2.
+      - name: Set up a 32-bit build
+        if: matrix.arch == '386'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib
+          {
+            echo "LIBSECCOMP_CONFIGURE=--host=i686-linux-gnu"
+            echo "GOARCH=386"
+            echo "CC=gcc -m32"
+          } >> "$GITHUB_ENV"
       - name: Build libseccomp ${{ matrix.version }}
         env:
           LIBSECCOMP_VERSION: ${{ matrix.version }}
@@ -244,7 +342,8 @@ jobs:
           # the soname link at the newest file there, so a build older than
           # the runner image's copy would never be the one loaded. The run
           # steps name this prefix for the build (pkg-config) and the loader.
-          ./configure --prefix="$LIBSECCOMP_PREFIX"
+          read -ra configure <<<"${LIBSECCOMP_CONFIGURE:-}"
+          ./configure --prefix="$LIBSECCOMP_PREFIX" "${configure[@]}"
           make -j"$(nproc)"
           make install
       # pkg-config only describes the build. TestLibseccompVersion reads the
@@ -268,6 +367,30 @@ jobs:
           PKG_CONFIG_PATH: ${{ env.LIBSECCOMP_PREFIX }}/lib/pkgconfig
           LD_LIBRARY_PATH: ${{ env.LIBSECCOMP_PREFIX }}/lib
         run: make test-libseccomp TESTFLAGS='-run Libseccomp'
+
+  # The apparmor package ports the stages apparmor_parser runs a path
+  # through (apparmor/parser_port.go). This checks the port against the
+  # parser the distribution ships, over a table of patterns, behind a build
+  # tag since it needs the binary. The test fails rather than skips when the
+  # binary is missing, so a broken install cannot pass.
+  apparmor-parser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y apparmor
+      - env:
+          SPM_REQUIRE_APPARMOR_PARSER: "1"
+        run: go test -count=1 -tags apparmor_parser -run TestTranslationAgreesWithApparmorParser ./apparmor/
 
   # The library handles Linux profile paths on every host and binaries are
   # released for these platforms, so the packages are tested there too, on
@@ -384,11 +507,54 @@ jobs:
             echo "::error::${FUZZ_TARGET} matched no fuzz target"
             exit 1
           fi
-      - if: github.event_name != 'pull_request'
+      # A failing input is written to the package's testdata/fuzz, where it
+      # would die with the runner. It is what reproduces the failure, so it
+      # is kept as an artifact to commit as a seed.
+      - id: crashers
+        if: failure()
+        run: |
+          set -euo pipefail
+          {
+            echo 'paths<<EOF'
+            git ls-files --others --exclude-standard -- '*/testdata/fuzz/*'
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+      - if: failure() && steps.crashers.outputs.paths != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-crashers-${{ matrix.fuzz.name }}
+          path: ${{ steps.crashers.outputs.paths }}
+      # Only main saves: a cache saved on a tag, which release.yml runs
+      # this workflow for, is one nothing restores.
+      - if: github.ref == 'refs/heads/main'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.GOFUZZCACHE }}
           key: fuzz-${{ matrix.fuzz.name }}-${{ github.sha }}
+
+  # The benchmark matrix is written out, so a package that gains its first
+  # benchmark would never run it. This counts the packages declaring one
+  # against the matrix, as fuzz-prepare does for the fuzz targets.
+  benchmark-check:
+    name: benchmark / matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # yq comes with the runner image.
+      - run: |
+          set -euo pipefail
+          want=$(grep -rl '^func Benchmark' --include='*_test.go' . \
+            | xargs -n1 dirname | sed 's|^\./||; s|^|./|; s|$|/|' | sort -u)
+          got=$(yq '.jobs.benchmark.strategy.matrix.include[].package' \
+            .github/workflows/ci.yml | sort -u)
+          if [ -z "$want" ] || [ "$want" != "$got" ]; then
+            echo "::error::the benchmark matrix does not list the packages that declare benchmarks"
+            diff <(echo "$want") <(echo "$got") || true
+            exit 1
+          fi
 
   benchmark:
     runs-on: ubuntu-latest
@@ -454,7 +620,7 @@ jobs:
           alert-threshold: "200%"
           summary-always: true
           fail-on-alert: false
-      - if: github.event_name != 'pull_request'
+      - if: github.ref == 'refs/heads/main'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ./cache
@@ -470,6 +636,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: hack/tools/go.sum
       # govulncheck reports standard library vulnerabilities for the Go it
       # runs under, so it runs under the Go the release is built with. local
       # keeps go tool from switching to another toolchain, and so to another
@@ -497,13 +664,19 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: |
+            go.sum
+            hack/tools/go.sum
       - run: make verify-tidy
 
   # The jobs that touch hack/tools/go.mod (govulncheck, tidy, mdtoc,
   # actionlint, api and dependencies) use the Go the release is built with:
   # that module's go line is newer than the floor in go.mod, setup-go sets
   # GOTOOLCHAIN=local, and the go command picks its toolchain from go.mod
-  # even under -modfile, so it would not switch by itself.
+  # even under -modfile, so it would not switch by itself. They key their
+  # cache on hack/tools/go.sum, which holds the modules they build, rather
+  # than on the root go.sum, which holds one module and so never changes
+  # the key when a tool is updated.
   mdtoc:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -514,6 +687,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: hack/tools/go.sum
       - run: make verify-mdtoc
 
   # actionlint runs shellcheck on every run step, which the runner image
@@ -528,6 +702,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: hack/tools/go.sum
       - run: make lint-actions
 
   # The module's API against the latest release, as gorelease reports it,
@@ -549,6 +724,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: hack/tools/go.sum
       # The report is captured before it goes to the summary, so that the
       # code fence around it closes even when gorelease fails. It is kept
       # outside the checkout, which gorelease refuses to read with an
@@ -575,6 +751,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
       - run: make verify-golden
 
   # seccomp/syscalls.go is generated from the syscalls.csv of every
@@ -590,6 +767,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
       - run: make verify-syscalls
 
   dependencies:
@@ -602,6 +780,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: hack/tools/go.sum
       - run: make verify-dependencies
 
   snapshot:
@@ -629,8 +808,18 @@ jobs:
       # version bump that moves a binary or an SBOM has to break here rather
       # than ship a release with nothing attested: attest-build-provenance
       # only errors when no subject at all matches.
+      # .goreleaser.yml builds 8 binaries: linux on amd64, arm64, ppc64le
+      # and s390x, darwin and windows on amd64 and arm64, each with an SBOM.
+      # A count that changes means the platforms did, and RELEASE.md, which
+      # lists them, has to change with it.
       - name: Check the paths the release attests over
         run: |
           set -euo pipefail
           ls -1 dist/spm_*/spm dist/spm_*/spm.exe \
             dist/spm_*.sbom.json dist/checksums.txt
+          binaries=$(find dist -path 'dist/spm_*/spm' -o -path 'dist/spm_*/spm.exe' | wc -l)
+          sboms=$(find dist -maxdepth 1 -name 'spm_*.sbom.json' | wc -l)
+          if [ "$binaries" -ne 8 ] || [ "$sboms" -ne 8 ]; then
+            echo "::error::$binaries binaries and $sboms SBOMs, want 8 of each"
+            exit 1
+          fi
