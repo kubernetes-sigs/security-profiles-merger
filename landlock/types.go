@@ -32,9 +32,8 @@ type Profile struct {
 	// ruleset. Rights not listed here are not restricted.
 	HandledAccessNet []NetAccessRight `json:"handledAccessNet,omitempty"`
 
-	// Scoped is the set of IPC scope restrictions applied to this ruleset.
-	// Scoped restrictions have no exceptions via rules; once scoped, access
-	// outside the Landlock domain is fully blocked.
+	// Scoped is the set of IPC scope restrictions of this ruleset, which no
+	// rule can lift.
 	Scoped []ScopeRight `json:"scoped,omitempty"`
 
 	// PathRules defines filesystem access rules for specific path hierarchies.
@@ -71,11 +70,9 @@ func (p *Profile) Clone() *Profile {
 	return clone
 }
 
-// FSAccessRight represents a Landlock filesystem access right.
-//
-// The kernel rejects rights it does not know, so a profile should only use
-// rights the target Landlock ABI supports. The rights below are available
-// since ABI version 1 unless their documentation says otherwise.
+// FSAccessRight represents a Landlock filesystem access right. The rights
+// below are available since ABI version 1 unless their documentation says
+// otherwise.
 type FSAccessRight string
 
 const (
@@ -175,9 +172,7 @@ const (
 // PathRule defines the access rights allowed for a specific path hierarchy.
 type PathRule struct {
 	// Path is the filesystem path hierarchy this rule applies to.
-	// UnmarshalStrict requires the member (ErrMissingField), so that a rule
-	// left out or null, such as {"pathRules":[null]}, is refused as a
-	// network rule without a port is.
+	// UnmarshalStrict requires the member (ErrMissingField).
 	Path string `json:"path" strict:"required"`
 
 	// AccessFS is the set of filesystem access rights allowed under this path.
@@ -186,11 +181,10 @@ type PathRule struct {
 
 // NetRule defines the access rights allowed for a specific port.
 type NetRule struct {
-	// Port is the network port this rule applies to. Port 0 is one a rule
-	// can name: a socket bound to it gets an ephemeral port. json.Unmarshal
-	// reads a rule without the member as a rule on that port, which is what
-	// a producer writing it with omitempty relies on, while UnmarshalStrict
-	// requires the member (ErrMissingField).
+	// Port is the network port this rule applies to; 0 is the port a socket
+	// binds to for an ephemeral one. json.Unmarshal reads a rule without the
+	// member as one on port 0, while UnmarshalStrict requires the member
+	// (ErrMissingField).
 	Port uint16 `json:"port" strict:"required"`
 
 	// AccessNet is the set of network access rights allowed for this port.
@@ -198,14 +192,12 @@ type NetRule struct {
 }
 
 // ABIVersion is a Landlock ABI version, as reported by
-// landlock_create_ruleset(LANDLOCK_CREATE_RULESET_VERSION). A kernel rejects
-// an access right its ABI does not know, so a profile can only be loaded on
-// a kernel whose ABI is at least RequiredABIVersion.
+// landlock_create_ruleset(LANDLOCK_CREATE_RULESET_VERSION). A profile loads
+// only on a kernel whose ABI is at least RequiredABIVersion.
 type ABIVersion int
 
-// Landlock ABI versions. The rights each one introduced are listed on the
-// access right constants. Some versions also added what a Profile cannot
-// express, which this package neither needs nor checks.
+// Landlock ABI versions. The access right constants name the version that
+// introduced them; what else a version added is not in a Profile.
 const (
 	ABIV1 ABIVersion = iota + 1
 	ABIV2
@@ -217,19 +209,15 @@ const (
 	ABIV7
 	ABIV8
 	ABIV9
-	// ABIV10 added the UDP rights and, beyond them, the quiet_access_fs,
-	// quiet_access_net and quiet_scoped masks of a ruleset and the
-	// LANDLOCK_ADD_RULE_QUIET flag of landlock_add_rule, which a Profile
+	// ABIV10 added the UDP rights, and quiet masks and flags a Profile
 	// cannot express.
 	ABIV10
-	// ABIV11 added only the LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS flag of
-	// landlock_restrict_self, and no access rights.
+	// ABIV11 added a landlock_restrict_self flag but no access rights.
 	ABIV11
 )
 
-// String returns the name of the version's constant, such as "ABIV3", for
-// a version from ABIV1 on, newer ones included, and "ABIVersion(n)" for one
-// below, which names no kernel.
+// String returns "ABIV" and the number for a version from ABIV1 on, newer
+// ones included, and "ABIVersion(n)" for one below.
 func (v ABIVersion) String() string {
 	if v < ABIV1 {
 		return "ABIVersion(" + strconv.Itoa(int(v)) + ")"
@@ -251,9 +239,8 @@ func NetAccessRights() map[NetAccessRight]ABIVersion { return maps.Clone(netAcce
 // version that introduced it, as FSAccessRights does.
 func ScopeRights() map[ScopeRight]ABIVersion { return maps.Clone(scopeABI) }
 
-// LatestABIVersion is the newest Landlock ABI this package knows. A newer
-// one is read as this one, since every right a Profile can hold is known
-// from it on.
+// LatestABIVersion is the newest Landlock ABI this package knows; Options
+// reads a newer one as this one.
 const LatestABIVersion = ABIV11
 
 // The tables below are the single source of the rights this package knows,

@@ -30,20 +30,13 @@ import (
 
 // ProfileDiff describes the differences between two seccomp profiles.
 type ProfileDiff struct {
-	// Equal is true when the two profiles compare equal in the normalized
-	// form Diff describes, even where they are spelled differently. That
-	// form is the rules a runtime adds, not the program libseccomp builds
-	// from them: two profiles holding the same rules in a different order
-	// are equal although libseccomp may refuse one of them, except where the
-	// order decides a call, which Diff compares as well.
+	// Equal is true when the profiles compare equal in the normalized form
+	// Diff describes (see the Diff section), even where spelled differently.
 	Equal bool `json:"equal"`
 
-	// DefaultAction is set when the default actions differ. The actions are
-	// reported as the profiles write them, except that
-	// SCMP_ACT_KILL_THREAD, which libseccomp defines as the same action as
-	// SCMP_ACT_KILL, is reported as SCMP_ACT_KILL, the spelling a merge
-	// result uses; the two compare equal and are never reported as a
-	// change.
+	// DefaultAction is set when the default actions differ, as written,
+	// except that SCMP_ACT_KILL_THREAD is reported as SCMP_ACT_KILL; the two
+	// compare equal.
 	DefaultAction *ValueDiff[specs.LinuxSeccompAction] `json:"defaultAction,omitempty"`
 
 	// DefaultErrnoRet is set when the default errno return values differ.
@@ -64,7 +57,7 @@ type ProfileDiff struct {
 	// string stands for no value.
 	ListenerMetadata *ValueDiff[string] `json:"listenerMetadata,omitempty"`
 
-	// Syscalls is set when the syscall entries differ.
+	// Syscalls is set when the syscall rules differ.
 	Syscalls *SyscallsDiff `json:"syscalls,omitempty"`
 }
 
@@ -109,22 +102,17 @@ type SyscallEntry struct {
 	Args []specs.LinuxSeccompArg `json:"args,omitempty"`
 }
 
-// SyscallChange represents a syscall both profiles load rules for, with
-// different rules. Left and Right list the rules of each side in normal
-// form, sorted, except for a syscall whose rules differ only in the order
-// libseccomp keeps them in, which lists them in the order a runtime adds
-// them (see the Diff section of the package documentation).
+// SyscallChange is a syscall both profiles load different rules for.
 type SyscallChange struct {
 	// Name is the syscall name.
 	Name string `json:"name"`
-	// Left holds the rules the left profile loads for the syscall, in the
-	// normal form Diff compares: rules equal to the profile default are left
-	// out, an unconditional rule hides the conditional ones and is then the
-	// only rule, and conditional rules are sorted by their conditions. For a
-	// syscall past the read budget (see the Cost bounds section of the
-	// package documentation) it holds instead the unconditional rules a
-	// collapse could pick: its most restrictive and its least restrictive
-	// action, each unless it equals the default, and one where they agree.
+	// Left holds the rules the left profile loads for the syscall in the
+	// normal form Diff compares, sorted by their conditions, or in the order
+	// a runtime adds them where only that order differs (see the Diff
+	// section). For a syscall past the read budget it holds the
+	// unconditional rules a collapse could pick instead: its most and its
+	// least restrictive action, each unless it equals the default, and one
+	// where they agree.
 	Left []SyscallDetail `json:"left"`
 	// Right holds the rules of the right profile, as Left holds the left's.
 	Right []SyscallDetail `json:"right"`
@@ -141,39 +129,15 @@ type SyscallDetail struct {
 	Args []specs.LinuxSeccompArg `json:"args,omitempty"`
 }
 
-// Diff compares two seccomp profiles by the rules a runtime loads from them
-// and returns a structured diff. Unlike Intersect and Union, it does not
-// validate the profiles. A nil profile is reported as an *InputError
-// naming its side, Index 0 for left and 1 for right, which matches
-// ErrNilProfile.
-//
-// Entries are normalized as a merge reads them: entries equal to the
-// profile default are ignored, an unconditional entry hides the conditional
-// entries for its syscall, conditions compare as libseccomp evaluates them,
-// exact duplicates are dropped, and errno values and SCMP_ACT_KILL_THREAD
-// are canonicalized. Rules are not rewritten beyond that, so
-// Diff(p, Intersect(p)) reports exactly what Intersect settled. Diff does
-// not check whether libseccomp accepts the rules: two profiles holding the
-// same rules in a different order compare equal although a runtime may
-// load only one of them. Where libseccomp keeps the order the rules were
-// added in and that order decides a call, as for conditions on one argument
-// against one value with different operators of one class or different
-// masks, the order is compared too (see the Diff section of the package
-// documentation). A syscall past the read budget is compared by the entries
-// that load it rather than by its rules.
-//
-// Architectures are compared with the architecture of the running program
-// (see NativeArchitecture) implied on both sides, so a profile destined for
-// another architecture compares differently here than on the target node;
-// use Options.Diff to name that architecture. See the Diff section of the
-// package documentation.
-//
-// Diff compares the fields this package reads, so two profiles that differ
-// only in a field of a newer runtime-spec compare equal; Validate rejects
-// such a field (ErrUnsupportedSpecField).
-//
-// The diff shares no memory with the profiles, so the caller may modify
-// it.
+// Diff compares two profiles by the rules a runtime loads from them,
+// normalized as a merge reads them, so Diff(p, Intersect(p)) reports exactly
+// what Intersect settled. It validates nothing, reports a nil profile as an
+// *InputError matching ErrNilProfile, Index 0 for left and 1 for right, and
+// returns a non-nil diff whenever the error is nil. It compares only the
+// fields this package reads ([ErrUnsupportedSpecField]) and implies the
+// native architecture of the running program on both sides ([Options.Diff]
+// names another). The diff shares no memory with the profiles. See the Diff
+// section.
 func Diff(left, right *specs.LinuxSeccomp) (*ProfileDiff, error) {
 	return ForHost().Diff(left, right)
 }
@@ -630,13 +594,10 @@ func compareUintPtr(left, right *uint) int {
 	return cmp.Compare(*left, *right)
 }
 
-// String returns a human-readable representation of the diff, as a single
-// line quoted and bounded as FormatProfile is, so that a runtime can log the
-// diff of an artifact it was handed.
-//
-// String has a value receiver, so a ProfileDiff and a pointer to one both
-// implement fmt.Stringer. Diff returns a non-nil diff whenever its error is
-// nil; called through a nil pointer, String panics.
+// String returns the diff as a single line, quoted and bounded as
+// FormatProfile is, for logging. It has a value receiver, so a ProfileDiff
+// and a pointer to one both implement fmt.Stringer; through a nil pointer
+// it panics.
 func (d ProfileDiff) String() string {
 	diff := &d
 

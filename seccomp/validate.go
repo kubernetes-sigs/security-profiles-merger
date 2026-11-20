@@ -48,222 +48,132 @@ const (
 )
 
 var (
-	// ErrUnknownAction is returned when a profile contains an unrecognized
-	// seccomp action.
+	// ErrUnknownAction is returned by Validate for an unknown action.
 	ErrUnknownAction = errors.New("unknown seccomp action")
-	// ErrEmptySyscallNames is returned when a syscall entry has no names.
+	// ErrEmptySyscallNames is returned by Validate for an entry without
+	// names.
 	ErrEmptySyscallNames = errors.New("syscall entry has no names")
-	// ErrEmptySyscallName is returned when a syscall entry contains an
-	// empty string in its name list.
+	// ErrEmptySyscallName is returned by Validate for an empty syscall name.
 	ErrEmptySyscallName = errors.New("empty syscall name")
-	// ErrInvalidSyscallName is returned when a syscall name holds a NUL
-	// byte, and by ValidateArtifact and ValidateStrict when it holds any
-	// other control character or is not valid UTF-8, which UnmarshalStrict
-	// refuses in a document as well. A runtime resolves a name through
-	// libseccomp's C API, where a NUL ends it: "re\x00ad" is added as "read"
-	// there while this package keeps the two apart, so a merge would settle
-	// "read" without the rule the runtime loads for it.
+	// ErrInvalidSyscallName is returned by Validate for a syscall name
+	// holding a NUL byte, where a runtime's C API cuts it, and by
+	// ValidateArtifact and ValidateStrict for one holding any control
+	// character or invalid UTF-8.
 	ErrInvalidSyscallName = errors.New("invalid syscall name")
-	// ErrDuplicateSyscallName is returned by ValidateStrict when the same
-	// syscall name appears in more than one syscall entry, or more than once
-	// within one entry.
+	// ErrDuplicateSyscallName is returned by ValidateStrict for a syscall
+	// name in several entries or twice in one entry.
 	ErrDuplicateSyscallName = errors.New("duplicate syscall name")
-	// ErrUnknownOperator is returned when a syscall arg contains an
-	// unrecognized comparison operator.
+	// ErrUnknownOperator is returned by Validate for an unknown operator.
 	ErrUnknownOperator = errors.New("unknown seccomp operator")
-	// ErrArgIndexOutOfRange is returned when a syscall arg index exceeds
-	// the maximum (5).
+	// ErrArgIndexOutOfRange is returned by Validate for an index above 5.
 	ErrArgIndexOutOfRange = errors.New("syscall arg index out of range")
-	// ErrUnknownArch is returned when a profile contains an unrecognized
-	// architecture, and, matching ErrInvalidOptions as well, by every
-	// method of an Options from ForArch naming one.
+	// ErrUnknownArch is returned by Validate for an unknown architecture,
+	// and, matching ErrInvalidOptions too, by every method of an Options
+	// from ForArch naming one.
 	ErrUnknownArch = errors.New("unknown architecture")
 	// ErrDuplicateArch is returned by ValidateArtifact and ValidateStrict
-	// when the same architecture appears more than once. Validate and the
-	// merges accept a repeated architecture, which a runtime loads once.
+	// for a repeated architecture, which Validate and the merges accept.
 	ErrDuplicateArch = errors.New("duplicate architecture")
-	// ErrUnknownFlag is returned when a profile contains an unrecognized
-	// seccomp flag.
+	// ErrUnknownFlag is returned by Validate for an unknown flag.
 	ErrUnknownFlag = errors.New("unknown seccomp flag")
 	// ErrDuplicateFlag is returned by ValidateArtifact and ValidateStrict
-	// when the same flag appears more than once. Validate and the merges
-	// accept a repeated flag, which a runtime sets once.
+	// for a repeated flag, which Validate and the merges accept.
 	ErrDuplicateFlag = errors.New("duplicate seccomp flag")
 	// ErrNotifyNotAllowed is returned by ValidateArtifact and ValidateStrict
-	// when a profile uses SCMP_ACT_NOTIFY, which needs a listener that an
-	// artifact cannot provide.
+	// for a profile using SCMP_ACT_NOTIFY.
 	ErrNotifyNotAllowed = errors.New("SCMP_ACT_NOTIFY is not allowed")
 	// ErrInvalidUTF8Listener is returned by Validate when listenerPath or
-	// listenerMetadata is not valid UTF-8. A profile travels to the runtime
-	// as JSON, which cannot carry such a value: encoding/json writes U+FFFD
-	// in place of each invalid byte, so the runtime would hand its
-	// notifications to another socket, or other metadata, than the profile
-	// names, and UnmarshalStrict refuses the document.
+	// listenerMetadata is not valid UTF-8, which JSON would carry to the
+	// runtime as another value.
 	ErrInvalidUTF8Listener = errors.New("listener setting is not valid UTF-8")
 	// ErrListenerNotAllowed is returned by ValidateArtifact and
-	// ValidateStrict when a profile sets listenerPath, listenerMetadata or
-	// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, which belong to a node-local
-	// listener that an artifact must not control.
+	// ValidateStrict for a profile setting listenerPath, listenerMetadata or
+	// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV.
 	ErrListenerNotAllowed = errors.New("listener settings are not allowed")
 	// ErrTooManyEntriesPerSyscall is returned by ValidateArtifact and
-	// ValidateStrict when one syscall name appears in more than
-	// MaxArtifactEntriesPerSyscall entries.
+	// ValidateStrict past MaxArtifactEntriesPerSyscall.
 	ErrTooManyEntriesPerSyscall = merge.LimitError("too many entries for syscall")
 	// ErrErrnoOutOfRange is returned by ValidateArtifact and ValidateStrict
-	// when errnoRet or defaultErrnoRet holds a value libseccomp refuses for
-	// its action: 4095 or above on SCMP_ACT_ERRNO, where 4095 is the
-	// kernel's MAX_ERRNO and libseccomp takes only values below it, and
-	// above 65535 on SCMP_ACT_TRACE, whose value is a 16-bit message for
-	// the tracer rather than an errno.
+	// for an errnoRet or defaultErrnoRet libseccomp refuses: 4095 or above
+	// on SCMP_ACT_ERRNO, above 65535 on SCMP_ACT_TRACE.
 	ErrErrnoOutOfRange = errors.New("errno out of range")
-	// ErrUnusedValueTwo is returned by ValidateStrict when an argument
-	// condition sets valueTwo with an operator other than
-	// SCMP_CMP_MASKED_EQ, the only one that reads it.
+	// ErrUnusedValueTwo is returned by ValidateStrict for valueTwo set with
+	// an operator other than SCMP_CMP_MASKED_EQ.
 	ErrUnusedValueTwo = errors.New("valueTwo is only used by SCMP_CMP_MASKED_EQ")
 	// ErrUnusedErrnoRet is returned by ValidateStrict and ValidateArtifact
-	// when errnoRet or defaultErrnoRet is set on an action other than
-	// SCMP_ACT_ERRNO or SCMP_ACT_TRACE, the only ones that return it. runc
-	// ignores such a value, but crun refuses the profile.
+	// for errnoRet or defaultErrnoRet on an action other than SCMP_ACT_ERRNO
+	// or SCMP_ACT_TRACE, which crun refuses.
 	ErrUnusedErrnoRet = errors.New("errnoRet is only used by SCMP_ACT_ERRNO and SCMP_ACT_TRACE")
 	// ErrConflictingEntries is returned by ValidateArtifact and
-	// ValidateStrict when entries for the same syscall yield different
-	// results and either the argument filter of one is equal to or wider
-	// than the other's (its conditions are a subset of the other's, which
-	// includes an unconditional entry), or they do not form one of the
-	// shapes libseccomp evaluates exactly. Where the profile covers an
-	// architecture that routes the syscall through socketcall or ipc, the
-	// same holds for the copies of its rules on that multiplexer, which lose
-	// the condition on the first argument, and conditional entries for the
-	// multiplexer itself next to entries for a syscall it carries are
-	// reported as well, since libseccomp interleaves them with the copies in
-	// an order of its own (see the package documentation). A runtime fails
-	// to load many such entries, and silently drops or reorders the others.
+	// ValidateStrict for rules of one syscall, or their copies on a
+	// multiplexer, with different results that a runtime refuses or
+	// evaluates in its own order, and for conditional multiplexer rules next
+	// to rules of a syscall it carries. See the Conflicting rules section.
 	ErrConflictingEntries = errors.New("conflicting entries")
 	// ErrTooManyRulesPerSyscall is returned by ValidateArtifact and
-	// ValidateStrict when one syscall loads more than
-	// MaxArtifactRulesPerSyscall rules.
+	// ValidateStrict past MaxArtifactRulesPerSyscall.
 	ErrTooManyRulesPerSyscall = merge.LimitError("too many rules for syscall")
 	// ErrTooManyNamesPerEntry is returned by ValidateArtifact and
-	// ValidateStrict when one syscall entry carries more than
-	// MaxArtifactNamesPerEntry names.
+	// ValidateStrict past MaxArtifactNamesPerEntry.
 	ErrTooManyNamesPerEntry = merge.LimitError("too many syscall names in entry")
 	// ErrTooManyRules is returned by ValidateArtifact and ValidateStrict
-	// when the profile as a whole loads more than MaxArtifactRules rules.
+	// past MaxArtifactRules.
 	ErrTooManyRules = merge.LimitError("too many rules in profile")
-	// ErrTooManyEntries is returned by ValidateArtifact and
-	// ValidateStrict when a profile holds more than MaxArtifactEntries
-	// syscall entries.
+	// ErrTooManyEntries is returned by ValidateArtifact and ValidateStrict
+	// past MaxArtifactEntries.
 	ErrTooManyEntries = merge.LimitError("too many syscall entries in profile")
-	// ErrValueTooWide is returned by ValidateArtifact and ValidateStrict
-	// when an argument condition compares against a value or mask above 32
-	// bits while the filter covers a 32-bit architecture: one the profile
-	// lists, or the native architecture of the running program, which
-	// runtimes always add. libseccomp compares only the lower 32 bits there,
-	// so SCMP_CMP_EQ against 0x100000005 matches 5 for a 32-bit caller, and
-	// a SCMP_CMP_MASKED_EQ whose mask sets only upper bits matches every
-	// call. valueTwo counts only where libseccomp reads it, within the mask
-	// of a SCMP_CMP_MASKED_EQ.
+	// ErrValueTooWide is returned by ValidateArtifact and ValidateStrict for
+	// a condition whose value or mask (valueTwo only within the mask of a
+	// SCMP_CMP_MASKED_EQ) is above 32 bits while the filter covers a 32-bit
+	// architecture, listed or native.
 	ErrValueTooWide = errors.New("argument value above 32 bits on a 32-bit architecture")
-	// ErrMixedByteOrder is returned by ValidateArtifact and ValidateStrict
-	// when the profile lists an architecture whose byte order differs from
-	// that of the native architecture, as s390x does from x86_64, and by
-	// Intersect, in an InputError, for an input that does. libseccomp keeps
-	// one byte order per filter and refuses such an architecture with EDOM,
-	// so a runtime fails to load the profile. Where the native architecture
-	// is not known, a list holding architectures of both byte orders is
-	// reported, since it loads on no node: by the validators, and by
-	// Intersect for an input, while Union accepts it.
+	// ErrMixedByteOrder is returned by ValidateArtifact and ValidateStrict,
+	// and by Intersect in an InputError, for an architecture of another byte
+	// order than the native one, or, where that is not known, a list mixing
+	// both.
 	ErrMixedByteOrder = errors.New("architecture of another byte order")
-	// ErrNotifyUnsupported is returned by Validate when SCMP_ACT_NOTIFY
-	// appears where runc refuses it outright: as the default action, or on
-	// the write syscall. libseccomp accepts both, so this is a runtime
-	// constraint rather than a kernel one.
+	// ErrNotifyUnsupported is returned by Validate for SCMP_ACT_NOTIFY as
+	// the default action or on the write syscall, which runc refuses.
 	ErrNotifyUnsupported = errors.New("SCMP_ACT_NOTIFY is not supported here")
 )
 
-// MaxArtifactEntriesPerSyscall bounds how many entries may name the same
-// syscall in a profile accepted by ValidateArtifact, which reports
-// ErrTooManyEntriesPerSyscall past it. Real profiles use a handful of
-// argument-filtered entries per syscall.
-//
-// The cap bounds one syscall, not the profile: MaxArtifactRules bounds the
-// profile as a whole (see the Cost bounds section of the package
-// documentation).
+// MaxArtifactEntriesPerSyscall bounds the entries naming one syscall in a
+// profile ValidateArtifact accepts.
 const MaxArtifactEntriesPerSyscall = 128
 
-// MaxArtifactNamesPerEntry bounds how many syscall names one entry may carry
-// in a profile accepted by ValidateArtifact, which reports
-// ErrTooManyNamesPerEntry past it. Linux has well under a thousand syscalls,
-// and a profile covering all of them names each one once.
-//
-// An entry loads one rule per name, so this bounds the expansion of a single
-// entry, which the per-syscall caps do not: they count per name.
+// MaxArtifactNamesPerEntry bounds the syscall names of one entry in a
+// profile ValidateArtifact accepts.
 const MaxArtifactNamesPerEntry = 1024
 
-// MaxArtifactRules bounds how many rules a profile accepted by
-// ValidateArtifact loads in total, counted the way
-// MaxArtifactRulesPerSyscall counts them for one syscall.
-// ValidateArtifact reports ErrTooManyRules past it.
-//
-// The rules of a profile grow as the product of its name and condition
-// counts rather than with its size, and the per-syscall caps bound only one
-// factor each: 40000 names against 256 conditions fit in 441 KB of JSON,
-// pass both caps, and load ten million rules, which cost the merge seconds
-// and gigabytes. This cap is what keeps a merge of an accepted artifact
-// proportional to the size of the file it came in.
+// MaxArtifactRules bounds the rules a profile ValidateArtifact accepts
+// loads in total, counted as for MaxArtifactRulesPerSyscall.
 const MaxArtifactRules = 16384
 
-// MaxArtifactEntries bounds how many syscall entries a profile accepted by
-// ValidateArtifact may hold, which reports ErrTooManyEntries past it.
-//
-// It bounds the work of the checks rather than of the merge: every check
-// visits every entry, and an entry that loads nothing, such as one equal to
-// the default or one without names, adds no rule for MaxArtifactRules to
-// count, while a document of a few megabytes holds millions of "{}". An
-// entry that loads anything loads at least one rule, so the value matches
-// MaxArtifactRules and refuses no artifact that limit admits, but the two
-// are separate limits and may change separately.
+// MaxArtifactEntries bounds the syscall entries of a profile
+// ValidateArtifact accepts. Only entries loading no rule, such as one equal
+// to the default, can exceed it without exceeding MaxArtifactRules; the two
+// may change separately.
 const MaxArtifactEntries = 16384
 
-// MaxArtifactRulesPerSyscall bounds how many rules one syscall may load in
-// a profile accepted by ValidateArtifact, which reports
-// ErrTooManyRulesPerSyscall past it. Rules are counted the way runtimes add
-// them: one per entry naming the syscall, except that an entry repeating an
-// argument index adds one rule per condition, and entries equal to the
-// default add none. It thereby also bounds the conditions of such an entry.
-// Every other entry has at most one condition per argument index, so at
-// most six once Validate limits indices to 0-5.
-//
-// Intersect compares every rule of a syscall against every rule for it on
-// the other side, and collapses the syscall to its most restrictive action
-// once that work exceeds the pair budget (see the Cost bounds section of the
-// package documentation). The budget admits this many rules against a
-// baseline with a dozen filtered entries for the same syscall, so an
-// artifact within the bound is merged precisely there, and one beyond it is
-// rejected here rather than silently denied the syscall.
+// MaxArtifactRulesPerSyscall bounds the rules one syscall loads in a
+// profile ValidateArtifact accepts, counted as runtimes add them (see the
+// Cost bounds section). Intersect merges an artifact within it precisely
+// against a baseline with up to a dozen filtered entries for the syscall.
 const MaxArtifactRulesPerSyscall = 256
 
-// Validate checks that a seccomp profile contains only known actions and
-// that every syscall entry has non-empty names, known argument operators,
-// argument indices in range, and known architectures and flags, and that
-// SCMP_ACT_NOTIFY appears only where runc loads it and only with the
-// listenerPath it needs, which is what a runtime needs to load the profile
-// at all. It also rejects a syscall name holding a NUL byte
-// (ErrInvalidSyscallName), which a runtime loads as another name than the
-// merges read, a listenerPath or listenerMetadata that is not valid UTF-8
-// (ErrInvalidUTF8Listener), which JSON carries to the runtime as another
-// value, and a field of the runtime-spec types this package does not read
-// (ErrUnsupportedSpecField), which a merge would drop. It is what
-// Intersect and Union run on every input, so callers that want to report
-// all problems up front can call it themselves.
+// Validate checks what a runtime needs to load a profile at all: known
+// actions, operators, architectures and flags; non-empty syscall names
+// without a NUL byte ([ErrInvalidSyscallName]); argument indices 0 to 5;
+// SCMP_ACT_NOTIFY only where runc loads it ([ErrNotifyUnsupported]) and
+// with a listenerPath ([ErrNotifyWithoutListener]); listener settings in
+// valid UTF-8 ([ErrInvalidUTF8Listener]); and no field of the runtime-spec
+// types this package does not read ([ErrUnsupportedSpecField]). Intersect
+// and Union run it on every input.
 //
-// Failures are collected into one bounded report, which matches
-// ErrMoreProblems when it left some out; see Reading a validation error in
-// the spm package documentation.
-//
-// Validate enforces none of the MaxArtifact limits and does not range-check
-// errno values (see the Errno values section of the package documentation);
-// ValidateStrict and ValidateArtifact do both.
+// It enforces none of the MaxArtifact limits and does not range-check errno
+// values (see the Errno values section). Failures are collected into one
+// bounded report, which matches [ErrMoreProblems] when it left some out (see
+// Reading a validation error in the spm package documentation).
 func Validate(profile *specs.LinuxSeccomp) error {
 	if profile == nil {
 		return ErrNilProfile
@@ -441,32 +351,17 @@ func invalidNameError(idx, nameIdx int, name string) error {
 	)
 }
 
-// ValidateStrict is the strictest of the three: it rejects everything
-// ValidateArtifact rejects and, on top of that, duplicate syscall names,
-// reported once per name that several entries use and once per entry that
-// repeats a name within itself (ErrDuplicateSyscallName), and valueTwo set
-// on an operator that ignores it (ErrUnusedValueTwo). A profile that
-// passes here therefore passes ValidateArtifact and Validate, the same
-// lattice the apparmor and landlock packages use. The listener flags some
-// runtime refuses, SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV in a profile in
-// which no entry notifies and SECCOMP_FILTER_FLAG_TSYNC next to a
-// listenerPath, need no check of their own: the first is a listener
-// setting and the second comes with one, which ValidateArtifact refuses
-// (ErrListenerNotAllowed).
+// ValidateStrict rejects everything ValidateArtifact rejects, and also
+// duplicate syscall names, once per name several entries use and once per
+// entry repeating a name ([ErrDuplicateSyscallName]), and valueTwo on an
+// operator that ignores it ([ErrUnusedValueTwo]). A profile it accepts
+// passes ValidateArtifact and Validate.
 //
-// The OCI runtime-spec allows the same syscall to appear in several entries
-// (for example with different argument filters), and Validate permits it.
-// ValidateStrict is a lint for profiles a person writes by hand, where a
-// duplicate, a listener setting, or a rule set libseccomp does not evaluate
-// exactly is likely a mistake. A runtime checks its baseline with Validate:
-// the defaults runtimes ship list one syscall in several entries, and a
-// baseline that notifies fails here (ErrNotifyNotAllowed,
-// ErrListenerNotAllowed). Merge results are not meant to pass it either,
-// since they often list one syscall in several entries; check them with
-// Validate.
-//
-// Its result depends on the native architecture of the running program, as
-// that of ValidateArtifact does; Options.ValidateStrict names another.
+// It is a lint for profiles a person writes. The runtime-spec allows one
+// syscall in several entries, as runtime defaults and merge results use it,
+// and a baseline that notifies fails here, so check those with Validate. It
+// depends on the native architecture as ValidateArtifact does
+// ([Options.ValidateStrict]).
 func ValidateStrict(profile *specs.LinuxSeccomp) error {
 	return ForHost().ValidateStrict(profile)
 }
@@ -507,16 +402,12 @@ func strictChecks(native specs.Arch) []profileCheck {
 //     and accept.
 //
 // It allows duplicate syscall names and ignores valueTwo where runtimes
-// ignore it. Failures are collected and bounded as Validate bounds them. A
-// profile that passes may still hold rules libseccomp evaluates in its own
-// order, so a runtime loads the result of intersecting it with its
-// baseline rather than the artifact itself; DecodeArtifact decodes and
-// checks an artifact in one call.
-//
-// What it reports depends on the native architecture of the running
-// program, so run it on the node that loads the result, or name that node
-// with Options.ValidateArtifact. See the Conflicting rules, Cost bounds and
-// Architectures sections of the package documentation.
+// ignore it. Failures are bounded as for Validate. A profile that passes may
+// still hold rules libseccomp evaluates in its own order, so a runtime loads
+// its intersection with the baseline rather than the artifact itself. What
+// it reports depends on the native architecture
+// ([Options.ValidateArtifact]). See the Conflicting rules, Cost bounds and
+// Architectures sections.
 func ValidateArtifact(profile *specs.LinuxSeccomp) error {
 	return ForHost().ValidateArtifact(profile)
 }

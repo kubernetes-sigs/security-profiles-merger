@@ -25,12 +25,8 @@ import (
 )
 
 // ErrDuplicateKey, ErrUnknownField, ErrMisspelledField, ErrMissingField,
-// ErrInvalidUTF8, ErrUnexpectedData and ErrNotAnObject are returned by
-// UnmarshalStrict for a document encoding/json would decode without a word:
-// one repeating a member, holding a member no field reads, holding a member
-// that names a field only ignoring case, leaving out the index or op of an
-// argument condition, holding a byte the decoder replaces, followed by more
-// data, or not an object at all, such as null. See the spm package for each.
+// ErrInvalidUTF8, ErrUnexpectedData and ErrNotAnObject are the spm
+// sentinels UnmarshalStrict returns, as its documentation lists.
 var (
 	ErrDuplicateKey    = spm.ErrDuplicateKey
 	ErrUnknownField    = spm.ErrUnknownField
@@ -42,33 +38,23 @@ var (
 )
 
 // UnmarshalStrict decodes a seccomp profile and rejects what encoding/json
-// accepts silently: members the profile type has no field for, members that
-// name a field only ignoring case, members repeated within one object, bytes
-// that are not valid UTF-8, data behind the profile, an argument condition
-// without its index or op, or with a null one ([ErrMissingField]), and a
-// document that is not a JSON object, such as null ([ErrNotAnObject]). Its
-// error messages are bounded in length, however long the literals the
-// document quotes.
+// accepts silently: a member no field reads ([ErrUnknownField]) or that
+// names a field only ignoring case ([ErrMisspelledField]), a member repeated
+// within one object ([ErrDuplicateKey]), bytes that are not valid UTF-8
+// ([ErrInvalidUTF8]), data behind the profile ([ErrUnexpectedData]), an
+// argument condition without its index or op, or with a null one
+// ([ErrMissingField]), and a document that is not a JSON object, such as
+// null ([ErrNotAnObject]). A condition may leave out value and valueTwo,
+// which default to 0. Error messages are bounded in length.
 //
-// Each of these lets a scanner that approved an artifact and the runtime
-// that loads it read two different profiles; the spm sentinels these errors
-// are, such as [spm.ErrDuplicateKey], say how. Here a condition
-// without its index or op decodes as a condition on argument 0 or without
-// an operator, which the document never named:
-// {"value":5,"op":"SCMP_CMP_EQ"} reads as a0 == 5. Its value and valueTwo
-// may be left out, as producers writing them with omitempty do, since 0 is
-// what they would say. Use this instead of json.Unmarshal for an artifact,
-// and validate the result with ValidateArtifact afterwards.
-//
-// The document is decoded into a fresh profile, which replaces the one
-// given only when decoding succeeds: a member the document omits is zero in
-// the result, whatever the given profile held, and an error leaves it as it
-// was.
-//
-// Bound the size of an untrusted document first: decoding holds many times
-// that in heap, as the Limits section of
+// The document is decoded into a fresh profile, which replaces the one given
+// only on success: a member the document omits is zero in the result, and an
+// error leaves the profile as it was. Use it instead of json.Unmarshal for
+// an artifact, bound the size of the document first, as the Limits section
+// of
 // https://github.com/kubernetes-sigs/security-profiles-merger/blob/main/docs/integration.md#limits
-// says. DecodeArtifact decodes and validates an artifact in one call.
+// says, and validate the result with ValidateArtifact, or use DecodeArtifact
+// for both.
 func UnmarshalStrict(data []byte, profile *specs.LinuxSeccomp) error {
 	if profile == nil {
 		return ErrNilProfile
@@ -77,13 +63,11 @@ func UnmarshalStrict(data []byte, profile *specs.LinuxSeccomp) error {
 	return strictjson.Unmarshal(data, profile, seccompjson.Required)
 }
 
-// DecodeArtifact decodes an artifact with UnmarshalStrict and checks it
-// with ValidateArtifact, the first two steps a runtime takes with a profile
-// it did not write. It returns the profile only when both pass, and the
-// error of the first that fails otherwise, either of which rejects the
-// artifact. Bound the size of data first, as UnmarshalStrict says. Its
-// result depends on the native architecture of the running program, as
-// that of ValidateArtifact does; Options.DecodeArtifact names another node.
+// DecodeArtifact decodes an artifact with UnmarshalStrict and checks it with
+// ValidateArtifact. It returns the profile only when both pass, and the
+// error of the first that fails otherwise. Bound the size of data first. It
+// depends on the native architecture as ValidateArtifact does
+// ([Options.DecodeArtifact]).
 func DecodeArtifact(data []byte) (*specs.LinuxSeccomp, error) {
 	return ForHost().DecodeArtifact(data)
 }

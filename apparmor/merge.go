@@ -28,68 +28,46 @@ import (
 )
 
 var (
-	// ErrNoProfiles is returned when no profiles are provided.
+	// ErrNoProfiles is returned by Intersect and Union when given no
+	// profiles.
 	ErrNoProfiles = spm.ErrNoProfiles
-	// ErrNilProfile is returned when a nil profile is provided.
+	// ErrNilProfile is returned for a nil profile: by the validators and
+	// UnmarshalStrict as it is, by Intersect, Union and Diff inside an
+	// InputError.
 	ErrNilProfile = spm.ErrNilProfile
 	// ErrMoreProblems is spm.ErrMoreProblems, which a validation report
-	// matches when it left failures out (see [spm.ErrMoreProblems]).
+	// matches when it left failures out.
 	ErrMoreProblems = spm.ErrMoreProblems
-	// ErrInexactBaseline is spm.ErrInexactBaseline, which ValidateBaseline
-	// returns for a baseline the merge does not read exactly.
+	// ErrInexactBaseline is spm.ErrInexactBaseline, returned by
+	// ValidateBaseline for a baseline the merge does not read exactly.
 	ErrInexactBaseline = spm.ErrInexactBaseline
-	// ErrArtifactTooLarge is spm.ErrArtifactTooLarge, which every error
-	// this package returns for a profile past a MaxArtifact limit matches.
+	// ErrArtifactTooLarge is spm.ErrArtifactTooLarge, matched by every
+	// error this package returns for a profile past a MaxArtifact limit.
 	ErrArtifactTooLarge = spm.ErrArtifactTooLarge
-	// ErrBudgetExceeded is returned by Intersect when one of its budgets
-	// cut the matching short and the result may lose access, which is when
-	// neither input of a merge step is kept whole: matching the paths of two
-	// inputs against their patterns would exceed the pair or work budget, or
-	// an input holds a pattern past the call's compile budget, which matches
-	// only its own spelling (see the Cost bounds section of the package
-	// documentation). The check is conservative: it does not tell whether
-	// the paths left out were ones the budget cost. It is not wrapped in
-	// an InputError. Union never returns it: past the budget it keeps
-	// every path with its own permissions, which permits what the exact
-	// union permits. ValidateBaseline returns it for a baseline whose
-	// patterns leave too little of the compile budget for an artifact's.
+	// ErrBudgetExceeded is returned, without an InputError, by Intersect
+	// when a budget cut it short and the result may lose access, and by
+	// ValidateBaseline (see the Cost bounds section). Union never returns it.
 	ErrBudgetExceeded = spm.ErrBudgetExceeded
 )
 
 // InputError is [spm.InputError], the error a merge or Diff returns for
 // one of its inputs, naming it by its position among the arguments. See
-// spm.InputError for its fields, and for the errors a merge returns without
-// it.
+// spm.InputError for its fields and for the errors returned without it.
 type InputError = spm.InputError
 
-// Intersect merges multiple AppArmor profiles via intersection: the
-// resulting profile permits an operation only if every input permits it.
-// Capabilities and file access rules are intersected, and network
-// permissions use AND semantics. This is the merge KEP-6061 defines for a
-// CRI runtime combining an artifact with its baseline.
-//
-// A nil section or network boolean is treated as an explicit empty section
-// or false, as AppArmor treats it, and the result carries every section
-// explicitly. Capability names are compared ignoring ASCII case and
-// returned lower-cased. The profiles are folded from left to right, and
-// then the result grants every literal path an input lists what every
-// input grants it, through its own entry for the path or its patterns that
-// match it, adding to the literal what the patterns the result keeps do not
-// grant. Within the compile and pass budgets what the result permits on
-// those literals therefore does not depend on the order of the inputs,
-// while the patterns it keeps may; every order is safe. Past the pass
-// budget the literal paths are those the fold kept. A profile intersected
-// with itself gives what intersecting it alone gives. See the Nil and empty
-// sections, Capability names, Filesystem merge and Cost bounds sections of
-// the package documentation.
-//
-// Each input is validated as the Validation section describes, and every
-// one that fails is reported as an InputError naming it. Matching and
-// compiling patterns is bounded, and a merge past a budget fails with
-// ErrBudgetExceeded when the result may lose access (see the Cost bounds
-// section), rather than return a result narrower than its inputs call
-// for. The result shares no memory with the inputs, a single input
-// included, so the caller may modify it.
+// Intersect merges profiles so that the result permits an operation only
+// where every input permits it, the merge KEP-6061 defines for a CRI
+// runtime combining an artifact with its baseline. Each input is validated
+// as the Validation section describes, every failing one reported as an
+// InputError, and past a budget Intersect fails with ErrBudgetExceeded
+// when the result may lose access (see the Cost bounds section). A nil
+// section counts as an explicit empty one, the result carries every
+// section, and capability names come back lower-cased. Within the budgets,
+// what the result permits on every literal path an input lists does not
+// depend on the order of the inputs, while the patterns it keeps may; see
+// the Filesystem merge section. Pass the baseline first: the compile
+// budget is spent in input order. The result shares no memory with the
+// inputs, a single input included.
 func Intersect(profiles ...*Profile) (*Profile, error) {
 	matchers := newMatcherCache()
 	exceeded := false
@@ -99,24 +77,14 @@ func Intersect(profiles ...*Profile) (*Profile, error) {
 	)
 }
 
-// Union merges multiple AppArmor profiles via union: the resulting profile
-// permits an operation if any input permits it. Capabilities and file
-// access rules are combined, and network permissions use OR semantics.
-// This is the merge the Security Profiles Operator uses to combine recorded
-// profiles.
-//
-// A nil section defers to the other profile, capability names are
-// lower-cased as by Intersect, and a literal of one profile that a glob of
-// the other covers is dropped or takes the glob's permissions, so a
-// write-only literal under a read-only glob becomes read-write. The union
-// of two profiles depends neither on their order nor on the order of their
-// paths. See the Filesystem merge section of the package documentation.
-//
-// Inputs are validated as for Intersect. Past the matching budget a list
-// keeps every path of both sides with the permissions its own side grants
-// it, which permits exactly what the reduced union permits, so Union never
-// fails with ErrBudgetExceeded (see the Cost bounds section). The result
-// is owned by the caller, as for Intersect.
+// Union merges profiles so that the result permits an operation where any
+// input permits it, the merge the Security Profiles Operator uses to
+// combine recorded profiles. Inputs are validated and reported as for
+// Intersect, and Union never fails with ErrBudgetExceeded (see the Cost
+// bounds section). A nil section defers to the other profile, capability
+// names come back lower-cased, and the union of two profiles depends on
+// neither their order nor the order of their paths (see the Filesystem
+// merge section). The result shares no memory with the inputs.
 func Union(profiles ...*Profile) (*Profile, error) {
 	matchers := newMatcherCache()
 
@@ -124,39 +92,27 @@ func Union(profiles ...*Profile) (*Profile, error) {
 }
 
 // ValidateBaseline checks a baseline once, where a runtime loads its
-// configuration: Validate, then QuotePath of every path and the spelling of
-// every capability name, then the length of its patterns, then Intersect of
-// the baseline alone, then Diff of the baseline against that intersection.
+// configuration; treat any error as a misconfigured node. It returns the
+// failure of the first step that fails:
 //
-// A path QuotePath refuses (ErrUnquotablePath) would reach a merge result
-// the runtime cannot render, and a capability name apparmor_parser does not
-// load (ErrInvalidCapabilityName), such as "net admin" or "CAP_CHOWN",
-// a result it cannot load, so a misconfigured node would otherwise surface
-// as the failure of every workload; each is reported with its list and
-// index. A relative path, which QuotePath refuses as well, is reported
-// once, by Validate. A capability name this package does not know is
-// accepted, as ValidateArtifact accepts it, since a newer kernel may know
-// it.
+//   - Validate, with its failures as Validate returns them;
+//   - QuotePath of every path (ErrUnquotablePath) and the spelling of every
+//     capability name (ErrInvalidCapabilityName), in one bounded report
+//     naming list and index; a relative path is reported only by Validate,
+//     and an unknown capability name is accepted;
+//   - the total length of its patterns, counted once each as the merge
+//     normalizes them, which past 2*MaxArtifactPatternBytes is refused
+//     with ErrBudgetExceeded and the byte count, not wrapped in an
+//     InputError, since it leaves too little of a merge's compile budget
+//     for an artifact's patterns;
+//   - Intersect of the baseline alone, whose errors are not wrapped in an
+//     InputError;
+//   - Diff of the baseline against that intersection, where an unequal
+//     diff is reported with ErrInexactBaseline and the diff in the message:
+//     it names what every merge with this baseline takes away, such as a
+//     pattern apparmor_parser rejects.
 //
-// A baseline whose glob patterns are longer in total than
-// 2*MaxArtifactPatternBytes leaves too little of a merge's compile budget
-// for the patterns of the artifacts merged with it (see the Cost bounds
-// section of the package documentation), so Intersect would fail with
-// ErrBudgetExceeded for nearly every workload with patterns of its own:
-// it is reported with ErrBudgetExceeded and the byte count, without an
-// InputError. Patterns are counted once each, normalized as the merge
-// reads them.
-//
-// The intersection is equal to the baseline exactly when the merge reads
-// every rule of it, so an unequal diff, reported with ErrInexactBaseline
-// and the diff in the message, names what every merge with that baseline
-// takes away whatever the artifact says, such as a pattern apparmor_parser
-// rejects, which an intersection drops. Treat any error as a misconfigured
-// node.
-//
-// It returns the failures of Validate as Validate does, those of QuotePath
-// and of the capability names in one bounded report, and the errors of the
-// merge without an InputError, since there is one input. See
+// See
 // https://github.com/kubernetes-sigs/security-profiles-merger/blob/main/docs/integration.md#the-runtime-flow
 // for where it fits.
 func ValidateBaseline(baseline *Profile) error {

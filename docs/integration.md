@@ -211,7 +211,8 @@ it, since the kernel denies `refer` there anyway, so a baseline listing
 1. **Decode with `UnmarshalStrict`**, or with `DecodeArtifact`, which runs
    steps 1 and 2. It refuses repeated, unknown and misspelled members,
    missing required members, invalid UTF-8, data after the profile and a
-   document that is not an object; [Strict decoding](api.md#strict-decoding)
+   document that is not an object;
+   [Strict decoding](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/spm#hdr-Strict_decoding)
    says why each lets a scanner that approved the artifact and the runtime
    that loads it read two different profiles. Cap the size of the document before
    decoding it (see [Limits](#limits)).
@@ -498,8 +499,9 @@ what it is given at face value.
   architecture has, accept it. An allowlist is not affected. See
   [Architectures](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Architectures).
 - **seccomp: libseccomp releases.** The merges are sound for a node linking
-  libseccomp 2.5.4 or newer; 2.5.2 evaluates some rule sets differently and
-  is not supported.
+  libseccomp 2.5.4 to 2.6.1, the releases checked; 2.5.2 is not supported,
+  and on a later release a rule on a syscall only that release knows is not
+  checked for lost rules.
 - **Landlock: refer.** The kernel allows a move or link into another
   directory only when both grant `refer` and the file gains no handled right
   at its destination, which a single ruleset cannot always express for two
@@ -649,7 +651,12 @@ stops restricting them, so it is a decision to make per node, not a
 default. An intersection leaves `refer` out of the handled set only beside
 a filesystem right ABI version 1 knows, which every downgrade keeps, so a
 downgraded result still denies the moves and links an input's `refer`
-denial covers.
+denial covers. After `Downgrade`, check the copy with `ValidateBaseline`,
+which reports a copy that handles and scopes nothing (`ErrEmptyRuleset`;
+apply no ruleset then) and, unlike `ValidateArtifact`, does not hold a
+merge result to `MaxArtifactRules`. Compute `LoweredRulePaths` on the copy
+you apply, with the original inputs: the inputs need no downgrade, since a
+lowered grant is a right the copy's own rule carries.
 
 ## seccomp: the listener
 

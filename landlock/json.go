@@ -22,13 +22,9 @@ import (
 )
 
 // ErrDuplicateKey, ErrUnknownField, ErrMisspelledField, ErrMissingField,
-// ErrInvalidUTF8, ErrUnexpectedData and ErrNotAnObject are returned by
-// UnmarshalStrict for a document encoding/json would decode without a word:
-// one repeating a member, holding a member no field reads, holding a member
-// that names a field only ignoring case, leaving out the port of a network
-// rule or the path of a path rule, holding a byte the decoder replaces,
-// followed by more data, or not an object at all, such as null. See the spm
-// package for each.
+// ErrInvalidUTF8, ErrUnexpectedData and ErrNotAnObject are the spm
+// sentinels UnmarshalStrict returns for a document encoding/json would
+// decode silently; see UnmarshalStrict for when.
 var (
 	ErrDuplicateKey    = spm.ErrDuplicateKey
 	ErrUnknownField    = spm.ErrUnknownField
@@ -40,34 +36,20 @@ var (
 )
 
 // UnmarshalStrict decodes a Landlock profile and rejects what encoding/json
-// accepts silently: members the Profile, PathRule and NetRule types have no
-// field for, members that name a field only ignoring case, members repeated
-// within one object, bytes that are not valid UTF-8, and data behind the
-// profile. A network rule without a port, or with a null one, is rejected as
-// well (ErrMissingField): json.Unmarshal reads it as a rule on port 0, which
-// is the port a socket binds to for an ephemeral one, so an artifact that
-// lost the member would grant that. So is a path rule without a path, and
-// a null rule in either list, which names neither member. A document that
-// is not a JSON object, such as null, is rejected too ([ErrNotAnObject]).
+// accepts silently: a member no field reads ([ErrUnknownField]), one naming
+// a field only ignoring case ([ErrMisspelledField]), one repeated within an
+// object ([ErrDuplicateKey]), invalid UTF-8 ([ErrInvalidUTF8]), data behind
+// the profile ([ErrUnexpectedData]), a document that is not an object, such
+// as null ([ErrNotAnObject]), and a network rule without a port, a path
+// rule without a path, or a null rule ([ErrMissingField]). Decode an
+// artifact with it rather than json.Unmarshal and validate it with
+// ValidateArtifact; DecodeArtifact does both.
 //
-// Each of these lets a scanner that approved an artifact and the runtime
-// that loads it read two different profiles; the spm sentinels these errors
-// are, such as [spm.ErrDuplicateKey], say how. Here a member
-// a newer version of this format uses to handle a further access right is
-// dropped, and the profile then looks like one that does not handle it,
-// which is the permissive direction. Use this instead of json.Unmarshal to
-// decode an artifact, and validate the result with ValidateArtifact
-// afterwards.
-//
-// The document is decoded into a fresh Profile, which replaces the one
-// given only when decoding succeeds: a member the document omits is zero in
-// the result, whatever the given Profile held, and an error leaves it as it
-// was.
-//
-// Bound the size of an untrusted document first: decoding holds many times
-// that in heap, as the Limits section of
-// https://github.com/kubernetes-sigs/security-profiles-merger/blob/main/docs/integration.md#limits
-// says. DecodeArtifact decodes and validates an artifact in one call.
+// The document is decoded into a fresh Profile, which replaces the given
+// one only on success: a member the document omits is zero, and an error
+// leaves the given Profile as it was. Bound the size of an untrusted
+// document first, since decoding holds many times that in heap; see
+// https://github.com/kubernetes-sigs/security-profiles-merger/blob/main/docs/integration.md#limits.
 func UnmarshalStrict(data []byte, profile *Profile) error {
 	if profile == nil {
 		return ErrNilProfile
@@ -77,11 +59,9 @@ func UnmarshalStrict(data []byte, profile *Profile) error {
 }
 
 // DecodeArtifact decodes an artifact with UnmarshalStrict and checks it
-// with ValidateArtifact, the first two steps a runtime takes with a profile
-// it did not write. It returns the profile only when both pass, and the
-// error of the first that fails otherwise, either of which rejects the
-// artifact. Bound the size of data first, as UnmarshalStrict says. It does
-// not check the rights against a kernel's ABI; Options.DecodeArtifact does.
+// with ValidateArtifact. It returns the profile only when both pass, and
+// otherwise the error of the first that fails. Bound the size of data
+// first. It checks no ABI version; Options.DecodeArtifact does.
 func DecodeArtifact(data []byte) (*Profile, error) {
 	return strictjson.DecodeValidated(data, UnmarshalStrict, ValidateArtifact)
 }

@@ -28,15 +28,11 @@ import (
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
-// ErrUnsupportedSpecField is returned by Validate when a profile sets a
-// field of specs.LinuxSeccomp, specs.LinuxSyscall or specs.LinuxSeccompArg
-// that this package does not read. A program built against a newer
-// runtime-spec than this package knows can hold such a field, which
-// UnmarshalStrict decodes, since the type has it, and which the merges
-// would drop from their result without a word, possibly loosening what the
-// profile restricts. Diff, which validates nothing, ignores such a field, so
-// two profiles differing only in one compare equal. The fields this package
-// reads are those of runtime-spec v1.3.0.
+// ErrUnsupportedSpecField is returned by Validate and Marshal for a profile
+// setting a field of specs.LinuxSeccomp, specs.LinuxSyscall or
+// specs.LinuxSeccompArg that this package does not read (it reads those of
+// runtime-spec v1.3.0), which a merge would drop. UnmarshalStrict decodes
+// such a field and Diff ignores it.
 var ErrUnsupportedSpecField = errors.New("field this package does not read")
 
 // The fields of the runtime-spec types the package reads. A field a newer

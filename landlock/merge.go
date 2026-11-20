@@ -30,20 +30,20 @@ import (
 )
 
 var (
-	// ErrNoProfiles is returned when no profiles are provided.
+	// ErrNoProfiles is returned by Intersect and Union without inputs.
 	ErrNoProfiles = spm.ErrNoProfiles
-	// ErrNilProfile is returned when a nil profile is provided.
+	// ErrNilProfile is matched by the error of every function given a nil
+	// profile.
 	ErrNilProfile = spm.ErrNilProfile
-	// ErrMoreProblems is spm.ErrMoreProblems, which a validation report
-	// matches when it left failures out (see [spm.ErrMoreProblems]).
+	// ErrMoreProblems is matched by a validation report that left failures
+	// out (see [spm.ErrMoreProblems]).
 	ErrMoreProblems = spm.ErrMoreProblems
-	// ErrArtifactTooLarge is spm.ErrArtifactTooLarge, which every error
-	// this package returns for a profile past a MaxArtifact limit matches.
+	// ErrArtifactTooLarge is matched by every error this package returns
+	// for a profile past a MaxArtifact limit.
 	ErrArtifactTooLarge = spm.ErrArtifactTooLarge
-	// ErrBudgetExceeded is returned by Intersect and Union when merging
-	// their inputs would cost more than the merge budget (see the Cost
-	// bounds section of the package documentation). It is not wrapped in an
-	// InputError.
+	// ErrBudgetExceeded is returned by Intersect and Union, not wrapped in
+	// an InputError, when merging their inputs would exceed the budget of
+	// the Cost bounds section.
 	ErrBudgetExceeded = spm.ErrBudgetExceeded
 )
 
@@ -57,68 +57,38 @@ var (
 // or a hundred recordings of a few dozen rules each.
 const maxMergeWork = 1 << 25
 
-// InputError is [spm.InputError], the error a merge or Diff returns for
-// one of its inputs, naming it by its position among the arguments. See
-// spm.InputError for its fields, and for the errors a merge returns without
-// it.
+// InputError is [spm.InputError], the error a merge, Diff or
+// LoweredRulePaths returns for one of its inputs, naming it by its
+// position.
 type InputError = spm.InputError
 
-// Intersect merges multiple Landlock profiles via intersection: the
-// resulting profile permits access only where every input permits it. This
-// is the merge KEP-6061 defines for a CRI runtime combining an artifact
-// with its baseline.
+// Intersect returns a profile that permits access only where every input
+// permits it, the merge KEP-6061 defines for an artifact and its baseline.
+// It may deny moves and links every input allows, and inside a mount other
+// than the root mount can allow a move an input denies (see the Refer
+// section). A rule of the result can carry an ancestor's access onto a
+// deeper path another input chose, so a caller merging an artifact checks
+// LoweredRulePaths or enforces the inputs as separate layers. See the
+// Handled access, Rule paths and Lowered rule paths sections.
 //
-// The handled access and scoped sets are unioned, except that
-// FSAccessRefer is left out where no rule of the result grants it and the
-// result handles another filesystem right ABIV1 knows, since the kernel
-// denies it there anyway. A right is granted for a path or port only where
-// every input permits it, by not handling it or through a rule; the result
-// carries the narrower of two rule paths, and a rule loses the rights its
-// ancestors in the result already grant. The result drops FSAccessRefer
-// where it would allow a move an input denies, so it may deny moves and
-// links that every input allows. Inside a mount other than the root mount
-// it can allow a move an input denies for a right that input's rule on "/"
-// grants as well (see the Refer section).
-// See the Handled access, Refer and Rule paths sections of the package
-// documentation.
-//
-// Hierarchy resolution is textual, so a rule of the result can carry an
-// ancestor's access onto a deeper path another input chose. A caller
-// merging an artifact must check LoweredRulePaths or enforce the inputs as
-// separate layers; see the Lowered rule paths section.
-//
-// Each input is checked with Validate, and every one that fails is
-// reported as an InputError naming it. Inputs whose merge would exceed the
-// budget are refused with ErrBudgetExceeded before anything is merged (see
-// the Cost bounds section); Validate counts no rules, so an untrusted
-// artifact must pass ValidateArtifact first. A result that handles and
-// scopes nothing restricts nothing, and ValidateArtifact reports it with
-// ErrEmptyRuleset. The result shares no memory with the inputs, a single
-// input included, so the caller may modify it.
+// Every input that is nil or fails Validate is reported as an InputError;
+// inputs past the budget are refused with ErrBudgetExceeded before anything
+// is merged. Validate counts no rules, so an artifact must pass
+// ValidateArtifact first. The result shares no memory with the inputs, a
+// single input included.
 func Intersect(profiles ...*Profile) (*Profile, error) {
 	return foldProfiles(profiles, intersectTwo, finishIntersect)
 }
 
-// Union merges multiple Landlock profiles via union: the resulting profile
-// permits access if any input permits it. This is the merge the Security
-// Profiles Operator uses to combine recorded profiles.
-//
-// The handled access and scoped sets are intersected, rules for one path or
-// port have their rights unioned, and a rule only one input holds is kept,
-// even where an ancestor grants the same rights. Where a right one input
+// Union returns a profile that permits access where any input permits it,
+// at every ABI version after Options.Downgrade too. Where a right one input
 // grants at a destination would deny a move another input allows, the
-// result stops handling that right, which permits it everywhere and more
-// than any input does, and it may need ABIV2 to list FSAccessRefer. The
-// guarantee holds after Options.Downgrade as well: at every version, the
-// downgraded result permits whatever a downgraded input permits. See the
-// Handled access, Refer and ABI versions sections of the package
-// documentation.
-//
+// result stops handling that right, which permits more than any input
+// does, and it may need ABIV2 where no input does. A result can handle and
+// scope nothing. See the Handled access, Rule paths, Refer and ABI
+// versions sections.
 // Inputs are validated, the cost is bounded, and the result is owned by the
-// caller, as for Intersect. A result that handles and scopes nothing, for
-// example the union of a profile handling only filesystem rights with one
-// handling only network rights, restricts nothing, and ValidateArtifact
-// reports it with ErrEmptyRuleset.
+// caller, as for Intersect.
 func Union(profiles ...*Profile) (*Profile, error) {
 	return foldProfiles(profiles, unionTwo, finishUnion)
 }
@@ -738,10 +708,8 @@ func validateInputs(profiles []*Profile) ([][]string, error) {
 }
 
 // ResultError is the error LoweredRulePaths returns for a merge result that
-// is nil or fails Validate. The result is not an input, so it is not an
-// InputError: match it with errors.As to tell a bad result, which is the
-// caller's own, from a bad input. errors.Is sees through it to the
-// sentinels of Err.
+// is nil or fails Validate. It is not an InputError, and errors.Is sees
+// through it to the sentinels of Err.
 type ResultError struct {
 	// Err is what was wrong with the result: ErrNilProfile or the error
 	// Validate returned for it.
@@ -769,72 +737,39 @@ type LoweredPath struct {
 	// Path is the rule path of the result, cleaned as the merge cleans it.
 	Path string
 	// Ancestor is the strict ancestor of Path a runtime opens Path
-	// beneath (see the Lowered rule paths section of the package
-	// documentation). It is "/" when the input's rule on "/" grants every
-	// right lowered onto Path, and otherwise the shallowest strict ancestor
-	// other than "/" on which a rule of an input grants a right the result
+	// beneath. It is "/" when the input's rule on "/" grants every right
+	// lowered onto Path, and otherwise the shallowest strict ancestor other
+	// than "/" on which a rule of an input grants a right the result
 	// carries at Path, which that input grants neither on "/" nor through
 	// its own rule on Path. Every such grant then comes from a rule on
 	// Ancestor or between it and Path.
 	Ancestor string
-	// Input is the index of the input whose rule is on Ancestor, as
-	// Intersect numbers its inputs, so that in
-	// LoweredRulePaths(effective, baseline, artifact) the baseline is 0.
-	// Where the rules of several inputs are on Ancestor, it is the first.
+	// Input is the index of the input whose rule is on Ancestor, the first
+	// where several have one, numbered as Intersect numbers its inputs.
 	Input int
-	// InRoot reports whether opening Path anywhere inside the root the
-	// runtime resolves rule paths against keeps the rule within what the
-	// inputs grant, with RESOLVE_IN_ROOT alone: Ancestor is "/" and no
-	// rule of the result grants FSAccessRefer. Where it is false, Path is
-	// opened beneath Ancestor with RESOLVE_BENEATH, RESOLVE_NO_SYMLINKS and
-	// RESOLVE_NO_XDEV, an Ancestor of "/" included. A rule on "/" covers
-	// every path from the root for the access it grants, but a result
-	// granting refer decides moves by comparing the rights of two rule
-	// paths, which a rule landing on another directory changes.
+	// InRoot reports that Ancestor is "/" and no rule of the result grants
+	// FSAccessRefer, so Path may be opened with RESOLVE_IN_ROOT alone,
+	// relative to the root the runtime resolves rule paths against. Where
+	// it is false, Path is opened beneath Ancestor, "/" included, with
+	// RESOLVE_BENEATH, RESOLVE_NO_SYMLINKS and RESOLVE_NO_XDEV.
 	InRoot bool
 }
 
-// LoweredRulePaths reports the rule paths of a merge result that carry
-// access an input granted only on an ancestor path. A path is reported when
-// the result grants a right there that some input grants through a rule on
-// one of its ancestors and not through a rule on the path itself, whether
-// that input has no rule on the path or one granting other rights: the
-// merge lowered that input's grant onto the deeper path, which another
-// input named.
+// LoweredRulePaths reports the rule paths where a merge result grants a
+// right that some input grants through a rule on an ancestor and not
+// through its own rule on the path, once each, sorted by path, or nil when
+// no grant was lowered. Inputs are read as the merge reads them: paths
+// cleaned, rules for one path folded, unhandled rights dropped. A caller
+// opens these paths as the Lowered rule paths section says; for a Union
+// result the answer is informational.
 //
-// Each path is reported once, with the ancestor to open it beneath (see
-// LoweredPath), and the list is sorted by path, or nil when no
-// grant was lowered. The result and every input are checked with Validate
-// first, and read as the merge reads an input: with paths cleaned, rules
-// for one path folded, and the rights a handled set does not list dropped
-// from the rules, since such a grant permits nothing the input does not
-// permit anyway and the merge ignores it.
-//
-// Inputs are numbered as Intersect numbers them: an input that is nil or
-// fails is reported as an InputError whose Index is its position among the
-// inputs, not among the arguments, so inputs[0] is Index 0 and in
-// LoweredRulePaths(effective, baseline, artifact) the baseline is Index 0,
-// as it is in Intersect(baseline, artifact). Several failing inputs are
-// joined in input order, as a merge joins them. A result that is nil or
-// fails is reported first and on its own, as a *ResultError, which is not
-// an InputError, so a caller dispatching on InputError never blames an
-// input for it; errors.Is still matches ErrNilProfile or the sentinels of
-// the failure. Without inputs nothing can have been lowered, so it returns
-// nil and no error once the result passes.
-//
-// The Lowered rule paths section of the package documentation explains why
-// this matters: hierarchy resolution is textual, while the kernel binds a
-// rule to the file its path resolves to, so a lowered grant lands wherever
-// the deeper path resolves, which may be outside the hierarchy the ancestor
-// rule covered and may be chosen by the author of an artifact. A caller can
-// open exactly these paths without leaving the hierarchy of their Ancestor
-// (openat2 with RESOLVE_BENEATH, RESOLVE_NO_SYMLINKS and RESOLVE_NO_XDEV
-// relative to a descriptor of Ancestor, or RESOLVE_IN_ROOT relative to the
-// root where InRoot is set), refuse a profile that has any, or
-// enforce the inputs as separate Landlock layers instead of merging them.
-// For a Union result the answer is informational: union grants what any
-// input grants, and the input naming the path granted the access there
-// itself.
+// The result is checked with Validate first and reported on its own as a
+// *ResultError, never an InputError. Each input that is nil or fails
+// Validate is reported as an InputError indexed by its position among the
+// inputs, so in LoweredRulePaths(effective, baseline, artifact) the
+// baseline is 0, as in Intersect(baseline, artifact), and several are
+// joined in input order. Without inputs it returns nil once the result
+// passes.
 func LoweredRulePaths(result *Profile, inputs ...*Profile) ([]LoweredPath, error) {
 	resultPaths, err := validateProfile(result, tierMerge)
 	if err != nil {

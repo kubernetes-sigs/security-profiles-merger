@@ -710,11 +710,10 @@ func evictGlobCache(incoming int) {
 }
 
 // IsGlobPattern reports whether the path is a pattern rather than the name
-// of a single file: whether it contains AppArmor glob tokens ("*", "**",
-// "?", character classes "[...]", or alternations "{a,b}"), or pattern
-// syntax apparmor_parser rejects, such as an unbalanced bracket or brace or
-// a trailing backslash. Backslash-escaped characters are literals. The
-// merge functions treat a rejected pattern as matching nothing.
+// of a single file: whether it holds unescaped AppArmor glob syntax or
+// pattern syntax apparmor_parser rejects, such as an unbalanced bracket or
+// brace or a trailing backslash, which the merges treat as matching
+// nothing.
 func IsGlobPattern(path string) bool {
 	// Whether a path is a pattern is decided by the parser port alone, so
 	// the pattern is neither translated nor compiled.

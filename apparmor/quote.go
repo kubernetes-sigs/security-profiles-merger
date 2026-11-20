@@ -24,40 +24,27 @@ import (
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
-// QuotePath returns the path spelled as apparmor_parser's lexer reads it as
-// one token in a file rule, such as "  <path> r,", meaning the file or
-// pattern the merge reads the path as. A runtime rendering a merge result
-// writes each path through it rather than escaping it by hand: Validate,
-// which is all the merge runs on its inputs, accepts paths that do not
-// render as one token, so a baseline can carry one into a result (see
-// ErrUnquotablePath).
+// QuotePath returns the path spelled as apparmor_parser's lexer reads one
+// token of a file rule, such as "  <path> r,", meaning the file or pattern
+// the merge reads the path as. Render every path of a merge result through
+// it: Validate, which is all the merge runs on its inputs, accepts paths
+// that are not one token, so a baseline can carry one into a result.
 //
-// Where the path is already one token of printable characters it is
-// returned as it is. Otherwise each character the lexer reads as syntax is
-// escaped: a space, a double quote and an exclamation mark with a
-// backslash, a tab, carriage return or newline as \t, \r or \n, a comma
-// that ends the path as `\,`, and a character that does not print as
-// itself as \x escapes of its bytes. A comma that the path goes on after
-// stays as it is, since escaping it would turn an alternation such as
-// "{a,b}" into a literal comma; a character after it that needs escaping
-// is written as a \x escape, which the lexer does not read as one. Bytes
-// that are not valid UTF-8 are kept, as ValidateArtifact keeps them.
+// A path that is already one token of printable characters is returned as
+// it is. Otherwise a space, a double quote and an exclamation mark get a
+// backslash, a tab, carriage return or newline become \t, \r or \n, a comma
+// that ends the path becomes `\,`, and a character that does not print as
+// itself, also after a backslash, becomes \x escapes of its bytes. A comma
+// the path goes on after stays, as in "{a,b}", and a character after it that
+// needs escaping is written as a \x escape. Bytes that are not valid UTF-8
+// are kept.
 //
-// It returns ErrEmptyPath for an empty path, and ErrRelativePath for a path
-// that does not start with "/", as every validator does: rendered as the
-// start of a rule, such a path can read as another rule, as "ptrace",
-// "signal" and "deny" do, or as a comment, as "#x" does. It returns
-// ErrUnquotablePath where no spelling it can write means what the path
-// means: an empty alternative such as "{a,,b}", whose second comma
-// cannot be written so that the lexer reads it and the parser still takes
-// it as a separator, and a pattern apparmor_parser rejects, which is
-// identified by its text, so that any new spelling names another rule. A
-// backslash before a character that does not print as itself is written
-// as the \x escapes of that character, which the parser reads alike, since
-// it drops a backslash it resolves no escape for. Beyond that it checks
-// only the spelling: a pattern ValidateArtifact rejects for another reason
-// is quoted all the same, so validate a result before rendering it where
-// that matters.
+// It returns ErrEmptyPath for an empty path and ErrRelativePath for one that
+// does not start with "/", as the validators do, and ErrUnquotablePath
+// where no spelling means what the path means: an empty alternative such as
+// "{a,,b}", and a pattern apparmor_parser rejects. It checks only the
+// spelling, so validate a result with ValidateArtifact before rendering it
+// where the other checks matter.
 func QuotePath(path string) (string, error) {
 	if path == "" {
 		return "", ErrEmptyPath

@@ -47,9 +47,8 @@ type ProfileDiff struct {
 }
 
 // SliceDiff represents added and removed items in a set-like slice. It is
-// spm.SliceDiff, the slice diff every package of this module produces, so
-// a value of it is a seccomp.SliceDiff or landlock.SliceDiff of the same
-// item type.
+// spm.SliceDiff, so a value of it is also a seccomp.SliceDiff or
+// landlock.SliceDiff of the same item type.
 type SliceDiff[T comparable] = spm.SliceDiff[T]
 
 // ExecutableDiff describes differences in the executable rules. A path only
@@ -95,30 +94,19 @@ type CapabilityDiff struct {
 	AllowedCapabilities *SliceDiff[string] `json:"allowedCapabilities,omitempty"`
 }
 
-// ValueDiff represents a changed value. It is [spm.ValueDiff], which the
-// seccomp diff names as well. For an optional boolean, Diff sets both
-// sides, false where a profile sets none, since it compares an unset
-// boolean as false.
+// ValueDiff represents a changed value. It is [spm.ValueDiff]. For an
+// optional boolean, Diff sets both sides, false where a profile sets none.
 type ValueDiff[T any] = spm.ValueDiff[T]
 
-// Diff compares two AppArmor profiles and returns a structured diff. Unlike
-// Intersect and Union, Diff does not validate profiles before comparing.
-//
-// Profiles are compared by what AppArmor loads from them, so a profile and
-// its merge result compare equal unless the merge changed what the profile
-// permits. Paths are compared by the rule they spell, as apparmor_parser
-// reads them: /foo//bar, /foo/bar and an escaped spelling of either are one
-// rule (while /foo/./bar, which matches nothing, is another), and an omitted
-// section or network boolean is compared as the explicit empty section or
-// false that it denies the same as, which is how Intersect writes it. A
-// profile that says nothing about raw sockets and one that forbids them are
-// therefore equal, and Diff(p, Intersect(p)) is equal unless p has glob
-// patterns that match nothing, which Intersect drops. A nil profile is
-// reported as an InputError naming it (Index 0 for left, 1 for right) and
-// wrapping ErrNilProfile, as Intersect and Union report one.
-//
-// The diff shares no memory with the profiles, so the caller may modify
-// it.
+// Diff compares two profiles by what AppArmor loads from them, without
+// validating them first, so a profile and its merge result compare equal
+// unless the merge changed what it permits. Paths are compared by the rule
+// they spell (/foo//bar, /foo/bar and an escaped spelling of either are one
+// rule, /foo/./bar another), and an omitted section or network boolean
+// equals the explicit empty section or false Intersect writes (see the Nil
+// and empty sections section). A nil profile is reported as an InputError
+// naming it (Index 0 for left, 1 for right) wrapping ErrNilProfile. The
+// diff shares no memory with the profiles.
 func Diff(left, right *Profile) (*ProfileDiff, error) {
 	err := merge.RequireNonNil(left, right)
 	if err != nil {
@@ -277,13 +265,11 @@ func ruleKey(path string) pathKey {
 	return matcherKey(path, keyAnalysis(path))
 }
 
-// String returns a human-readable representation of the diff, as a single
-// line quoted and bounded as Profile.String is, so that a runtime can log
-// the diff of an artifact it was handed.
-//
-// String has a value receiver, so a ProfileDiff and a pointer to one both
-// implement fmt.Stringer. Diff returns a non-nil diff whenever its error is
-// nil; called through a nil pointer, String panics.
+// String returns the diff as a single line, quoted and bounded as
+// Profile.String is, so that a runtime can log the diff of an artifact. It
+// has a value receiver, so a ProfileDiff and a pointer to one both
+// implement fmt.Stringer; Diff returns a non-nil diff whenever its error is
+// nil, and String panics when called through a nil pointer.
 func (d ProfileDiff) String() string {
 	diff := &d
 

@@ -27,9 +27,8 @@ import (
 // ProfileDiff describes the differences between two Landlock profiles.
 type ProfileDiff struct {
 	// Equal is true when the two profiles are the same as written after
-	// normalization: paths cleaned, duplicate rules and rights merged, and
-	// rights compared as sets (see Diff). Two profiles the kernel enforces
-	// alike can still differ, as Diff says.
+	// the normalization Diff describes; profiles the kernel enforces alike
+	// can still differ.
 	Equal bool `json:"equal"`
 
 	// HandledAccessFS is set when the handled filesystem access sets differ.
@@ -48,9 +47,8 @@ type ProfileDiff struct {
 	NetRules *NetRulesDiff `json:"netRules,omitempty"`
 }
 
-// SliceDiff represents added and removed items in a set-like slice, such as
-// a handled access set. It is spm.SliceDiff, which seccomp.SliceDiff and
-// apparmor.SliceDiff name too.
+// SliceDiff is [spm.SliceDiff]: the items added to and removed from a
+// set-like slice, such as a handled access set.
 type SliceDiff[T comparable] = spm.SliceDiff[T]
 
 // PathRulesDiff describes differences in path rules, compared by their
@@ -105,37 +103,19 @@ type NetRuleChange struct {
 	Right []NetAccessRight `json:"right,omitempty"`
 }
 
-// Diff compares two Landlock profiles and returns a structured diff.
-// Paths are cleaned (repeated and trailing slashes and "." components are
-// removed) and duplicate rules and rights are merged before comparing, so
-// "/var//data/" and "/var/data" are treated as identical. ".." components
-// are kept, since the kernel resolves them against the file system. Rights
-// are compared as sets and reported sorted. Because the paths compared are
-// the cleaned ones, a rule on "/srv/f/", which the kernel can load only
-// when f is a directory, equals one on "/srv/f"; ValidateArtifact reports
-// the first with ErrTrailingSlash.
+// Diff compares two Landlock profiles after cleaning paths as the merge
+// does (".." kept, so "/var//data/" equals "/var/data" and "/srv/f/" equals
+// "/srv/f") and folding duplicate rules and rights; rights are compared as
+// sets and reported sorted. It compares rules and handled sets as written,
+// not the access they grant: Diff(p, Intersect(p, p)) is unequal whenever
+// an ancestor rule of p grants a right of a deeper rule, and listing
+// FSAccessRefer where no rule grants it is reported although the kernel
+// enforces both alike. To tell whether a baseline constrained an artifact,
+// compare the access each grants on the paths of interest.
 //
-// Diff compares rules as written, not the access they grant through the
-// hierarchy. Intersect removes from a rule the rights its ancestors in the
-// result already grant, and drops the rule when none remain, so Diff
-// reports it as changed or removed although the access is the same:
-// Diff(p, Intersect(p, p)) is unequal whenever an ancestor rule of p grants
-// a right of a deeper rule. To tell whether a baseline constrained an
-// artifact, compare the access each grants on the paths of interest rather
-// than Diff equality.
-//
-// The handled sets are compared as written too. A profile handling a
-// filesystem right denies FSAccessRefer whether or not it lists it, so one
-// listing refer where no rule grants it is enforced like one leaving it
-// out, and Diff still reports refer as added or removed: listing it is what
-// makes the profile need ABIV2.
-//
-// Unlike Intersect and Union, Diff does not validate profiles before
-// comparing. A nil profile is reported as an InputError naming it, with
-// Index 0 for left and 1 for right, that wraps ErrNilProfile.
-//
-// The diff shares no memory with the profiles, so the caller may modify
-// it.
+// Diff does not validate. A nil profile is reported as an InputError (Index
+// 0 for left, 1 for right) wrapping ErrNilProfile. The diff shares no
+// memory with the profiles.
 func Diff(left, right *Profile) (*ProfileDiff, error) {
 	err := merge.RequireNonNil(left, right)
 	if err != nil {
@@ -252,13 +232,9 @@ func canonicalProfile(profile *Profile) *Profile {
 	return result
 }
 
-// String returns a human-readable representation of the diff, as a single
-// line quoted and bounded as Profile.String is, so that a runtime can log
-// the diff of an artifact it was handed.
-//
-// String has a value receiver, so a ProfileDiff and a pointer to one both
-// implement fmt.Stringer. Diff returns a non-nil diff whenever its error is
-// nil; called through a nil pointer, String panics.
+// String returns the diff as one line, quoted and bounded as Profile.String
+// is. Diff returns a non-nil diff whenever its error is nil; called through
+// a nil pointer, String panics.
 func (d ProfileDiff) String() string {
 	diff := &d
 

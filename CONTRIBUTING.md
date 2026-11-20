@@ -339,6 +339,39 @@ those statements were established, which a change to them has to redo:
   libseccomp resolves as native, not only those Go runs on: crun is written
   in C and runs natively on x32, MIPS n32, ppc, s390, sh, m68k and parisc.
 
+### Limits and their measurements
+
+The package documentation states each limit and budget and what exceeding
+it returns. This is where the values come from:
+
+- `landlock.MaxArtifactRules` is 1024. Merging a profile costs the number
+  of rules times the depth of their paths, since both merges look up the
+  ancestors of every rule path among the rules: forty thousand rules of
+  two-thousand-component paths took an intersection fourteen seconds and
+  close to four gigabytes. A union also settles the moves between the
+  directories the inputs name, comparing each with at most 64 classes of
+  the others, which keeps it linear in the rules as well. The profiles
+  KEP-6061 expects runtimes to accept hold a few dozen rules.
+- `apparmor.MaxPathLen` is `PATH_MAX` less its terminating NUL, the limit
+  the landlock package applies to the rule paths it opens, so that one
+  bound holds for both packages. AppArmor never opens a rule path, and the
+  names it matches can be longer, since its path buffer defaults to twice
+  `PATH_MAX` and a file reached by relative opens may have a longer full
+  name. A profile naming such paths is beyond what the package models.
+- `apparmor.MaxArtifactCapabilities` exists because nothing else bounds the
+  capability list: a name need not be one the package knows, since a newer
+  kernel may know it. A profile naming a hundred thousand capabilities
+  merges in milliseconds but is reported in megabytes.
+- A compiled apparmor glob program holds up to some 450 bytes per byte of
+  its pattern for the costliest shapes, such as a run of `*/` components.
+  Two artifacts of sixteen four-kilobyte `*/` patterns intersected with
+  `/**` held some 25 megabytes while the merge ran.
+- Landlock ABI versions 7, 8, 10 and 11 added things a `landlock.Profile`
+  cannot express: flags of `landlock_restrict_self` (7, 8 and 11, the last
+  `LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS`), and in 10, beside the UDP rights,
+  the `quiet_access_fs`, `quiet_access_net` and `quiet_scoped` masks of a
+  ruleset and the `LANDLOCK_ADD_RULE_QUIET` flag of `landlock_add_rule`.
+
 ## Mentorship
 
 - [Mentoring Initiatives](https://k8s.dev/community/mentoring) - We have a
