@@ -18,10 +18,9 @@ package merge
 
 import (
 	"fmt"
-	"slices"
-	"strings"
 	"unicode/utf8"
 
+	"sigs.k8s.io/security-profiles-merger/internal/report"
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
@@ -115,7 +114,7 @@ func (b *boundedError) Unwrap() error { return b.err }
 // truncated report matches spm.ErrMoreProblems, so the truncation itself is
 // visible rather than silent.
 type Collector struct {
-	report limitedError
+	failures limitedError
 }
 
 // Report adds the failure build returns, calling build only when the report
@@ -123,13 +122,13 @@ type Collector struct {
 // without being built, so Report is for a check that has already failed:
 // build must return a non-nil error and have no other effect.
 func (c *Collector) Report(build func() error) {
-	if len(c.report.kept) < MaxJoinedErrors {
-		c.report.add(build())
+	if len(c.failures.kept) < MaxJoinedErrors {
+		c.failures.add(build())
 
 		return
 	}
 
-	c.report.omitted++
+	c.failures.omitted++
 }
 
 // Reportf adds the failure fmt.Errorf builds from format and args, building
@@ -138,14 +137,14 @@ func (c *Collector) Report(build func() error) {
 // check that fails a bounded number of times; one that can fail once per
 // element of its input uses Report, which costs nothing past the limit.
 func (c *Collector) Reportf(format string, args ...any) {
-	if len(c.report.kept) < MaxJoinedErrors {
+	if len(c.failures.kept) < MaxJoinedErrors {
 		//nolint:err113 // the callers' formats wrap their sentinels with %w
-		c.report.add(fmt.Errorf(format, args...))
+		c.failures.add(fmt.Errorf(format, args...))
 
 		return
 	}
 
-	c.report.omitted++
+	c.failures.omitted++
 }
 
 // Add adds err. A report from Collector.Err is flattened into this one
@@ -153,7 +152,7 @@ func (c *Collector) Reportf(format string, args ...any) {
 // reports of their checks, and the bound has to hold for the whole of it,
 // not once per check. A nil err is ignored.
 func (c *Collector) Add(err error) {
-	c.report.add(err)
+	c.failures.add(err)
 }
 
 // Err returns the collected report: nil when nothing failed, as
@@ -162,47 +161,20 @@ func (c *Collector) Add(err error) {
 // when it left failures out.
 func (c *Collector) Err() error {
 	switch {
-	case len(c.report.kept) == 0 && c.report.omitted == 0:
+	case len(c.failures.kept) == 0 && c.failures.omitted == 0:
 		return nil
-	case len(c.report.kept) == 1 && c.report.omitted == 0:
-		return c.report.kept[0]
+	case len(c.failures.kept) == 1 && c.failures.omitted == 0:
+		return c.failures.kept[0]
 	default:
-		report := limitedError{kept: slices.Clone(c.report.kept), omitted: c.report.omitted}
-
-		return &report
+		return report.New(c.failures.kept, c.failures.omitted, spm.ErrMoreProblems)
 	}
 }
 
-// limitedError is the report Collector.Err returns: the failures it kept and how
-// many it left out.
+// limitedError gathers what a Collector reports: the failures it kept and
+// how many it left out. Collector.Err returns them as a report.ListError.
 type limitedError struct {
 	kept    []error
 	omitted int
-}
-
-// Error lists the kept failures one per line, as errors.Join does, followed
-// by the count of the omitted ones.
-func (l *limitedError) Error() string {
-	lines := make([]string, 0, len(l.kept)+1)
-	for _, err := range l.kept {
-		lines = append(lines, err.Error())
-	}
-
-	if l.omitted > 0 {
-		lines = append(lines, fmt.Sprintf("%d %v", l.omitted, spm.ErrMoreProblems))
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-// Unwrap returns the kept failures, and spm.ErrMoreProblems when any were left
-// out, so that errors.Is sees both.
-func (l *limitedError) Unwrap() []error {
-	if l.omitted == 0 {
-		return l.kept
-	}
-
-	return append(slices.Clone(l.kept), spm.ErrMoreProblems)
 }
 
 func (l *limitedError) add(err error) {
@@ -211,12 +183,12 @@ func (l *limitedError) add(err error) {
 	}
 
 	//nolint:errorlint // only a report itself is flattened, not one wrapped
-	if nested, ok := err.(*limitedError); ok {
-		for _, kept := range nested.kept {
+	if nested, ok := err.(*report.ListError); ok {
+		for _, kept := range nested.Kept() {
 			l.add(kept)
 		}
 
-		l.omitted += nested.omitted
+		l.omitted += nested.Omitted()
 
 		return
 	}
@@ -239,7 +211,7 @@ func (l *limitedError) add(err error) {
 // The set of keys seen starts empty rather than sized for count: a list
 // that repeats one key many times holds few distinct ones.
 func ReportDuplicates[Key comparable](
-	report *Collector, count int, key func(idx int) (Key, bool),
+	collector *Collector, count int, key func(idx int) (Key, bool),
 	duplicate func(idx, first int) error,
 ) {
 	seen := make(map[Key]int)
@@ -257,7 +229,7 @@ func ReportDuplicates[Key comparable](
 			continue
 		}
 
-		report.Report(func() error { return duplicate(idx, first) })
+		collector.Report(func() error { return duplicate(idx, first) })
 	}
 }
 
@@ -270,14 +242,14 @@ func ReportDuplicates[Key comparable](
 // kept; past MaxJoinedErrors failing profiles the result matches
 // spm.ErrMoreProblems.
 func CheckInputs[T any](profiles []*T, check func(idx int, profile *T) error) error {
-	var report Collector
+	var collector Collector
 
 	for idx, profile := range profiles {
 		err := check(idx, profile)
 		if err != nil {
-			report.Report(func() error { return &spm.InputError{Index: idx, Err: err} })
+			collector.Report(func() error { return &spm.InputError{Index: idx, Err: err} })
 		}
 	}
 
-	return report.Err()
+	return collector.Err()
 }

@@ -74,11 +74,24 @@ var (
 //
 // Decoding holds many times the size of data in heap, so bound the size of
 // an untrusted document before passing it here; the Limits section of
-// docs/integration.md gives the figures.
+// https://github.com/kubernetes-sigs/security-profiles-merger/blob/main/docs/integration.md#limits
+// gives the figures. DecodeArtifact decodes and validates an artifact in
+// one call.
 func UnmarshalStrict(data []byte, profile *specs.LinuxSeccomp) error {
 	if profile == nil {
 		return ErrNilProfile
 	}
 
 	return strictjson.Unmarshal(data, profile, seccompjson.Required)
+}
+
+// DecodeArtifact decodes an artifact with UnmarshalStrict and checks it
+// with ValidateArtifact, the first two steps a runtime takes with a profile
+// it did not write. It returns the profile only when both pass, and the
+// error of the first that fails otherwise, either of which rejects the
+// artifact. Bound the size of data first, as UnmarshalStrict says. Its
+// result depends on the native architecture of the running program, as
+// that of ValidateArtifact does; Options.DecodeArtifact names another node.
+func DecodeArtifact(data []byte) (*specs.LinuxSeccomp, error) {
+	return ForHost().DecodeArtifact(data)
 }

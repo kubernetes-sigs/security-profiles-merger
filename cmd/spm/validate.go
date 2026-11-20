@@ -73,13 +73,14 @@ func bindValidateFlags(flags *flag.FlagSet) *validateOptions {
 	)
 	flags.BoolVar(
 		&opts.strict, "strict", false,
-		"use strict validation, which also rejects unknown and "+
-			"misspelled fields and invalid UTF-8 (not with --artifact)",
+		"use strict validation, which also rejects unknown and misspelled "+
+			"fields, missing required members and invalid UTF-8 (not with --artifact)",
 	)
 	flags.BoolVar(
 		&opts.artifact, "artifact", false,
 		"validate as an artifact, the untrusted profile a container runtime "+
-			"pulls, rejecting unknown, repeated and misspelled fields and invalid UTF-8",
+			"pulls; besides the repeated keys every mode rejects, it rejects unknown "+
+			"and misspelled fields, missing required members and invalid UTF-8",
 	)
 	flags.BoolVar(
 		&opts.quiet, "quiet", false,

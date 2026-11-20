@@ -242,12 +242,26 @@ func TestLoweredRulePathsResultErrors(t *testing.T) {
 		// A bad input as well is not reported: the result comes first.
 		_, err := landlock.LoweredRulePaths(testCase.result, fsProfile(read), nil)
 
-		var inputErr *landlock.InputError
+		var (
+			inputErr  *landlock.InputError
+			resultErr *landlock.ResultError
+		)
 		if !errors.Is(err, testCase.want) || errors.As(err, &inputErr) ||
-			!strings.HasPrefix(err.Error(), "result: ") {
+			!errors.As(err, &resultErr) || !strings.HasPrefix(err.Error(), "result: ") {
 			t.Errorf("%s: LoweredRulePaths = %v, want a result error wrapping %v",
 				testCase.name, err, testCase.want)
 		}
+	}
+}
+
+// TestResultErrorWithoutErr checks that a ResultError a caller builds
+// without an Err still formats rather than panics.
+func TestResultErrorWithoutErr(t *testing.T) {
+	t.Parallel()
+
+	err := &landlock.ResultError{Err: nil}
+	if got := err.Error(); got != "result: <nil>" {
+		t.Errorf("Error() = %q, want %q", got, "result: <nil>")
 	}
 }
 

@@ -125,12 +125,11 @@ type kindOps[T any, D any] struct {
 	diff       func(*T, *T) (*D, error)
 	formatDiff func(*D) string
 	equal      func(*D) bool
-	// forArch returns the functions as a node with the given native
-	// architecture runs them, rather than the one this program runs on, and
-	// is nil for a profile type that has no architectures. Validate has no
-	// such variant, since what it checks does not depend on the
-	// architecture.
-	forArch func(native specs.Arch) kindOps[T, D]
+	// forArch returns the functions as the node the options name runs
+	// them, rather than the one this program runs on, and is nil for a
+	// profile type that has no architectures. Validate has no such
+	// variant, since what it checks does not depend on the architecture.
+	forArch func(node seccomp.Options) kindOps[T, D]
 }
 
 // errArchNotApplicable reports --arch named for a profile type that has no
@@ -241,9 +240,7 @@ func seccompOps(opts seccomp.Options) kindOps[specs.LinuxSeccomp, seccomp.Profil
 		diff:             opts.Diff,
 		formatDiff:       (*seccomp.ProfileDiff).String,
 		equal:            func(diff *seccomp.ProfileDiff) bool { return diff.Equal },
-		forArch: func(native specs.Arch) kindOps[specs.LinuxSeccomp, seccomp.ProfileDiff] {
-			return seccompOps(seccomp.Options{Arch: native})
-		},
+		forArch:          seccompOps,
 	}
 }
 
@@ -324,7 +321,7 @@ func knownType(name string) bool {
 func (inv *invocation) useKind(name string) bool {
 	switch name {
 	case typeSeccomp:
-		inv.kind = seccompOps(seccomp.Options{Arch: seccomp.NativeHost})
+		inv.kind = seccompOps(seccomp.ForHost())
 	case typeAppArmor:
 		inv.kind = kindOps[apparmor.Profile, apparmor.ProfileDiff]{
 			intersect:        apparmor.Intersect,

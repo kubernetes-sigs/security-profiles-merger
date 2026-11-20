@@ -6,6 +6,7 @@ write with one it did, uses this module safely. The
 call, in what order, and what is left to the caller.
 
 <!-- toc -->
+- [Checklist](#checklist)
 - [Who is trusted](#who-is-trusted)
 - [The runtime flow](#the-runtime-flow)
 - [Extra steps after Intersect](#extra-steps-after-intersect)
@@ -20,6 +21,42 @@ call, in what order, and what is left to the caller.
 - [Guarantees and limits of the model](#guarantees-and-limits-of-the-model)
 - [Concurrency](#concurrency)
 <!-- /toc -->
+
+## Checklist
+
+What a runtime gets wrong most easily, each explained further down:
+
+- **Restate the CRI-O seccomp default** before using it as a baseline:
+  `seccomp.ValidateBaseline` refuses it as shipped, since the merge cannot
+  read its `clone` and `socket` rules exactly
+  ([the runtime flow](#the-runtime-flow)). The Moby and containerd defaults
+  pass as they are.
+- **Log the architectures an artifact takes away.** An artifact that lists
+  no architectures narrows the result to the native one, so on an amd64
+  node a 32-bit process in the container is killed on its first syscall
+  ([step 3](#the-runtime-flow)).
+- **Write the seccomp result with `seccomp.Marshal`**, also inside a whole
+  `specs.Spec`: marshalling the spec drops an empty `"flags": []`, and the
+  runtime then sets `SECCOMP_FILTER_FLAG_SPEC_ALLOW`
+  ([Extra steps after Intersect](#extra-steps-after-intersect)).
+- **Check `landlock.LoweredRulePaths`** of a Landlock result and open each
+  path it reports beneath its ancestor, or refuse the profile
+  ([Landlock: lowered rule paths](#landlock-lowered-rule-paths)).
+- **Check the Landlock result against the node's ABI** with
+  `landlock.Options{ABI: nodeABI}.Validate`: a ruleset the kernel refuses
+  must not turn into running without Landlock
+  ([Extra steps after Intersect](#extra-steps-after-intersect)).
+- **Check every seccomp and AppArmor baseline with `ValidateBaseline`** at
+  config load, not only the CRI-O default: an error there is a
+  misconfigured node, which would otherwise fail every workload. The
+  AppArmor one also refuses paths `apparmor.QuotePath` cannot render
+  ([the runtime flow](#the-runtime-flow)).
+- **Render AppArmor paths through `apparmor.QuotePath`**, never as they
+  are: a path can hold what the profile lexer reads as syntax, and escaping
+  every comma by hand breaks alternations
+  ([Rendering the result](#rendering-the-result)).
+- **Cap the size of an artifact document** before decoding it: the module
+  bounds the profile, not the bytes ([Limits](#limits)).
 
 ## Who is trusted
 
@@ -50,30 +87,15 @@ var load func(*specs.LinuxSeccomp)
 // 0. At config load, check that the baseline loads, then that the merge
 //    reads every rule of it: its intersection with itself is equal to it
 //    exactly then.
-if err := seccomp.Validate(baseline); err != nil {
+if err := seccomp.ValidateBaseline(baseline); err != nil {
     return nodeMisconfigured(err)
-}
-settled, err := seccomp.Intersect(baseline)
-if err != nil {
-    return nodeMisconfigured(err)
-}
-diff, err := seccomp.Diff(baseline, settled)
-if err != nil {
-    return nodeMisconfigured(err)
-}
-if !diff.Equal {
-    return nodeMisconfigured(fmt.Errorf("baseline has rules the merge cannot apply: %s", diff))
 }
 
-// 1. At pull time, decode strictly. encoding/json accepts what two readers
-//    of one document can read differently.
-var artifact specs.LinuxSeccomp
-if err := seccomp.UnmarshalStrict(data, &artifact); err != nil {
-    return reject(err)
-}
-
-// 2. Validate as an artifact, before anything else looks at it.
-if err := seccomp.ValidateArtifact(&artifact); err != nil {
+// 1. At pull time, decode strictly, since encoding/json accepts what two
+//    readers of one document can read differently, and 2. validate as an
+//    artifact, before anything else looks at it. DecodeArtifact does both.
+artifact, err := seccomp.DecodeArtifact(data)
+if err != nil {
     return reject(err)
 }
 
@@ -83,7 +105,7 @@ inputs := []*specs.LinuxSeccomp{baseline}
 if podProfile != nil {
     inputs = append(inputs, podProfile)
 }
-inputs = append(inputs, &artifact)
+inputs = append(inputs, artifact)
 effective, err := seccomp.Intersect(inputs...)
 if err != nil {
     var inputErr *spm.InputError
@@ -98,7 +120,7 @@ load(effective)
 
 // 5. Log what the merge took away from the artifact, and the architectures
 //    the artifact took away from the baseline (see step 3).
-if diff, err := seccomp.Diff(&artifact, effective); err == nil && !diff.Equal {
+if diff, err := seccomp.Diff(artifact, effective); err == nil && !diff.Equal {
     log.Printf("artifact constrained by baseline: %s", diff)
 }
 if diff, err := seccomp.Diff(baseline, effective); err == nil && diff.Architectures != nil {
@@ -109,23 +131,28 @@ if diff, err := seccomp.Diff(baseline, effective); err == nil && diff.Architectu
 
 The same calls exist in `apparmor` and `landlock`, which need the
 [extra steps](#extra-steps-after-intersect) below before step 4, except
-the self-check of step 0, which applies to `seccomp` and `apparmor`. A
-Landlock baseline is checked with `Validate`, or `ValidateStrict` for one a
-person wrote: `Intersect` of one Landlock profile drops the rights a rule on
-an ancestor already grants, so a valid baseline granting `read_file` on `/`
-and `read_file` and `execute` on `/usr` diffs unequal against it without
-the merge taking anything away.
+`ValidateBaseline`, the self-check of step 0, which only `seccomp` and
+`apparmor` have. A Landlock baseline is checked with `Validate`, or
+`ValidateStrict` for one a person wrote: `Intersect` of one Landlock
+profile drops the rights a rule on an ancestor already grants, so a valid
+baseline granting `read_file` on `/` and `read_file` and `execute` on
+`/usr` diffs unequal against it without the merge taking anything away.
 
-0. **Check the baseline once, at config load: `Validate`, then
-   `Diff(baseline, Intersect(baseline))`** (seccomp and AppArmor). The
-   intersection of the baseline with itself is equal to it exactly when the
-   merge reads every rule of it, so an unequal diff names what every merge
+0. **Check the baseline once, at config load, with `ValidateBaseline`**
+   (seccomp and AppArmor): `Validate`, then
+   `Diff(baseline, Intersect(baseline))`. The intersection of the baseline
+   with itself is equal to it exactly when the merge reads every rule of
+   it, so an unequal diff, `ErrInexactBaseline`, names what every merge
    with that baseline takes away, whatever the artifact says. It shows more
    than `ValidateArtifact` reports (see the seccomp
-   [Diff](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Diff) section). Run it on the node, or
-   through a `seccomp.Options` naming the node's architecture, and treat an
-   unequal diff as a misconfigured node rather than as something to fix at
-   merge time.
+   [Diff](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Diff)
+   section). Run it on the node, or through `seccomp.ForArch` naming the
+   node's architecture, and treat any
+   error as a misconfigured node rather than as something to fix at merge
+   time. For AppArmor it also refuses every path `apparmor.QuotePath`
+   cannot render (`ErrUnquotablePath`, `ErrRelativePath`), which would
+   otherwise reach every merge result and fail each workload instead of the
+   node.
 
    Moby, containerd and CRI-O list one syscall in several entries in their
    defaults, which `ValidateStrict` reports. The Moby and containerd defaults
@@ -168,8 +195,9 @@ the merge taking anything away.
    Both validation levels also reject a notification listener (see
    [seccomp: the listener](#seccomp-the-listener)). `ValidateStrict` remains
    useful as a lint for a baseline an administrator writes by hand.
-1. **Decode with `UnmarshalStrict`.** It refuses repeated, unknown and
-   misspelled members, invalid UTF-8, data after the profile and a document
+1. **Decode with `UnmarshalStrict`**, or with `DecodeArtifact`, which runs
+   steps 1 and 2. It refuses repeated, unknown and misspelled members,
+   invalid UTF-8, data after the profile and a document
    that is not an object; [Strict decoding](api.md#strict-decoding) says why
    each lets a scanner that approved the artifact and the runtime that loads
    it read two different profiles. Cap the size of the document before
@@ -200,8 +228,8 @@ the merge taking anything away.
    filter for an x86_64 node, `ValidateArtifact` reports such an
    architecture (`ErrMixedByteOrder`), and so does `Intersect`, which
    refuses the input listing it rather than drop it. `Validate` does not
-   look at the byte order, but `Intersect` of the baseline alone, which the
-   config-load check runs, refuses a baseline listing one.
+   look at the byte order, but `ValidateBaseline`, through `Intersect` of
+   the baseline alone, refuses a baseline listing one.
 4. **Load the result of the merge, never the artifact.** An accepted artifact
    may still hold rules a runtime evaluates in an order of its own; the merge
    reads those conservatively and never emits them.
@@ -221,7 +249,7 @@ the merge taking anything away.
 |---------|---------------------------|
 | `apparmor` | Render the profile text yourself, as the [checklist](#rendering-the-result) below says: `Profile.String` is for people, not for apparmor_parser |
 | `landlock` | Check the result with `landlock.Options{ABI: nodeABI}.Validate`. Check each of `LoweredRulePaths` (see [below](#landlock-lowered-rule-paths)). Map the rights to the kernel's bits as the [checklist](#rendering-the-result) below says. A result that handles and scopes nothing restricts nothing and the kernel refuses to load it: apply no ruleset. After `Intersect` that happens only when no input handles or scopes anything, which `ValidateArtifact` refuses in an artifact |
-| `seccomp` | Run the merge on the node that loads the result, or name that node's architecture with `seccomp.Options` (see [What the models leave out](#what-the-models-leave-out)). Keep an empty `Flags` list of the result as `"flags": []`: `json.Marshal` leaves it out of a `specs.LinuxSeccomp`, and runc and crun then set `SECCOMP_FILTER_FLAG_SPEC_ALLOW` (see [Flags](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Flags)). `seccomp.Marshal` writes the profile alone that way. A runtime that sets the result as `spec.Linux.Seccomp` and marshals the whole `specs.Spec` loses the empty list all the same, so where the result's `Flags` is empty but not nil it writes the `linux.seccomp` member of `config.json` from `seccomp.Marshal` itself, for example by replacing that member of the marshaled spec with the bytes `Marshal` returns |
+| `seccomp` | Run the merge on the node that loads the result, or name that node's architecture with `seccomp.ForArch` (see [What the models leave out](#what-the-models-leave-out)). Keep an empty `Flags` list of the result as `"flags": []`: `json.Marshal` leaves it out of a `specs.LinuxSeccomp`, and runc and crun then set `SECCOMP_FILTER_FLAG_SPEC_ALLOW` (see [Flags](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Flags)). `seccomp.Marshal` writes the profile alone that way. A runtime that sets the result as `spec.Linux.Seccomp` and marshals the whole `specs.Spec` loses the empty list all the same, so where the result's `Flags` is empty but not nil it writes the `linux.seccomp` member of `config.json` from `seccomp.Marshal` itself, for example by replacing that member of the marshaled spec with the bytes `Marshal` returns |
 
 ### Rendering the result
 
@@ -232,17 +260,23 @@ rendered into.
 
 AppArmor, writing rules for apparmor_parser:
 
-- **Capability names in lower case.** The merge returns them upper-cased
-  (`CHOWN`), and apparmor_parser accepts only `capability chown,`; see
+- **Capability names as returned.** The merge returns them in lower case
+  (`chown`), the only spelling apparmor_parser accepts in
+  `capability chown,`; see
   [Capability names](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#hdr-Capability_names).
-- **Quote and escape every path.** A path may hold spaces, commas, quotes
-  and other characters the profile lexer reads as syntax. `ValidateArtifact`
-  and `ValidateStrict` reject such a path in an artifact
-  (`ErrUnquotablePath`), but `Validate`, which is all the merge runs, does
-  not, so a baseline that passes `Validate` can carry one into the result.
-  Escape what the lexer reads as syntax when writing each path, or run
-  `ValidateArtifact` on the result and refuse it when it reports
-  `ErrUnquotablePath`.
+- **Write every path through `apparmor.QuotePath`.** A path may hold
+  spaces, commas, quotes and other characters the profile lexer reads as
+  syntax. `ValidateArtifact` and `ValidateStrict` reject such a path in an
+  artifact (`ErrUnquotablePath`), but `Validate`, which is all the merge
+  runs, does not, so a baseline that passes `Validate` can carry one into
+  the result. `QuotePath` escapes what the lexer reads as syntax, and
+  returns `ErrUnquotablePath` where no spelling keeps the meaning; refuse
+  the result then. A runtime escaping by hand escapes a space, a tab, a
+  newline, a double quote and an exclamation mark, but a comma only where it
+  ends the path or one of those characters or another comma follows it:
+  escaping every comma turns an alternation such as `{a,b}` into a literal
+  comma. After an unescaped comma the lexer reads no backslash escape, so
+  a character there that needs one takes a `\x` escape instead.
 - **Write each list with its own permission.** `AllowedExecutables` and
   `AllowedLibraries` carry no exec transition mode (see
   [Scope](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#hdr-Scope)),
@@ -273,11 +307,13 @@ Landlock, building the `landlock_ruleset_attr` and the rules:
 work, so that an over-large artifact is rejected where the reason can be
 reported rather than merged slowly. In `seccomp` that holds for the limits on
 the whole profile, such as `MaxArtifactEntries`; its per-syscall limits come
-in the same bounded report as every other finding, so a profile with 32
-earlier problems matches `ErrMoreProblems` instead of such a limit.
-`Validate` applies none of them except the path length, and neither does the
-merge, so run `ValidateArtifact` on every artifact before `Intersect`: that
-is what bounds the cost of the merge.
+in the same bounded report as every other finding, so a profile with
+enough earlier problems matches `ErrMoreProblems` instead of such a limit.
+Every limit error matches `spm.ErrArtifactTooLarge`, for a caller that
+treats every oversized artifact alike. `Validate` applies none of them
+except the path length, and neither does the merge, so run
+`ValidateArtifact` on every artifact before `Intersect`: that is what
+bounds the cost of the merge.
 
 - The seccomp merge falls back to a conservative result past budgets of its
   own, collapsing a syscall in the merge direction; see
@@ -342,24 +378,22 @@ per input, since its user picks the files.
 
 ## Reading a validation error
 
-A validator collects its failures and reports at most 32 of them. Past that
+A validator collects its failures into one bounded report: past the bound
 the error matches `ErrMoreProblems` instead of listing the rest, so
-`errors.Is` for a sentinel the profile violates can be false. Treat a match
-of `ErrMoreProblems` as "and possibly others" before dispatching on another
-sentinel, and do not branch on the absence of one.
+`errors.Is` for a sentinel the profile violates can be false. The
+[spm documentation](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/spm#hdr-Reading_a_validation_error)
+describes the bound and how to dispatch around it, and `spm.Problems` lists
+the failures of a report.
 
 A merge checks every input and wraps the report of each one that fails in
 an `spm.InputError`, whose `Index` is that input's position among the
 arguments; `errors.Is` sees through it to the sentinels, so the same
 dispatch works on a merge failure. Several failing inputs give their
-InputErrors joined in input order, which `errors.As` searches from the
-first and `Unwrap() []error` lists, bounded like the failures of one
-validator: past 32 failing inputs the error matches `ErrMoreProblems`. A
-caller that names inputs, as `spm` does, walks that list. Every value a
-message quotes from a profile is bounded in length and escaped, so an error
-is safe to log as it is. How to walk a report of several failures, or of
-several inputs, is in the
-[spm documentation](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/spm).
+InputErrors joined in input order and bounded the same way, which
+`errors.As` searches from the first and `spm.Problems` lists. A caller that
+names inputs, as `spm` does, walks that list. Every value a message quotes
+from a profile is bounded in length and escaped, so an error is safe to log
+as it is.
 
 ### Errors outside an InputError
 
@@ -372,7 +406,8 @@ caused them. Check for an `InputError` first, then for these:
 | `ErrBudgetExceeded` | `apparmor.Intersect`; `landlock.Intersect` and `landlock.Union` | The inputs together are too large to merge precisely. After the baseline check, the artifact brought the size: reject the workload |
 | `seccomp.ErrLostRules` | `seccomp.Union`; `seccomp.Intersect` where it cannot drop an architecture | libseccomp would lose the rules of an architecture in the result. The baseline check at config load catches a baseline that does this alone, so after it the artifact brought the rules: reject the workload |
 | `seccomp.ErrNotifyWithoutListener` | `seccomp.Intersect` and `seccomp.Union`, on their result | A result that would notify without a listener. `Validate` of every input rules it out, so treat it as an internal error and reject the workload. On an input it comes inside an `InputError` |
-| `seccomp.ErrUnknownArch` | Every method of a `seccomp.Options` whose `Arch` the package does not know | A misconfigured node or caller, before any profile was read. On an input it comes inside an `InputError` |
+| `seccomp.ErrUnknownArch` | Every method that returns an error of a `seccomp.ForArch` naming an architecture the package does not know | A misconfigured node or caller, before any profile was read. On an input it comes inside an `InputError` |
+| `seccomp.ErrInvalidOptions` | Every method that returns an error of the zero `seccomp.Options` | A bug in the caller, before any profile was read |
 
 A seccomp merge also returns `ErrConflictingListener` inside an
 `InputError` naming the later of two inputs, although both took part (see
@@ -387,10 +422,12 @@ what it is given at face value.
 - **AppArmor: deny rules and exec modes.** A deny rule beats an allow rule in
   AppArmor, and `Profile` has no place for one, so mapping only the allow
   rules of a profile that holds deny rules yields a `Profile` that grants
-  more than the original. Do not map such a profile onto this type. Exec
-  transition modifiers (`ix`, `Px`, `Ux` and the rest) are not modeled
-  either, so two profiles listing one executable intersect to a shared
-  permission even where their modes differ. See
+  more than the original. Do not map such a profile onto this type, nor one
+  using the `priority=` qualifier of AppArmor 5.0, with which allow rules
+  alone can narrow each other. Exec transition modifiers (`ix`, `Px`, `Ux`
+  and the rest) are not modeled either, so two profiles listing one
+  executable intersect to a shared permission even where their modes
+  differ. See
   [Scope](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#hdr-Scope)
   for the full list.
 - **seccomp: 32-bit and multiplexing architectures, and where the merge
@@ -403,8 +440,8 @@ what it is given at face value.
   `SCMP_ACT_KILL`, or by collapsing the syscall; `Union` collapses it. What
   `ValidateArtifact` accepts and what the merges return therefore depend on
   the native architecture: call them on the node that loads the result, or
-  name that node with `seccomp.Options`, whose zero value reads an unknown
-  node as possibly any architecture (see
+  name that node with `seccomp.ForArch`; `seccomp.ForAnyArch` reads an
+  unknown node as possibly any architecture a runtime can be native on (see
   [Validation levels](api.md#validation-levels)). See
   [Architectures](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Architectures).
 - **seccomp: a libseccomp defect.** libseccomp 2.5.2, 2.5.4, 2.5.5, 2.6.0
@@ -455,7 +492,7 @@ var ruleFDs map[string]int
 effective, err := landlock.Intersect(baseline, artifact)
 // ...
 // An InputError here numbers the inputs as Intersect does, so the baseline
-// is Index 0; a bad effective comes as a "result: " error, not an
+// is Index 0; a bad effective comes as a *landlock.ResultError, not an
 // InputError.
 lowered, err := landlock.LoweredRulePaths(effective, baseline, artifact)
 if err != nil {
@@ -580,9 +617,10 @@ held up.
   landlock merges fail with `ErrBudgetExceeded`. The size of the document,
   and how many merges run at once, are the caller's to bound (see
   [Limits](#limits)).
-- **Bounded errors and output.** A validation report lists at most 32
-  failures, a value it quotes is cut at 64 bytes, a decoder message at 512
-  bytes, and control characters are escaped; `seccomp.FormatProfile` and
+- **Bounded errors and output.** A validation report lists a bounded
+  number of failures, a value it quotes is cut at 64 bytes, a decoder
+  message at 512 bytes, and control characters are escaped;
+  `seccomp.FormatProfile` and
   the `String` methods are escaped the same way and cut at 64 KiB with
   `... (output truncated)`, so an error, a formatted profile or a formatted
   diff is safe to log.

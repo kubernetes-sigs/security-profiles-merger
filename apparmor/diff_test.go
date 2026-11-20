@@ -150,7 +150,7 @@ func TestDiffSections(t *testing.T) {
 			want: &apparmor.ProfileDiff{Capabilities: &apparmor.CapabilityDiff{
 				AllowedCapabilities: sliceDiff([]string{capChown}, []string{capSysTime}),
 			}},
-			str: "Diff{caps:-SYS_TIME,+CHOWN}",
+			str: "Diff{caps:-sys_time,+chown}",
 		},
 		{
 			name:  "one capability for another",
@@ -159,7 +159,7 @@ func TestDiffSections(t *testing.T) {
 			want: &apparmor.ProfileDiff{Capabilities: &apparmor.CapabilityDiff{
 				AllowedCapabilities: sliceDiff([]string{capChown}, []string{capNetAdmin}),
 			}},
-			str: "Diff{caps:-NET_ADMIN,+CHOWN}",
+			str: "Diff{caps:-net_admin,+chown}",
 		},
 		{
 			name: "filesystem",
@@ -226,7 +226,7 @@ func TestDiffSections(t *testing.T) {
 					AllowedCapabilities: sliceDiff([]string{capChown}, []string{capNetAdmin}),
 				},
 			},
-			str: "Diff{r:-/etc/config,+/var/log net:raw:true->false caps:-NET_ADMIN,+CHOWN}",
+			str: "Diff{r:-/etc/config,+/var/log net:raw:true->false caps:-net_admin,+chown}",
 		},
 		{
 			name: "every field",
@@ -275,7 +275,7 @@ func TestDiffSections(t *testing.T) {
 			},
 			str: "Diff{exec:-/usr/bin/bash,+/usr/bin/python lib:-/usr/lib/libc.so,+/usr/lib/libm.so " +
 				"r:-/etc/config w:-/var/log rw:-/tmp " +
-				"net:raw:true->false,tcp:true->false,udp:false->true caps:-NET_ADMIN,+CHOWN}",
+				"net:raw:true->false,tcp:true->false,udp:false->true caps:-net_admin,+chown}",
 		},
 	})
 }
@@ -411,10 +411,10 @@ func TestDiffPaths(t *testing.T) {
 					ReadOnlyPaths: sliceDiff([]string{hostile}, []string{"/a"}),
 				},
 				Capabilities: &apparmor.CapabilityDiff{
-					AllowedCapabilities: sliceDiff([]string{"X\nY"}, nil),
+					AllowedCapabilities: sliceDiff([]string{"x\ny"}, nil),
 				},
 			},
-			str: `Diff{exec:+"/a\nFORGED \x1b[31mred" r:-/a,+"/a\nFORGED \x1b[31mred" caps:+"X\nY"}`,
+			str: `Diff{exec:+"/a\nFORGED \x1b[31mred" r:-/a,+"/a\nFORGED \x1b[31mred" caps:+"x\ny"}`,
 		},
 		// Paths are normalized before they are compared.
 		{

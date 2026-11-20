@@ -50,11 +50,12 @@ func LackedSomewhere(name string) bool { return syscallPlacements[name].kept != 
 
 // LosesRules reports whether libseccomp would lose the rules of an
 // architecture of the profile in a filter of a node with the given native
-// architecture (see settleAbsentSyscalls), so that a fuzz test can check
-// that no merge result does.
+// architecture, or for the empty Arch of a node of any architecture a
+// runtime can be native on (see settleAbsentSyscalls), so that a fuzz test
+// can check that no merge result does.
 func LosesRules(profile *specs.LinuxSeccomp, native specs.Arch) bool {
 	settler := newAbsentSettler(intersectRulesFor(native), profile)
-	arch, _ := settler.losingBlock(coveredArchitectures(profile.Architectures, native))
+	arch, _, _ := settler.losingBlockOf()
 
 	return arch != ""
 }

@@ -60,20 +60,20 @@ func TestContract(t *testing.T) {
 		// big-endian node is named, since the cases list little-endian
 		// architectures.
 		Intersects: map[string]func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error){
-			"Options.Intersect":         seccomp.Options{}.Intersect,
-			"x86_64 Options.Intersect":  seccomp.Options{Arch: specs.ArchX86_64}.Intersect,
-			"aarch64 Options.Intersect": seccomp.Options{Arch: specs.ArchAARCH64}.Intersect,
+			"Options.Intersect":         seccomp.ForAnyArch().Intersect,
+			"x86_64 Options.Intersect":  seccomp.ForArch(specs.ArchX86_64).Intersect,
+			"aarch64 Options.Intersect": seccomp.ForArch(specs.ArchAARCH64).Intersect,
 		},
 		Unions: map[string]func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error){
-			"Options.Union":        seccomp.Options{}.Union,
-			"x86_64 Options.Union": seccomp.Options{Arch: specs.ArchX86_64}.Union,
-			"x86 Options.Union":    seccomp.Options{Arch: specs.ArchX86}.Union,
+			"Options.Union":        seccomp.ForAnyArch().Union,
+			"x86_64 Options.Union": seccomp.ForArch(specs.ArchX86_64).Union,
+			"x86 Options.Union":    seccomp.ForArch(specs.ArchX86).Union,
 		},
 		Diffs: map[string]func(left, right *specs.LinuxSeccomp) (*seccomp.ProfileDiff, error){
 			"Diff":         seccomp.Diff,
-			"Options.Diff": seccomp.Options{}.Diff,
-			"x86_64 Diff":  seccomp.Options{Arch: specs.ArchX86_64}.Diff,
-			"x86 Diff":     seccomp.Options{Arch: specs.ArchX86}.Diff,
+			"Options.Diff": seccomp.ForAnyArch().Diff,
+			"x86_64 Diff":  seccomp.ForArch(specs.ArchX86_64).Diff,
+			"x86 Diff":     seccomp.ForArch(specs.ArchX86).Diff,
 		},
 		Copies: map[string]func(*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error){
 			"Clone": func(profile *specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
@@ -84,8 +84,8 @@ func TestContract(t *testing.T) {
 			"Validate":                 seccomp.Validate,
 			"ValidateStrict":           seccomp.ValidateStrict,
 			"ValidateArtifact":         seccomp.ValidateArtifact,
-			"Options.ValidateStrict":   seccomp.Options{}.ValidateStrict,
-			"Options.ValidateArtifact": seccomp.Options{}.ValidateArtifact,
+			"Options.ValidateStrict":   seccomp.ForAnyArch().ValidateStrict,
+			"Options.ValidateArtifact": seccomp.ForAnyArch().ValidateArtifact,
 		},
 		Valid: func() *specs.LinuxSeccomp {
 			return profile(specs.ActErrno, allow(syscallRead))

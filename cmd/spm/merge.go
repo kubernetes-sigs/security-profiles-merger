@@ -56,7 +56,7 @@ settled and which values the artifact and strict checks accept. It defaults
 to the architecture this program runs on, so the same inputs can merge
 differently on another machine; pass a name such as SCMP_ARCH_X86_64 for
 the target node, or --arch none for a node of unknown architecture, which
-settles the result for every architecture Go runs on.
+settles the result for every architecture a runtime can be native on.
 
 Options:
 `

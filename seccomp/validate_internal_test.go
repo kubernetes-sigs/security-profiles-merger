@@ -351,8 +351,8 @@ func TestValidateArtifactRefusesTooManyEntriesFirst(t *testing.T) {
 		"ValidateStrict":   ValidateStrict,
 	} {
 		err := validate(large)
-		if !errors.Is(err, ErrTooManyProfileEntries) || errors.Is(err, ErrEmptySyscallNames) {
-			t.Errorf("%s = %v, want ErrTooManyProfileEntries alone", name, err)
+		if !errors.Is(err, ErrTooManyEntries) || errors.Is(err, ErrEmptySyscallNames) {
+			t.Errorf("%s = %v, want ErrTooManyEntries alone", name, err)
 		}
 
 		// Per-entry work would cost tens of thousands of allocations here.

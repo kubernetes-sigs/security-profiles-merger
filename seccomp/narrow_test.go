@@ -99,7 +99,7 @@ func TestMergesReadRulesUnconditionalOn32Bit(t *testing.T) {
 		filtered("msgget", specs.ActErrno))
 	input.Architectures = []specs.Arch{specs.ArchX86_64, specs.ArchX32}
 
-	result, err := seccomp.Options{Arch: specs.ArchX86_64}.Union(input, profileOf(specs.ActTrap))
+	result, err := seccomp.ForArch(specs.ArchX86_64).Union(input, profileOf(specs.ActTrap))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestUnionReadsEachInputByItsOwnArchitectures(t *testing.T) {
 	narrow := profileOf(specs.ActKillProcess)
 	narrow.Architectures = []specs.Arch{specs.ArchX86}
 
-	result, err := seccomp.Options{Arch: specs.ArchX86_64}.Union(wide, narrow)
+	result, err := seccomp.ForArch(specs.ArchX86_64).Union(wide, narrow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,12 +218,12 @@ func TestDiffShowsTheSettledRuleOn32Bit(t *testing.T) {
 		t.Fatal("personality is not in a safe shape")
 	}
 
-	settled, err := seccomp.Options{Arch: specs.ArchX86_64}.Intersect(profile)
+	settled, err := seccomp.ForArch(specs.ArchX86_64).Intersect(profile)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	diff, err := seccomp.Options{Arch: specs.ArchX86_64}.Diff(profile, settled)
+	diff, err := seccomp.ForArch(specs.ArchX86_64).Diff(profile, settled)
 	if err != nil {
 		t.Fatal(err)
 	}

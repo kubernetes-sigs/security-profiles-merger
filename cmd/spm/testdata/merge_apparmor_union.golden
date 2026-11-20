@@ -16,9 +16,9 @@
   },
   "capability": {
     "allowedCapabilities": [
-      "CHOWN",
-      "NET_ADMIN",
-      "SYS_TIME"
+      "chown",
+      "net_admin",
+      "sys_time"
     ]
   }
 }

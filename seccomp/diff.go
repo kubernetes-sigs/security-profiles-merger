@@ -175,14 +175,14 @@ type SyscallDetail struct {
 // The diff shares no memory with the profiles, so the caller may modify
 // it.
 func Diff(left, right *specs.LinuxSeccomp) (*ProfileDiff, error) {
-	return Options{Arch: NativeHost}.Diff(left, right)
+	return ForHost().Diff(left, right)
 }
 
 // diffProfiles compares two profiles with the given native architecture
 // implied on both sides, or none for the empty Arch: Diff settles nothing
 // for the 32-bit and multiplexing architectures, so the empty Arch only
 // changes how the architecture lists compare, while the merges and the
-// validators read it as any architecture a Go program runs on.
+// validators read it as any architecture this package knows.
 func diffProfiles(native specs.Arch, left, right *specs.LinuxSeccomp) (*ProfileDiff, error) {
 	err := merge.RequireNonNil(left, right)
 	if err != nil {

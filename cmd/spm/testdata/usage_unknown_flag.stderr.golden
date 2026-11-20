@@ -30,7 +30,7 @@ Options:
   --arch string
     	seccomp architecture of the node that loads the profiles, for --artifact or --strict: native, none, or a name such as SCMP_ARCH_X86_64 (default "native")
   --artifact
-    	validate as an artifact, the untrusted profile a container runtime pulls, rejecting unknown, repeated and misspelled fields and invalid UTF-8
+    	validate as an artifact, the untrusted profile a container runtime pulls; besides the repeated keys every mode rejects, it rejects unknown and misspelled fields, missing required members and invalid UTF-8
   --format string
     	output format: json, human (default "json")
   --no-detect-note
@@ -40,6 +40,6 @@ Options:
   --quiet
     	write no profile on success and note no auto-detected type; errors and warnings still go to stderr (not with --output or --format)
   --strict
-    	use strict validation, which also rejects unknown and misspelled fields and invalid UTF-8 (not with --artifact)
+    	use strict validation, which also rejects unknown and misspelled fields, missing required members and invalid UTF-8 (not with --artifact)
   --type string
     	profile type: seccomp, apparmor, landlock (auto-detected if omitted)

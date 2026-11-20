@@ -81,16 +81,9 @@ func compareArg(left, right specs.LinuxSeccompArg) int {
 }
 
 // argKeyBytes sizes the key builder for a typical condition, which runs to
-// about eighteen bytes ("0:SCMP_CMP_EQ:0:0;"). It is a hint, not a bound: a
-// longer one costs a regrowth, which is what this saves on the hot path.
-//
-// Sizing it generously would not be free. Builder.String hands out a string
-// backed by the whole buffer without copying it, so every byte reserved
-// here stays live for as long as the key does, and these keys sit in maps
-// for the length of a merge. Measured over the artifact-sized benchmarks, a
-// hint of 24 allocates fewer bytes than no hint at all while removing the
-// same 30% of allocations; a hint of 64 removes those allocations but ends
-// up costing more bytes than not growing.
+// about eighteen bytes ("0:SCMP_CMP_EQ:0:0;"). It is a hint, not a bound. It
+// stays small because Builder.String keeps the whole buffer alive for as
+// long as the key, and the keys sit in maps for the length of a merge.
 const argKeyBytes = 24
 
 // sortedArgsKey formats args that are already sorted and canonical, as

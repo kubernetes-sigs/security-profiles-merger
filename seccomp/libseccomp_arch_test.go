@@ -980,7 +980,7 @@ func TestMergesDropX86_64WhereX32IsNativeAgainstLibseccomp(t *testing.T) {
 	artifact := profileOf(specs.ActAllow, filtered("socketcall", specs.ActErrno))
 	artifact.Architectures = archs
 
-	result, err := seccomp.Options{Arch: specs.ArchX32}.Intersect(baseline, artifact)
+	result, err := seccomp.ForArch(specs.ArchX32).Intersect(baseline, artifact)
 	if err != nil {
 		t.Fatalf("Options.Intersect: %v", err)
 	}

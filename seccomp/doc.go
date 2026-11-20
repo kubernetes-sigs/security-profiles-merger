@@ -30,6 +30,9 @@ limitations under the License.
 // a runtime applies to an artifact. [UnmarshalStrict] decodes a profile and
 // refuses what encoding/json accepts silently, which is where an artifact
 // should enter, and [Marshal] writes one as a runtime is to read it.
+// [DecodeArtifact] decodes and checks an artifact in one call, and
+// [ValidateBaseline] checks a baseline once, at config load, including
+// whether the merge reads every rule of it.
 //
 // What the merges, [Diff] and the artifact checks return depends on the
 // native architecture of the node that loads the result. The functions
@@ -304,77 +307,43 @@ limitations under the License.
 // architecture on which every syscall is called directly. Two effects of
 // other architectures are read separately, for an architecture a profile
 // lists and for the native architecture, which the merges and [Diff] take
-// to be the one of the running program (see [NativeArchitecture]). Both
-// were checked against libseccomp 2.6.1 for every architecture it knows,
-// and the libseccomp tests of this package check merge results on x86,
-// x32, arm, aarch64, ppc64le, mipsel and, with libseccomp 2.6, sh against
-// it, with libseccomp sorting the syscalls by priority and into a binary
-// tree. The remaining multiplexing architectures (big-endian 32-bit MIPS,
-// ppc, ppc64, s390, s390x, m68k, sheb) are big-endian, which libseccomp
-// does not combine with a little-endian architecture in one filter, and
-// are inferred from the probed ones.
+// to be the one of the running program (see [NativeArchitecture]) unless
+// [Options] names another. The merges are sound for a node linking
+// libseccomp 2.5.4 or newer; 2.5.2 evaluates some rule sets differently and
+// is not supported. CONTRIBUTING.md records how each claim below was
+// checked against which libseccomp releases.
 //
-// The evaluation model is checked against libseccomp 2.5.4, 2.5.5, 2.6.0
-// and 2.6.1, and the merges are sound for a node linking one of those or a
-// newer release. libseccomp 2.5.2 compiles some rule sets into a binary
-// tree that evaluates differently from those releases, so a merge result
-// can permit more (intersection) or less (union) than an input there, and
-// releases older than 2.5.4 are not supported. The table of where each
-// release places a syscall (see below) also covers 2.5.2, which only makes
-// the check for lost rules more cautious.
-//
-// One thing libseccomp does there is a defect rather than a reading, which
-// the merges keep their results clear of rather than follow: libseccomp
-// 2.5.2, 2.5.4, 2.5.5, 2.6.0 and 2.6.1 load the syscall number in the code
-// of the syscall they test first in an architecture's block, and leave that
-// code out when the architecture lacks the syscall, which libseccomp then
-// keeps under a number it makes up. The rules of that architecture then
-// apply to no call, and every call gets the default action. A block tests
-// first the syscall whose rules compile to the fewest comparisons, and one
-// the architecture has wins a tie, so this takes a profile in which every
-// rule on a syscall the architecture has is conditional and some rule on one
-// it lacks is cheaper, as "socketcall" with one unconditional rule and
-// "socket" with a conditional one are on x86_64. Every architecture keeps
-// such a syscall except where it multiplexes the socket and SysV IPC
-// syscalls, which keeps only a multiplexed one it has no number for (as x86
-// does "accept"), and x86_64 and x32 are affected only together: one alone
-// loads the number before any syscall is tested. Together they share one
-// AUDIT_ARCH value and are told apart by that number, so a block of either
-// that tests a syscall its architecture lacks first, as x32 does with
-// "set_thread_area", loses the rules of the other block as well, even when
-// it holds no rule of its own to lose. It does not happen where libseccomp
-// sorts into a binary tree, which runc asks for above 32 syscall names and
-// crun never does. A profile that names a syscall every covered
-// architecture has in an unconditional rule is not affected, which every
-// allowlist is.
+// The libseccomp releases checked, 2.5.2 to 2.6.1, sorting syscalls by
+// priority (crun always, runc up to 32 syscall names), lose every rule of
+// an architecture when the syscall its block tests first does not exist
+// there, and every call then gets the default action. That takes a profile
+// in which every rule on a syscall the architecture has is conditional and
+// some rule on one it lacks is cheaper, as "socketcall" with one
+// unconditional rule and "socket" with a conditional one are on x86_64;
+// x86_64 and x32 share one block and are affected together. A profile that
+// names a syscall every covered architecture has in an unconditional rule
+// is not affected, which every allowlist is.
 //
 // An input can have that form, and a merge can produce it from inputs that
 // do not, since it drops rules equal to the default and collapses others to
 // unconditional ones; under a permissive default the result would then
 // permit what an input denies. [Intersect] and [Union] therefore check every
 // covered architecture of their result against a table of where libseccomp
-// places each syscall, generated from the syscall tables of libseccomp
-// 2.5.2, 2.5.4, 2.5.5, 2.6.0 and 2.6.1 and combined so that it errs safe for
-// all of them, so the check holds on a node linking any of those releases or
-// a newer one (the merges as a whole need 2.5.4, see above).
-// [ValidateArtifact] and [ValidateStrict] report a profile that has the
-// shape as written ([ErrLostRules]), whose rules a runtime loading it would
-// lose. The merges settle the shapes of the rules first, so they may accept
-// such a profile, and can produce the shape from inputs that do not have it,
-// which is what they check their result for. A rule on a syscall no covered
+// places each syscall, combined over the supported releases so that it errs
+// safe for all of them. [ValidateArtifact] and [ValidateStrict] report a
+// profile that has the shape as written ([ErrLostRules]), whose rules a
+// runtime loading it would lose; the merges settle the shapes of the rules
+// first, so they may accept such a profile. A rule on a syscall no covered
 // architecture has applies to no call, and the merges drop it, which is
-// exact. The validators keep it: a runtime loading the profile as written
-// keeps it under the number libseccomp makes up, and it is what the block
-// then tests first. Otherwise [Intersect] drops an architecture, as it
-// does below: x32 where it pairs with x86_64, or x86_64 where x32 is named
-// native, the affected one where it is not native, and otherwise the
-// listed architectures on which the offending syscall applies. [Union]
-// cannot drop one and refuses with [ErrLostRules], as [Intersect] does where
-// nothing can be dropped. Where the native architecture is not known, the
-// runtime may add any architecture a Go program runs on, so each is checked
-// as native, a rule goes only where no architecture has its syscall, x32 is
-// the only architecture that can be dropped, and dropping the last listed
-// one is refused.
+// exact. Otherwise [Intersect] drops an architecture, as it does below: x32
+// where it pairs with x86_64, or x86_64 where x32 is native, the affected
+// one where it is not native, and otherwise the listed architectures on
+// which the offending syscall applies. [Union] cannot drop one and refuses
+// with [ErrLostRules], as [Intersect] does where nothing can be dropped.
+// Where the native architecture is not known, each architecture a runtime
+// can be native on is checked as native, a rule goes only where no
+// architecture has its syscall, and an architecture is dropped only where
+// that helps whichever is native, so the merge is refused more often.
 //
 // On a 32-bit architecture (x86, x32, arm, 32-bit and n32 MIPS, ppc, s390,
 // parisc, m68k, sh), libseccomp compares only the lower 32 bits of each
@@ -462,10 +431,12 @@ limitations under the License.
 // its result. For [Diff] the native architecture means the same two profiles
 // compare differently depending on where the comparison runs. [Options]
 // names the native architecture of the node a merge, diff or check is for:
-// its zero value one that is not known, which the merges and validators
-// read as possibly any architecture a Go program runs on (see [Options]),
-// [NativeHost] the running program's, which the plain functions assume, or
-// another node's.
+// another node's, the running program's, which the plain functions assume,
+// or one that is not known, which the merges and validators read as
+// possibly any architecture a runtime can be native on, every architecture
+// this package knows. crun is written in C and runs natively on x32, MIPS
+// n32, ppc, s390, sh, m68k and parisc, where no Go program does, so those
+// count as well.
 //
 // # Flags
 //
@@ -666,7 +637,7 @@ limitations under the License.
 // [MaxArtifactEntriesPerSyscall] and [MaxArtifactRulesPerSyscall] bound
 // one syscall; they count per name, so [MaxArtifactNamesPerEntry] bounds the
 // names of one entry and [MaxArtifactRules] the rules of the whole
-// profile, a quarter of the read budget, so an accepted artifact is always
+// profile, well inside the read budget, so an accepted artifact is always
 // read rule by rule. The pair and combined budgets also depend on the other
 // input: an accepted artifact stays inside the pair budget against a
 // baseline with up to a dozen filtered rules for a syscall, and a baseline

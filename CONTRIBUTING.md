@@ -30,12 +30,12 @@ We have full documentation on how to get started contributing here:
   [Local Development](#local-development).
 - Nothing else for the Makefile: it runs the pinned golangci-lint through
   `go run` (which needs Go 1.26 or newer, see below), and mdtoc,
-  govulncheck, zeitgeist, actionlint and gorelease
-  through `go tool` from their own module, `hack/tools/go.mod`. The targets
-  that run those tools need a Go at least as new as that module's `go`
-  line, since the go command picks its toolchain from `go.mod` alone. CI
-  runs them with the Go in `.go-version`, so a tools update that raises
-  that `go` line has to raise `.go-version` too.
+  govulncheck, zeitgeist, actionlint and gorelease through `go tool` from
+  their own module, `hack/tools/go.mod`. The targets that run those tools
+  need a Go at least as new as that module's `go` line, since the go
+  command picks its toolchain from `go.mod` alone. CI runs them with the Go
+  in `.go-version`, so a tools update that raises that `go` line has to
+  raise `.go-version` too.
 
 Fill in the `release-note` block of the pull request template in every pull
 request, with `NONE` if a consumer sees no change. The release notes are
@@ -47,34 +47,39 @@ rejects, returns differently or adds.
 The codebase is organized in layers:
 
 - `spm/` is the public home of what the three profile packages have in
-  common: `SliceDiff`, `InputError`, `MaxPathLen` and the sentinel errors
-  they share (such as `ErrNilProfile`, `ErrMoreProblems`,
-  `ErrBudgetExceeded` and the ones `UnmarshalStrict` returns). Each profile
+  common: `SliceDiff`, `InputError`, `Problems`, `MaxPathLen` and the
+  sentinel errors they share (such as `ErrNilProfile`, `ErrMoreProblems`,
+  `ErrBudgetExceeded`, `ErrArtifactTooLarge`, which every limit error
+  matches, and the ones `UnmarshalStrict` returns). Each profile
   package re-exports every shared sentinel it returns under its own name
   (`TestSentinelsAreShared` in `spm/spm_test.go` lists them), so a caller
   need not import `spm`, but naming them once is what makes
   `seccomp.SliceDiff` and `apparmor.SliceDiff` the same type rather than
   twins, and what lets pkg.go.dev link them. Keep it this small: the three
   profile types have no common shape, so nothing that needs to know which
-  type it has belongs here. `cmd/spm/kinds.go` is
-  where that knowledge lives, as a table of per-type function values.
+  type it has belongs here. `cmd/spm/kinds.go` is where that knowledge
+  lives, as a table of per-type function values.
 - `internal/merge/` holds what the packages share beyond `spm`. The generic
   merge primitives: `Fold` folds any profile type pairwise,
   `IntersectSlice`, `UnionSlice` and `DeduplicateSlice` work with any
   comparable element type, and `DiffSlice` with ordered element types only,
   since it sorts its results, as `SortedKeyDiff` sorts the keys two maps do
   not share and those they do; `NilIfEmpty` spells an empty list as nil;
-  `NewSliceDiff` builds an `spm.SliceDiff`, nil
-  for equal lists, and `WriteSliceDiff` formats one for string-like types,
-  skipping a nil one. `ClonePtr` copies an optional value. All three profile
-  packages merge through `Fold`, which returns a single profile as it is
-  and stops at the first error a merge returns: apparmor and landlock fold
-  copies they own, apparmor ends the fold past its budget, and seccomp
-  normalizes a single profile rather than merging it. It also holds the
+  `NewSliceDiff` builds an `spm.SliceDiff`, nil for equal lists, and
+  `WriteSliceDiff` formats one for string-like types, skipping a nil one.
+  `ClonePtr` copies an optional value. All three profile packages merge
+  through `Fold`, which returns a single profile as it is and stops at the
+  first error a merge returns: apparmor and landlock fold copies they own,
+  apparmor ends the fold past its budget, and seccomp normalizes a single
+  profile rather than merging it. It also holds the
   bounds on what an error reports (`Collector`, whose `Report` and
   `Reportf` build a failure only while the report has room, `BoundedError`,
-  `QuoteBounded`)
-  and the quoting of profile values for output (`SafeText`, `SafeName`).
+  `QuoteBounded`), the limit sentinels (`LimitError`) and the quoting of
+  profile values for output (`SafeText`, `SafeName`).
+- `internal/report/` holds the error type a `Collector` returns for several
+  failures. It imports nothing of the module, so that `spm.Problems` can
+  take apart exactly that type and `errors.Join` results, and no other
+  error.
 - `internal/strictjson/` finds what `encoding/json` accepts silently and an
   artifact must not carry: repeated members, members no field reads, members
   that name a field only ignoring case, required members left out or null,
@@ -85,14 +90,15 @@ The codebase is organized in layers:
 - `internal/testutil/` holds what the tests of several packages share.
 - `internal/snippets/` holds no code; its test type-checks the Go snippets
   of the documentation (see [Documentation](#documentation)).
-- `seccomp/`, `apparmor/`, `landlock/` each expose the same public API surface:
-  `Intersect`, `Union`, `Validate`, `ValidateStrict`, `ValidateArtifact`,
-  `UnmarshalStrict` and `Diff`, and `String` methods on the profile and
-  diff types (`seccomp.FormatProfile` for `specs.LinuxSeccomp`, which is not
-  its own). `seccomp` adds an `Options` type naming a node's native architecture, whose methods
-  are the merges, `Diff` and the two stricter validators for that node, and
-  `landlock` one naming a kernel ABI version, whose methods are the three
-  validators with that version's check added, and `Downgrade`. Each package
+- `seccomp/`, `apparmor/`, `landlock/` each expose the same public API
+  surface: `Intersect`, `Union`, `Validate`, `ValidateStrict`,
+  `ValidateArtifact`, `UnmarshalStrict`, `DecodeArtifact` and `Diff`, and
+  `String` methods on the profile and diff types (`seccomp.FormatProfile`
+  for `specs.LinuxSeccomp`, which is not its own). `seccomp` and `apparmor`
+  add `ValidateBaseline`. `seccomp` adds an `Options` type naming a node's
+  native architecture and `landlock` one naming a kernel ABI version; each
+  has a method for every validator and for every other operation whose
+  result depends on the node, and its zero value is an error. Each package
   defines its own types (seccomp uses OCI runtime-spec types, apparmor and
   landlock define their own) and implements profile-specific normalization,
   deduplication, and merge logic on top of `internal/merge/`. The seccomp
@@ -171,8 +177,8 @@ What `make help` does not say:
 
 - `make lint` loads the cgo bridge behind the `libseccomp` build tag, which
   `.golangci.yml` sets along with `apparmor_parser`, so any libseccomp
-  headers do. The default `make`
-  target and `make verify` run `lint`, so they need the headers too.
+  headers do. The default `make` target and `make verify` run `lint`, so
+  they need the headers too.
 - `make lint` builds golangci-lint from source with `go run`, and its
   `go.mod` requires Go 1.26: it needs that Go or a newer one on `PATH`, or a
   `GOTOOLCHAIN` that lets the go command fetch it. CI installs the release
@@ -273,11 +279,54 @@ merge should keep all three passing:
   names the version that answered. On a 386 build the tests whose
   expectations come from the evaluator skip, since it models a 64-bit
   native architecture that calls every syscall directly; the merge
-  differentials run there as everywhere. libseccomp 2.5.2 is left out: it
-  evaluates some binary trees differently, and the merges do not support
-  releases older than 2.5.4. The syscall placement table
-  (`seccomp/syscalls.go`) still covers 2.5.2, since knowing more releases
-  only makes the check for lost rules more cautious.
+  differentials run there as everywhere. libseccomp 2.5.2 is left out (see
+  [below](#seccomp-architectures-and-libseccomp-releases)).
+
+### seccomp architectures and libseccomp releases
+
+The Architectures section of the seccomp package documentation states what
+the merges do on 32-bit and multiplexing architectures and about the
+libseccomp defect that loses the rules of an architecture. This is how
+those statements were established, which a change to them has to redo:
+
+- Both effects of other architectures, the 32-bit comparisons and the
+  socket and SysV IPC multiplexers, were checked against libseccomp 2.6.1
+  for every architecture it knows. The libseccomp tests check merge results
+  on x86, x32, arm, aarch64, ppc64le, mipsel and, with libseccomp 2.6, sh,
+  with libseccomp sorting the syscalls by priority and into a binary tree.
+  The remaining multiplexing architectures (big-endian 32-bit MIPS, ppc,
+  ppc64, s390, s390x, m68k, sheb) are big-endian, which libseccomp does not
+  combine with a little-endian architecture in one filter, so they are
+  inferred from the probed ones.
+- The evaluation model is checked against libseccomp 2.5.4, 2.5.5, 2.6.0
+  and 2.6.1. libseccomp 2.5.2 compiles some rule sets into a binary tree
+  that evaluates differently from those releases, so a merge result can
+  permit more (intersection) or less (union) than an input there, which is
+  why releases older than 2.5.4 are not supported. The table of where each
+  release places a syscall also covers 2.5.2, which only makes the check
+  for lost rules more cautious.
+- The defect: libseccomp 2.5.2, 2.5.4, 2.5.5, 2.6.0 and 2.6.1 load the
+  syscall number in the code of the syscall they test first in an
+  architecture's block, and leave that code out when the architecture lacks
+  the syscall, which libseccomp then keeps under a number it makes up. A
+  block tests first the syscall whose rules compile to the fewest
+  comparisons, and one the architecture has wins a tie. Every architecture
+  keeps such a syscall except where it multiplexes the socket and SysV IPC
+  syscalls, which keeps only a multiplexed one it has no number for (as x86
+  does "accept"). x86_64 and x32 are affected only together: one alone
+  loads the number before any syscall is tested, while together they share
+  one AUDIT_ARCH value and are told apart by that number, so a block of
+  either that tests a syscall its architecture lacks first, as x32 does
+  with "set_thread_area", loses the rules of the other block as well, even
+  when it holds no rule of its own to lose. It does not happen where
+  libseccomp sorts into a binary tree, which runc asks for above 32 syscall
+  names and crun never does.
+- The placement table, `seccomp/syscalls.go`, is generated from the
+  syscall tables of libseccomp 2.5.2, 2.5.4, 2.5.5, 2.6.0 and 2.6.1 and
+  combined so that it errs safe for all of them (see `make verify-syscalls`).
+- A node whose native architecture is not known may be any architecture
+  libseccomp resolves as native, not only those Go runs on: crun is written
+  in C and runs natively on x32, MIPS n32, ppc, s390, sh, m68k and parisc.
 
 ## Mentorship
 

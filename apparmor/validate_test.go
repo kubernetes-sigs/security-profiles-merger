@@ -334,7 +334,7 @@ func TestValidateAllowsUnknownCapability(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !slices.Contains(both.Capabilities.AllowedCapabilities, "SOME_FUTURE_CAP") {
+	if !slices.Contains(both.Capabilities.AllowedCapabilities, "some_future_cap") {
 		t.Errorf("capability granted by both profiles should survive: %v",
 			both.Capabilities.AllowedCapabilities)
 	}

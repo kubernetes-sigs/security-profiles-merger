@@ -27,8 +27,8 @@
   },
   "capability": {
     "allowedCapabilities": [
-      "CHOWN",
-      "NET_ADMIN"
+      "chown",
+      "net_admin"
     ]
   }
 }

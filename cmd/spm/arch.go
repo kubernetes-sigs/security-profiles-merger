@@ -32,9 +32,10 @@ const (
 	// archNative implies the architecture this program runs on, which is
 	// what the commands have always done.
 	archNative = "native"
-	// archNone names no architecture, the zero seccomp.Options: a diff
+	// archNone names no architecture, seccomp.ForAnyArch(): a diff
 	// implies none on either side, and a merge and the artifact and strict
-	// checks take the node to be any architecture Go runs on.
+	// checks take the node to be any architecture a runtime can be native
+	// on.
 	archNone = "none"
 	// archPrefix is what a seccomp architecture name starts with.
 	archPrefix = "SCMP_ARCH_"
@@ -48,13 +49,13 @@ var errUnknownArchName = errors.New("unknown architecture")
 
 // archOption is the native architecture --arch names for a seccomp profile:
 // the one a diff implies on both sides, a merge settles its result for, and
-// the artifact and strict checks judge a profile for, as the Arch of
-// seccomp.Options takes it: seccomp.NativeHost for the default, which is
-// what the library functions without an architecture assume.
+// the artifact and strict checks judge a profile for, as seccomp.Options
+// names it: seccomp.ForHost for the default, which is what the library
+// functions without an architecture assume.
 type archOption struct {
 	// named reports whether --arch was given at all, whatever its value.
 	named bool
-	value specs.Arch
+	value seccomp.Options
 }
 
 // bindArchFlag declares --arch on the set. what says what the architecture
@@ -88,13 +89,13 @@ func parseArchFlag(flags *flag.FlagSet, value string, stderr io.Writer) (archOpt
 func parseArch(value string, named bool) (archOption, error) {
 	switch {
 	case value == archNative:
-		return archOption{named: named, value: seccomp.NativeHost}, nil
+		return archOption{named: named, value: seccomp.ForHost()}, nil
 	case value == archNone:
-		return archOption{named: named, value: ""}, nil
+		return archOption{named: named, value: seccomp.ForAnyArch()}, nil
 	case strings.HasPrefix(value, archPrefix) && knownArch(specs.Arch(value)):
-		return archOption{named: named, value: specs.Arch(value)}, nil
+		return archOption{named: named, value: seccomp.ForArch(specs.Arch(value))}, nil
 	default:
-		return archOption{named: named, value: seccomp.NativeHost}, fmt.Errorf(
+		return archOption{named: named, value: seccomp.ForHost()}, fmt.Errorf(
 			"%w %q (use %s, %s, or a name such as %sX86_64)",
 			errUnknownArchName, value, archNative, archNone, archPrefix,
 		)

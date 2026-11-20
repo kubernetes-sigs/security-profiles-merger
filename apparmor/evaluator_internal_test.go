@@ -528,9 +528,11 @@ const fsSelectorBits = 2
 // evalCapabilities are the capability names the fuzzers select from, one per
 // bit of the capability selector. Eight is enough for the oracle: the merge
 // treats a name as opaque text, so which names they are changes nothing.
+// Some are spelled in upper case, which the merges accept and return
+// lower-cased.
 var evalCapabilities = []string{
-	"CHOWN", "NET_ADMIN", "SYS_TIME", "SYS_PTRACE",
-	"NET_RAW", "SETUID", "MKNOD", "BPF",
+	"chown", "NET_ADMIN", "sys_time", "SYS_PTRACE",
+	"net_raw", "SETUID", "mknod", "BPF",
 }
 
 // capSectionAbsent is the bit of the capability selector that leaves the
@@ -622,7 +624,9 @@ func evalNetwork(netBits uint8) *NetworkRules {
 // both merges make of an absent section.
 func permitsCapability(profile *Profile, name string) bool {
 	return profile.Capabilities != nil &&
-		slices.Contains(profile.Capabilities.AllowedCapabilities, name)
+		slices.ContainsFunc(profile.Capabilities.AllowedCapabilities, func(granted string) bool {
+			return asciiLower(granted) == asciiLower(name)
+		})
 }
 
 // netPermission is one of the three network permissions a profile carries.

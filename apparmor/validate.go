@@ -158,17 +158,17 @@ var (
 
 	// ErrTooManyPaths is returned by ValidateArtifact and ValidateStrict
 	// when a profile holds more than MaxArtifactPaths paths.
-	ErrTooManyPaths = errors.New("too many paths")
+	ErrTooManyPaths = merge.LimitError("too many paths")
 
 	// ErrTooManyPatternBytes is returned by ValidateArtifact and
 	// ValidateStrict when the glob patterns of a profile are longer than
 	// MaxArtifactPatternBytes in total.
-	ErrTooManyPatternBytes = errors.New("glob patterns too long in total")
+	ErrTooManyPatternBytes = merge.LimitError("glob patterns too long in total")
 
 	// ErrTooManyCapabilities is returned by ValidateArtifact and
 	// ValidateStrict when a profile holds more than
 	// MaxArtifactCapabilities capability names.
-	ErrTooManyCapabilities = errors.New("too many capabilities")
+	ErrTooManyCapabilities = merge.LimitError("too many capabilities")
 )
 
 // MaxPathLen is the longest path this package accepts, in bytes, which is
@@ -207,10 +207,10 @@ const MaxArtifactPaths = 1024
 // pattern is compiled into a program first.
 //
 // Compiling a pattern costs time and memory in proportion to its length. A
-// merge bounds what it compiles on its own, at four times this bound per
-// call, so a baseline of up to twice this bound and two artifacts this
-// bound admits are compiled and matched in full (see the Cost bounds section
-// of the package documentation). Compiled patterns are also kept across
+// merge bounds what it compiles on its own, at a budget per call sized so
+// that a baseline of patterns larger than an artifact's, and two artifacts
+// this bound admits, are compiled and matched in full (see the Cost bounds
+// section of the package documentation). Compiled patterns are also kept across
 // calls in a cache bounded by an estimate of the memory they hold, which
 // only saves a later call the compiling.
 //
@@ -226,22 +226,25 @@ const MaxArtifactPatternBytes = 64 << 10
 // of an artifact is bounded. Linux has some forty capabilities.
 const MaxArtifactCapabilities = 512
 
-// asciiUpper upper-cases the ASCII letters of a name and leaves every other
-// byte as it is. strings.ToUpper folds by Unicode rules, where U+017F and
-// U+0131 upper-case into "S" and "I", so a capability spelled with one of
-// them would compare equal to a real capability name, pass ValidateStrict as
-// a known one, and be merged into the real one. A capability name is a word
-// of ASCII characters (see ErrInvalidCapabilityName), so nothing a profile
-// can spell needs the Unicode rules.
-func asciiUpper(name string) string {
+// asciiLower lower-cases the ASCII letters of a name and leaves every other
+// byte as it is. It is the canonical form of a capability name, the one
+// apparmor_parser accepts. strings.ToLower folds by Unicode rules, and
+// comparing by those would let a name spelled with U+017F or U+0131, which
+// strings.ToUpper turns into "S" and "I", or U+212A, which strings.ToLower
+// turns into "k", compare equal to a real capability name, pass
+// ValidateStrict as a known one, and be merged into the real one. A
+// capability name is a word of ASCII characters (see
+// ErrInvalidCapabilityName), so nothing a profile can spell needs the
+// Unicode rules.
+func asciiLower(name string) string {
 	var builder strings.Builder
 
 	builder.Grow(len(name))
 
 	for idx := range len(name) {
 		char := name[idx]
-		if char >= 'a' && char <= 'z' {
-			char -= 'a' - 'A'
+		if char >= 'A' && char <= 'Z' {
+			char += 'a' - 'A'
 		}
 
 		builder.WriteByte(char)
@@ -251,17 +254,17 @@ func asciiUpper(name string) string {
 }
 
 func isKnownCapability(name string) bool {
-	switch asciiUpper(name) {
-	case "CHOWN", "DAC_OVERRIDE", "DAC_READ_SEARCH", "FOWNER", "FSETID",
-		"KILL", "SETGID", "SETUID", "SETPCAP", "LINUX_IMMUTABLE",
-		"NET_BIND_SERVICE", "NET_BROADCAST", "NET_ADMIN", "NET_RAW",
-		"IPC_LOCK", "IPC_OWNER", "SYS_MODULE", "SYS_RAWIO",
-		"SYS_CHROOT", "SYS_PTRACE", "SYS_PACCT", "SYS_ADMIN",
-		"SYS_BOOT", "SYS_NICE", "SYS_RESOURCE", "SYS_TIME",
-		"SYS_TTY_CONFIG", "MKNOD", "LEASE", "AUDIT_WRITE",
-		"AUDIT_CONTROL", "SETFCAP", "MAC_OVERRIDE", "MAC_ADMIN",
-		"SYSLOG", "WAKE_ALARM", "BLOCK_SUSPEND", "AUDIT_READ",
-		"PERFMON", "BPF", "CHECKPOINT_RESTORE":
+	switch asciiLower(name) {
+	case "chown", "dac_override", "dac_read_search", "fowner", "fsetid",
+		"kill", "setgid", "setuid", "setpcap", "linux_immutable",
+		"net_bind_service", "net_broadcast", "net_admin", "net_raw",
+		"ipc_lock", "ipc_owner", "sys_module", "sys_rawio",
+		"sys_chroot", "sys_ptrace", "sys_pacct", "sys_admin",
+		"sys_boot", "sys_nice", "sys_resource", "sys_time",
+		"sys_tty_config", "mknod", "lease", "audit_write",
+		"audit_control", "setfcap", "mac_override", "mac_admin",
+		"syslog", "wake_alarm", "block_suspend", "audit_read",
+		"perfmon", "bpf", "checkpoint_restore":
 		return true
 	default:
 		return false
@@ -296,10 +299,9 @@ func isKnownCapability(name string) bool {
 // twice what it means once. See the Validation section of the package
 // documentation.
 //
-// Failures are collected and returned together, up to 32: past that the
-// error lists the first 32 and a count of the rest and matches
-// ErrMoreProblems, so a sentinel a profile violates can be absent from the
-// error that reports it.
+// Failures are collected into one bounded report, which matches
+// ErrMoreProblems when it left some out; see Reading a validation error in
+// the spm package documentation.
 func Validate(profile *Profile) error {
 	if profile == nil {
 		return ErrNilProfile
@@ -1153,7 +1155,7 @@ func (check *validator) emptyCapabilities(caps []string) {
 
 func (check *validator) duplicateCapabilities(caps []string) {
 	merge.ReportDuplicates(&check.report, len(caps),
-		func(idx int) (string, bool) { return asciiUpper(caps[idx]), true },
+		func(idx int) (string, bool) { return asciiLower(caps[idx]), true },
 		func(idx, first int) error {
 			return fmt.Errorf(
 				"%s[%d]: %s: %w (also at %s[%d])",

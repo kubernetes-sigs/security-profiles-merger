@@ -124,7 +124,7 @@ const goldenProfileJSON = `{"executable":{"allowedExecutables":["/usr/bin/bash",
 	`"allowedLibraries":["/usr/lib/libc.so","/usr/lib/libm.so"]},` +
 	`"filesystem":{"readOnlyPaths":["/etc/config"],"writeOnlyPaths":["/var/log"],"readWritePaths":["/tmp"]},` +
 	`"network":{"allowRaw":true,"allowedProtocols":{"allowTcp":true,"allowUdp":false}},` +
-	`"capability":{"allowedCapabilities":["NET_ADMIN","SYS_TIME"]}}`
+	`"capability":{"allowedCapabilities":["net_admin","sys_time"]}}`
 
 // goldenProfile is the profile goldenProfileJSON encodes.
 func goldenProfile() apparmor.Profile {

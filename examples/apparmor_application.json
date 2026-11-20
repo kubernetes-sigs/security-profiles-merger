@@ -15,6 +15,6 @@
     }
   },
   "capability": {
-    "allowedCapabilities": ["NET_BIND_SERVICE", "NET_ADMIN"]
+    "allowedCapabilities": ["net_bind_service", "net_admin"]
   }
 }

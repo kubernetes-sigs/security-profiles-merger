@@ -298,10 +298,14 @@ func assertCapsSubset(
 ) {
 	t.Helper()
 
-	leftCaps := stringSet(left.Capabilities.AllowedCapabilities)
-	rightCaps := stringSet(right.Capabilities.AllowedCapabilities)
+	leftCaps := capabilitySet(left.Capabilities.AllowedCapabilities)
+	rightCaps := capabilitySet(right.Capabilities.AllowedCapabilities)
 
 	for _, name := range result.Capabilities.AllowedCapabilities {
+		if name != asciiLowerForTest(name) {
+			t.Errorf("intersect result has cap %q, want it lower-cased", name)
+		}
+
 		_, inLeft := leftCaps[name]
 		_, inRight := rightCaps[name]
 
@@ -320,7 +324,7 @@ func assertCapsSuperset(
 
 	for _, profiles := range []*apparmor.Profile{left, right} {
 		for _, name := range profiles.Capabilities.AllowedCapabilities {
-			if _, ok := resultCaps[name]; !ok {
+			if _, ok := resultCaps[asciiLowerForTest(name)]; !ok {
 				t.Errorf("union result missing cap %q from input", name)
 			}
 		}
@@ -471,6 +475,31 @@ func pathIdentitySet(paths []string) map[string]struct{} {
 	}
 
 	return set
+}
+
+// capabilitySet returns the capability names lower-cased, the spelling the
+// merges return them in, whatever case an input spells them in.
+func capabilitySet(names []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		set[asciiLowerForTest(name)] = struct{}{}
+	}
+
+	return set
+}
+
+// asciiLowerForTest lower-cases the ASCII letters of a capability name and
+// leaves every other byte, as the merges do: strings.ToLower would also
+// fold U+212A KELVIN SIGN into "k", which the merges keep apart.
+func asciiLowerForTest(name string) string {
+	lowered := []byte(name)
+	for idx, char := range lowered {
+		if 'A' <= char && char <= 'Z' {
+			lowered[idx] = char + 'a' - 'A'
+		}
+	}
+
+	return string(lowered)
 }
 
 func stringSet(items []string) map[string]struct{} {

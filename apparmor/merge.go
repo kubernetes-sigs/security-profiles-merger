@@ -32,9 +32,14 @@ var (
 	// ErrNilProfile is returned when a nil profile is provided.
 	ErrNilProfile = spm.ErrNilProfile
 	// ErrMoreProblems is spm.ErrMoreProblems, which a validation report
-	// matches when it left failures out: read a match as "and possibly
-	// others" before dispatching on another sentinel.
+	// matches when it left failures out (see [spm.ErrMoreProblems]).
 	ErrMoreProblems = spm.ErrMoreProblems
+	// ErrInexactBaseline is spm.ErrInexactBaseline, which ValidateBaseline
+	// returns for a baseline the merge does not read exactly.
+	ErrInexactBaseline = spm.ErrInexactBaseline
+	// ErrArtifactTooLarge is spm.ErrArtifactTooLarge, which every error
+	// this package returns for a profile past a MaxArtifact limit matches.
+	ErrArtifactTooLarge = spm.ErrArtifactTooLarge
 	// ErrBudgetExceeded is returned by Intersect when one of its budgets
 	// cut the matching short and the result may lose access, which is when
 	// neither input of a merge step is kept whole: matching the paths of two
@@ -62,30 +67,21 @@ type InputError = spm.InputError
 // CRI runtime combining an artifact with its baseline.
 //
 // A nil section or network boolean is treated as an explicit empty section
-// or false, since to AppArmor an absent section denies everything it
-// covers, and the result carries every section explicitly. Capability names
-// are compared with ASCII case folding and returned upper-cased, which a
-// consumer must lower-case before rendering them as rules (see
-// CapabilityRules). A literal path survives where a glob of every other
-// input matches it; the Filesystem merge section of the package
-// documentation gives the rules for globs.
+// or false, as AppArmor treats it, and the result carries every section
+// explicitly. Capability names are compared ignoring ASCII case and
+// returned lower-cased. A literal path survives where a glob of every other
+// input matches it. More than two profiles are folded from left to right,
+// and with patterns involved the result depends on that order, but every
+// grouping is safe. See the Nil and empty sections, Capability names and
+// Filesystem merge sections of the package documentation.
 //
-// More than two profiles are folded from left to right, and with patterns
-// involved the result depends on that order, but every grouping is safe:
-// the result permits only what every input permits. Matching paths against
-// patterns and compiling them is bounded, and a merge past a budget fails
-// with ErrBudgetExceeded when the result may lose access, which is when
-// neither input of a merge step is kept whole (see ErrBudgetExceeded and
-// the Cost bounds section), rather than return a result that may be
-// narrower than its inputs call for.
-//
-// Each input is validated as the Validation section of the package
-// documentation describes, and every one that fails is reported as an
-// InputError naming the input: the error is that InputError for one, and
-// the InputErrors joined in input order for several.
-//
-// The result shares no memory with the inputs, a single input included, so
-// the caller may modify it.
+// Each input is validated as the Validation section describes, and every
+// one that fails is reported as an InputError naming it. Matching and
+// compiling patterns is bounded, and a merge past a budget fails with
+// ErrBudgetExceeded when the result may lose access (see the Cost bounds
+// section), rather than return a result narrower than its inputs call
+// for. The result shares no memory with the inputs, a single input
+// included, so the caller may modify it.
 func Intersect(profiles ...*Profile) (*Profile, error) {
 	matchers := newMatcherCache()
 	exceeded := false
@@ -97,30 +93,84 @@ func Intersect(profiles ...*Profile) (*Profile, error) {
 
 // Union merges multiple AppArmor profiles via union: the resulting profile
 // permits an operation if any input permits it. Capabilities and file
-// access rules are combined, and network permissions use OR semantics. This
-// is the merge the Security Profiles Operator uses to combine recorded
+// access rules are combined, and network permissions use OR semantics.
+// This is the merge the Security Profiles Operator uses to combine recorded
 // profiles.
 //
-// A nil section defers to the other profile, which for a union grants the
-// same as an empty one would. Capability names are upper-cased as they are
-// by Intersect. A literal of one profile that a glob of the other covers is
-// dropped, or takes the glob's permissions where the glob grants only part
-// of them, so a write-only literal under a read-only glob becomes
-// read-write; the Filesystem merge section of the package documentation has
-// the details. The union of two profiles depends neither on their order
-// nor on the order of their paths.
+// A nil section defers to the other profile, capability names are
+// lower-cased as by Intersect, and a literal of one profile that a glob of
+// the other covers is dropped or takes the glob's permissions, so a
+// write-only literal under a read-only glob becomes read-write. The union
+// of two profiles depends neither on their order nor on the order of their
+// paths. See the Filesystem merge section of the package documentation.
 //
-// Matching paths against patterns is bounded as it is for Intersect. Past
-// the budget a list keeps every path of both sides with the permissions its
-// own side grants it, which permits exactly what the reduced union permits
-// (see the Cost bounds section). Inputs are validated as for Intersect.
-//
-// The result shares no memory with the inputs, a single input included, so
-// the caller may modify it.
+// Inputs are validated as for Intersect. Past the matching budget a list
+// keeps every path of both sides with the permissions its own side grants
+// it, which permits exactly what the reduced union permits, so Union never
+// fails with ErrBudgetExceeded (see the Cost bounds section). The result
+// is owned by the caller, as for Intersect.
 func Union(profiles ...*Profile) (*Profile, error) {
 	matchers := newMatcherCache()
 
 	return foldProfiles(profiles, matchers, unionStrategy{matchers: matchers})
+}
+
+// ValidateBaseline checks a baseline once, where a runtime loads its
+// configuration: Validate, then QuotePath of every path, then Intersect of
+// the baseline alone, then Diff of the baseline against that intersection.
+//
+// A path QuotePath refuses (ErrUnquotablePath, ErrRelativePath) would reach
+// a merge result the runtime cannot render, so a misconfigured node would
+// otherwise surface as the failure of every workload; each is reported with
+// its list and index. The intersection is equal to the baseline exactly
+// when the merge reads every rule of it, so an unequal diff, reported with
+// ErrInexactBaseline and the diff in the message, names what every merge
+// with that baseline takes away whatever the artifact says, such as a
+// pattern apparmor_parser rejects, which an intersection drops. Treat any
+// error as a misconfigured node.
+//
+// It returns the failures of Validate as Validate does, those of QuotePath
+// in one bounded report, and the errors of the merge without an
+// InputError, since there is one input. See
+// https://github.com/kubernetes-sigs/security-profiles-merger/blob/main/docs/integration.md#the-runtime-flow
+// for where it fits.
+func ValidateBaseline(baseline *Profile) error {
+	err := Validate(baseline)
+	if err != nil {
+		return err
+	}
+
+	var unrenderable merge.Collector
+
+	for list, paths := range pathLists(baseline) {
+		for idx, path := range *paths {
+			_, err := QuotePath(path)
+			if err != nil {
+				unrenderable.Reportf("%s[%d]: %w", list, idx, err)
+			}
+		}
+	}
+
+	err = unrenderable.Err()
+	if err != nil {
+		return err
+	}
+
+	settled, err := Intersect(baseline)
+	if err != nil {
+		return merge.SoleInputError(err)
+	}
+
+	diff, err := Diff(baseline, settled)
+	if err != nil {
+		return err
+	}
+
+	if !diff.Equal {
+		return fmt.Errorf("%w: %s", ErrInexactBaseline, diff)
+	}
+
+	return nil
 }
 
 type strategy interface {
@@ -994,7 +1044,7 @@ func normalizeCapabilities(caps []string) []string {
 
 	result := make([]string, len(caps))
 	for idx, c := range caps {
-		result[idx] = asciiUpper(c)
+		result[idx] = asciiLower(c)
 	}
 
 	return result

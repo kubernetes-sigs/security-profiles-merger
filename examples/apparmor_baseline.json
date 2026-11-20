@@ -16,6 +16,6 @@
     }
   },
   "capability": {
-    "allowedCapabilities": ["NET_BIND_SERVICE", "CHOWN"]
+    "allowedCapabilities": ["net_bind_service", "chown"]
   }
 }

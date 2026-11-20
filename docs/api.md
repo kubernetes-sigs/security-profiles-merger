@@ -42,8 +42,8 @@ also passes `Validate`.
 
 | Level | For whom | Called by |
 |-------|----------|-----------|
-| `Validate` | Any merge input: what a runtime needs to load the profile at all. The runtime defaults fail the other two levels, and both reject a seccomp notification listener. A seccomp or AppArmor baseline needs `Diff(baseline, Intersect(baseline))` as well, see [the runtime flow](integration.md#the-runtime-flow); a Landlock one does not, since `Intersect` of one Landlock profile drops rights an ancestor rule grants | The runtime at config load; every `Intersect` and `Union`, on each input; `spm validate`; `spm merge --validate default` |
-| `ValidateArtifact` | The artifact: `Validate` plus the limits and what an untrusted author must not control | The runtime at pull time, after `UnmarshalStrict`; `spm validate --artifact`; `spm merge --validate artifact` |
+| `Validate` | Any merge input: what a runtime needs to load the profile at all. The seccomp defaults runtimes ship fail `ValidateStrict`, CRI-O's fails `ValidateArtifact` as well, and both levels reject a seccomp notification listener. A seccomp or AppArmor baseline is checked with `ValidateBaseline`, which adds `Diff(baseline, Intersect(baseline))`, see [the runtime flow](integration.md#the-runtime-flow); a Landlock one is not, since `Intersect` of one Landlock profile drops rights an ancestor rule grants | The runtime at config load; every `Intersect` and `Union`, on each input; `spm validate`; `spm merge --validate default` |
+| `ValidateArtifact` | The artifact: `Validate` plus the limits and what an untrusted author must not control | The runtime at pull time, after `UnmarshalStrict`, or both as `DecodeArtifact`; `spm validate --artifact`; `spm merge --validate artifact` |
 | `ValidateStrict` | A profile a person writes by hand, as a lint: `ValidateArtifact` plus what is likely a mistake, such as a duplicate | Tooling and review of hand-written profiles; `spm validate --strict`; `spm merge --validate strict` |
 
 `Validate` is what the merge runs on its inputs: `apparmor` runs it on each
@@ -53,21 +53,33 @@ comes back as an [`InputError`](#spm). The merge applies none of the artifact
 limits ([seccomp](#limits), [apparmor](#limits-1), [landlock](#limits-2)),
 and bounds its own work instead; see [Limits](integration.md#limits).
 
-`seccomp.Options` names the node a call is for by its native
-architecture, and its methods are the merges, `Diff` and the two stricter
-validators for that node. Its zero value is a node whose architecture is not
-known, read as possibly any architecture Go runs on, which is not what the
-plain functions assume (`seccomp.NativeHost` is); name the node's
-architecture whenever it is known
-([Options](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#Options)).
-The exception is the byte order: for an unknown node `Intersect` accepts
-architectures of either byte order, which it refuses for a known node, and
-the stricter validators report only a list mixing the two
-(`ErrMixedByteOrder`).
-`landlock.Options` names a kernel ABI version instead: its validators add
-that version's check to each level, and `Downgrade` drops the rights the
-version does not know. It has no zero value to use, since 0 names no
-version.
+`seccomp.Options` and `landlock.Options` name the node a call is for. Each
+has a method for every validator and for every other operation whose result
+depends on the node, and the zero value of each is an error, so an
+`Options` a caller forgot to fill in never stands for some node.
+
+- `seccomp.Options` names the native architecture and comes from a
+  constructor: `ForArch` for a named node, `ForHost` for the one the
+  program runs on, which is what the plain functions assume, or
+  `ForAnyArch` for a node whose architecture is not known, read as possibly
+  any architecture a runtime can be native on, the ones only crun runs on
+  natively (x32, MIPS n32, ppc, s390, sh, m68k, parisc) included. Of those,
+  in practice only x32 changes a result: a narrow x86_64 denylist may be
+  refused with `ErrLostRules`, so name the node's architecture with
+  `ForArch` where it is known. For an unknown node `Intersect` accepts
+  architectures of either byte order, which it refuses for a known node,
+  and the stricter validators report only a list mixing the two
+  (`ErrMixedByteOrder`). Its methods are the three validators,
+  `ValidateBaseline`, `DecodeArtifact`, the merges and `Diff`; the zero
+  value is `ErrInvalidOptions`
+  ([Options](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#Options)).
+- `landlock.Options` names a kernel ABI version: its validators and
+  `DecodeArtifact` add that version's check to each level, and `Downgrade`
+  drops the rights the version does not know. The merges, `Diff` and
+  `LoweredRulePaths` do not depend on the version and have no method. 0
+  names no version and is `ErrUnknownABIVersion`.
+
+`apparmor` has no `Options`: nothing it does depends on the node.
 
 A validator reports each failure on a line of its own, shaped as
 `<path>: <value>: <sentinel>`, with what else explains it in parentheses.
@@ -86,7 +98,8 @@ on, an entry at a time, except that a notification listener missing from
 the profile is reported last, after every entry. Counts name the lists they
 count, as in `pathRules, netRules: 2000 rules: too many rules (max 1024)`.
 The text is for people: match the sentinels with
-`errors.Is` rather than parsing it (see
+`errors.Is` rather than parsing it, and list the failures with
+`spm.Problems` (see
 [reading a validation error](integration.md#reading-a-validation-error)).
 
 ## Concurrency
@@ -123,7 +136,8 @@ one of the three packages arbitrarily.
 | Name | Description |
 |------|-------------|
 | `SliceDiff[T]` | Added and removed items in a set-like slice, each sorted; a diff field of this type is nil when the lists are equal |
-| `InputError` | Names the one input profile an error is about: each input of a merge that is nil or fails validation, a nil profile given to `Diff`, each input of `landlock.LoweredRulePaths` that is nil or fails validation, and an error a package documents as brought by one input, such as `seccomp.ErrConflictingListener`. When several fail, a merge or `LoweredRulePaths` joins them in input order, while `Diff` reports only the first nil one. `Index` is the position among the inputs: for `LoweredRulePaths`, `inputs[i]` is `i`, as `Intersect` numbers it, and a bad result is no `InputError`; `Err` is what was wrong with it. Match it with `errors.As`, which finds the first; `errors.Is` sees through it to the sentinels. See [reading a validation error](integration.md#reading-a-validation-error) and [Errors outside an InputError](integration.md#errors-outside-an-inputerror) |
+| `Problems` | The failures an error reports: those of a validator's report, of the joined `InputError`s of a merge or of an `errors.Join`, a report or join among them listed in turn, with `ErrMoreProblems` once and last; the error itself otherwise. One failure that matches several sentinels stays one problem, and it does not look inside an `InputError`: call it on the `InputError`'s `Err` |
+| `InputError` | Names the one input profile an error is about: each input of a merge that is nil or fails validation, a nil profile given to `Diff`, each input of `landlock.LoweredRulePaths` that is nil or fails validation, and an error a package documents as brought by one input, such as `seccomp.ErrConflictingListener`. When several fail, a merge or `LoweredRulePaths` joins them in input order, while `Diff` reports only the first nil one. `Index` is the position among the inputs: for `LoweredRulePaths`, `inputs[i]` is `i`, as `Intersect` numbers it, and a bad result is a `landlock.ResultError` instead; `Err` is what was wrong with it. Match it with `errors.As`, which finds the first; `errors.Is` sees through it to the sentinels. See [reading a validation error](integration.md#reading-a-validation-error) and [Errors outside an InputError](integration.md#errors-outside-an-inputerror) |
 | `MaxPathLen` | 4095, the longest path `apparmor` and `landlock` accept: `PATH_MAX` less its terminating NUL |
 
 These sentinels are shared: `errors.Is` against the one here matches an error
@@ -132,15 +146,20 @@ from any of the three packages.
 | Sentinel | Raised by | Meaning |
 |----------|-----------|---------|
 | `ErrNoProfiles` | `Intersect` and `Union` of every package | No profiles were given |
-| `ErrNilProfile` | Every function that takes a profile and returns an error | A nil profile was given; a merge, `Diff` and `LoweredRulePaths` wrap it in an `InputError` naming the input, except a nil result of `LoweredRulePaths`, which comes as a `result: ` error |
-| `ErrMoreProblems` | Every validator; every merge, inside the `InputError` of an input whose report left failures out, and beside the joined `InputError`s past 32 failing inputs | The report left failures out; see [reading a validation error](integration.md#reading-a-validation-error) |
+| `ErrNilProfile` | Every function that takes a profile and returns an error | A nil profile was given; a merge, `Diff` and `LoweredRulePaths` wrap it in an `InputError` naming the input, except a nil result of `LoweredRulePaths`, which comes as a `landlock.ResultError` |
+| `ErrMoreProblems` | Every validator; every merge, inside the `InputError` of an input whose report left failures out, and beside the joined `InputError`s past the bound | The report left failures out; the [spm documentation](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/spm#hdr-Reading_a_validation_error) describes the bound |
+| `ErrArtifactTooLarge` | `ValidateArtifact` and `ValidateStrict` of every package, through each `ErrTooMany*` | A profile past a `MaxArtifact*` limit. Every `ErrTooMany*` sentinel matches it with `errors.Is`; it is never returned on its own |
+| `ErrInexactBaseline` | `seccomp.ValidateBaseline`, `apparmor.ValidateBaseline` | A baseline whose intersection with itself differs from it: every merge with it takes away what the message names |
 | `ErrBudgetExceeded` | `apparmor.Intersect`; `landlock.Intersect` and `landlock.Union` | The merge ran past a bound on its own work, not wrapped in an `InputError`; see [Limits](integration.md#limits) |
 | `ErrEmptyPath` | `apparmor`, `landlock`: every validator and merge | A path is the empty string, or for `landlock` one that cleans to `.`, such as `.` or `./` |
 | `ErrNulInPath` | `apparmor`: `ValidateArtifact` and `ValidateStrict`; `landlock`: every validator and merge | A path holds a NUL byte, or in `apparmor` an escape denoting one |
-| `ErrRelativePath` | `apparmor`, `landlock`: `ValidateArtifact` and `ValidateStrict` | A path does not start with `/` |
+| `ErrRelativePath` | `apparmor`, `landlock`: `ValidateArtifact` and `ValidateStrict`; `apparmor.QuotePath` | A path does not start with `/` |
 | `ErrPathTooLong` | `apparmor`, `landlock`: every validator and merge | A path is longer than `MaxPathLen`. It is checked before the path is scanned, and only the count limits of `ValidateArtifact` and `ValidateStrict` run before it. `apparmor` checks every path's length first and, when one is too long, skips the other checks of `Validate` |
 | `ErrDuplicateKey`, `ErrUnknownField`, `ErrMisspelledField`, `ErrInvalidUTF8`, `ErrUnexpectedData`, `ErrNotAnObject` | `UnmarshalStrict` of every package | See [Strict decoding](#strict-decoding) |
 | `ErrMissingField` | `seccomp.UnmarshalStrict` and `landlock.UnmarshalStrict` | See [Strict decoding](#strict-decoding) |
+
+Each `DecodeArtifact` returns what its `UnmarshalStrict` and
+`ValidateArtifact` return.
 
 ### Strict decoding
 
@@ -168,8 +187,9 @@ of problem it finds, naming every member of that kind up to a bound. Every
 message is bounded in length, since the decoder quotes back literals whose
 length the document chooses. The profile it is given is replaced only when
 decoding succeeds.
-Validate the result with `ValidateArtifact` afterwards: strict decoding checks
-the shape of the document, not the profile.
+Validate the result with `ValidateArtifact` afterwards, or call
+`DecodeArtifact`, which does both: strict decoding checks the shape of the
+document, not the profile.
 
 ## seccomp
 
@@ -189,11 +209,14 @@ import "sigs.k8s.io/security-profiles-merger/seccomp"
 | `Intersect` | Merge profiles so that the result permits a call only if every input does: a runtime's merge of an artifact with its baseline |
 | `Union` | Merge profiles so that the result permits a call if any input does: the merge of recorded profiles |
 | `Diff` | Structured diff by the rules a runtime loads, with the running program's architecture implied |
-| `Options.Intersect`, `Options.Union`, `Options.Diff`, `Options.ValidateArtifact`, `Options.ValidateStrict` | The functions of the same name for the node `Options.Arch` names: one whose architecture is not known for the zero value, the running program's for `NativeHost`, which the plain functions assume, or another node's. An unknown `Arch` is `ErrUnknownArch` |
+| `Options.Intersect`, `Options.Union`, `Options.Diff`, `Options.Validate`, `Options.ValidateArtifact`, `Options.ValidateStrict`, `Options.ValidateBaseline`, `Options.DecodeArtifact` | The functions of the same name for the node the options name (see [Validation levels](#validation-levels)): `ForArch`, `ForHost`, which the plain functions are, or `ForAnyArch`. The zero value is `ErrInvalidOptions`, and an architecture `ForArch` names that the package does not know is `ErrUnknownArch` |
+| `ForArch`, `ForHost`, `ForAnyArch` | The `Options` of a node of the named native architecture, of the node the program runs on, and of a node whose architecture is not known |
 | `Validate` | What a runtime needs to load the profile at all; what the merges run on every input |
+| `ValidateBaseline` | The check of a baseline at config load: `Validate`, `Intersect` of the baseline alone and `Diff` against it, `ErrInexactBaseline` when the diff is unequal. Errors of the merge come without an `InputError` |
 | `ValidateArtifact` | `Validate` plus what an artifact needs to load on every runtime: the [limits](#limits), no notify or listener settings, no rules of one syscall with different results outside a safe shape, on the syscall or on a multiplexer that carries it, and no filter in which libseccomp loses the rules of an architecture as written. It does not promise an exact merge: same-result rules outside a safe shape pass it and are still settled (see [Conflicting rules](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Conflicting_rules)) |
 | `ValidateStrict` | `ValidateArtifact` plus duplicate syscall names, `valueTwo` on operators that ignore it, and the listener flags some runtime refuses (`ErrNotifyUnsupported`) |
 | `UnmarshalStrict` | Decode a profile, refusing what `encoding/json` accepts silently (see [Strict decoding](#strict-decoding)) |
+| `DecodeArtifact` | `UnmarshalStrict` then `ValidateArtifact`, returning the profile only when both pass |
 | `Marshal` | Encode a profile as `json.Marshal` does, except that an empty `Flags` list is written as `"flags": []`, which a runtime reads differently from no list ([Flags](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Flags)) |
 | `Clone` | A deep copy of a profile, keeping nil and empty lists apart |
 | `NativeArchitecture` | The seccomp architecture of the running program, from `runtime.GOARCH` |
@@ -201,7 +224,7 @@ import "sigs.k8s.io/security-profiles-merger/seccomp"
 
 ### Types
 
-`Options` with the constant `NativeHost`, and the diff types
+`Options`, whose `String` names its constructor, and the diff types
 (`ProfileDiff`, `ValueDiff[T]`, `SliceDiff[T]`, `SyscallsDiff`,
 `SyscallEntry`, `SyscallChange`, `SyscallDetail`), which are
 documented field by field in the
@@ -224,7 +247,8 @@ error is nil.
 | `ErrEmptySyscallName` | `Validate` and up | A name is the empty string |
 | `ErrUnknownOperator` | `Validate` and up | An argument operator this package does not know |
 | `ErrArgIndexOutOfRange` | `Validate` and up | An argument index above 5 |
-| `ErrUnknownArch`, `ErrUnknownFlag` | `Validate` and up; `ErrUnknownArch` also every `Options` method, for `Options.Arch`, without an `InputError` | An architecture or flag this package does not know |
+| `ErrUnknownArch`, `ErrUnknownFlag` | `Validate` and up; `ErrUnknownArch` also every method that returns an error of an `Options` from `ForArch`, for the architecture it names, without an `InputError` | An architecture or flag this package does not know |
+| `ErrInvalidOptions` | Every `Options` method that returns an error, without an `InputError` | The zero `Options`, which no constructor returns |
 | `ErrUnsupportedSpecField` | `Validate` and up, `Marshal` | A field of the runtime-spec types this package does not read, which a program built against a newer runtime-spec can set and the merge would drop |
 | `ErrNotifyUnsupported` | `Validate` and up | `SCMP_ACT_NOTIFY` as the default action or on `write`, which runc refuses. `ValidateStrict` also returns it, as a portability rule, for `SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV` without an entry that notifies and for `SECCOMP_FILTER_FLAG_TSYNC` next to a `listenerPath`, which crun refuses; the merges accept both and drop the flag from a result that cannot load it |
 | `ErrInvalidUTF8Listener` | `Validate` and up | A `listenerPath` or `listenerMetadata` that is not valid UTF-8, which JSON carries to the runtime as U+FFFD, naming another socket |
@@ -240,11 +264,12 @@ error is nil.
 | `ErrValueTooWide` | `ValidateArtifact`, `ValidateStrict` | A value or mask above 32 bits where the filter covers a 32-bit architecture |
 | `ErrMixedByteOrder` | `ValidateArtifact`, `ValidateStrict`; `Intersect` for a known node, in an `InputError` naming the input | An architecture whose byte order differs from the node's (or, for an unknown node, a list holding both byte orders), which libseccomp refuses with `EDOM` |
 | `ErrConflictingEntries` | `ValidateArtifact`, `ValidateStrict` | Rules of one syscall with different results that a runtime refuses or evaluates in its own order ([Conflicting rules](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Conflicting_rules)) |
-| `ErrTooManyEntriesPerSyscall`, `ErrTooManyRulesPerSyscall`, `ErrTooManyNamesPerEntry`, `ErrTooManyRules`, `ErrTooManyProfileEntries` | `ValidateArtifact`, `ValidateStrict` | A profile past one of the [limits](#limits) |
+| `ErrTooManyEntriesPerSyscall`, `ErrTooManyRulesPerSyscall`, `ErrTooManyNamesPerEntry`, `ErrTooManyRules`, `ErrTooManyEntries` | `ValidateArtifact`, `ValidateStrict` | A profile past one of the [limits](#limits); each matches `ErrArtifactTooLarge` |
 | `ErrDuplicateSyscallName` | `ValidateStrict` | A name in several entries, or twice in one |
 | `ErrUnusedValueTwo` | `ValidateStrict` | `valueTwo` on an operator other than `SCMP_CMP_MASKED_EQ` |
+| `ErrInexactBaseline` | `ValidateBaseline` | See [spm](#spm) |
 | `ErrMoreProblems` | Every validator | See [spm](#spm) |
-| `ErrDuplicateKey`, `ErrUnknownField`, `ErrMisspelledField`, `ErrInvalidUTF8`, `ErrUnexpectedData`, `ErrNotAnObject` | `UnmarshalStrict` | See [Strict decoding](#strict-decoding) |
+| `ErrDuplicateKey`, `ErrUnknownField`, `ErrMisspelledField`, `ErrMissingField`, `ErrInvalidUTF8`, `ErrUnexpectedData`, `ErrNotAnObject` | `UnmarshalStrict`, `DecodeArtifact` | See [Strict decoding](#strict-decoding) |
 
 "`Validate` and up" means `Validate`, `ValidateArtifact` and `ValidateStrict`.
 Every merge input failing `Validate` comes back as an
@@ -255,8 +280,7 @@ Every merge input failing `Validate` comes back as an
 A rule is what a syscall loads, counted the way runtimes add them (one per
 name an entry lists, one per condition when an entry repeats an argument
 index, none for an entry equal to the default). Each error is named after the
-limit it reports, except that the profile-wide entry limit keeps
-`ErrTooManyProfileEntries`.
+limit it reports.
 
 | Constant | Value | Bounds | Error |
 |----------|-------|--------|-------|
@@ -264,7 +288,7 @@ limit it reports, except that the profile-wide entry limit keeps
 | `MaxArtifactRulesPerSyscall` | 256 | Rules one syscall loads | `ErrTooManyRulesPerSyscall` |
 | `MaxArtifactNamesPerEntry` | 1024 | Names one entry carries | `ErrTooManyNamesPerEntry` |
 | `MaxArtifactRules` | 16384 | Rules the whole profile loads | `ErrTooManyRules` |
-| `MaxArtifactEntries` | 16384 | Entries the whole profile holds | `ErrTooManyProfileEntries` |
+| `MaxArtifactEntries` | 16384 | Entries the whole profile holds | `ErrTooManyEntries` |
 
 `ValidateArtifact` and `ValidateStrict` enforce all five, the three on the
 whole profile first and on their own; `Validate` enforces none. Why they
@@ -321,9 +345,12 @@ import "sigs.k8s.io/security-profiles-merger/apparmor"
 | `Validate` | Empty and oversized paths, AppArmor variables, paths listed twice within or across filesystem categories (compared with repeated slashes collapsed and escapes resolved), empty or duplicate capability names. What the merge runs on each input as written, except the duplicates within one list, which it folds |
 | `ValidateArtifact` | `Validate` plus the [limits](#limits-1), checked first and on their own, and what a runtime could not load or would silently drop: relative paths, patterns apparmor_parser rejects, loads with another meaning than they spell, or the matcher cannot use, `.` or `..` components, NUL bytes, characters the lexer does not accept unescaped or that are not printable, capability names outside `[A-Za-z0-9_]` |
 | `ValidateStrict` | `ValidateArtifact` plus capability names outside the known set and duplicate executable or library paths |
+| `ValidateBaseline` | The check of a baseline at config load: `Validate`, `QuotePath` of every path, each one it refuses reported with its list and index, then `Intersect` of the baseline alone and `Diff` against it, `ErrInexactBaseline` when the diff is unequal, as for a pattern apparmor_parser rejects, which the intersection drops |
 | `UnmarshalStrict` | Decode a profile, refusing what `encoding/json` accepts silently; see [strict decoding](#strict-decoding) |
+| `DecodeArtifact` | `UnmarshalStrict` then `ValidateArtifact`, returning the profile only when both pass |
 | `Diff` | Structured diff, comparing what AppArmor loads from the two profiles. A nil profile is an `InputError` naming it, wrapping `ErrNilProfile` |
 | `IsGlobPattern` | Whether a path holds glob syntax, including syntax apparmor_parser rejects |
+| `QuotePath` | A path spelled as one token of a rendered file rule, naming what the merge reads it as: syntax the lexer reads escaped, a comma escaped only where it ends the path, characters that do not print as themselves as `\x` escapes. `ErrRelativePath` for a path not starting with `/`, which rendered at the start of a rule can read as another rule (`ptrace`) or a comment (`#x`), `ErrUnquotablePath` where no such spelling exists, `ErrEmptyPath` for an empty path |
 
 ### Types
 
@@ -359,9 +386,9 @@ name it and on `ErrNilProfile`, `ErrEmptyPath`, `ErrPathTooLong` and
 | `ErrInvalidGlob` | `ValidateArtifact`, `ValidateStrict` | A pattern apparmor_parser rejects, or a class form it translates into something else; the merge treats it as matching nothing, except a class opened by an escaped `^` (`[\^x]`), which the parser negates and the merge matches as negated |
 | `ErrGlobTooComplex` | `ValidateArtifact`, `ValidateStrict` | A pattern past the matcher's limits (100 alternatives in total), which never matches |
 | `ErrDotComponent` | `ValidateArtifact`, `ValidateStrict` | A `.` or `..` component, which matches nothing |
-| `ErrUnquotablePath` | `ValidateArtifact`, `ValidateStrict` | A character the lexer does not accept unescaped, which lets a consumer rendering the profile write rules of the author's choosing, or one that does not print as itself (a C0 control, DEL, what `strconv.IsPrint` refuses, such as U+0085 or U+2028, or a blank such as U+3164), which a consumer rendering or logging the profile writes out raw or shows as another path |
+| `ErrUnquotablePath` | `ValidateArtifact`, `ValidateStrict`, `QuotePath` | A character the lexer does not accept unescaped, which lets a consumer rendering the profile write rules of the author's choosing, or one that does not print as itself (a C0 control, DEL, what `strconv.IsPrint` refuses, such as U+0085 or U+2028, or a blank such as U+3164), which a consumer rendering or logging the profile writes out raw or shows as another path |
 | `ErrInvalidCapabilityName` | `ValidateArtifact`, `ValidateStrict` | A capability name outside `[A-Za-z0-9_]` |
-| `ErrTooManyPaths`, `ErrTooManyPatternBytes`, `ErrTooManyCapabilities` | `ValidateArtifact`, `ValidateStrict`, first and on their own | A [limit](#limits-1) is exceeded |
+| `ErrTooManyPaths`, `ErrTooManyPatternBytes`, `ErrTooManyCapabilities` | `ValidateArtifact`, `ValidateStrict`, first and on their own | A [limit](#limits-1) is exceeded; each matches `ErrArtifactTooLarge` |
 | `ErrUnknownCapability` | `ValidateStrict` | A capability name outside the known set |
 | `ErrDuplicateExecutablePath` | `ValidateStrict` | A path is listed twice in `AllowedExecutables` or `AllowedLibraries` |
 
@@ -384,10 +411,12 @@ give the reasoning.
 
 Each bullet names a section of the package documentation:
 
-- [Scope](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#hdr-Scope): exec transition modes and deny rules
-  are not modeled; do not map a profile holding deny rules onto `Profile`.
-- [Capability names](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#hdr-Capability_names): results are
-  upper-cased, and apparmor_parser accepts only lower case.
+- [Scope](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#hdr-Scope): exec transition modes, deny rules
+  and the `priority=` qualifier are not modeled; do not map a profile
+  holding deny rules or priorities onto `Profile`.
+- [Capability names](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#hdr-Capability_names): compared
+  ignoring ASCII case, and results are lower-cased, as apparmor_parser
+  takes them.
 - [Glob patterns](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#hdr-Glob_patterns): globs mean what
   apparmor_parser makes of them, matched on bytes.
 - [Path spelling](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#hdr-Path_spelling): two spellings of one
@@ -425,19 +454,21 @@ import "sigs.k8s.io/security-profiles-merger/landlock"
 | `Validate` | Known rights and valid paths: no empty paths, paths over `MaxPathLen`, NUL bytes or `..` components. What the merge runs on each input; duplicate rules and rights pass, as the kernel and the merge fold them |
 | `ValidateArtifact` | `Validate` plus the [limit](#limits-2), checked first and on its own, and what a kernel could not load: relative paths, paths ending in `/` or `/.`, rules granting an unhandled right or no right, a ruleset that handles and scopes nothing; and paths that are not valid UTF-8, which JSON cannot carry |
 | `ValidateStrict` | `ValidateArtifact` plus duplicate rules and rights, which no other validator reports |
-| `Options.Validate`, `Options.ValidateArtifact`, `Options.ValidateStrict` | The validator of the same name plus the rights the ABI version `Options.ABI` names does not know, in one report. A version newer than `LatestABIVersion` is read as `LatestABIVersion`, and one below `ABIV1`, 0 included, is `ErrUnknownABIVersion` |
+| `Options.Validate`, `Options.ValidateArtifact`, `Options.ValidateStrict`, `Options.DecodeArtifact` | The function of the same name plus the rights the ABI version `Options.ABI` names does not know, in one report. A version newer than `LatestABIVersion` is read as `LatestABIVersion`, and one below `ABIV1`, 0 included, is `ErrUnknownABIVersion` |
 | `RequiredABIVersion` | The lowest ABI version supporting every right a profile uses, after `Validate` |
 | `FSAccessRights`, `NetAccessRights`, `ScopeRights` | Every right this package knows, each with the ABI version that introduced it |
 | `Options.Downgrade` | A copy of a profile without the rights the ABI version `Options.ABI` names does not support. Another policy than the profile: a right dropped from a handled set is no longer restricted, and at `ABIV1` the moves a `refer` grant allowed are denied |
-| `LoweredRulePaths` | The rule paths of a result that carry access an input granted only on an ancestor path, after `Validate` of the result and of every input. An input that is nil or fails is an `InputError` whose `Index` is its position among the inputs, so the baseline of `LoweredRulePaths(effective, baseline, artifact)` is 0, as in `Intersect`; a result that is nil or fails is an error prefixed `result: `, not an `InputError`. Without inputs it returns nil |
+| `LoweredRulePaths` | The rule paths of a result that carry access an input granted only on an ancestor path, after `Validate` of the result and of every input. An input that is nil or fails is an `InputError` whose `Index` is its position among the inputs, so the baseline of `LoweredRulePaths(effective, baseline, artifact)` is 0, as in `Intersect`; a result that is nil or fails is a `*ResultError`, not an `InputError`. Without inputs it returns nil |
 | `UnmarshalStrict` | Decode a profile, refusing what `encoding/json` accepts silently; see [strict decoding](#strict-decoding) |
+| `DecodeArtifact` | `UnmarshalStrict` then `ValidateArtifact`, returning the profile only when both pass; `Options.DecodeArtifact` checks the ABI version too |
 | `Diff` | Structured diff of the cleaned rules as written, not of the access they grant. A nil profile is an `InputError` naming it, wrapping `ErrNilProfile` |
 
 ### Types
 
-The types are `Profile`, `Options`, the access rights (`FSAccessRight`,
-`NetAccessRight`, `ScopeRight`), `PathRule`, `NetRule`, `ABIVersion` with the
-constants `ABIV1` to `ABIV11` and `LatestABIVersion`, and the diff types
+The types are `Profile`, `Options`, `ResultError`, the access rights
+(`FSAccessRight`, `NetAccessRight`, `ScopeRight`), `PathRule`, `NetRule`,
+`ABIVersion` with the constants `ABIV1` to `ABIV11` and `LatestABIVersion`,
+and the diff types
 (`ProfileDiff`, `SliceDiff[T]`, `PathRulesDiff`, `PathRuleChange`,
 `NetRulesDiff`, `NetRuleChange`). The access rights mirror the Landlock UAPI,
 and each names the ABI version that introduced it. `*Profile`, `PathRule`,
@@ -466,7 +497,7 @@ its budget, and otherwise only on the rows that name it and on
 | `ErrInvalidUTF8Path` | `ValidateArtifact`, `ValidateStrict` | A path is not valid UTF-8, which the JSON form of a profile cannot carry; `Validate` and the merge accept it |
 | `ErrEmptyRule` | `ValidateArtifact`, `ValidateStrict` | A rule grants no right, which the kernel rejects (`ENOMSG`); the merge drops it |
 | `ErrEmptyRuleset` | `ValidateArtifact`, `ValidateStrict` | The ruleset handles and scopes nothing, which the kernel refuses (`ENOMSG`); apply no ruleset instead |
-| `ErrTooManyRules` | `ValidateArtifact`, `ValidateStrict`, first and on its own | The [limit](#limits-2) is exceeded |
+| `ErrTooManyRules` | `ValidateArtifact`, `ValidateStrict`, first and on its own | The [limit](#limits-2) is exceeded; it matches `ErrArtifactTooLarge` |
 | `ErrDuplicateRule` | `ValidateStrict` | More than one rule for a path (after cleaning) or port |
 | `ErrDuplicateRight` | `ValidateStrict` | A right is repeated in a handled set, scoped set or rule |
 | `ErrUnsupportedABIRight` | The `Options` validators | A right the ABI version they name does not know (`EINVAL`) |

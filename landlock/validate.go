@@ -54,7 +54,7 @@ var (
 	ErrPathTooLong = spm.ErrPathTooLong
 	// ErrTooManyRules is returned by ValidateArtifact and ValidateStrict
 	// when a profile holds more than MaxArtifactRules rules.
-	ErrTooManyRules = errors.New("too many rules")
+	ErrTooManyRules = merge.LimitError("too many rules")
 
 	// ErrParentPath is returned when a path rule contains a ".." component.
 	// The kernel resolves ".." against the file system, where a symlink can
@@ -200,10 +200,11 @@ func rulePath(rules string, idx int, member string) string {
 // folds them and so does the merge. ValidateArtifact adds what a kernel
 // could not load and ValidateStrict adds the duplicate checks, so what
 // Validate rejects ValidateArtifact rejects, and what ValidateArtifact
-// rejects ValidateStrict rejects. Failures are collected and returned
-// together, up to 32: past that the error lists the first 32 and a count of
-// the rest and matches ErrMoreProblems, so a sentinel a profile violates
-// can be absent from the error that reports it.
+// rejects ValidateStrict rejects.
+//
+// Failures are collected into one bounded report, which matches
+// ErrMoreProblems when it left some out; see Reading a validation error in
+// the spm package documentation.
 func Validate(profile *Profile) error {
 	_, err := validateProfile(profile, tierMerge)
 
@@ -627,6 +628,13 @@ func highestABI[T ~string](rights []T, table map[T]ABIVersion) ABIVersion {
 // ErrUnknownABIVersion, so that a runtime whose probe of the kernel failed
 // and left the version at 0 does not pass every profile. A kernel without
 // Landlock reports no version at all; such a node applies no ruleset.
+//
+// Options has a method for every validator and for every other operation
+// whose result depends on the ABI version: Validate, ValidateArtifact,
+// ValidateStrict, DecodeArtifact and Downgrade. The merges, Diff and
+// LoweredRulePaths do not depend on it and have no method; check a merge
+// result with Validate of the options instead. RequiredABIVersion asks the
+// question the other way round.
 type Options struct {
 	// ABI is the version the kernel reports, as
 	// landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)
@@ -660,6 +668,31 @@ func (o Options) ValidateArtifact(profile *Profile) error {
 // version does not support, as Validate of the options does.
 func (o Options) ValidateStrict(profile *Profile) error {
 	return o.validate(profile, tierStrict)
+}
+
+// DecodeArtifact decodes an artifact with UnmarshalStrict and checks it
+// with ValidateArtifact of the options, so that an artifact carrying a
+// right the node's kernel does not know is refused with the rest. It
+// returns the profile only when both pass.
+func (o Options) DecodeArtifact(data []byte) (*Profile, error) {
+	err := o.checkABI()
+	if err != nil {
+		return nil, err
+	}
+
+	var artifact Profile
+
+	err = UnmarshalStrict(data, &artifact)
+	if err != nil {
+		return nil, err
+	}
+
+	err = o.ValidateArtifact(&artifact)
+	if err != nil {
+		return nil, err
+	}
+
+	return &artifact, nil
 }
 
 // Downgrade returns a copy of the profile without the access rights the ABI

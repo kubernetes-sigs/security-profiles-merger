@@ -37,10 +37,10 @@
   },
   "capability": {
     "allowedCapabilities": [
-      "CHOWN",
-      "NET_ADMIN",
-      "SETUID",
-      "SYS_TIME"
+      "chown",
+      "net_admin",
+      "setuid",
+      "sys_time"
     ]
   }
 }

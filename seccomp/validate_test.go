@@ -53,7 +53,7 @@ func (set validatorSet) validators(arch specs.Arch) []namedValidator {
 	artifact, strict, prefix := seccomp.ValidateArtifact, seccomp.ValidateStrict, ""
 
 	if arch != "" {
-		options := seccomp.Options{Arch: arch}
+		options := seccomp.ForArch(arch)
 		artifact, strict = options.ValidateArtifact, options.ValidateStrict
 		prefix = "Options{" + string(arch) + "}."
 	}
@@ -634,8 +634,9 @@ func artifactCases() []validatorCase {
 					filtered(syscallRead, specs.ActAllow), filtered(syscallWrite, specs.ActTrace),
 				},
 			},
-			// On a node of the byte order of the architectures listed.
-			arch:    littleEndianNode().Arch,
+			// On a node of the byte order of the architectures listed: the
+			// plain validators on a little-endian host, x86-64 elsewhere.
+			arch:    littleEndianArch(),
 			accepts: byArtifact,
 		},
 		{
@@ -1300,7 +1301,7 @@ func TestValidateArtifactMemoryAtTheLimits(t *testing.T) {
 	var err error
 
 	allocated := testutil.AllocatedBytes(func() {
-		err = seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(profile)
+		err = seccomp.ForArch(specs.ArchX86_64).ValidateArtifact(profile)
 	})
 
 	if err != nil {
@@ -1323,7 +1324,7 @@ func TestValidateArtifactMemoryAtTheLimits(t *testing.T) {
 func TestValidateArtifactReportsLostRules(t *testing.T) {
 	t.Parallel()
 
-	aarch64 := seccomp.Options{Arch: specs.ArchAARCH64}
+	aarch64 := seccomp.ForArch(specs.ArchAARCH64)
 
 	profile := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
@@ -1428,8 +1429,8 @@ func TestValidateArtifactByteOrder(t *testing.T) {
 	}
 
 	for name, check := range map[string]func(*specs.LinuxSeccomp) error{
-		"ValidateArtifact": seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact,
-		"ValidateStrict":   seccomp.Options{Arch: specs.ArchX86_64}.ValidateStrict,
+		"ValidateArtifact": seccomp.ForArch(specs.ArchX86_64).ValidateArtifact,
+		"ValidateStrict":   seccomp.ForArch(specs.ArchX86_64).ValidateStrict,
 	} {
 		err := check(profile)
 		if !errors.Is(err, seccomp.ErrMixedByteOrder) {
@@ -1446,7 +1447,7 @@ func TestValidateArtifactByteOrder(t *testing.T) {
 	}
 
 	// On a big-endian node the little-endian one is the foreign one.
-	err := seccomp.Options{Arch: specs.ArchS390X}.ValidateArtifact(profile)
+	err := seccomp.ForArch(specs.ArchS390X).ValidateArtifact(profile)
 
 	want := `architectures[0]: "SCMP_ARCH_AARCH64": architecture of another byte order ` +
 		`(little-endian, native SCMP_ARCH_S390X is big-endian)`
@@ -1475,7 +1476,7 @@ func TestValidateArtifactByteOrderForUnknownNode(t *testing.T) {
 		{specs.ArchS390X, specs.ArchX86, specs.ArchX86_64},
 		{specs.ArchX86, specs.ArchS390X, specs.ArchX86_64},
 	} {
-		err := seccomp.Options{Arch: ""}.ValidateArtifact(&specs.LinuxSeccomp{
+		err := seccomp.ForAnyArch().ValidateArtifact(&specs.LinuxSeccomp{
 			DefaultAction: specs.ActErrno,
 			Architectures: archs,
 		})
@@ -1484,7 +1485,7 @@ func TestValidateArtifactByteOrderForUnknownNode(t *testing.T) {
 		}
 	}
 
-	err := seccomp.Options{Arch: ""}.ValidateArtifact(&specs.LinuxSeccomp{
+	err := seccomp.ForAnyArch().ValidateArtifact(&specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
 		Architectures: []specs.Arch{specs.ArchS390X, specs.ArchPPC64},
 	})
@@ -1499,7 +1500,7 @@ func TestValidateArtifactByteOrderForUnknownNode(t *testing.T) {
 func TestValidateArtifactReportsForeignArchitectureOnce(t *testing.T) {
 	t.Parallel()
 
-	err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(&specs.LinuxSeccomp{
+	err := seccomp.ForArch(specs.ArchX86_64).ValidateArtifact(&specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
 		Architectures: []specs.Arch{specs.ArchS390X, specs.ArchX86_64, specs.ArchS390X},
 	})
@@ -1531,13 +1532,13 @@ func TestValidateTraceMessageRange(t *testing.T) {
 	}
 
 	for _, ret := range []uint{4095, 5000, 65535} {
-		err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateStrict(traced(ret))
+		err := seccomp.ForArch(specs.ArchX86_64).ValidateStrict(traced(ret))
 		if err != nil {
 			t.Errorf("SCMP_ACT_TRACE with message %d should validate: %v", ret, err)
 		}
 	}
 
-	err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(traced(65536))
+	err := seccomp.ForArch(specs.ArchX86_64).ValidateArtifact(traced(65536))
 	if !errors.Is(err, seccomp.ErrErrnoOutOfRange) {
 		t.Fatalf("expected ErrErrnoOutOfRange, got: %v", err)
 	}
@@ -1564,7 +1565,7 @@ func TestValidateTraceMessageRange(t *testing.T) {
 func TestValidateArtifactKeepsRulesThatApplyNowhere(t *testing.T) {
 	t.Parallel()
 
-	x86_64 := seccomp.Options{Arch: specs.ArchX86_64}
+	x86_64 := seccomp.ForArch(specs.ArchX86_64)
 
 	socket := profileOf(specs.ActAllow,
 		filtered("socketcall", specs.ActErrno),
@@ -1626,7 +1627,7 @@ func TestValidateArtifactKeepsRulesThatApplyNowhere(t *testing.T) {
 func TestValidateArtifactJudgesLostRulesAsWritten(t *testing.T) {
 	t.Parallel()
 
-	aarch64 := seccomp.Options{Arch: specs.ArchAARCH64}
+	aarch64 := seccomp.ForArch(specs.ArchAARCH64)
 
 	profile := profileOf(specs.ActErrno,
 		filtered("socket", specs.ActAllow, arg(0, specs.OpEqualTo, 2), arg(1, specs.OpEqualTo, 1)),
@@ -1666,7 +1667,7 @@ func TestValidateArtifactJudgesLostRulesAsWritten(t *testing.T) {
 func TestValidateArtifactReportsLostRulesOfRepeatedIndices(t *testing.T) {
 	t.Parallel()
 
-	aarch64 := seccomp.Options{Arch: specs.ArchAARCH64}
+	aarch64 := seccomp.ForArch(specs.ArchAARCH64)
 
 	socket := filtered("socket", specs.ActAllow, arg(0, specs.OpGreaterEqual, 40))
 
@@ -1749,7 +1750,7 @@ func TestValidateMessages(t *testing.T) {
 		{
 			// The failures only the artifact and strict checks report.
 			name:     "ValidateStrict of the artifact checks",
-			validate: seccomp.Options{Arch: specs.ArchX86_64}.ValidateStrict,
+			validate: seccomp.ForArch(specs.ArchX86_64).ValidateStrict,
 			profile: &specs.LinuxSeccomp{
 				DefaultAction:   specs.ActErrno,
 				DefaultErrnoRet: &big,

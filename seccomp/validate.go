@@ -77,14 +77,16 @@ var (
 	// ErrUnknownArch is returned when a profile contains an unrecognized
 	// architecture.
 	ErrUnknownArch = errors.New("unknown architecture")
-	// ErrDuplicateArch is returned when the same architecture appears
-	// more than once.
+	// ErrDuplicateArch is returned by ValidateArtifact and ValidateStrict
+	// when the same architecture appears more than once. Validate and the
+	// merges accept a repeated architecture, which a runtime loads once.
 	ErrDuplicateArch = errors.New("duplicate architecture")
 	// ErrUnknownFlag is returned when a profile contains an unrecognized
 	// seccomp flag.
 	ErrUnknownFlag = errors.New("unknown seccomp flag")
-	// ErrDuplicateFlag is returned when the same flag appears more than
-	// once.
+	// ErrDuplicateFlag is returned by ValidateArtifact and ValidateStrict
+	// when the same flag appears more than once. Validate and the merges
+	// accept a repeated flag, which a runtime sets once.
 	ErrDuplicateFlag = errors.New("duplicate seccomp flag")
 	// ErrNotifyNotAllowed is returned by ValidateArtifact and ValidateStrict
 	// when a profile uses SCMP_ACT_NOTIFY, which needs a listener that an
@@ -105,7 +107,7 @@ var (
 	// ErrTooManyEntriesPerSyscall is returned by ValidateArtifact and
 	// ValidateStrict when one syscall name appears in more than
 	// MaxArtifactEntriesPerSyscall entries.
-	ErrTooManyEntriesPerSyscall = errors.New("too many entries for syscall")
+	ErrTooManyEntriesPerSyscall = merge.LimitError("too many entries for syscall")
 	// ErrErrnoOutOfRange is returned by ValidateArtifact and ValidateStrict
 	// when errnoRet or defaultErrnoRet holds a value libseccomp refuses for
 	// its action: 4095 or above on SCMP_ACT_ERRNO, where 4095 is the
@@ -139,18 +141,18 @@ var (
 	// ErrTooManyRulesPerSyscall is returned by ValidateArtifact and
 	// ValidateStrict when one syscall loads more than
 	// MaxArtifactRulesPerSyscall rules.
-	ErrTooManyRulesPerSyscall = errors.New("too many rules for syscall")
+	ErrTooManyRulesPerSyscall = merge.LimitError("too many rules for syscall")
 	// ErrTooManyNamesPerEntry is returned by ValidateArtifact and
 	// ValidateStrict when one syscall entry carries more than
 	// MaxArtifactNamesPerEntry names.
-	ErrTooManyNamesPerEntry = errors.New("too many syscall names in entry")
+	ErrTooManyNamesPerEntry = merge.LimitError("too many syscall names in entry")
 	// ErrTooManyRules is returned by ValidateArtifact and ValidateStrict
 	// when the profile as a whole loads more than MaxArtifactRules rules.
-	ErrTooManyRules = errors.New("too many rules in profile")
-	// ErrTooManyProfileEntries is returned by ValidateArtifact and
+	ErrTooManyRules = merge.LimitError("too many rules in profile")
+	// ErrTooManyEntries is returned by ValidateArtifact and
 	// ValidateStrict when a profile holds more than MaxArtifactEntries
 	// syscall entries.
-	ErrTooManyProfileEntries = errors.New("too many syscall entries in profile")
+	ErrTooManyEntries = merge.LimitError("too many syscall entries in profile")
 	// ErrValueTooWide is returned by ValidateArtifact and ValidateStrict
 	// when an argument condition compares against a value or mask above 32
 	// bits while the filter covers a 32-bit architecture: one the profile
@@ -218,14 +220,16 @@ const MaxArtifactNamesPerEntry = 1024
 const MaxArtifactRules = 16384
 
 // MaxArtifactEntries bounds how many syscall entries a profile accepted by
-// ValidateArtifact may hold, which reports ErrTooManyProfileEntries past
-// it.
-// An entry that loads anything loads at least one rule, so an artifact
-// within MaxArtifactRules needs no more entries than that. Only entries
-// that load nothing can exceed it, such as entries equal to the default or
-// without names, and each costs every check a step of its own: a document of
-// a few megabytes holds millions of "{}".
-const MaxArtifactEntries = MaxArtifactRules
+// ValidateArtifact may hold, which reports ErrTooManyEntries past it.
+//
+// It bounds the work of the checks rather than of the merge: every check
+// visits every entry, and an entry that loads nothing, such as one equal to
+// the default or one without names, adds no rule for MaxArtifactRules to
+// count, while a document of a few megabytes holds millions of "{}". An
+// entry that loads anything loads at least one rule, so the value matches
+// MaxArtifactRules and refuses no artifact that limit admits, but the two
+// are separate limits and may change separately.
+const MaxArtifactEntries = 16384
 
 // MaxArtifactRulesPerSyscall bounds how many rules one syscall may load in
 // a profile accepted by ValidateArtifact, which reports
@@ -259,9 +263,9 @@ const MaxArtifactRulesPerSyscall = 256
 // Intersect and Union run on every input, so callers that want to report
 // all problems up front can call it themselves.
 //
-// Failures are collected and returned together, up to a bound: past it the
-// error matches ErrMoreProblems instead of listing the rest, so a sentinel
-// a profile violates can be absent from the error that reports it.
+// Failures are collected into one bounded report, which matches
+// ErrMoreProblems when it left some out; see Reading a validation error in
+// the spm package documentation.
 //
 // Validate enforces none of the MaxArtifact limits and does not range-check
 // errno values (see the Errno values section of the package documentation);
@@ -505,7 +509,7 @@ func invalidNameError(idx, nameIdx int, name string) error {
 // Its result depends on the native architecture of the running program, as
 // that of ValidateArtifact does; Options.ValidateStrict names another.
 func ValidateStrict(profile *specs.LinuxSeccomp) error {
-	return Options{Arch: NativeHost}.ValidateStrict(profile)
+	return ForHost().ValidateStrict(profile)
 }
 
 // strictChecks returns the checks ValidateStrict runs besides Validate, for
@@ -523,57 +527,38 @@ func strictChecks(native specs.Arch) []profileCheck {
 //
 //   - duplicate architectures and flags (ErrDuplicateArch,
 //     ErrDuplicateFlag);
-//   - errno values of 4095 or above on SCMP_ACT_ERRNO and trace messages
-//     above 65535 on SCMP_ACT_TRACE, which libseccomp refuses
-//     (ErrErrnoOutOfRange), and errnoRet or defaultErrnoRet on any other
-//     action (ErrUnusedErrnoRet), which runc ignores but crun refuses;
-//   - SCMP_ACT_NOTIFY (ErrNotifyNotAllowed) and the listener settings
-//     listenerPath, listenerMetadata and
-//     SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (ErrListenerNotAllowed), which
-//     belong to the node-local listener;
+//   - errno values libseccomp refuses (ErrErrnoOutOfRange) and an errno on
+//     an action that ignores it, which crun refuses (ErrUnusedErrnoRet);
+//   - SCMP_ACT_NOTIFY and the listener settings, which belong to the node
+//     (ErrNotifyNotAllowed, ErrListenerNotAllowed);
 //   - syscall names holding a control character or not valid UTF-8
 //     (ErrInvalidSyscallName);
-//   - an architecture whose byte order differs from that of the native
-//     architecture of the running program, which libseccomp does not
-//     combine with it in one filter (ErrMixedByteOrder);
-//   - a condition against a value or mask above 32 bits when the filter
-//     covers a 32-bit architecture, one the profile lists or the native
-//     architecture of the running program (ErrValueTooWide);
-//   - a profile past MaxArtifactEntries, MaxArtifactNamesPerEntry or
-//     MaxArtifactRules (ErrTooManyProfileEntries, ErrTooManyNamesPerEntry,
-//     ErrTooManyRules), which are checked before anything else and
-//     reported on their own, since every other check costs a step per entry
-//     or name;
-//   - a profile past MaxArtifactEntriesPerSyscall or
-//     MaxArtifactRulesPerSyscall (ErrTooManyEntriesPerSyscall,
-//     ErrTooManyRulesPerSyscall);
-//   - rules of one syscall with different results where the filter of one
-//     is equal to or wider than the other's, or where the conditional rules
-//     do not form a safe shape (ErrConflictingEntries);
+//   - an architecture of another byte order than the native one
+//     (ErrMixedByteOrder), and a value above 32 bits where the filter
+//     covers a 32-bit architecture (ErrValueTooWide);
+//   - a profile past a MaxArtifact limit (ErrTooManyEntries,
+//     ErrTooManyNamesPerEntry, ErrTooManyRules, checked first and on their
+//     own, and ErrTooManyEntriesPerSyscall, ErrTooManyRulesPerSyscall);
+//     each matches ErrArtifactTooLarge;
+//   - rules of one syscall with different results that a runtime refuses
+//     or evaluates in its own order (ErrConflictingEntries);
 //   - a filter in which libseccomp loses the rules of a covered
-//     architecture (ErrLostRules) when a runtime loads the profile as
-//     written. The merges settle the shapes of the rules first, which can
-//     remove that, so Intersect and Union may accept such a profile.
+//     architecture as written (ErrLostRules), which the merges may settle
+//     and accept.
 //
-// The per-syscall rule count, the conflict checks and the lost-rules check
-// run only when Validate passes.
+// It allows duplicate syscall names and ignores valueTwo where runtimes
+// ignore it. Failures are collected and bounded as Validate bounds them. A
+// profile that passes may still hold rules libseccomp evaluates in its own
+// order, so a runtime loads the result of intersecting it with its
+// baseline rather than the artifact itself; DecodeArtifact decodes and
+// checks an artifact in one call.
 //
-// It allows duplicate syscall names, which the OCI runtime-spec permits and
-// the merges handle, and ignores valueTwo where runtimes ignore it. Failures
-// are collected and bounded as Validate bounds them.
-//
-// A profile that passes may still hold rules libseccomp evaluates in its
-// own order or refuses on a multiplexing architecture, so runtimes should
-// load the result of intersecting it with their baseline rather than the
-// artifact itself. See the Conflicting rules, Cost bounds and Architectures
-// sections of the package documentation.
-//
-// What it reports depends on the native architecture of the running program
-// (ErrValueTooWide, ErrMixedByteOrder, ErrLostRules and the conflicts on a
-// multiplexer), so run it on the node that loads the result, or name that
-// node's architecture with Options.ValidateArtifact.
+// What it reports depends on the native architecture of the running
+// program, so run it on the node that loads the result, or name that node
+// with Options.ValidateArtifact. See the Conflicting rules, Cost bounds and
+// Architectures sections of the package documentation.
 func ValidateArtifact(profile *specs.LinuxSeccomp) error {
-	return Options{Arch: NativeHost}.ValidateArtifact(profile)
+	return ForHost().ValidateArtifact(profile)
 }
 
 // artifactChecks returns the checks ValidateArtifact runs besides Validate,
@@ -848,7 +833,7 @@ func validateProfileSize(profile *specs.LinuxSeccomp) error {
 		return fmt.Errorf(
 			"syscalls: %d entries: %w (max %d)",
 			entries,
-			ErrTooManyProfileEntries,
+			ErrTooManyEntries,
 			MaxArtifactEntries,
 		)
 	}
