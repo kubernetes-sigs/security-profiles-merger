@@ -26,8 +26,9 @@ import (
 // UnmarshalStrict for a document encoding/json would decode without a word:
 // one repeating a member, holding a member no field reads, holding a member
 // that names a field only ignoring case, leaving out the port of a network
-// rule or the path of a path rule, holding a byte the decoder replaces, followed by more data, or not
-// an object at all, such as null. See the spm package for each.
+// rule or the path of a path rule, holding a byte the decoder replaces,
+// followed by more data, or not an object at all, such as null. See the spm
+// package for each.
 var (
 	ErrDuplicateKey    = spm.ErrDuplicateKey
 	ErrUnknownField    = spm.ErrUnknownField
@@ -65,6 +66,10 @@ var (
 // given only when decoding succeeds: a member the document omits is zero in
 // the result, whatever the given Profile held, and an error leaves it as it
 // was.
+//
+// Decoding holds many times the size of data in heap, so bound the size of
+// an untrusted document before passing it here; the Limits section of
+// docs/integration.md gives the figures.
 func UnmarshalStrict(data []byte, profile *Profile) error {
 	if profile == nil {
 		return ErrNilProfile

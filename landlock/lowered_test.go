@@ -19,6 +19,7 @@ package landlock_test
 import (
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"sigs.k8s.io/security-profiles-merger/landlock"
@@ -217,32 +218,70 @@ func TestLoweredRulePaths(t *testing.T) {
 			t.Errorf("%s: LoweredRulePaths = %v, want %v", name, got, test.want)
 		}
 	}
+}
 
-	// A nil or invalid result or input is reported, an input by its index
-	// among the inputs, as a merge reports it.
-	_, err := landlock.LoweredRulePaths(nil, fsProfile(read))
-	if !errors.Is(err, landlock.ErrNilProfile) {
-		t.Errorf("LoweredRulePaths(nil) = %v, want ErrNilProfile", err)
+// TestLoweredRulePathsResultErrors checks that a bad result is reported
+// on its own and not as an InputError, so that a caller dispatching on
+// InputError never blames an input for it.
+func TestLoweredRulePathsResultErrors(t *testing.T) {
+	t.Parallel()
+
+	read := fsRights{landlock.FSAccessReadFile}
+
+	for _, testCase := range []struct {
+		name   string
+		result *landlock.Profile
+		want   error
+	}{
+		{name: "nil result", result: nil, want: landlock.ErrNilProfile},
+		{
+			name:   "invalid result",
+			result: fsProfile(fsRights{"bogus"}),
+			want:   landlock.ErrUnknownRight,
+		},
+	} {
+		// A bad input as well is not reported: the result comes first.
+		_, err := landlock.LoweredRulePaths(testCase.result, fsProfile(read), nil)
+
+		var inputErr *landlock.InputError
+		if !errors.Is(err, testCase.want) || errors.As(err, &inputErr) ||
+			!strings.HasPrefix(err.Error(), "result: ") {
+			t.Errorf("%s: LoweredRulePaths = %v, want a result error wrapping %v",
+				testCase.name, err, testCase.want)
+		}
 	}
+}
 
-	_, err = landlock.LoweredRulePaths(fsProfile(read), nil)
-	if !errors.Is(err, landlock.ErrNilProfile) {
-		t.Errorf("LoweredRulePaths(result, nil) = %v, want ErrNilProfile", err)
-	}
+// TestLoweredRulePathsInputErrors checks that a bad input is an InputError
+// numbered among the inputs, as Intersect numbers it, so inputs[0] is
+// Index 0, and that every failing input is reported in input order.
+func TestLoweredRulePathsInputErrors(t *testing.T) {
+	t.Parallel()
 
-	_, err = landlock.LoweredRulePaths(
-		fsProfile(read),
-		fsProfile(read),
-		fsProfile(fsRights{"bogus"}),
-	)
+	read := fsRights{landlock.FSAccessReadFile}
+
+	_, err := landlock.LoweredRulePaths(fsProfile(read), fsProfile(fsRights{"bogus"}))
 
 	var inputErr *landlock.InputError
-	if !errors.As(err, &inputErr) || inputErr.Index != 1 ||
+	if !errors.As(err, &inputErr) || inputErr.Index != 0 ||
 		!errors.Is(err, landlock.ErrUnknownRight) {
-		t.Errorf(
-			"LoweredRulePaths(unknown right in input 1) = %v, want an InputError for input 1",
-			err,
-		)
+		t.Errorf("LoweredRulePaths(valid, invalid) = %v, want an InputError for input 0", err)
+	}
+
+	_, err = landlock.LoweredRulePaths(fsProfile(read), nil, fsProfile(read), nil)
+
+	var joined interface{ Unwrap() []error }
+	if !errors.As(err, &joined) || len(joined.Unwrap()) != 2 {
+		t.Fatalf("LoweredRulePaths(valid, nil, valid, nil) = %v, want two InputErrors", err)
+	}
+
+	for idx, wantIndex := range []int{0, 2} {
+		got := joined.Unwrap()[idx]
+		if !errors.As(got, &inputErr) || inputErr.Index != wantIndex ||
+			!errors.Is(got, landlock.ErrNilProfile) {
+			t.Errorf("LoweredRulePaths(valid, nil, valid, nil) failure %d = %v, "+
+				"want an InputError for input %d wrapping ErrNilProfile", idx, got, wantIndex)
+		}
 	}
 }
 

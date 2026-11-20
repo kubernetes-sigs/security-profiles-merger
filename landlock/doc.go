@@ -324,4 +324,9 @@ limitations under the License.
 // arguments, except UnmarshalStrict, which replaces the profile it is given
 // when decoding succeeds, so concurrent calls only need their profiles not
 // to be written to at the same time from elsewhere.
+//
+// What [Intersect], [Union], [Diff], [Options.Downgrade] and [Profile.Clone]
+// return shares no memory with their arguments, also for a single input, so
+// it is the caller's to keep or modify without affecting the inputs, and
+// modifying an input later leaves the result as it was.
 package landlock

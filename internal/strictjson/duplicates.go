@@ -17,7 +17,8 @@ limitations under the License.
 // Package strictjson finds what encoding/json accepts silently and an
 // artifact must not carry: members repeated within one object, members the
 // target type has no field for, members that name a field only ignoring
-// case, bytes that are not valid UTF-8, and data behind the document. The
+// case, required members left out or null, bytes that are not valid UTF-8,
+// data behind the document, and a document that is not an object. The
 // command and the three profile packages share it, so that a library caller
 // can refuse the same documents the command refuses.
 package strictjson

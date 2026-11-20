@@ -106,6 +106,9 @@ type InputError = spm.InputError
 // A result that handles and scopes nothing, which happens only when no input
 // handles or scopes anything, restricts nothing; the kernel refuses to load
 // it, and ValidateArtifact reports it with ErrEmptyRuleset.
+//
+// The result shares no memory with the inputs, a single input included, so
+// the caller may modify it.
 func Intersect(profiles ...*Profile) (*Profile, error) {
 	return foldProfiles(profiles, intersectTwo, finishIntersect)
 }
@@ -138,6 +141,9 @@ func Intersect(profiles ...*Profile) (*Profile, error) {
 // profile handling only filesystem rights with one handling only network
 // rights, restricts nothing; the kernel refuses to load it, and
 // ValidateArtifact reports it with ErrEmptyRuleset.
+//
+// The result shares no memory with the inputs, a single input included, so
+// the caller may modify it.
 func Union(profiles ...*Profile) (*Profile, error) {
 	return foldProfiles(profiles, unionTwo, finishUnion)
 }
@@ -155,18 +161,9 @@ func foldProfiles(
 	// Validate the caller's profiles first, so errors name their own
 	// indices and paths, and so that a path past MaxPathLen is reported as
 	// such rather than counted against the budget. Validation is linear in
-	// the inputs; the budget then bounds the merge.
-	cleaned := make([][]string, len(profiles))
-
-	// Every input is checked, and each that fails reported (see
-	// merge.CheckInputs); the budget, which is no input's fault, is checked
-	// only once all of them passed, and so stays outside an InputError.
-	err := merge.CheckInputs(profiles, func(idx int, profile *Profile) error {
-		paths, err := validateProfile(profile, tierMerge)
-		cleaned[idx] = paths
-
-		return err
-	})
+	// the inputs; the budget then bounds the merge, and is checked only once
+	// every input passed, so it stays outside an InputError.
+	cleaned, err := validateInputs(profiles)
 	if err != nil {
 		return nil, err
 	}
@@ -751,6 +748,25 @@ func minimizePathRules(rules []PathRule) []PathRule {
 	return result
 }
 
+// validateInputs runs Validate on every input and returns the cleaned
+// paths of each, or every input that fails as an InputError naming its
+// index among the inputs, joined in input order (see merge.CheckInputs).
+func validateInputs(profiles []*Profile) ([][]string, error) {
+	cleaned := make([][]string, len(profiles))
+
+	err := merge.CheckInputs(profiles, func(idx int, profile *Profile) error {
+		paths, err := validateProfile(profile, tierMerge)
+		cleaned[idx] = paths
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return cleaned, nil
+}
+
 // LoweredRulePaths reports the rule paths of a merge result that carry
 // access an input granted only on an ancestor path. A path is reported when
 // the result grants a right there that some input grants through a rule on
@@ -764,10 +780,19 @@ func minimizePathRules(rules []PathRule) []PathRule {
 // checked with Validate first, and read as the merge reads an input: with
 // paths cleaned, rules for one path folded, and the rights a handled set
 // does not list dropped from the rules, since such a grant permits nothing
-// the input does not permit anyway and the merge ignores it. An input that
+// the input does not permit anyway and the merge ignores it.
+//
+// Inputs are numbered as Intersect numbers them: an input that is nil or
 // fails is reported as an InputError whose Index is its position among the
-// inputs, as Intersect numbers them, and a result that fails as an error
-// that is not one.
+// inputs, not among the arguments, so inputs[0] is Index 0 and in
+// LoweredRulePaths(effective, baseline, artifact) the baseline is Index 0,
+// as it is in Intersect(baseline, artifact). Several failing inputs are
+// joined in input order, as a merge joins them. A result that is nil or
+// fails is reported first and on its own, as an error prefixed "result: "
+// that is not an InputError, so a caller dispatching on InputError never
+// blames an input for it; errors.Is still matches ErrNilProfile or the
+// sentinels of the failure. Without inputs nothing can have been lowered,
+// so it returns nil and no error once the result passes.
 //
 // The Lowered rule paths section of the package documentation explains why
 // this matters: hierarchy resolution is textual, while the kernel binds a
@@ -786,13 +811,9 @@ func LoweredRulePaths(result *Profile, inputs ...*Profile) ([]string, error) {
 		return nil, fmt.Errorf("result: %w", err)
 	}
 
-	cleaned := make([][]string, len(inputs))
-
-	for idx, input := range inputs {
-		cleaned[idx], err = validateProfile(input, tierMerge)
-		if err != nil {
-			return nil, &spm.InputError{Index: idx, Err: err}
-		}
+	cleaned, err := validateInputs(inputs)
+	if err != nil {
+		return nil, err
 	}
 
 	if len(result.PathRules) == 0 {

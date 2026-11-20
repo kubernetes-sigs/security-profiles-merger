@@ -61,6 +61,16 @@ func TestSentinelsAreShared(t *testing.T) {
 			shared: spm.ErrRelativePath,
 		},
 		{
+			name:   "ErrNulInPath",
+			errs:   []error{apparmor.ErrNulInPath, landlock.ErrNulInPath},
+			shared: spm.ErrNulInPath,
+		},
+		{
+			name:   "ErrBudgetExceeded",
+			errs:   []error{apparmor.ErrBudgetExceeded, landlock.ErrBudgetExceeded},
+			shared: spm.ErrBudgetExceeded,
+		},
+		{
 			name:   "ErrPathTooLong",
 			errs:   []error{apparmor.ErrPathTooLong, landlock.ErrPathTooLong},
 			shared: spm.ErrPathTooLong,
@@ -96,7 +106,7 @@ func TestSentinelsAreShared(t *testing.T) {
 		},
 		{
 			name:   "ErrMissingField",
-			errs:   []error{landlock.ErrMissingField},
+			errs:   []error{seccomp.ErrMissingField, landlock.ErrMissingField},
 			shared: spm.ErrMissingField,
 		},
 		{

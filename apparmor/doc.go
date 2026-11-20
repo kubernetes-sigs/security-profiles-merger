@@ -33,8 +33,9 @@ limitations under the License.
 //
 // [UnmarshalStrict] decodes a profile and refuses what encoding/json accepts
 // silently: members no field reads, members that name a field only ignoring
-// case, members repeated within one object, invalid UTF-8 and data behind
-// the profile. Decode an artifact with it and validate the result with
+// case, members repeated within one object, invalid UTF-8, data behind the
+// profile, and a document that is not a JSON object ([ErrNotAnObject]).
+// Decode an artifact with it and validate the result with
 // [ValidateArtifact].
 //
 // # Validation
@@ -420,4 +421,9 @@ limitations under the License.
 // keeps the patterns it read for its own duration, without a lock, since no
 // other call sees them. Concurrent calls only need their profiles not to be
 // written to at the same time from elsewhere.
+//
+// What [Intersect], [Union], [Diff] and [Profile.Clone] return shares no
+// memory with their arguments, also for a single input, so it is the
+// caller's to keep or modify without affecting the inputs, and modifying an
+// input later leaves the result as it was.
 package apparmor

@@ -130,6 +130,9 @@ type BoolPtrDiff struct {
 // patterns that match nothing, which Intersect drops. A nil profile is
 // reported as an InputError naming it (Index 0 for left, 1 for right) and
 // wrapping ErrNilProfile, as Intersect and Union report one.
+//
+// The diff shares no memory with the profiles, so the caller may modify
+// it.
 func Diff(left, right *Profile) (*ProfileDiff, error) {
 	err := merge.RequireNonNil(left, right)
 	if err != nil {

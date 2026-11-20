@@ -139,6 +139,9 @@ type NetRuleChange struct {
 // Unlike Intersect and Union, Diff does not validate profiles before
 // comparing. A nil profile is reported as an InputError naming it, with
 // Index 0 for left and 1 for right, that wraps ErrNilProfile.
+//
+// The diff shares no memory with the profiles, so the caller may modify
+// it.
 func Diff(left, right *Profile) (*ProfileDiff, error) {
 	err := merge.RequireNonNil(left, right)
 	if err != nil {

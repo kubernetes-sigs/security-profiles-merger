@@ -19,6 +19,7 @@ package landlock_test
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	"sigs.k8s.io/security-profiles-merger/landlock"
 )
@@ -544,4 +545,77 @@ func Example() {
 	// Output:
 	// Profile{fs:read_file,write_file /srv/data(read_file)}
 	// open beneath /srv: [/srv/data]
+}
+
+// A runtime maps each right to the kernel's bit with a table of its own.
+// Checking the table against FSAccessRights shows which rights it lacks for
+// the ABI versions it supports; a profile holding one of those is refused
+// rather than loaded without it.
+func ExampleFSAccessRights() {
+	kernelBits := map[landlock.FSAccessRight]uint64{
+		landlock.FSAccessExecute:    1 << 0,
+		landlock.FSAccessWriteFile:  1 << 1,
+		landlock.FSAccessReadFile:   1 << 2,
+		landlock.FSAccessReadDir:    1 << 3,
+		landlock.FSAccessRemoveDir:  1 << 4,
+		landlock.FSAccessRemoveFile: 1 << 5,
+		landlock.FSAccessMakeChar:   1 << 6,
+		landlock.FSAccessMakeDir:    1 << 7,
+		landlock.FSAccessMakeReg:    1 << 8,
+		landlock.FSAccessMakeSock:   1 << 9,
+		landlock.FSAccessMakeFIFO:   1 << 10,
+		landlock.FSAccessMakeBlock:  1 << 11,
+		landlock.FSAccessMakeSym:    1 << 12,
+	}
+
+	var missing []string
+
+	for right, abi := range landlock.FSAccessRights() {
+		_, ok := kernelBits[right]
+		if !ok && abi <= landlock.ABIV3 {
+			missing = append(missing, fmt.Sprintf("%s (%v)", right, abi))
+		}
+	}
+
+	slices.Sort(missing)
+	fmt.Println(missing)
+
+	// Output:
+	// [refer (ABIV2) truncate (ABIV3)]
+}
+
+// NetAccessRights lists every network right with the version that
+// introduced it, here the ones a node reporting ABIV4 can enforce.
+func ExampleNetAccessRights() {
+	var enforced []landlock.NetAccessRight
+
+	for right, abi := range landlock.NetAccessRights() {
+		if abi <= landlock.ABIV4 {
+			enforced = append(enforced, right)
+		}
+	}
+
+	slices.Sort(enforced)
+	fmt.Println(enforced)
+
+	// Output:
+	// [bind_tcp connect_tcp]
+}
+
+// ScopeRights lists every scope with the version that introduced it, here
+// the ones a node reporting ABIV6 can enforce.
+func ExampleScopeRights() {
+	var enforced []string
+
+	for scope, abi := range landlock.ScopeRights() {
+		if abi <= landlock.ABIV6 {
+			enforced = append(enforced, fmt.Sprintf("%s (%v)", scope, abi))
+		}
+	}
+
+	slices.Sort(enforced)
+	fmt.Println(enforced)
+
+	// Output:
+	// [abstract_unix_socket (ABIV6) signal (ABIV6)]
 }

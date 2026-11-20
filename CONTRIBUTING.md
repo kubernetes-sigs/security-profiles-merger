@@ -50,12 +50,13 @@ The codebase is organized in layers:
   common: `SliceDiff`, `InputError`, `MaxPathLen` and the sentinel errors
   they share (such as `ErrNilProfile`, `ErrMoreProblems`,
   `ErrBudgetExceeded` and the ones `UnmarshalStrict` returns). Each profile
-  package re-exports what it uses under its own name, so a caller need not
-  import `spm`, but naming them once is what makes `seccomp.SliceDiff` and
-  `apparmor.SliceDiff` the same type rather than twins, and what lets
-  pkg.go.dev link them. Keep
-  it this small: the three profile types have no common shape, so nothing
-  that needs to know which type it has belongs here. `cmd/spm/kinds.go` is
+  package re-exports every shared sentinel it returns under its own name
+  (`TestSentinelsAreShared` in `spm/spm_test.go` lists them), so a caller
+  need not import `spm`, but naming them once is what makes
+  `seccomp.SliceDiff` and `apparmor.SliceDiff` the same type rather than
+  twins, and what lets pkg.go.dev link them. Keep it this small: the three
+  profile types have no common shape, so nothing that needs to know which
+  type it has belongs here. `cmd/spm/kinds.go` is
   where that knowledge lives, as a table of per-type function values.
 - `internal/merge/` holds what the packages share beyond `spm`. The generic
   merge primitives: `Fold` folds any profile type pairwise,
@@ -73,7 +74,8 @@ The codebase is organized in layers:
   and the quoting of profile values for output (`SafeText`, `SafeName`).
 - `internal/strictjson/` finds what `encoding/json` accepts silently and an
   artifact must not carry: repeated members, members no field reads, members
-  that name a field only ignoring case, invalid UTF-8 and trailing data. Each
+  that name a field only ignoring case, required members left out or null,
+  invalid UTF-8, trailing data and a document that is not an object. Each
   package's `UnmarshalStrict` is its `Unmarshal`, and the command uses the
   scans one by one, since its default mode warns where the strict modes
   reject.
@@ -82,9 +84,11 @@ The codebase is organized in layers:
   of the documentation (see [Documentation](#documentation)).
 - `seccomp/`, `apparmor/`, `landlock/` each expose the same public API surface:
   `Intersect`, `Union`, `Validate`, `ValidateStrict`, `ValidateArtifact`,
-  `UnmarshalStrict`, `Diff`, `FormatDiff`, and `FormatProfile`; `seccomp` and
-  `landlock` add an `Options` type whose methods run those functions for
-  another node. Each package
+  `UnmarshalStrict`, `Diff`, `FormatDiff`, and `FormatProfile`. `seccomp`
+  adds an `Options` type naming a node's native architecture, whose methods
+  are the merges, `Diff` and the two stricter validators for that node, and
+  `landlock` one naming a kernel ABI version, whose methods are the three
+  validators with that version's check added, and `Downgrade`. Each package
   defines its own types (seccomp uses OCI runtime-spec types, apparmor and
   landlock define their own) and implements profile-specific normalization,
   deduplication, and merge logic on top of `internal/merge/`. The seccomp
@@ -154,57 +158,28 @@ another fence, such as ` ```text `, for code that is not meant to compile.
 
 ## Local Development
 
-```sh
-make                     # build, lint, and test (default target)
-make help                # display available targets
-make build               # build the spm binary (static)
-make test                # run tests with race detection and coverage
-make lint                # run golangci-lint
-make lint-actions        # run actionlint on the workflows
-make fuzz                # run all fuzz tests (default 30s, set FUZZTIME to adjust)
-make test-libseccomp     # check the seccomp model against libseccomp
-make bench               # run benchmarks
-make verify              # run the verifications CI runs
-make verify-coverage     # verify test coverage meets threshold (default 95%)
-make verify-tidy         # verify go.mod and hack/tools/go.mod are tidy
-make verify-mdtoc        # verify table of contents in markdown files
-make update-mdtoc        # regenerate table of contents in markdown files
-make verify-golden       # regenerate the CLI golden files and fail if any changed
-make verify-syscalls     # regenerate seccomp/syscalls.go and fail if it changed
-make verify-dependencies # verify external dependencies
-make report-upstream     # print the pinned tool versions behind upstream
-make verify-upstream     # fail if a pinned tool version is behind upstream
-make govulncheck         # run govulncheck
-make api-report          # report API changes since the latest release
-make tidy                # run go mod tidy on go.mod and hack/tools/go.mod
-make clean               # remove build artifacts and the release snapshot
-```
+`make` builds, lints and tests; `make help` lists every target with what it
+needs. Build the binary with `make build`, or give `go build` an output
+path: a bare `go build ./cmd/spm` at the repository root fails, because the
+binary would take the name of the `spm` package directory.
 
-Build the binary with `make build`, or give `go build` an output path: a bare
-`go build ./cmd/spm` at the repository root fails, because the binary would
-take the name of the `spm` package directory.
+What `make help` does not say:
 
-Notes on the targets:
-
-- `make test` runs with the race detector, which needs cgo; `RACE=` skips it.
-- `make lint` needs the libseccomp headers: `.golangci.yml` sets
-  `run.build-tags` to `libseccomp`, so the linter loads the cgo bridge behind
-  that tag. Any version does for linting. The default `make` target and
-  `make verify` run `lint`, so they need the headers too.
+- `make lint` loads the cgo bridge behind the `libseccomp` build tag, which
+  `.golangci.yml` sets, so any libseccomp headers do. The default `make`
+  target and `make verify` run `lint`, so they need the headers too.
 - `make lint` builds golangci-lint from source with `go run`, and its
   `go.mod` requires Go 1.26: it needs that Go or a newer one on `PATH`, or a
   `GOTOOLCHAIN` that lets the go command fetch it. CI installs the release
   binary of the same version instead.
-- `make test-libseccomp` needs cgo and the libseccomp headers. Set
-  `LIBSECCOMP_VERSION` to require a particular version, as CI does.
-- `make verify` rewrites `go.mod`, `hack/tools/go.mod` and the goldens in
-  place before checking that nothing changed, and so runs its steps one at
-  a time even under `make -j`.
-- `make verify-syscalls` downloads the `syscalls.csv` of each libseccomp
-  release the seccomp guard covers, so it needs network access and `curl`.
-- `make report-upstream` and `make verify-upstream` need `GITHUB_TOKEN`.
-- `make api-report` compares against the newest tag before `HEAD`, and
-  gorelease refuses a working tree with uncommitted changes.
+- `make verify-coverage` fails below 95% coverage by default; set
+  `COVERAGE_THRESHOLD` to change it.
+- `make test-libseccomp` takes `LIBSECCOMP_VERSION` to require a particular
+  version, as CI does.
+- `make verify` runs its steps one at a time even under `make -j`, since it
+  rewrites files in place before checking that nothing changed.
+- `make verify-syscalls` downloads with `curl`.
+- `make api-report` compares against the newest tag before `HEAD`.
 - `make lint-actions` runs shellcheck on the run steps when it is on `PATH`,
   as it is in CI.
 

@@ -132,6 +132,9 @@ type InputError = spm.InputError
 //
 // This implements the merge KEP-6061 defines for a CRI runtime combining an
 // artifact with its baseline.
+//
+// The result shares no memory with the inputs, a single input included, so
+// the caller may modify it.
 func Intersect(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 	return Options{Arch: NativeHost}.Intersect(profiles...)
 }
@@ -163,6 +166,9 @@ func Intersect(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 //
 // This implements the merge the Security Profiles Operator uses to combine
 // recorded profiles.
+//
+// The result shares no memory with the inputs, a single input included, so
+// the caller may modify it.
 func Union(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 	return Options{Arch: NativeHost}.Union(profiles...)
 }

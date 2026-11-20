@@ -473,3 +473,43 @@ func ExampleValidate_failures() {
 	// false true
 	// false true
 }
+
+// NativeArchitecture names the architecture the plain functions assume, so
+// a caller can record which node a result was merged for, and Options
+// naming it merges as Intersect does. What it prints depends on the host,
+// so the example is compiled but not run.
+func ExampleNativeArchitecture() { //nolint:testableexamples // prints the host architecture
+	native, ok := seccomp.NativeArchitecture()
+	if !ok {
+		// No node runs a program of this GOARCH under seccomp: name the
+		// node's architecture with Options instead.
+		fmt.Println("no seccomp architecture for this GOARCH")
+
+		return
+	}
+
+	profile := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Architectures: []specs.Arch{specs.ArchX86_64, specs.ArchX86, specs.ArchAARCH64},
+		Syscalls: []specs.LinuxSyscall{
+			{Names: []string{"read", "write"}, Action: specs.ActAllow},
+		},
+	}
+
+	plain, err := seccomp.Intersect(profile)
+	if err != nil {
+		panic(err)
+	}
+
+	named, err := seccomp.Options{Arch: native}.Intersect(profile)
+	if err != nil {
+		panic(err)
+	}
+
+	diff, err := seccomp.Diff(plain, named)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println("merged for", native, "as Intersect merges:", diff.Equal)
+}

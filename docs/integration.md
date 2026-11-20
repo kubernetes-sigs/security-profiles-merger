@@ -117,23 +117,15 @@ and `read_file` and `execute` on `/usr` diffs unequal against it without
 the merge taking anything away.
 
 0. **Check the baseline once, at config load: `Validate`, then
-   `Diff(baseline, Intersect(baseline))`** (seccomp and AppArmor). `Validate` is what the merge
-   needs to load the profile at all. The diff is the check that matters: an
+   `Diff(baseline, Intersect(baseline))`** (seccomp and AppArmor). The
    intersection of the baseline with itself is equal to it exactly when the
-   merge reads every rule of it, so a diff that is not equal names what
-   every merge with that baseline will take away, whatever the artifact
-   says. It is a different check from `ValidateArtifact`, which reports
-   rules of one syscall with different results: the diff also shows rules
-   outside a [safe shape](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Evaluation_model)
-   whose results agree, a value above 32 bits where the profile covers a
-   32-bit architecture, and conditional rules on `socketcall` or `ipc`
-   themselves, which the merge collapses where the profile covers an
-   architecture that multiplexes (see
-   [What the models leave out](#what-the-models-leave-out)). Run the
-   diff on the node, or the `Diff` and `Intersect` methods of a
-   `seccomp.Options` naming the node's architecture, and treat an unequal
-   diff as a misconfigured node rather than as something to fix at merge
-   time.
+   merge reads every rule of it, so an unequal diff names what every merge
+   with that baseline takes away, whatever the artifact says. It shows more
+   than `ValidateArtifact` reports (see the seccomp
+   [Diff](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Diff) section). Run it on the node, or
+   through a `seccomp.Options` naming the node's architecture, and treat an
+   unequal diff as a misconfigured node rather than as something to fix at
+   merge time.
 
    Moby, containerd and CRI-O list one syscall in several entries in their
    defaults, which `ValidateStrict` reports. The Moby and containerd defaults
@@ -249,8 +241,9 @@ AppArmor, writing rules for apparmor_parser:
   `AllowedLibraries` carry no exec transition mode (see
   [Scope](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#hdr-Scope)),
   so the runtime picks one, the same for every path of the list.
-- **Load it under a timeout.** Run apparmor_parser under a timeout that kills
-  its process group (see [Combining recordings](#combining-recordings-union)).
+- **Load it under a timeout** that kills the process group of
+  apparmor_parser, as [Combining recordings](#combining-recordings-union)
+  explains.
 
 Landlock, building the `landlock_ruleset_attr` and the rules:
 
@@ -283,15 +276,26 @@ is what bounds the cost of the merge.
 - The seccomp merge falls back to a conservative result past budgets of its
   own, collapsing a syscall in the merge direction; see
   [Cost bounds](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Cost_bounds).
+  The read budget keeps `Diff` and the merges linear in the size of a
+  profile that skipped validation, but not cheap: `Diff` of one allocates
+  around 150 times its size, and `Union` far less. Both are cheap on
+  validated profiles, which is why the flow above validates before anything
+  else.
 - The apparmor merge bounds pattern matching and pattern compilation on its
   own, while reading, validating and normalizing paths stays linear in the
   size of the input. Past the matching or the compile budget `Intersect`
   fails with `ErrBudgetExceeded` when the result may lose access, which is
-  when neither input is kept whole, also where only paths the baseline lacks
-  are left out; `Union` keeps every path, which permits the same; see
+  when neither input is kept whole. That includes an artifact asking for a
+  path the baseline lacks, although the exact intersection would only drop
+  that path, while a profile intersected with itself succeeds. `Union`
+  keeps every path, which permits the same; see
   [Cost bounds](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#hdr-Cost_bounds).
-  `ValidateArtifact` is still what keeps every pattern inside the
-  compilation budget, besides refusing what would not load.
+  The budgets apply to each list of each step of the fold (the
+  executables, the libraries, and the filesystem paths together), so a
+  merge of N inputs can cost up to 3(N-1) times what one list at its budget
+  costs, which matters for a `Union` of many recordings. `ValidateArtifact` is
+  still what keeps every pattern inside the compilation budget, besides
+  refusing what would not load.
 - The landlock merge takes memory linear in its inputs and time in the
   number of inputs times the number of rules of all inputs times the depth
   and length of their paths, so its cost grows with the square of the number
@@ -307,16 +311,28 @@ A budget error is no fault of one input, so it is not wrapped in an
 budget admits a baseline merged with artifacts `ValidateArtifact` accepts;
 an apparmor artifact of long paths can exceed the apparmor work budget.
 
+No function can be cancelled, since none takes a `context.Context`: each
+returns once its bounded work is done. That work can still add up, as an
+apparmor merge at its budgets shows, so bound how many merges run at once,
+and stop waiting for one past a deadline where a container start has one
+(the merge then finishes its bounded work on its own), rather than let a
+burst of artifacts occupy every worker.
+
 The API reference lists each package's limits, their values and the errors
 they raise: [seccomp](api.md#limits), [apparmor](api.md#limits-1) and
 [landlock](api.md#limits-2).
 
-The module does not bound the size of the document itself, and decoding and
-validating one costs a multiple of its size in memory. Cap what you read
-from the registry before decoding it. 1 MiB is plenty: the largest profile
-in this repository, the CRI-O default seccomp profile, is about 14 KiB, and
-the profiles KEP-6061 expects runtimes to accept are of that order. The
-`spm` command reads up to 10 MiB per input, since its user picks the files.
+The module does not bound the size of the document itself. Cap what you
+read from the registry before decoding it. 1 MiB is plenty: the largest
+profile in this repository, the Moby default seccomp profile for amd64, is
+about 16 KiB, and the profiles KEP-6061 expects runtimes to accept are of
+that order. Strict decoding holds up to about 85 to 90 times the size of
+the document in heap at its peak, depending on its shape (a list of empty
+syscall entries comes close to that), and allocates about twice that in
+total, so at a 1 MiB cap each artifact can hold on the order of 90 MB before
+`ValidateArtifact` gets to refuse it on its counts. Size the number of
+artifacts decoded in parallel by that. The `spm` command reads up to 10 MiB
+per input, since its user picks the files.
 
 ## Reading a validation error
 
@@ -329,19 +345,15 @@ sentinel, and do not branch on the absence of one.
 A merge checks every input and wraps the report of each one that fails in
 an `spm.InputError`, whose `Index` is that input's position among the
 arguments; `errors.Is` sees through it to the sentinels, so the same
-dispatch works on a merge failure. One failing input gives its InputError
-as the error. Several give the InputErrors joined in input order, which
-`errors.As` searches from the first, and which `Unwrap() []error` lists,
-bounded like the failures of one validator: past 32 failing inputs the
-error matches `ErrMoreProblems`. A caller that names inputs, as `spm`
-does, walks that list.
-
-Every value a message quotes from a profile is bounded in length and escaped,
-so an error is safe to log as it is. A report holding more than one failure
-implements `Unwrap() []error`, which lists the failures it kept and, when it
-left some out, `ErrMoreProblems` last; a single failure comes back as it is.
-Find the list with `errors.As`, which also looks inside an `InputError`, and
-fall back to the error itself.
+dispatch works on a merge failure. Several failing inputs give their
+InputErrors joined in input order, which `errors.As` searches from the
+first and `Unwrap() []error` lists, bounded like the failures of one
+validator: past 32 failing inputs the error matches `ErrMoreProblems`. A
+caller that names inputs, as `spm` does, walks that list. Every value a
+message quotes from a profile is bounded in length and escaped, so an error
+is safe to log as it is. How to walk a report of several failures, or of
+several inputs, is in the
+[spm documentation](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/spm).
 
 ### Errors outside an InputError
 
@@ -377,67 +389,43 @@ what it is given at face value.
   for the full list.
 - **seccomp: 32-bit and multiplexing architectures, and where the merge
   runs.** The model reads the program libseccomp compiles for a 64-bit
-  architecture on which every syscall is called directly. On a 32-bit
-  architecture libseccomp compares only the lower 32 bits of a value, so
-  `ValidateArtifact` rejects a condition against a wider value
-  (`ErrValueTooWide`) when the filter covers one. Where socket and SysV IPC
-  calls also go through `socketcall(2)` and `ipc(2)`, libseccomp copies the
-  rules onto the multiplexer with the first argument's condition replaced.
-  `Intersect` settles both by dropping an affected architecture the result
-  only lists, which leaves its calls to `SCMP_ACT_KILL`, or, where the native
-  architecture is affected, by collapsing the syscall to one unconditional
-  rule; `Union` collapses the syscall to its least restrictive action. The
-  native architecture is that of the running program, so what
-  `ValidateArtifact` accepts and what the merges return depend on where they
-  run: call them on the node that loads the result. Where they cannot run
-  there, the methods of `seccomp.Options` take that node's architecture
-  instead. The zero `seccomp.Options` stand for a node whose architecture is
-  not known and read it as possibly any architecture Go runs on, which is
-  the safe choice for an unknown node (see
-  [Validation levels](api.md#validation-levels)), so
-  name the node's architecture whenever it is known. See
+  architecture on which every syscall is called directly. A 32-bit
+  architecture compares only the lower 32 bits of a value, and socket and
+  SysV IPC calls also go through `socketcall(2)` and `ipc(2)` on some
+  architectures. `Intersect` settles both by dropping an affected
+  architecture the result only lists, which leaves its calls to
+  `SCMP_ACT_KILL`, or by collapsing the syscall; `Union` collapses it. What
+  `ValidateArtifact` accepts and what the merges return therefore depend on
+  the native architecture: call them on the node that loads the result, or
+  name that node with `seccomp.Options`, whose zero value reads an unknown
+  node as possibly any architecture (see
+  [Validation levels](api.md#validation-levels)). See
   [Architectures](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Architectures).
 - **seccomp: a libseccomp defect.** libseccomp 2.5.2, 2.5.4, 2.5.5, 2.6.0
   and 2.6.1, sorting syscalls by priority (crun always, runc up to 32
-  syscall names), lose every rule of an architecture when the syscall a
+  syscall names), lose every rule of an architecture when the syscall its
   block tests first does not exist there, and every call then gets the
-  default action. That takes a profile in which every rule on a syscall the
-  architecture has is conditional and a rule on one it lacks is cheaper,
-  such as an unconditional rule on `socketcall` next to a conditional one on
-  `socket`; x86_64 and x32 are affected only together, where a block of
-  either can lose the other's rules. An input can have that form, and a
-  merge can produce it from inputs that do not, so both merges check their
-  result against a table of where those releases place each syscall: a rule
-  on a syscall no covered architecture has is dropped, `Intersect` otherwise
+  default action. An input can have that form, and a merge can produce it
+  from inputs that do not, so both merges check their result. Both drop a
+  rule on a syscall no covered architecture has; otherwise `Intersect`
   drops an architecture, and `Union`, which cannot drop one, refuses with
-  `ErrLostRules`. `ValidateArtifact` and `ValidateStrict` report an input
-  that has the form as written, whose rules a runtime loading it unmerged
-  would lose, even where the merges, which settle rule shapes first, accept
-  it. An allowlist is not affected, since it names syscalls every
-  architecture has in unconditional rules. See
+  `ErrLostRules`. `ValidateArtifact` reports an input that has the form as
+  written. An allowlist is not affected. See
   [Architectures](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Architectures).
-- **seccomp: libseccomp releases.** The merges are checked against what
-  libseccomp 2.5.4, 2.5.5, 2.6.0 and 2.6.1 compile, and are sound for a node
-  linking one of those or a newer release. libseccomp 2.5.2 evaluates some
-  rule sets differently when it sorts them into a binary tree, so a release
-  older than 2.5.4 is not supported. The table of where each release places
-  a syscall also covers 2.5.2, which only makes the check for lost rules
-  more cautious.
+- **seccomp: libseccomp releases.** The merges are sound for a node linking
+  libseccomp 2.5.4 or newer; 2.5.2 evaluates some rule sets differently and
+  is not supported.
 - **Landlock: refer.** The kernel allows a move or link into another
   directory only when both grant `refer` and the file gains no handled right
   at its destination, which a single ruleset cannot always express for two
-  inputs. `Intersect` then drops `refer` where the result would allow a move
-  an input denies, so it may deny moves every input allows, and `Union` stops
-  handling a right that would deny a move an input allows, which permits that
-  right everywhere.
-- **Landlock: the rule on `/` and mounts.** Inside a mount other than the
-  root mount, the kernel leaves the rights the rule on `/` grants out of
-  that comparison, so a ruleset granting a right on `/` and again on a
-  directory denies moves into that directory there, although the file gains
-  nothing. `Union` stops handling a right that would deny a move an input
-  allows in either case; what stays is a directory moved beneath a rule that
-  repeats `refer` of the root rule. `Intersect` follows its inputs for moves
-  inside the root mount only and may allow such a move elsewhere. See
+  inputs. `Intersect` then may deny moves every input allows, and `Union`
+  stops handling a right, which permits it everywhere. Inside a mount other
+  than the root mount the kernel leaves the rule on `/` out of that
+  comparison. `Union` looks both ways and stops handling the rights that
+  would deny a move an input allows in either case, except for a directory
+  moved beneath a rule that repeats `refer` of the root rule. `Intersect`
+  follows its inputs for moves inside the root mount only, so in another
+  mount it can allow a move an input denies. See
   [Refer](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#hdr-Refer).
 - **Landlock: symlinks and bind mounts.** Hierarchy resolution is textual,
   while the kernel binds a rule to the file its path resolves to. See below.
@@ -446,10 +434,10 @@ what it is given at face value.
 
 An intersection carries the narrower of two rule paths, so a rule of the
 result can sit on a path only the artifact named while the access it carries
-comes from the baseline's rule on an ancestor. Where that deeper path is a
-symlink or a bind mount leaving the ancestor's hierarchy, the kernel binds
-the rule to whatever it resolves to, which the baseline never covered, and
-the artifact's author chose the path.
+comes from the baseline's rule on an ancestor. Where that path is a symlink
+or a bind mount, the kernel binds the rule to whatever it resolves to,
+which the baseline never covered, and the artifact's author chose the path
+(see [Lowered rule paths](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#hdr-Lowered_rule_paths)).
 
 <!-- go-snippet
 var baseline, artifact *landlock.Profile
@@ -459,6 +447,9 @@ var ruleFDs map[string]int
 ```go
 effective, err := landlock.Intersect(baseline, artifact)
 // ...
+// An InputError here numbers the inputs as Intersect does, so the baseline
+// is Index 0; a bad effective comes as a "result: " error, not an
+// InputError.
 lowered, err := landlock.LoweredRulePaths(effective, baseline, artifact)
 if err != nil {
     return err
@@ -482,49 +473,34 @@ for _, path := range lowered {
 
 A runtime that would rather have the kernel intersect can skip the merge and
 enforce the baseline and the artifact as two Landlock layers, one
-`landlock_restrict_self` call each. The kernel permits an access only when
-every layer does, and is stricter than `Intersect` in one respect: a layer
-that handles no filesystem right, such as one that only handles `bind_tcp`
-or only scopes signals, still denies moving or linking a file into another
-directory (`EXDEV`), which `Intersect` of the same inputs allows. Give such
-a layer `refer` as its handled filesystem right, with a rule granting
-`refer` on `/`, so that it leaves those moves to the other layer.
+`landlock_restrict_self` call each. Give a layer that handles no filesystem
+right `refer` as its handled filesystem right, with a rule granting `refer`
+on `/`: otherwise it denies moving or linking a file into another directory,
+which `Intersect` of the same inputs allows (see
+[Lowered rule paths](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#hdr-Lowered_rule_paths)).
 
 Also check the result with `landlock.Options{ABI: nodeABI}.Validate`, where
-`nodeABI` is the version the node's kernel reports. An intersection
-unions the handled access rights, so the result can require up to the
-highest ABI any input needs, and a runtime that treats "the ruleset failed
-to load" as "run without Landlock" would fail open. A runtime that prefers
-enforcing what an older kernel can enforce calls `Options.Downgrade`, which
-drops the rights that version does not know; the result no longer restricts
-them, so this is a decision to make per node, not a default.
+`nodeABI` is the version the node's kernel reports: an intersection can
+require up to the highest ABI any input needs, and a runtime that treats
+"the ruleset failed to load" as "run without Landlock" would fail open.
+`Options.Downgrade` drops the rights an older kernel does not know, which
+stops restricting them, so it is a decision to make per node, not a
+default.
 
 ## seccomp: the listener
 
-A profile answering `SCMP_ACT_NOTIFY` needs a `listenerPath`, which only the
-node provides. `ValidateArtifact` therefore rejects the action and every
-listener setting in an artifact, and so does `ValidateStrict`, which rejects
-everything `ValidateArtifact` rejects.
-
-A baseline may legitimately run a notification listener, setting
-`listenerPath` and answering `SCMP_ACT_NOTIFY`: those settings name
-node-local resources, which is exactly why an artifact must not carry them
-and a baseline may. `Validate`, the level a baseline is checked with,
-accepts them. `Validate` requires the two to travel together, since runc
-refuses a filter that notifies into nothing: a profile answering
-`SCMP_ACT_NOTIFY` must name the `listenerPath` that answers it. `Intersect`
-takes the listener from its first input, the baseline, and refuses a later
-input that sets `listenerPath` or `listenerMetadata` without setting both
-exactly as the baseline does, also where the baseline names none, with
+A profile answering `SCMP_ACT_NOTIFY` needs a `listenerPath`, which names a
+socket on the node. `ValidateArtifact` and `ValidateStrict` therefore reject
+the action and every listener setting in an artifact, while `Validate`, the
+level a baseline is checked with, accepts them as long as a profile that
+notifies names a listener. `Intersect` takes the listener from its first
+input, the baseline, and refuses a later input that sets `listenerPath` or
+`listenerMetadata` other than exactly as the baseline does with
 `ErrConflictingListener`, rather than let the artifact choose who answers
-the workload's calls. `Union` takes the listener from whichever input names
-one and refuses two inputs naming different ones. Neither rewrites an
-action to do without a listener: a result that would notify without one is
-refused with `ErrNotifyWithoutListener`. A result in which no entry
-notifies drops `SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV`, and one with a
-listener drops `SECCOMP_FILTER_FLAG_TSYNC`, since a runtime refuses either
-there; `ValidateStrict` names both as a portability rule. See
-[Listener](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Listener).
+the workload's calls. `Union` takes it from whichever input names one and
+refuses two different ones. Neither emits a result that would notify
+without a listener (`ErrNotifyWithoutListener`). See
+[Listener](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Listener) for the flags that travel with it.
 
 ## Combining recordings (Union)
 
@@ -537,13 +513,10 @@ few properties of the result matter:
   `Intersect`: an errno value follows the earlier input when actions tie.
   The same recordings in the same order always give the same profile, so
   pass them in a fixed order, such as by name.
-- **One listener.** Any recording may name the seccomp listener, but two
-  naming different ones fail (see
-  [seccomp: the listener](#seccomp-the-listener)).
-- **Rules libseccomp would lose.** `Union` never drops an architecture, so
-  it refuses a result in which libseccomp would lose the rules of one with
-  `ErrLostRules`, where `Intersect` drops the architecture instead; see
-  [What the models leave out](#what-the-models-leave-out).
+- **What can fail.** Two recordings naming different seccomp listeners
+  (see [seccomp: the listener](#seccomp-the-listener)), and a result in
+  which libseccomp would lose the rules of an architecture (`ErrLostRules`,
+  see [What the models leave out](#what-the-models-leave-out)).
 - **Landlock bounds the number of recordings.** The cost of a Landlock
   merge grows with the square of the number of inputs, and `Union` refuses
   more than its budget admits with `ErrBudgetExceeded`, about 300 recordings
@@ -552,20 +525,18 @@ few properties of the result matter:
 - **The loosest input wins.** A seccomp recording whose default action is
   `SCMP_ACT_ALLOW` makes the result allow everything that recording does not
   restrict itself. A Landlock profile that does not handle a right makes the
-  result permit that right everywhere.
-- **Landlock can stop handling a right.** Where the inputs grant `refer` in
-  a way one ruleset cannot express, `Union` stops handling a right, which
-  permits it everywhere; see
-  [What the models leave out](#what-the-models-leave-out).
+  result permit that right everywhere, and so can `refer` grants one
+  ruleset cannot express (see
+  [What the models leave out](#what-the-models-leave-out)).
 - **AppArmor merges permissions per path.** A path read-only in one
   recording and write-only in another comes out read-write, and so does a
   read-only path one recording lists under a write-only glob of the other.
-- **AppArmor keeps patterns that do not load.** `Union` validates its inputs
-  with `Validate`, which accepts a pattern apparmor_parser rejects, and
-  keeps such a pattern as written. Check the result with `ValidateArtifact`
-  before rendering it for the parser, and run the parser under a timeout
-  that kills its process group: apparmor_parser 5.0.2 does not return from a
-  class holding an escaped comma (`/a/[\,]`), and its workers outlive it.
+- **AppArmor keeps patterns that do not load.** `Union` keeps a pattern
+  apparmor_parser rejects as written, so check the result with
+  `ValidateArtifact` before rendering it, and run the parser under a
+  timeout that kills its process group: apparmor_parser 5.0.2 does not
+  return from a class holding an escaped comma (`/a/[\,]`), and its workers
+  outlive it.
 
 ```sh
 spm merge --type seccomp --strategy union \
@@ -586,10 +557,12 @@ held up.
   permitted by `Union`. Where libseccomp would lose the rules of an
   architecture, `Intersect` drops it and `Union` refuses the result (see
   [What the models leave out](#what-the-models-leave-out)).
-- **No mutation.** A function never modifies its arguments, except
-  `UnmarshalStrict`, which replaces the profile it is given when decoding
-  succeeds. See [Concurrency](api.md#concurrency) for the one piece of state
-  calls share.
+- **No mutation, no sharing.** A function never modifies its arguments,
+  except `UnmarshalStrict`, which replaces the profile it is given when
+  decoding succeeds, and a result of `Intersect`, `Union`, `Diff` or
+  `landlock.Options.Downgrade` shares no memory with its inputs, so the
+  caller may modify it. See [Concurrency](api.md#concurrency) for the one
+  piece of state calls share.
 - **Bounded work, after `ValidateArtifact`.** The
   [artifact limits](#limits) bound what `ValidateArtifact` accepts, so that
   an accepted artifact merged with a baseline of ordinary size is merged
@@ -597,8 +570,9 @@ held up.
   the cost of the merge. Every merge also has a budget of its own: past it
   the seccomp merge collapses a syscall in the merge direction, the
   apparmor union keeps every path, and the apparmor intersection and both
-  landlock merges fail with `ErrBudgetExceeded`. The size of the document
-  is the caller's to bound.
+  landlock merges fail with `ErrBudgetExceeded`. The size of the document,
+  and how many merges run at once, are the caller's to bound (see
+  [Limits](#limits)).
 - **Bounded errors and output.** A validation report lists at most 32
   failures, a value it quotes is cut at 64 bytes, a decoder message at 512
   bytes, and control characters are escaped; `FormatProfile`, `FormatDiff`
@@ -619,6 +593,7 @@ held up.
 
 ## Concurrency
 
-Every exported function is safe to call from several goroutines; see
+Every exported function is safe to call from several goroutines, and a
+merge result is the caller's to modify; see
 [Concurrency](api.md#concurrency) for the one piece of state calls share and
 what it keeps in memory.
