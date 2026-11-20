@@ -566,12 +566,14 @@ func TestDiffCommandReportsFailures(t *testing.T) {
 			validate:         nil,
 			validateStrict:   nil,
 			validateArtifact: nil,
+			validateBaseline: nil,
 			inputCheck:       nil,
 			format:           nil,
 			diff:             diffFn,
 			formatDiff:       func(*unencodableDiff) string { return "" },
 			equal:            func(*unencodableDiff) bool { return true },
 			forArch:          nil,
+			forABI:           nil,
 		}
 
 		var stderr strings.Builder
@@ -584,5 +586,73 @@ func TestDiffCommandReportsFailures(t *testing.T) {
 			t.Errorf("%s: exit code = %d, stderr = %q, want %d and %q",
 				name, code, stderr.String(), exitUsage, errDiffFailed)
 		}
+	}
+}
+
+// TestDiffValidate covers diff --validate: without it the profiles are
+// compared whatever they hold, with it each is checked under its mode first,
+// and one that fails is reported by name and ends the run with 2, as every
+// other diff failure does. A list names one mode per profile, as for merge.
+func TestDiffValidate(t *testing.T) {
+	t.Parallel()
+
+	typo := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO","syscals":[]}`)
+	empty := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[{"names":[],`+
+		`"action":"SCMP_ACT_ALLOW"}]}`)
+
+	for _, test := range []struct {
+		name     string
+		args     []string
+		wantCode int
+		want     string
+	}{
+		{
+			name:     "no checks",
+			args:     []string{typo, typo},
+			wantCode: 0,
+			want:     strings.Repeat(`warning: `+typo+`: unknown field "syscals"`+"\n", 2),
+		},
+		{
+			name:     "artifact for both",
+			args:     []string{"--validate", "artifact", typo, testdataSeccompA},
+			wantCode: exitUsage,
+			want:     `error: ` + typo + `: unknown field "syscals"` + "\n",
+		},
+		{
+			name:     "default fails what Validate refuses",
+			args:     []string{"--validate", "default", empty, testdataSeccompA},
+			wantCode: exitUsage,
+			want:     "error: " + empty + ": syscalls[0].names: syscall entry has no names\n",
+		},
+		{
+			name:     "one mode per profile",
+			args:     []string{"--validate", "default,artifact", typo, testdataSeccompA},
+			wantCode: exitDiff,
+			want:     `warning: ` + typo + `: unknown field "syscals"` + "\n",
+		},
+		{
+			name:     "a list of the wrong length",
+			args:     []string{"--validate", "artifact,artifact,artifact", testdataSeccompA, testdataSeccompB},
+			wantCode: exitUsage,
+			want:     "error: wrong number of validation modes: got 3 for 2 profiles\n",
+		},
+		{
+			name:     "an unknown mode",
+			args:     []string{"--validate", "baseline", testdataSeccompA, testdataSeccompB},
+			wantCode: exitUsage,
+			want:     `error: unknown validation mode "baseline" (use default, strict, or artifact)` + "\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			code, _, stderr := runCapture(t, append([]string{
+				cmdDiff, flagType, typeSeccomp, flagArch, "SCMP_ARCH_X86_64",
+			}, test.args...), nil)
+			if code != test.wantCode || stderr != test.want {
+				t.Errorf("exit code = %d, stderr = %q, want %d and %q",
+					code, stderr, test.wantCode, test.want)
+			}
+		})
 	}
 }

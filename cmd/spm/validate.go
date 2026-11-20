@@ -17,10 +17,14 @@ limitations under the License.
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"slices"
+	"strconv"
+
+	"sigs.k8s.io/security-profiles-merger/landlock"
 )
 
 const validateUsage = `Usage: spm validate [options] [files...]
@@ -38,17 +42,35 @@ single profile as an object, and several, or a JSON array on stdin even of
 one element, as an array. --quiet writes no profile and notes no
 auto-detected profile type, and --no-detect-note drops that note while
 still writing the profiles. Errors and warnings always go to stderr.
---quiet cannot be combined with --output or --format, nor --strict with
---artifact.
+--quiet cannot be combined with --output or --format, and --artifact,
+--strict and --baseline cannot be combined with each other.
+
+--artifact is for a profile a runtime did not author, such as one pulled
+with a workload: it adds the limits and checks of the library's
+ValidateArtifact. --strict is for a profile a person wrote: it adds to
+those what is likely a mistake, such as a duplicate entry. Both decode
+strictly, refusing unknown and misspelled fields, missing required members
+and invalid UTF-8, which the default checks only warn about. --baseline is
+for the baseline a runtime merges every artifact into, checked as the
+runtime checks it at config load, with the library's ValidateBaseline: for
+seccomp and AppArmor it refuses a baseline the merge does not read
+exactly, and for Landlock what the merge would read otherwise than meant,
+such as a relative path.
 
 --arch names the native seccomp architecture of the node that loads the
-profiles, which decides what --artifact and --strict accept: a value above
-32 bits is refused where that node covers a 32-bit architecture. It
-defaults to the architecture this program runs on, so the same profile can
-pass here and fail on another machine; pass a name such as SCMP_ARCH_X86_64
-for the target node, or --arch none for a node of unknown architecture,
-which refuses such a value whatever the profile lists. The default checks do
-not depend on it, so it needs --artifact or --strict.
+profiles. A value above 32 bits is refused where that node covers a 32-bit
+architecture: by --artifact and --strict as such, and by --baseline as a
+baseline the merge does not read exactly. For --baseline it also decides
+how the merge settles the architectures and which byte order it refuses.
+It defaults to the architecture this program runs on, so the same profile
+can pass here and fail on another machine; pass a name such as
+SCMP_ARCH_X86_64 for the target node, or --arch none for a node of
+unknown architecture. The default checks do not depend on it, so it needs
+one of those three flags.
+
+--abi names the Landlock ABI version of the kernel that loads the profiles,
+as landlock_create_ruleset reports it, and refuses every right that kernel
+does not know, which it would reject.
 
 Options:
 `
@@ -59,7 +81,11 @@ type validateOptions struct {
 
 	strict   bool
 	artifact bool
+	baseline bool
 	quiet    bool
+	abi      string
+	// abiVersion is the version abi names once it is checked, or 0.
+	abiVersion landlock.ABIVersion
 }
 
 // bindValidateFlags declares the validate flags on the set and returns the
@@ -69,18 +95,28 @@ func bindValidateFlags(flags *flag.FlagSet) *validateOptions {
 
 	opts.bind(
 		flags, "the validated profiles", "stdout, not with --quiet",
-		"of the node that loads the profiles, for --artifact or --strict",
+		"of the node that loads the profiles, for --artifact, --strict or --baseline",
 	)
 	flags.BoolVar(
 		&opts.strict, "strict", false,
-		"use strict validation, which also rejects unknown and misspelled "+
-			"fields, missing required members and invalid UTF-8 (not with --artifact)",
+		"validate as a profile a person wrote: what --artifact rejects, and what "+
+			"is likely a mistake, such as a duplicate entry",
 	)
 	flags.BoolVar(
 		&opts.artifact, "artifact", false,
-		"validate as an artifact, the untrusted profile a container runtime "+
-			"pulls; besides the repeated keys every mode rejects, it rejects unknown "+
+		"validate as an artifact, the untrusted profile a container runtime pulls: "+
+			"the artifact limits and checks, and strict decoding, which rejects unknown "+
 			"and misspelled fields, missing required members and invalid UTF-8",
+	)
+	flags.BoolVar(
+		&opts.baseline, "baseline", false,
+		"validate as the baseline a runtime merges artifacts into, as the runtime "+
+			"checks it at config load",
+	)
+	flags.StringVar(
+		&opts.abi, "abi", "",
+		"Landlock ABI version of the kernel that loads the profiles, such as 6; "+
+			"refuses the rights it does not know",
 	)
 	flags.BoolVar(
 		&opts.quiet, "quiet", false,
@@ -110,12 +146,14 @@ func (opts *validateOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) i
 	return validateValidateFlags(opts, validateFlagsNamed{
 		format: flagNamed(flags, "format"),
 		arch:   flagNamed(flags, flagNameArch),
+		abi:    flagNamed(flags, flagNameABI),
 	}, stderr)
 }
 
 // validateInputs validates the profiles that were read, and writes them
 // back.
 func validateInputs(opts *validateOptions, inv *invocation) int {
+	inv.abi = opts.abiVersion
 	inv.checks = &inputChecks{
 		modes: slices.Repeat([]validateMode{opts.mode()}, len(inv.inputs)), strategy: "",
 	}
@@ -147,9 +185,36 @@ func (opts *validateOptions) mode() validateMode {
 		return modeArtifact
 	case opts.strict:
 		return modeStrict
+	case opts.baseline:
+		return modeBaseline
 	default:
 		return modeDefault
 	}
+}
+
+// flagNameABI is the name of the validate flag that names a Landlock ABI
+// version.
+const flagNameABI = "abi"
+
+var errBadABI = errors.New("invalid Landlock ABI version")
+
+// parseABI returns the Landlock ABI version an --abi value names, or 0
+// when the flag is not named, which leaves the version unchecked. A version
+// is a whole number from 1 on, written in decimal digits alone, without a
+// sign; one newer than the library knows reads as the newest it knows, as
+// landlock.Options reads it.
+func parseABI(value string, named bool) (landlock.ABIVersion, error) {
+	if !named {
+		return 0, nil
+	}
+
+	version, err := strconv.Atoi(value)
+	if err != nil || value[0] < '0' || value[0] > '9' || version < int(landlock.ABIV1) {
+		return 0, fmt.Errorf("%w %q (use a whole number from %d on)",
+			errBadABI, value, landlock.ABIV1)
+	}
+
+	return landlock.ABIVersion(version), nil
 }
 
 // validateFlagsNamed reports which validate flags were named, which a
@@ -157,6 +222,7 @@ func (opts *validateOptions) mode() validateMode {
 type validateFlagsNamed struct {
 	format bool
 	arch   bool
+	abi    bool
 }
 
 func validateValidateFlags(
@@ -168,6 +234,15 @@ func validateValidateFlags(
 
 	if code := checkModeFlags(opts, named.arch, stderr); code != 0 {
 		return code
+	}
+
+	var err error
+
+	opts.abiVersion, err = parseABI(opts.abi, named.abi)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+
+		return exitUsage
 	}
 
 	if opts.quiet && opts.output != "" {
@@ -202,12 +277,20 @@ func checkModeFlags(opts *validateOptions, archNamed bool, stderr io.Writer) int
 		return exitUsage
 	}
 
+	if opts.baseline && (opts.strict || opts.artifact) {
+		_, _ = fmt.Fprintln(
+			stderr, "error: --baseline cannot be combined with --strict or --artifact",
+		)
+
+		return exitUsage
+	}
+
 	// The default checks do not depend on the architecture, so --arch
 	// without the checks that do would be a flag that quietly does nothing,
 	// as it would be for a profile type without architectures.
-	if archNamed && !opts.strict && !opts.artifact {
+	if archNamed && opts.mode() == modeDefault {
 		_, _ = fmt.Fprintln(
-			stderr, "error: --arch only applies with --strict or --artifact",
+			stderr, "error: --arch only applies with --strict, --artifact or --baseline",
 		)
 
 		return exitUsage
@@ -222,7 +305,7 @@ func checkModeFlags(opts *validateOptions, archNamed bool, stderr io.Writer) int
 // ambiguities unmarshalAll looks for, such as members the profile type does
 // not know, errors rather than warnings.
 func (ops kindOps[T, D]) validateCommand(inv *invocation, mode validateMode) int {
-	ops = ops.atArch(inv)
+	ops = ops.atNode(inv)
 	check := ops.checker(mode)
 
 	inputs, report := inv.inputs, inv.report

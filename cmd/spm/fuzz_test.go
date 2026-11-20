@@ -113,7 +113,7 @@ func checkDetectedFamilies(t *testing.T, raw string) []string {
 }
 
 // checkConflict checks the shape of a conflict found within a single input:
-// it names that input, and it names two different types.
+// it names that input, and it names two different types or more.
 func checkConflict(t *testing.T, conflict *typeConflict) {
 	t.Helper()
 
@@ -121,7 +121,8 @@ func checkConflict(t *testing.T, conflict *typeConflict) {
 		t.Errorf("a conflict within one input must name it: %+v", conflict)
 	}
 
-	if conflict.first == conflict.second {
-		t.Errorf("a conflict must name two types, got %+v", conflict)
+	if len(conflict.types) < 2 || len(slices.Compact(slices.Sorted(slices.Values(
+		conflict.types)))) != len(conflict.types) {
+		t.Errorf("a conflict must name two different types or more, got %+v", conflict)
 	}
 }

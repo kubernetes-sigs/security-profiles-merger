@@ -19,8 +19,11 @@ limitations under the License.
 package main
 
 import (
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -192,6 +195,179 @@ func validateSlowWrite(t *testing.T, writer *os.File, path string) {
 	code, stdout, stderr := runGuarded(t, []string{cmdValidate, flagType, typeSeccomp, path})
 	if code != 0 || stderr != "" || !strings.Contains(stdout, `"names": [`) {
 		t.Errorf("exit code = %d, stdout = %q, stderr = %q, want 0, the profile and nothing",
+			code, stdout, stderr)
+	}
+}
+
+// TestStdinThatIsNoFileOrPipe covers "-" reading a device: it is refused
+// before anything is read, as the same device named as a file argument is,
+// rather than read up to the size bound. The null device reads as empty.
+func TestStdinThatIsNoFileOrPipe(t *testing.T) {
+	t.Parallel()
+
+	zero, err := os.Open("/dev/zero")
+	if err != nil {
+		t.Skipf("no /dev/zero: %v", err)
+	}
+
+	t.Cleanup(func() { _ = zero.Close() })
+
+	null, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = null.Close() })
+
+	for _, test := range []struct {
+		args  []string
+		stdin *os.File
+		want  string
+	}{
+		{[]string{stdinArg}, zero, "error: stdin: " + errNotRegularFile.Error() + "\n"},
+		{[]string{"/dev/zero"}, nil, "error: /dev/zero: " + errNotRegularFile.Error() + "\n"},
+		{[]string{stdinArg}, null, "error: stdin: " + errEmptyInput.Error() + "\n"},
+		{nil, null, "error: stdin: " + errEmptyInput.Error() + "\n"},
+	} {
+		var stdin io.Reader
+		if test.stdin != nil {
+			stdin = test.stdin
+		}
+
+		code, stdout, stderr := runCapture(t,
+			append([]string{cmdValidate, flagType, typeSeccomp}, test.args...), stdin)
+		if code != 1 || stdout != "" || stderr != test.want {
+			t.Errorf("%q: exit code = %d, stdout = %q, stderr = %q, want 1, nothing and %q",
+				test.args, code, stdout, stderr, test.want)
+		}
+	}
+}
+
+// TestStdinNamedTwice covers "-" beside another name for stdin: one of the
+// names that always lead to it, and, where stdin is a pipe, any path to
+// that pipe. The pipe can be read once, so the second reader would find
+// nothing; the run is refused before either is read.
+func TestStdinNamedTwice(t *testing.T) {
+	t.Parallel()
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = reader.Close() })
+
+	_ = writer.Close()
+
+	viaFD := "/dev/fd/" + strconv.Itoa(int(reader.Fd()))
+
+	type stdinCase struct {
+		args  []string
+		stdin io.Reader
+		want  string
+	}
+
+	cases := []stdinCase{
+		{
+			args:  []string{"/dev/stdin", stdinArg},
+			stdin: strings.NewReader("{}"),
+			want:  `error: stdin ("-") can only be specified once: /dev/stdin and - both read it`,
+		},
+		{
+			args:  []string{"/dev/stdin", "/dev/fd/0"},
+			stdin: strings.NewReader("{}"),
+			want:  `error: stdin can only be read once: /dev/stdin and /dev/fd/0 both read it`,
+		},
+	}
+
+	// Another path to the pipe is found where stat of it reports the pipe,
+	// as on Linux; stat of /dev/fd/N on darwin does not, so the path is
+	// read as a second reader there instead.
+	if pipeReachedThrough(t, reader, viaFD) {
+		cases = append(cases, stdinCase{
+			args:  []string{stdinArg, viaFD},
+			stdin: reader,
+			want:  `error: stdin ("-") can only be specified once: - and ` + viaFD + ` both read it`,
+		}, stdinCase{
+			args:  []string{viaFD, viaFD},
+			stdin: reader,
+			want:  `error: stdin can only be read once: ` + viaFD + ` and ` + viaFD + ` both read it`,
+		})
+	}
+
+	for _, test := range cases {
+		code, _, stderr := runCapture(t, append([]string{cmdDiff}, test.args...), test.stdin)
+		if code != exitUsage || stderr != test.want+"\n" {
+			t.Errorf("%q: exit code = %d, stderr = %q, want %d and %q",
+				test.args, code, stderr, exitUsage, test.want)
+		}
+	}
+}
+
+// pipeReachedThrough reports whether stat of path reports the pipe reader
+// reads from.
+func pipeReachedThrough(t *testing.T, reader *os.File, path string) bool {
+	t.Helper()
+
+	pipe, err := reader.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(path)
+
+	return err == nil && os.SameFile(info, pipe)
+}
+
+// TestRegularStdinReadThroughAnAlias covers stdin that is a regular file,
+// which an alias such as /dev/stdin opens afresh and reads whole, so naming
+// it twice is no mistake: only "-" twice is refused then.
+func TestRegularStdinReadThroughAnAlias(t *testing.T) {
+	t.Parallel()
+
+	profile := writeTemp(t, seccompJSON(t, testSyscallRead))
+
+	open := func() *os.File {
+		file, err := os.Open(profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		t.Cleanup(func() { _ = file.Close() })
+
+		return file
+	}
+
+	viaFD := func(file *os.File) string {
+		return "/dev/fd/" + strconv.Itoa(int(file.Fd()))
+	}
+
+	stdin := open()
+
+	err := checkPaths([]string{stdinArg, "/dev/stdin", "/dev/fd/0", viaFD(stdin)}, stdin)
+	if err != nil {
+		t.Errorf("checkPaths with a regular file on stdin = %v, want nil", err)
+	}
+
+	err = checkPaths([]string{stdinArg, stdinArg}, open())
+	if !errors.Is(err, errDuplicateStdin) {
+		t.Errorf("checkPaths(- -) = %v, want %v", err, errDuplicateStdin)
+	}
+
+	// The same file read through "-" and through a path that leads to it
+	// gives two profiles where opening /dev/fd/N opens the file afresh, as
+	// on Linux; elsewhere it may share the offset "-" has read to the end.
+	if runtime.GOOS != "linux" {
+		return
+	}
+
+	stdin = open()
+
+	code, stdout, stderr := runCapture(t, []string{
+		cmdValidate, flagType, typeSeccomp, stdinArg, viaFD(stdin),
+	}, stdin)
+	if code != 0 || stderr != "" || strings.Count(stdout, testSyscallRead) != 2 {
+		t.Errorf("exit code = %d, stdout = %q, stderr = %q, want 0 and two profiles",
 			code, stdout, stderr)
 	}
 }

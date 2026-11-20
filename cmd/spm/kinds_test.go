@@ -264,3 +264,61 @@ func TestNullIsNotAProfile(t *testing.T) {
 		t.Errorf("an empty object: exit code = %d, want 0: %s", code, stderr)
 	}
 }
+
+// TestMixedTypesNameEveryType covers inputs of three profile types, and one
+// document holding the members of three: the error names each type, not
+// only the first two found.
+func TestMixedTypesNameEveryType(t *testing.T) {
+	t.Parallel()
+
+	apparmorFile := writeTemp(t, apparmorJSON(t, "chown"))
+	landlockFile := writeTemp(t, landlockJSON(t, "read_file"))
+	seccompFile := writeTemp(t, seccompJSON(t, testSyscallRead))
+
+	code, _, stderr := runCapture(t, []string{
+		cmdValidate, apparmorFile, landlockFile, seccompFile,
+	}, nil)
+
+	want := "error: inputs mix profile types (apparmor, landlock and seccomp), use --type\n"
+	if code != exitUsage || stderr != want {
+		t.Errorf("exit code = %d, stderr = %q, want %d and %q", code, stderr, exitUsage, want)
+	}
+
+	all := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO","pathRules":[],"capability":{}}`)
+
+	code, _, stderr = runCapture(t, []string{cmdValidate, all}, nil)
+
+	want = "error: " + all + ": mixes profile types (seccomp, landlock and apparmor), use --type\n"
+	if code != 1 || stderr != want {
+		t.Errorf("exit code = %d, stderr = %q, want 1 and %q", code, stderr, want)
+	}
+}
+
+// TestNoDetectNoteOnUsageErrors covers a run that a usage error stops once
+// the inputs are read: it does not note the type it detected, which it
+// never uses, so stderr holds the error alone.
+func TestNoDetectNoteOnUsageErrors(t *testing.T) {
+	t.Parallel()
+
+	apparmorFile := writeTemp(t, apparmorJSON(t, "chown"))
+
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{
+			[]string{cmdDiff, testdataSeccompA},
+			"error: got 1 file: " + errDiffRequiresTwo.Error() + "\n",
+		},
+		{
+			[]string{cmdValidate, "--artifact", flagArch, "SCMP_ARCH_X86_64", apparmorFile},
+			"error: " + errArchNotApplicable.Error() + "\n",
+		},
+	} {
+		code, _, stderr := runCapture(t, test.args, nil)
+		if code != exitUsage || stderr != test.want {
+			t.Errorf("%q: exit code = %d, stderr = %q, want %d and %q",
+				test.args, code, stderr, exitUsage, test.want)
+		}
+	}
+}

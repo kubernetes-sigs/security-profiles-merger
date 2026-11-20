@@ -49,6 +49,10 @@ const (
 	testdataSeccompTypeError = "testdata/seccomp_type_error.json"
 	testdataInvalidAction    = "testdata/invalid_action.json"
 	testdataSeccompWideValue = "testdata/seccomp_wide_value.json"
+
+	// testdataCRIO is the CRI-O default seccomp profile, which the merge
+	// does not read exactly (see seccomp/testdata/defaults/README.md).
+	testdataCRIO = "../../seccomp/testdata/defaults/crio-amd64.json"
 )
 
 // update rewrites the golden files from what the CLI produces now, rather
@@ -252,6 +256,17 @@ func failureGoldenCases() []goldenCase {
 		goldenCmd("validate_seccomp_type_error", 1, "validate --type seccomp",
 			testdataSeccompTypeError),
 		goldenCmd("validate_syntax_error", 1, "validate", "testdata/seccomp_syntax_error.json"),
+		// A baseline the merge does not read exactly fails --baseline with
+		// the rules every merge would take away, which the default checks
+		// accept; restated, the same rules pass.
+		goldenCmd("validate_seccomp_baseline_crio", 1,
+			"validate --type seccomp --baseline --quiet --arch SCMP_ARCH_X86_64",
+			testdataCRIO),
+		goldenCmd("validate_seccomp_baseline_crio_restated", 0,
+			"validate --type seccomp --baseline --quiet --arch SCMP_ARCH_X86_64",
+			"../../seccomp/testdata/defaults/crio-amd64-restated.json"),
+		goldenCmd("validate_seccomp_default_crio", 0, "validate --type seccomp --quiet",
+			testdataCRIO),
 		goldenCmd("usage_unknown_command", exitUsage, testBogus),
 		goldenCmd("usage_unknown_flag", exitUsage, "validate -real.json"),
 		goldenCmd("usage_empty_argument", exitUsage, "validate", ""),

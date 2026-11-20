@@ -134,7 +134,7 @@ func TestReadFromStdinTooManyProfiles(t *testing.T) {
 		t.Fatalf("exit code = %d, want %d: %s", code, exitUsage, stderr)
 	}
 
-	if !strings.Contains(stderr, "too many profiles on stdin") {
+	if !strings.HasPrefix(stderr, "error: stdin: too many profiles (max 1000)\n") {
 		t.Errorf("stderr = %q, want the stdin bound error", stderr)
 	}
 }
@@ -484,7 +484,7 @@ func TestInputPastTheLimitsBesideABadOne(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing.json")
 	bad := writeTemp(t, `{"defaultAction":1}`)
 	large := writeTemp(t, string(make([]byte, maxInputSize+1)))
-	want := "error: reading " + large + ": " + errFileTooLarge.Error() + "\n"
+	want := "error: " + large + ": " + errFileTooLarge.Error() + "\n"
 
 	for _, args := range [][]string{{missing, large}, {large, missing}, {bad, large}} {
 		code, _, stderr := runCapture(t,
@@ -573,8 +573,8 @@ func TestErrorSentinels(t *testing.T) {
 		{errEmptyFile, "file is empty"},
 		{errDuplicateStdin, `stdin ("-") can only be specified once`},
 		{errTooManyFiles, "too many input files (max 1000)"},
-		{errTooManyStdin, "too many profiles on stdin (max 1000)"},
-		{errStdinTooLarge, "stdin input exceeds 10485760 bytes"},
+		{errTooManyStdin, "stdin: too many profiles (max 1000)"},
+		{errStdinTooLarge, "stdin: input exceeds 10485760 byte limit"},
 		{errFileTooLarge, "file exceeds 10485760 byte limit"},
 		{errInputTooLarge, "inputs exceed 67108864 bytes in total"},
 	} {
@@ -630,5 +630,54 @@ func TestInputNamesAreQuoted(t *testing.T) {
 		if !strings.Contains(stderr, `x\x1b[31mRED\nforged"`) {
 			t.Errorf("%q: stderr = %q, want the quoted name", args, stderr)
 		}
+	}
+}
+
+// TestTotalInputBoundCountsEveryByteRead covers the bound on the inputs
+// together, which counts the bytes read rather than the profiles kept:
+// files of nothing but space, and the space between the elements of a stdin
+// array, cost memory to read as a profile does. Each read stops where the
+// bound leaves no room.
+func TestTotalInputBoundCountsEveryByteRead(t *testing.T) {
+	t.Parallel()
+
+	space := writeTemp(t, strings.Repeat(" ", maxInputSize))
+
+	// Seven reads of a file of space alone pass the bound, which six do
+	// not, where each fails on its own as empty.
+	_, err := readInputs(slices.Repeat([]string{space}, 7), nil)
+	if !errors.Is(err, errInputTooLarge) {
+		t.Errorf("seven files of space: error = %v, want %v", err, errInputTooLarge)
+	}
+
+	inputs, err := readInputs(slices.Repeat([]string{space}, 6), nil)
+	if err != nil || len(inputs) != 6 || !errors.Is(inputs[0].err, errEmptyFile) {
+		t.Errorf("six files of space: %v, %v, want six empty files", inputs, err)
+	}
+
+	code, _, stderr := runCapture(t, append([]string{cmdValidate, flagType, typeSeccomp},
+		slices.Repeat([]string{space}, 7)...), nil)
+	if want := "error: " + errInputTooLarge.Error() + "\n"; code != exitUsage || stderr != want {
+		t.Errorf("exit code = %d, stderr = %q, want %d and %q", code, stderr, exitUsage, want)
+	}
+
+	// A stdin array whose elements are small but which is mostly the space
+	// between them counts with that space.
+	const element = `{"defaultAction":"SCMP_ACT_ERRNO"}`
+
+	padded := "[" + element + strings.Repeat(" ", 5<<20) + "," + element + "]"
+
+	_, err = readInputs(append(slices.Repeat([]string{space}, 6), stdinArg),
+		strings.NewReader(padded))
+	if !errors.Is(err, errInputTooLarge) {
+		t.Errorf("a padded stdin array: error = %v, want %v", err, errInputTooLarge)
+	}
+
+	// The read itself stops one byte past what the bound leaves.
+	small := writeTemp(t, element)
+
+	_, read, err := readFileWithLimit(small, 10)
+	if !errors.Is(err, errInputTooLarge) || read != 11 {
+		t.Errorf("readFileWithLimit = %d, %v, want 11 and %v", read, err, errInputTooLarge)
 	}
 }

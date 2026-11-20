@@ -5,6 +5,8 @@ writing Go code. Flags must precede file arguments, and `--` ends them, so
 that every argument after it is a file name even when it starts with `-`.
 Without file arguments, commands read from stdin, unless stdin is a terminal;
 outside Windows, any character device but the null device counts as one.
+`-` reads stdin among file arguments, and stdin mostly follows the rules of
+a file argument then; [Exit codes](#exit-codes) lists the differences.
 `spm help <command>` is the reference for the flags of a command; this page
 explains what the commands do with them.
 
@@ -23,13 +25,15 @@ The same code means the same thing in every subcommand:
 | Code | Meaning |
 |------|---------|
 | `0` | Success. For `diff`, the two profiles are equal |
-| `1` | The profile is bad: it is empty, does not parse, is not of the type `--type` names or the other inputs reveal, has no type that can be detected, does not validate, cannot be read (a missing or unreadable file, or a directory, device or socket), or its output could not be written. For `diff`, `1` means *different* and nothing else |
+| `1` | The profile is bad: it is empty, does not parse, is not of the type `--type` names or the other inputs reveal, has no type that can be detected, does not validate, cannot be read (a missing or unreadable file, a directory, device or socket, or `-` reading a terminal, another device or a directory), or its output could not be written. For `diff`, `1` means *different* and nothing else |
 | `2` | Usage error, listed below. For `diff`, every failure, since `1` is taken |
 
 Usage errors, which exit `2`:
 
 - an unknown command, flag, type, format, strategy, architecture or
-  `--validate` mode;
+  `--validate` mode, or an invalid `--abi` version;
+- an empty `--type` or `--output` value, which would otherwise read as the
+  flag left out: use `-` for stdout;
 - a missing `--strategy`, or flags that cannot be combined;
 - an unexpected argument, such as `spm version extra` or
   `spm help merge extra`, or an empty file argument;
@@ -38,17 +42,25 @@ Usage errors, which exit `2`:
 - for `diff`, another number of profiles than two; stdin that could not be
   read counts as one profile at least, so only too many are refused then;
 - `--arch` for a profile type that has no architectures, or for `validate`
-  without `--artifact` or `--strict`, whose checks it does not change;
+  without `--artifact`, `--strict` or `--baseline`, whose checks it does not
+  change; `--abi` for another profile type than Landlock;
 - a flag or a `--` after the file arguments;
 - no file arguments while stdin is a terminal, or outside Windows another
   character device but the null device, such as `/dev/zero`;
 - an input past the limits: a file over 10 MiB, inputs over 64 MiB in total,
-  more than 1000 file arguments, a stdin array of more than 1000 profiles, or
-  more than 1000 profiles in total (each element of a stdin array counts, and
-  so does each file beside it); a stdin array that does not parse is a bad
-  profile instead, wherever its syntax error sits, since its syntax is
-  checked before its elements are counted;
-- stdin named twice (`spm merge - -`);
+  counting every byte read, the space around and between documents
+  included, more than 1000 file arguments, a stdin array of more than 1000
+  profiles, or more than 1000 profiles in total (each element of a stdin
+  array counts, and so does each file beside it); a stdin array that does
+  not parse is a bad profile instead, wherever its syntax error sits, since
+  its syntax is checked before its elements are counted;
+- stdin named twice: `-` twice, and where stdin is not a regular file,
+  two of `-`, `/dev/stdin`, `/dev/fd/0` and `/proc/self/fd/0`, or, on
+  Linux where stdin is a pipe, one of them beside another path that leads
+  to that pipe, which can be read only once; elsewhere such a path reads
+  the pipe a second time, and whichever reads second fails as empty. A
+  regular file on stdin reads whole through each of those paths but `-`,
+  so only `-` twice is refused then;
 - inputs that disagree on the profile type, each holding the members of
   another one, which blames none of them; an input holding the members of
   two types, or of another type than `--type` names, or members none of
@@ -58,11 +70,15 @@ Usage errors, which exit `2`:
 The split is between "you invoked it wrong", which no profile can cause, and
 "the profile is wrong", which is the answer the command was asked for. An
 input past the limits is discovered while reading, but exits `2`: the profile
-was never read, so nothing about it is known to be wrong. It ends the run
-there, before any input is checked, so it exits `2` whatever the other
-inputs hold and nothing is reported about them, and the exit code does not
-depend on which of them were read before it. The flags, an empty file
-argument and stdin named twice are checked before any input is read.
+was never read, so nothing about it is known to be wrong. Its error names
+the input, as every error about an input does
+(`error: big.json: file exceeds 10485760 byte limit`,
+`error: stdin: input exceeds 10485760 byte limit`); a bound on all inputs
+together names none. It ends the run there, before any input is checked,
+so it exits `2` whatever the other inputs hold and nothing is reported
+about them, and the exit code does not depend on which of them were read
+before it. The flags, an empty file argument and stdin named twice are
+checked before any input is read.
 
 A bad profile fails on its own: the other inputs are still read, checked and
 reported, and the run exits `1` at the end. A file that cannot be read or is
@@ -86,6 +102,16 @@ itself, and the run exits `1`, while a mix of profiles that are each fine
 exits `2`. An input that shows no type, or several, is not checked further.
 `diff` exits `2` for both.
 
+`-` reads stdin as a file argument reads its file. Stdin that is a terminal,
+another device but the null device, or a directory is refused before
+anything is read from it, as the same device named as a file is: `spm
+validate - </dev/zero` and `spm validate /dev/zero` both exit `1`, and
+`spm validate -` typed at a terminal does not wait for input. Without file
+arguments, a terminal or another character device on stdin is a usage
+error instead, since no input was named at all. Two things are read on
+stdin that are refused as file arguments: a socket, and the null device,
+which reads as empty input.
+
 A file argument may be a regular file or a pipe once a symbolic link is
 followed, so a process substitution such as `spm diff <(cmd a) <(cmd b)` and a
 pipe into `/dev/stdin` work. A directory, a device or a socket is refused before
@@ -100,6 +126,15 @@ with "FIFO has no writer", so `spm validate f & cmd > f` fails and can leave
 but never closes it still holds the run. On FreeBSD, and possibly the other
 BSDs, a FIFO without a writer may still wait for one.
 
+Every symbolic link on the way to a file argument is followed, the last
+one included, and what the file holds is decoded and may be echoed: an
+error quotes the value it is about, and `validate` writes the profile it
+read. A runtime or a CI job that runs `spm` over a tree of untrusted
+profiles should therefore resolve the paths itself and refuse a link that
+leads out of the tree, or any link at all, before it passes them on: spm
+cannot tell a link that was meant from one planted to read a file
+elsewhere on the node.
+
 ## Merge profiles
 
 ```sh
@@ -110,11 +145,12 @@ spm merge --type apparmor --strategy union recording1.json recording2.json
 Without `--type`, the type is detected from the fields the profiles carry,
 matched ignoring case as the decoder matches them, and noted on stderr;
 `--no-detect-note` suppresses that note, and errors and warnings still go
-there. Every top-level field counts, not only `defaultAction`: a profile of
-`syscalls` alone is a seccomp profile. Inputs that mix profile types are
-rejected, since merging them would drop whatever the chosen type has no field
-for. One document that carries the members of two types is rejected the same
-way (`error: <input>: mixes profile types (seccomp and apparmor), use --type`)
+there. A run that a usage error stops does not write it. Every top-level
+field counts, not only `defaultAction`: a profile of `syscalls` alone is a
+seccomp profile. Inputs that mix profile types are rejected, since merging
+them would drop whatever the chosen type has no field for. One document
+that carries the members of two types is rejected the same way
+(`error: <input>: mixes profile types (seccomp and apparmor), use --type`)
 rather than resolved by a fixed precedence, which could validate an AppArmor
 profile that carries a `defaultAction` member as an almost empty seccomp
 profile. An input whose members reveal no type defers to the others only
@@ -150,20 +186,20 @@ spm merge --type seccomp --strategy intersect --validate default,artifact \
 ```
 
 The merge only runs if every input passes, and every input that fails is
-reported, under `default` as well. The baseline gets `default`, as
-in the library flow: the seccomp defaults runtimes ship fail `strict`, which
+reported, under `default` as well: once another input has failed, an input
+left to the merge's own checks is merged alone, for the node `--arch`
+names, so that an intersection names a baseline of another byte order
+beside a misspelled artifact. The baseline gets `default`, as in the
+library flow: the seccomp defaults runtimes ship fail `strict`, which
 also rejects `SCMP_ACT_NOTIFY` and the listener settings. `artifact` refuses
 what `UnmarshalStrict` refuses, a member the profile type has no field for
-included. The check the flow runs once at config load, that the merge reads
-every rule of the baseline, is a merge of the baseline alone followed by a
-diff, which exits `0` when the two are equal. It applies to a seccomp or
-AppArmor baseline; a Landlock merge of one profile drops rights a rule on an
-ancestor already grants, so a Landlock baseline is checked with
-`spm validate` instead (see [the runtime flow](integration.md#the-runtime-flow)):
+included. The check the flow runs once at config load is
+[`spm validate --baseline`](#validate-profiles), which `merge --validate`
+does not take:
 
 ```sh
-spm merge --strategy intersect baseline.json > settled.json &&
-  spm diff baseline.json settled.json
+spm validate --type seccomp --baseline --quiet --arch SCMP_ARCH_X86_64 \
+  baseline.json
 ```
 
 `--arch` names the native seccomp architecture of the node that loads the
@@ -187,10 +223,12 @@ known. The merge and the `artifact` and `strict` checks then take the node to
 be any architecture a runtime can be native on, including the ones only crun
 runs on natively, such as x32 and MIPS n32. The result is safe on every node
 but keeps fewer rules than one settled for a known 64-bit node, and a value
-above 32 bits fails the checks whatever the profile lists. Of the
-architectures only crun runs on, in practice only x32 changes a result: a
-narrow x86_64 denylist may be refused because libseccomp would lose its
-rules where x32 is native. Name the node's architecture where it is known.
+above 32 bits fails the checks whatever the profile lists. Any of the
+architectures only crun runs on can change a result, x32, MIPS n32, ppc,
+s390, parisc, m68k and sh among them: a merge may be refused because
+libseccomp would lose rules where one of them is native, such as an
+`SCMP_ACT_ERRNO` entry for `newfstatat` beside a conditioned `mmap`, which
+is refused for parisc. Name the node's architecture where it is known.
 The byte order is the exception: with no node to compare with, an
 intersection accepts architectures of either byte order, and the checks
 refuse only a list mixing the two, while one of a single byte order loads
@@ -229,6 +267,11 @@ means stdout, as `-` means stdin for an input:
   `--output /dev/null` leaves that node alone. One that is replaced by a
   regular file between the check and the open is refused, since writing
   that file in place would leave the end of its old content behind.
+- A FIFO is opened as a shell redirection opens it: `--output` is the
+  caller's own choice, unlike an input, so the run waits for a reader to
+  open the FIFO, however long that takes, and then for it to take what
+  does not fit in the pipe. `spm validate --output fifo profile.json &
+  cat fifo` works whichever starts first.
 - A file that is a mount point cannot be replaced, which is what a file
   bind-mounted into a container is (`docker run -v ./out.json:/out.json`, or
   a Kubernetes `subPath` mount). It is written in place and keeps its mode
@@ -281,10 +324,49 @@ library, and handle what `encoding/json` accepts silently as follows. The
 | Member the profile type has no field for | warn | reject | reject |
 | Data after the profile, or a document that is not an object | reject | reject | reject |
 
-`--artifact` is for a profile a runtime did not author, `--strict` for one a
-person wrote; they cannot be combined. Both refuse what the library's
-`UnmarshalStrict` refuses, so a misspelled `syscals` fails `--artifact` as it
-fails a runtime that decodes the artifact with the library.
+`--artifact` is for a profile a runtime did not author, such as one pulled
+with a workload: it adds the limits and checks of `ValidateArtifact`.
+`--strict` is for one a person wrote: it adds to those what is likely a
+mistake, such as a duplicate entry. They cannot be combined. Both refuse
+what the library's `UnmarshalStrict` refuses, so a misspelled `syscals`
+fails `--artifact` as it fails a runtime that decodes the artifact with the
+library.
+
+`--baseline` checks the baseline a runtime merges every artifact into, as
+the runtime checks it once at config load (see
+[the runtime flow](integration.md#the-runtime-flow)), and cannot be combined
+with `--artifact` or `--strict`. It decodes as the default mode does. For
+seccomp it runs `seccomp.Options.ValidateBaseline` for the node `--arch`
+names, and for AppArmor `apparmor.ValidateBaseline`: `Validate`, then a
+merge of the baseline alone and a diff against it, which fails with the
+rules every merge would take away whatever the artifact says. The seccomp
+check also diffs the baseline against its merge with a profile allowing
+every call, which refuses what only a merge next to an artifact takes
+away, such as a condition on a value above 32 bits where the node covers
+a 32-bit architecture. The CRI-O default seccomp profile passes the
+default checks but fails here, since the merge rewrites its masked
+`clone` clauses; restated as the integration guide describes, it passes.
+The AppArmor check also refuses a path `QuotePath` cannot render, which a
+merge followed by a diff would not find. For Landlock it runs
+`landlock.ValidateBaseline`, or `landlock.Options.ValidateBaseline` for
+the version `--abi` names: every check of `ValidateArtifact` but its
+bound on the number of rules, such as a relative path or a rule granting
+a right the baseline does not handle, which the default checks accept
+and the merge would read otherwise than meant. A Landlock merge of one
+profile drops rights a rule on an ancestor already grants, so a merge and
+a diff cannot tell an exact Landlock baseline from an inexact one.
+
+```sh
+spm validate --type seccomp --baseline --arch SCMP_ARCH_X86_64 baseline.json
+spm validate --type landlock --baseline --abi 4 baseline.json
+```
+
+`--abi` names the Landlock ABI version of the kernel that loads the
+profiles, as `landlock_create_ruleset` reports it, and runs the validators
+of `landlock.Options` for that version in every mode: each right the
+kernel does not know is refused, since the kernel would refuse the
+ruleset. A version newer than the library knows reads as the newest it
+knows. It is a usage error for a seccomp or AppArmor profile.
 
 `--arch` names the native seccomp architecture of the node that loads the
 profiles, as `merge --arch` does. It matters to `--artifact` and `--strict`
@@ -299,9 +381,13 @@ machine unless `--arch` names an x86-64 node, and so does a seccomp
 `merge --strategy intersect` of them, which refuses such an input. With
 `--arch none` they take the node to be any architecture a runtime can be
 native on and refuse a value above 32 bits everywhere, but refuse only an
-architecture list mixing the two byte orders. The default checks do not
-depend on the architecture, so `--arch` without one of the two flags is a
-usage error rather than a flag that does nothing.
+architecture list mixing the two byte orders. For `--baseline`, `--arch`
+names the node the merge of the baseline runs for: it decides how that
+merge settles the architectures and which byte order it refuses, as for
+`merge --arch`, and a value above 32 bits where the node covers a 32-bit
+architecture fails it as a baseline the merge does not read exactly. The default checks do not depend on the architecture, so
+`--arch` without `--artifact`, `--strict` or `--baseline` is a usage error
+rather than a flag that does nothing.
 
 ```sh
 spm validate --type seccomp --artifact --arch SCMP_ARCH_X86 artifact.json
@@ -312,8 +398,8 @@ table lets two readers of one profile read different rules; a repeated
 member is refused in every mode, since `encoding/json` merges a repeated
 object into the earlier one and can read a profile allowing more than
 either occurrence. A seccomp condition may leave out its `value` and
-`valueTwo`, as the Security Profiles Operator does for 0. `spm diff` has no
-strictness flag, so it warns about all of these but a repeated member and
+`valueTwo`, as the Security Profiles Operator does for 0. `spm diff`
+without `--validate` warns about all of these but a repeated member and
 still prints its verdict.
 
 Every error and warning line names the input it came from: a file by its
@@ -424,12 +510,29 @@ cat profiles.json | spm diff --type landlock
 ```
 
 Exits 0 if the profiles are equal, 1 if they differ, and 2 on any error,
-since `1` is taken. The profiles are not validated, as the library's `Diff`
-validates nothing: two copies of an invalid profile print `"equal": true`
-and exit 0, so run [`spm validate`](#validate-profiles) on them first where
-that matters. `--no-detect-note` suppresses the note about an
+since `1` is taken. Without `--validate` the profiles are not validated, as
+the library's `Diff` validates nothing: two copies of an invalid profile
+print `"equal": true` and exit 0. `--validate` names the checks to run on
+them first, as `merge --validate` does: one mode for both, or one mode per
+profile separated by commas, such as `--validate default,artifact` for a
+baseline and an artifact. A profile that fails is reported by name and the
+run exits 2. `--no-detect-note` suppresses the note about an
 auto-detected profile type, and `--output` writes the diff to a file instead
 of stdout under the same rules as `merge --output`.
+
+```sh
+spm diff --type seccomp --validate artifact left.json right.json
+```
+
+The input limits bound what is read, not what a profile can make `diff`
+or a merge hold: the default checks apply none of the library's artifact
+limits, and a `diff` without `--validate` applies no check at all. Two
+seccomp profiles of about 8 MiB naming 700,000 syscalls each are within the
+input limits, and a `diff` of them takes over 1 GiB of memory, as does a
+union of eight. `--validate artifact` refuses such a profile before the
+comparison or the merge runs, in about 100 MiB. A job that diffs or merges
+profiles it did not author, as in a container with a memory limit, passes
+`--validate artifact` for each of them.
 
 A node covers its own seccomp architecture whether or not a profile lists it,
 so `spm diff` implies one on both sides. By default (`--arch native`) that is
