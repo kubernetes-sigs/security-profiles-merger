@@ -69,14 +69,11 @@ func TestMergesStayWithinTheirPairBudget(t *testing.T) {
 		"Intersect": Intersect,
 		"Union":     Union,
 	} {
-		start := time.Now()
+		bound := testutil.StartWallClock(t, 2*time.Second)
 
 		result, err := mergeFn(budgetProfile(literals...), budgetProfile(globs...))
 
-		elapsed := time.Since(start)
-		if testutil.CheckWallClock() && elapsed > 2*time.Second {
-			t.Errorf("%s of %d paths took %v", name, 2*len(literals), elapsed)
-		}
+		bound.Checkf("%s of %d paths", name, 2*len(literals))
 
 		// Past the budget an intersection fails, and a union keeps every
 		// path (see TestUnionPastItsBudgetKeepsEveryPath).
@@ -321,14 +318,11 @@ func TestMergesBoundTheirRegexWork(t *testing.T) {
 		"Intersect": Intersect,
 		"Union":     Union,
 	} {
-		start := time.Now()
+		bound := testutil.StartWallClock(t, 2*time.Second)
 
 		result, err := mergeFn(globs, names)
 
-		elapsed := time.Since(start)
-		if testutil.CheckWallClock() && elapsed > 2*time.Second {
-			t.Errorf("%s took %v", name, elapsed)
-		}
+		bound.Checkf("%s", name)
 
 		// Past the budget the intersection fails and the union keeps every
 		// path.

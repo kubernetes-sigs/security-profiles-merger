@@ -132,6 +132,22 @@ func (c *Collector) Report(build func() error) {
 	c.report.omitted++
 }
 
+// Reportf adds the failure fmt.Errorf builds from format and args, building
+// it only when the report still has room for it, as Report does. The
+// arguments are evaluated and boxed even past the limit, so Reportf is for a
+// check that fails a bounded number of times; one that can fail once per
+// element of its input uses Report, which costs nothing past the limit.
+func (c *Collector) Reportf(format string, args ...any) {
+	if len(c.report.kept) < MaxJoinedErrors {
+		//nolint:err113 // the callers' formats wrap their sentinels with %w
+		c.report.add(fmt.Errorf(format, args...))
+
+		return
+	}
+
+	c.report.omitted++
+}
+
 // Add adds err. A report from Collector.Err is flattened into this one
 // rather than counted as one failure: validators build their report from the
 // reports of their checks, and the bound has to hold for the whole of it,

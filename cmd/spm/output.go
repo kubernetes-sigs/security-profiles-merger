@@ -88,8 +88,6 @@ func (e *writtenUnsyncedError) Error() string {
 	return "written, but it may not outlast a crash: " + e.err.Error()
 }
 
-func (e *writtenUnsyncedError) Unwrap() error { return e.err }
-
 // errSymlinkOutput reports an --output path that is a symbolic link, which
 // is refused rather than followed.
 var errSymlinkOutput = errors.New("refusing to write through a symbolic link")
@@ -390,9 +388,17 @@ func replaceOutputFileWith(
 	return err
 }
 
+// tempFile is what writeTempFile needs of the temporary file: an *os.File,
+// or in a test, one whose steps fail.
+type tempFile interface {
+	io.WriteCloser
+	Chmod(mode fs.FileMode) error
+	Sync() error
+}
+
 // writeTempFile sets the mode of the new file, writes and syncs content,
 // and closes the file, which it does whether or not anything failed.
-func writeTempFile(temp *os.File, content []byte) error {
+func writeTempFile(temp tempFile, content []byte) error {
 	err := chmodOutput(temp)
 	if err != nil {
 		_ = temp.Close()

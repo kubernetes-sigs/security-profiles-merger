@@ -303,10 +303,6 @@ func mergeOptional[T any](
 	cloneFn func(*T) *T,
 	mergeFn func(*T, *T) *T,
 ) *T {
-	if left == nil && right == nil {
-		return nil
-	}
-
 	if left == nil {
 		return cloneFn(right)
 	}
@@ -339,36 +335,21 @@ func mergeExecutable(left, right *ExecutableRules, mergeStrategy strategy) *Exec
 }
 
 func mergeFilesystem(left, right *FilesystemRules, mergeStrategy strategy) *FilesystemRules {
-	return mergeOptional(
-		left,
-		right,
-		cloneFilesystem,
-		func(lhs, rhs *FilesystemRules) *FilesystemRules {
-			return mergeStrategy.mergeFilesystem(lhs, rhs)
-		},
-	)
+	return mergeOptional(left, right, cloneFilesystem, mergeStrategy.mergeFilesystem)
 }
 
 func mergeNetwork(left, right *NetworkRules, mergeStrategy strategy) *NetworkRules {
 	return mergeOptional(left, right, cloneNetwork, func(lhs, rhs *NetworkRules) *NetworkRules {
-		result := &NetworkRules{
-			AllowRaw:  mergeStrategy.mergeBool(lhs.AllowRaw, rhs.AllowRaw),
-			Protocols: nil,
+		return &NetworkRules{
+			AllowRaw: mergeStrategy.mergeBool(lhs.AllowRaw, rhs.AllowRaw),
+			Protocols: mergeOptional(lhs.Protocols, rhs.Protocols, cloneProtocols,
+				func(lhs, rhs *AllowedProtocols) *AllowedProtocols {
+					return &AllowedProtocols{
+						AllowTCP: mergeStrategy.mergeBool(lhs.AllowTCP, rhs.AllowTCP),
+						AllowUDP: mergeStrategy.mergeBool(lhs.AllowUDP, rhs.AllowUDP),
+					}
+				}),
 		}
-
-		switch {
-		case lhs.Protocols != nil && rhs.Protocols != nil:
-			result.Protocols = &AllowedProtocols{
-				AllowTCP: mergeStrategy.mergeBool(lhs.Protocols.AllowTCP, rhs.Protocols.AllowTCP),
-				AllowUDP: mergeStrategy.mergeBool(lhs.Protocols.AllowUDP, rhs.Protocols.AllowUDP),
-			}
-		case lhs.Protocols != nil:
-			result.Protocols = cloneProtocols(lhs.Protocols)
-		case rhs.Protocols != nil:
-			result.Protocols = cloneProtocols(rhs.Protocols)
-		}
-
-		return result
 	})
 }
 
@@ -927,37 +908,19 @@ func (p *Profile) Clone() *Profile {
 		return nil
 	}
 
-	return cloneProfile(p)
-}
-
-func cloneProfile(profile *Profile) *Profile {
-	clone := &Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
+	return &Profile{
+		Executable:   cloneExecutable(p.Executable),
+		Filesystem:   cloneFilesystem(p.Filesystem),
+		Network:      cloneNetwork(p.Network),
+		Capabilities: cloneCapabilities(p.Capabilities),
 	}
-
-	if profile.Executable != nil {
-		clone.Executable = cloneExecutable(profile.Executable)
-	}
-
-	if profile.Filesystem != nil {
-		clone.Filesystem = cloneFilesystem(profile.Filesystem)
-	}
-
-	if profile.Network != nil {
-		clone.Network = cloneNetwork(profile.Network)
-	}
-
-	if profile.Capabilities != nil {
-		clone.Capabilities = cloneCapabilities(profile.Capabilities)
-	}
-
-	return clone
 }
 
 func cloneExecutable(exec *ExecutableRules) *ExecutableRules {
+	if exec == nil {
+		return nil
+	}
+
 	return &ExecutableRules{
 		AllowedExecutables: slices.Clone(exec.AllowedExecutables),
 		AllowedLibraries:   slices.Clone(exec.AllowedLibraries),
@@ -965,6 +928,10 @@ func cloneExecutable(exec *ExecutableRules) *ExecutableRules {
 }
 
 func cloneFilesystem(fsRules *FilesystemRules) *FilesystemRules {
+	if fsRules == nil {
+		return nil
+	}
+
 	return &FilesystemRules{
 		ReadOnlyPaths:  slices.Clone(fsRules.ReadOnlyPaths),
 		WriteOnlyPaths: slices.Clone(fsRules.WriteOnlyPaths),
@@ -973,19 +940,21 @@ func cloneFilesystem(fsRules *FilesystemRules) *FilesystemRules {
 }
 
 func cloneNetwork(network *NetworkRules) *NetworkRules {
-	clone := &NetworkRules{
+	if network == nil {
+		return nil
+	}
+
+	return &NetworkRules{
 		AllowRaw:  merge.ClonePtr(network.AllowRaw),
-		Protocols: nil,
+		Protocols: cloneProtocols(network.Protocols),
 	}
-
-	if network.Protocols != nil {
-		clone.Protocols = cloneProtocols(network.Protocols)
-	}
-
-	return clone
 }
 
 func cloneProtocols(proto *AllowedProtocols) *AllowedProtocols {
+	if proto == nil {
+		return nil
+	}
+
 	return &AllowedProtocols{
 		AllowTCP: merge.ClonePtr(proto.AllowTCP),
 		AllowUDP: merge.ClonePtr(proto.AllowUDP),
@@ -993,13 +962,17 @@ func cloneProtocols(proto *AllowedProtocols) *AllowedProtocols {
 }
 
 func cloneCapabilities(caps *CapabilityRules) *CapabilityRules {
+	if caps == nil {
+		return nil
+	}
+
 	return &CapabilityRules{
 		AllowedCapabilities: slices.Clone(caps.AllowedCapabilities),
 	}
 }
 
 func normalizeProfile(profile *Profile) *Profile {
-	result := cloneProfile(profile)
+	result := profile.Clone()
 
 	for _, paths := range pathLists(result) {
 		*paths = normalizePaths(*paths)

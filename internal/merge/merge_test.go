@@ -445,6 +445,46 @@ func TestDiffSlice(t *testing.T) {
 	}
 }
 
+func TestSortedKeyDiff(t *testing.T) {
+	t.Parallel()
+
+	added, removed, both := merge.SortedKeyDiff(
+		map[string]int{"d": 1, "a": 2, "c": 3, "b": 4},
+		map[string]int{"e": 5, "c": 6, "b": 7},
+	)
+
+	for _, check := range []struct {
+		name      string
+		got, want []string
+	}{
+		{"removed", removed, []string{"a", "d"}},
+		{"added", added, []string{"e"}},
+		{"both", both, []string{"b", "c"}},
+	} {
+		if !slices.Equal(check.got, check.want) {
+			t.Errorf("%s = %v, want %v", check.name, check.got, check.want)
+		}
+	}
+
+	extra, gone, shared := merge.SortedKeyDiff(map[int]bool{1: true}, map[int]bool{1: false})
+	if extra != nil || gone != nil || !slices.Equal(shared, []int{1}) {
+		t.Errorf("SortedKeyDiff of one shared key = %v, %v, %v, want only [1], shared",
+			extra, gone, shared)
+	}
+}
+
+func TestNilIfEmpty(t *testing.T) {
+	t.Parallel()
+
+	if got := merge.NilIfEmpty([]int{}); got != nil {
+		t.Errorf("NilIfEmpty(empty) = %#v, want nil", got)
+	}
+
+	if got := merge.NilIfEmpty([]int{1}); !slices.Equal(got, []int{1}) {
+		t.Errorf("NilIfEmpty([1]) = %v, want [1]", got)
+	}
+}
+
 func TestClonePtrNil(t *testing.T) {
 	t.Parallel()
 

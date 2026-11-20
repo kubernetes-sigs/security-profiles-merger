@@ -237,8 +237,8 @@ func failingProfile(count int) *specs.LinuxSeccomp {
 //
 // The race detector and coverage counters add a few dozen allocations of
 // their own that vary from run to run, more than that slack, so the counts
-// are compared only in an uninstrumented run, which CI makes in the bounds
-// job.
+// are compared only in an uninstrumented run, which every CI test job but
+// the coverage one makes.
 //
 //nolint:paralleltest // AllocsPerRun refuses to run in a parallel test
 func TestValidatorsDoNotBuildFailuresPastTheLimit(t *testing.T) {

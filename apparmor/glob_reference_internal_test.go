@@ -17,7 +17,7 @@ limitations under the License.
 package apparmor
 
 import (
-	"math/rand"
+	"math/rand/v2"
 	"slices"
 	"strings"
 	"sync"
@@ -258,8 +258,8 @@ var refCorpus = []string{
 
 func refRandPaths(rnd *rand.Rand) []string {
 	paths := make([]string, 0, len(refCorpus))
-	for range rnd.Intn(6) {
-		paths = append(paths, refCorpus[rnd.Intn(len(refCorpus))])
+	for range rnd.IntN(6) {
+		paths = append(paths, refCorpus[rnd.IntN(len(refCorpus))])
 	}
 
 	return paths
@@ -289,7 +289,7 @@ func TestRefCorpusGlobsMatchProbes(t *testing.T) {
 func TestIntersectPathsMatchesReference(t *testing.T) {
 	t.Parallel()
 
-	rnd := rand.New(rand.NewSource(11))
+	rnd := rand.New(rand.NewPCG(11, 11))
 
 	for range 60000 {
 		left, right := refRandPaths(rnd), refRandPaths(rnd)
@@ -306,7 +306,7 @@ func TestIntersectPathsMatchesReference(t *testing.T) {
 func TestMergeFilesystemMatchesReference(t *testing.T) {
 	t.Parallel()
 
-	rnd := rand.New(rand.NewSource(23))
+	rnd := rand.New(rand.NewPCG(23, 23))
 
 	for range 60000 {
 		left := &FilesystemRules{

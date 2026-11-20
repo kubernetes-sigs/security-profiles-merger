@@ -27,6 +27,7 @@ import (
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"sigs.k8s.io/security-profiles-merger/landlock"
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
 
@@ -532,6 +533,56 @@ func TestParseArch(t *testing.T) {
 
 		if got.value != testCase.wantArch {
 			t.Errorf("%q = %q, want %q", testCase.value, got.value, testCase.wantArch)
+		}
+	}
+}
+
+// errDiffFailed is the failure TestDiffCommandReportsFailures injects.
+var errDiffFailed = errors.New("diff failed")
+
+// unencodableDiff is a diff the JSON encoder refuses.
+type unencodableDiff struct{}
+
+func (unencodableDiff) MarshalJSON() ([]byte, error) { return nil, errDiffFailed }
+
+// TestDiffCommandReportsFailures covers the failures of the diff command
+// that no profile reaches: a diff function that fails, which the package
+// functions do only for a nil profile, and a diff that cannot be written.
+// Both are usage errors, since exit code 1 means "different".
+func TestDiffCommandReportsFailures(t *testing.T) {
+	t.Parallel()
+
+	for name, diffFn := range map[string]func(*landlock.Profile, *landlock.Profile) (*unencodableDiff, error){
+		"diff fails": func(*landlock.Profile, *landlock.Profile) (*unencodableDiff, error) {
+			return nil, errDiffFailed
+		},
+		"write fails": func(*landlock.Profile, *landlock.Profile) (*unencodableDiff, error) {
+			return &unencodableDiff{}, nil
+		},
+	} {
+		ops := kindOps[landlock.Profile, unencodableDiff]{
+			intersect:        nil,
+			union:            nil,
+			validate:         nil,
+			validateStrict:   nil,
+			validateArtifact: nil,
+			inputCheck:       nil,
+			format:           nil,
+			diff:             diffFn,
+			formatDiff:       func(*unencodableDiff) string { return "" },
+			equal:            func(*unencodableDiff) bool { return true },
+			forArch:          nil,
+		}
+
+		var stderr strings.Builder
+
+		inv := testInvocation(rawInputs(landlockJSON(t, "read_file"), landlockJSON(t, "read_file")))
+		inv.stderr = &stderr
+
+		code := ops.diffCommand(inv)
+		if code != exitUsage || !strings.Contains(stderr.String(), errDiffFailed.Error()) {
+			t.Errorf("%s: exit code = %d, stderr = %q, want %d and %q",
+				name, code, stderr.String(), exitUsage, errDiffFailed)
 		}
 	}
 }

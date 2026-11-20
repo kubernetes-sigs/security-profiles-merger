@@ -128,12 +128,9 @@ func checkDiffCount(inv *invocation) {
 	))
 }
 
-func diffProfiles[T any, D any](
-	inv *invocation,
-	diffFn func(*T, *T) (*D, error),
-	formatFn func(*D) string,
-	equalFn func(*D) bool,
-) int {
+// diffCommand compares two profiles.
+func (ops kindOps[T, D]) diffCommand(inv *invocation) int {
+	ops = ops.atArch(inv)
 	profiles := unmarshalAll[T](inv.inputs, make([]bool, len(inv.inputs)), inv.report)
 
 	if inv.halted() {
@@ -142,18 +139,18 @@ func diffProfiles[T any, D any](
 
 	inv.report.flush(inv.stderr)
 
-	result, err := diffFn(profiles[0], profiles[1])
+	result, err := ops.diff(profiles[0], profiles[1])
 	if err != nil {
 		_, _ = fmt.Fprintf(inv.stderr, "error: %v\n", err)
 
 		return exitUsage
 	}
 
-	if code := inv.write(result, formatFn(result)); code != 0 {
+	if code := inv.write(result, ops.formatDiff(result)); code != 0 {
 		return exitUsage
 	}
 
-	if !equalFn(result) {
+	if !ops.equal(result) {
 		return exitDiff
 	}
 

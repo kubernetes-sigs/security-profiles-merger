@@ -62,14 +62,17 @@ The codebase is organized in layers:
   merge primitives: `Fold` folds any profile type pairwise,
   `IntersectSlice`, `UnionSlice` and `DeduplicateSlice` work with any
   comparable element type, and `DiffSlice` with ordered element types only,
-  since it sorts its results; `NewSliceDiff` builds an `spm.SliceDiff`, nil
+  since it sorts its results, as `SortedKeyDiff` sorts the keys two maps do
+  not share and those they do; `NilIfEmpty` spells an empty list as nil;
+  `NewSliceDiff` builds an `spm.SliceDiff`, nil
   for equal lists, and `WriteSliceDiff` formats one for string-like types,
   skipping a nil one. `ClonePtr` copies an optional value. All three profile
   packages merge through `Fold`, which returns a single profile as it is
   and stops at the first error a merge returns: apparmor and landlock fold
   copies they own, apparmor ends the fold past its budget, and seccomp
   normalizes a single profile rather than merging it. It also holds the
-  bounds on what an error reports (`Collector`, `BoundedError`,
+  bounds on what an error reports (`Collector`, whose `Report` and
+  `Reportf` build a failure only while the report has room, `BoundedError`,
   `QuoteBounded`)
   and the quoting of profile values for output (`SafeText`, `SafeName`).
 - `internal/strictjson/` finds what `encoding/json` accepts silently and an
@@ -186,11 +189,12 @@ What `make help` does not say:
   as it is in CI.
 
 `make verify` runs `verify-coverage` (the test suite with the race detector,
-then the coverage floor), `lint`, `verify-tidy`, `verify-mdtoc`,
+then the coverage floor), `lint`, `vet-arch` (`go vet` for the Linux
+architectures the tests run on besides amd64), `build`, `verify-go-floor`
+(go.mod's go line is exactly `GO_FLOOR`), `verify-tidy`, `verify-mdtoc`,
 `verify-golden`, `verify-syscalls`, `verify-dependencies`, `govulncheck` and
-`lint-actions` in one command, with the Go on your `PATH`. It does not build
-the binary; `make build` does. These CI jobs need something the Makefile
-does not install or a machine it does not have:
+`lint-actions` in one command, with the Go on your `PATH`. These CI jobs
+need something the Makefile does not install or a machine it does not have:
 
 | CI job | Local equivalent | Needs |
 |--------|------------------|-------|
@@ -198,11 +202,11 @@ does not install or a machine it does not have:
 | `snapshot` | `goreleaser release --snapshot --skip=sign --clean` | goreleaser and syft |
 | `lint` (second run) | `GOOS=windows golangci-lint run ./cmd/...` | nothing more; it lints the files of `cmd/spm` for hosts that are not Unix |
 | `test / macos-latest / floor go`, `test / macos-latest / release go`, `test / windows-latest / floor go`, `test / windows-latest / release go` | `go test -count=1 ./...` | a macOS or Windows machine, and for `release go` the Go in `.go-version` |
-| `test / linux-386` | `GOARCH=386 CGO_ENABLED=0 go test -count=1 ./...` | nothing more on amd64 |
+| `test / linux-386` | `GOARCH=386 CGO_ENABLED=0 make test-wall-clock` | nothing more on amd64, and a machine that runs little else |
 | `test / linux-arm64` | `CGO_ENABLED=0 go test -count=1 ./...` | an arm64 machine |
 | `test / linux-<arch> (qemu)` | `GOARCH=<arch> CGO_ENABLED=0 go test -short -count=1 ./...` | qemu-user with binfmt_misc for s390x, ppc64le or arm |
 | `vet / <os>-<arch>` | `GOOS=<os> GOARCH=<arch> go vet ./...` | nothing more |
-| `test / release go` | `go test -count=1 ./...` | the Go in `.go-version` |
+| `test / release go` | `make test-wall-clock` (the suite one package at a time, with the wall-clock bounds on) | the Go in `.go-version`, and a machine that runs little else |
 | `fuzz / <target>` | `make fuzz` | time |
 | `test-libseccomp / <version>`, `test-libseccomp / 2.6.1 / <arch>` | `make test-libseccomp`, then `SPM_LIBSECCOMP_OPTIMIZE=2 make test-libseccomp` | cgo and that libseccomp version, built for arm64 or for 386 (`GOARCH=386 CC="gcc -m32"`) |
 | `api / gorelease` | `make api-report` | a clean working tree; the job only reports |

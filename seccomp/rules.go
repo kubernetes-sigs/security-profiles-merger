@@ -1249,23 +1249,13 @@ func defaultClause(profile *specs.LinuxSeccomp) *clause {
 	}
 }
 
-// mergedNames returns every syscall name of either side, sorted once over
-// the union rather than once per side.
+// mergedNames returns every syscall name of either side once, sorted.
 func mergedNames(left, right map[string]*syscallRules) []string {
-	names := make([]string, 0, len(left)+len(right))
-	for name := range left {
-		names = append(names, name)
-	}
-
-	for name := range right {
-		if _, ok := left[name]; !ok {
-			names = append(names, name)
-		}
-	}
-
+	names := slices.AppendSeq(make([]string, 0, len(left)+len(right)), maps.Keys(left))
+	names = slices.AppendSeq(names, maps.Keys(right))
 	slices.Sort(names)
 
-	return names
+	return slices.Compact(names)
 }
 
 // mergeProfileSyscalls merges the syscall entries of two profiles given the

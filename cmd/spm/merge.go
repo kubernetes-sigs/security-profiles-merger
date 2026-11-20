@@ -210,52 +210,25 @@ func (opts *mergeOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) int 
 	return opts.check(stderr)
 }
 
-// mergeRequest carries what one merge run needs besides its invocation, so
-// that the per-input validation modes do not turn mergeProfiles into a long
-// parameter list.
-type mergeRequest[T any] struct {
-	strategy string
-	// checks holds the check of each input, nil for one the merge checks,
-	// and strict whether each is decoded strictly, in the order of inputs.
-	checks []func(*T) error
-	strict []bool
-	// inputCheck is the check the merge functions run on each input on its
-	// own, or nil where only a merge of the input runs it (see kindOps).
-	inputCheck func(*T) error
-	intersect  func(...*T) (*T, error)
-	union      func(...*T) (*T, error)
-	formatFn   func(*T) string
-}
-
-func mergeProfiles[T any](inv *invocation, request mergeRequest[T]) int {
-	var mergeFn func(...*T) (*T, error)
-
-	switch request.strategy {
-	case strategyIntersect:
-		mergeFn = request.intersect
-	case strategyUnion:
-		mergeFn = request.union
-	default:
-		// runMerge checks the strategy before reading any input.
-		_, _ = fmt.Fprintf(inv.stderr, "error: unknown strategy %q\n", request.strategy)
-
-		return exitUsage
-	}
-
+// mergeProfiles decodes every input, runs the check of each that has one
+// (nil for an input the merge checks itself) and merges them with mergeFn.
+// strict says which inputs are decoded strictly.
+func (ops kindOps[T, D]) mergeProfiles(
+	inv *invocation, mergeFn func(...*T) (*T, error), checks []func(*T) error, strict []bool,
+) int {
 	report := inv.report
-	profiles := unmarshalAll[T](inv.inputs, request.strict, report)
+	profiles := unmarshalAll[T](inv.inputs, strict, report)
 
-	for idx, profile := range profiles {
-		if check := request.checks[idx]; check != nil && profile != nil {
-			err := check(profile)
-			if err != nil {
-				report.fail(idx, err)
-			}
+	checkInputs(profiles, report, func(idx int, profile *T) error {
+		if checks[idx] == nil {
+			return nil
 		}
-	}
+
+		return checks[idx](profile)
+	})
 
 	if inv.halted() {
-		checkLeftInputs(request, mergeFn, profiles, report)
+		ops.checkLeftInputs(mergeFn, checks, profiles, report)
 
 		return inv.stop(1)
 	}
@@ -269,7 +242,7 @@ func mergeProfiles[T any](inv *invocation, request mergeRequest[T]) int {
 
 	report.flush(inv.stderr)
 
-	return inv.write(result, request.formatFn(result))
+	return inv.write(result, ops.format(result))
 }
 
 // checkLeftInputs runs the check the merge runs on each input on the ones
@@ -279,33 +252,28 @@ func mergeProfiles[T any](inv *invocation, request mergeRequest[T]) int {
 // checked on its own, so that a failure between two inputs, such as a
 // conflict between their listeners, is neither reported nor blamed on
 // either: the merge was not going to run (see mergeInputCheck).
-func checkLeftInputs[T any](
-	request mergeRequest[T], mergeFn func(...*T) (*T, error), profiles []*T,
+func (ops kindOps[T, D]) checkLeftInputs(
+	mergeFn func(...*T) (*T, error), checks []func(*T) error, profiles []*T,
 	report *inputReport,
 ) {
-	check := mergeInputCheck(request.inputCheck, mergeFn)
+	check := ops.mergeInputCheck(mergeFn)
 
-	for idx, profile := range profiles {
-		if profile == nil || request.checks[idx] != nil {
-			continue
+	checkInputs(profiles, report, func(idx int, profile *T) error {
+		if checks[idx] != nil {
+			return nil
 		}
 
-		err := check(profile)
-		if err != nil {
-			report.fail(idx, err)
-		}
-	}
+		return check(profile)
+	})
 }
 
 // mergeInputCheck returns the check the merge functions run on one input on
 // its own: inputCheck, or where the package exports none, a merge of the
 // input alone with mergeFn, of which only a failure it blames on the input
 // counts.
-func mergeInputCheck[T any](
-	inputCheck func(*T) error, mergeFn func(...*T) (*T, error),
-) func(*T) error {
-	if inputCheck != nil {
-		return inputCheck
+func (ops kindOps[T, D]) mergeInputCheck(mergeFn func(...*T) (*T, error)) func(*T) error {
+	if ops.inputCheck != nil {
+		return ops.inputCheck
 	}
 
 	return func(profile *T) error {

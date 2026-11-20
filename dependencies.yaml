@@ -21,6 +21,19 @@ dependencies:
       - path: .go-version
         match: "^[0-9]"
 
+  # The oldest Go the library supports, go.mod's go line, which the jobs
+  # that set go-version-file to go.mod test. make verify-go-floor checks
+  # that go.mod holds exactly the Makefile's GO_FLOOR, and this keeps the
+  # two in step. Raising it raises it for every consumer, so it has no
+  # upstream to follow.
+  - name: go-floor
+    version: "1.24"
+    refPaths:
+      - path: go.mod
+        match: "^go "
+      - path: Makefile
+        match: ^GO_FLOOR
+
   - name: golangci-lint
     version: 2.15.0
     upstream:

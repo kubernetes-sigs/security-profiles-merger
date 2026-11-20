@@ -206,31 +206,30 @@ func (c ruleChanges[Rule, Change]) empty() bool {
 }
 
 // diffRules compares two lists of canonical rules, which hold one rule per
-// key with sorted rights, in key order (see canonicalProfile). A key only
-// the left holds is removed, one only the right holds is added, and one both
-// hold with different rights is changed; each is reported in key order.
+// key with sorted rights (see canonicalProfile). A key only the left holds
+// is removed, one only the right holds is added, and one both hold with
+// different rights is changed; each is reported in key order.
 func diffRules[Rule any, Key cmp.Ordered, Right comparable, Change any](
 	kind ruleKind[Rule, Key, Right], left, right []Rule,
 	change func(key Key, left, right []Right) Change,
 ) ruleChanges[Rule, Change] {
 	leftMap, rightMap := kind.ruleMap(left), kind.ruleMap(right)
+	added, removed, both := merge.SortedKeyDiff(leftMap, rightMap)
 
 	var changes ruleChanges[Rule, Change]
 
-	for _, rule := range left {
-		ruleKey, leftAccess := kind.key(rule), kind.access(rule)
-
-		rightAccess, ok := rightMap[ruleKey]
-		if !ok {
-			changes.removed = append(changes.removed, rule)
-		} else if !slices.Equal(leftAccess, rightAccess) {
-			changes.changed = append(changes.changed, change(ruleKey, leftAccess, rightAccess))
-		}
+	for _, ruleKey := range removed {
+		changes.removed = append(changes.removed, kind.build(ruleKey, leftMap[ruleKey]))
 	}
 
-	for _, rule := range right {
-		if _, ok := leftMap[kind.key(rule)]; !ok {
-			changes.added = append(changes.added, rule)
+	for _, ruleKey := range added {
+		changes.added = append(changes.added, kind.build(ruleKey, rightMap[ruleKey]))
+	}
+
+	for _, ruleKey := range both {
+		if !slices.Equal(leftMap[ruleKey], rightMap[ruleKey]) {
+			changes.changed = append(changes.changed,
+				change(ruleKey, leftMap[ruleKey], rightMap[ruleKey]))
 		}
 	}
 

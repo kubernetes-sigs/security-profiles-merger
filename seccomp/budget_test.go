@@ -161,18 +161,14 @@ func TestIntersectArtifactSizedContestedProfile(t *testing.T) {
 		}
 	}
 
-	start := time.Now()
+	bound := testutil.StartWallClock(t, generousBudget)
 
 	result, err := seccomp.Intersect(left, right)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Coverage counters slow these loops several times over, so the bound
-	// is only checked without coverage.
-	if elapsed := time.Since(start); testutil.CheckWallClock() && elapsed > generousBudget {
-		t.Errorf("merge took %s, want well under %s", elapsed, generousBudget)
-	}
+	bound.Checkf("merge")
 
 	err = seccomp.Validate(result)
 	if err != nil {
@@ -358,19 +354,14 @@ func TestMergeBoundsMultiNameExpansion(t *testing.T) {
 	calls := [][]uint64{{0, 0}, {1, 0}, {uint64(conditions) + 1, 0}}
 
 	for _, direction := range []safetyDirection{intersectSafety(), unionSafety()} {
-		start := time.Now()
+		bound := testutil.StartWallClock(t, generousBudget)
 
 		result, err := direction.merge(left, right)
 		if err != nil {
 			t.Fatalf("%s: unexpected error: %v", direction.name, err)
 		}
 
-		// Coverage counters and the race detector slow this several times
-		// over, so the bound is only checked without them.
-		if elapsed := time.Since(start); testutil.CheckWallClock() &&
-			elapsed > generousBudget {
-			t.Errorf("%s took %s, want well under %s", direction.name, elapsed, generousBudget)
-		}
+		bound.Checkf("%s", direction.name)
 
 		err = seccomp.Validate(result)
 		if err != nil {
@@ -426,17 +417,14 @@ func TestMergeBoundsRepeatedMultiplexedName(t *testing.T) {
 	}
 
 	for _, direction := range []safetyDirection{intersectSafety(), unionSafety()} {
-		start := time.Now()
+		bound := testutil.StartWallClock(t, generousBudget)
 
 		result, err := direction.merge(profile, profile)
 		if err != nil {
 			t.Fatalf("%s: unexpected error: %v", direction.name, err)
 		}
 
-		if elapsed := time.Since(start); testutil.CheckWallClock() &&
-			elapsed > generousBudget {
-			t.Errorf("%s took %s, want well under %s", direction.name, elapsed, generousBudget)
-		}
+		bound.Checkf("%s", direction.name)
 
 		err = seccomp.Validate(result)
 		if err != nil {
@@ -475,16 +463,14 @@ func TestValidateStrictBoundsDuplicateReport(t *testing.T) {
 		})
 	}
 
-	start := time.Now()
+	bound := testutil.StartWallClock(t, generousBudget)
 
 	err := seccomp.ValidateStrict(profile)
 	if !errors.Is(err, seccomp.ErrDuplicateSyscallName) {
 		t.Fatalf("expected ErrDuplicateSyscallName, got: %v", err)
 	}
 
-	if elapsed := time.Since(start); testutil.CheckWallClock() && elapsed > generousBudget {
-		t.Errorf("ValidateStrict took %s, want well under %s", elapsed, generousBudget)
-	}
+	bound.Checkf("ValidateStrict")
 
 	if size := len(err.Error()); size > generousSize {
 		t.Errorf("error is %d bytes, want at most %d", size, generousSize)
@@ -508,12 +494,10 @@ func TestValidateArtifactRejectsMultiNameExpansion(t *testing.T) {
 		Syscalls:      []specs.LinuxSyscall{multiNameEntry(names, conditions)},
 	}
 
-	start := time.Now()
+	bound := testutil.StartWallClock(t, generousBudget)
 	err := seccomp.ValidateArtifact(profile)
 
-	if elapsed := time.Since(start); testutil.CheckWallClock() && elapsed > generousBudget {
-		t.Errorf("validation took %s, want well under %s", elapsed, generousBudget)
-	}
+	bound.Checkf("validation")
 
 	for _, want := range []error{seccomp.ErrTooManyNamesPerEntry, seccomp.ErrTooManyRules} {
 		if !errors.Is(err, want) {

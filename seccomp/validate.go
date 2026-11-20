@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"math"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -283,9 +282,7 @@ func Validate(profile *specs.LinuxSeccomp) error {
 	// runc refuses SCMP_ACT_NOTIFY as the default action ("SCMP_ACT_NOTIFY
 	// cannot be used as default action"); see validateEntry for the rest.
 	if profile.DefaultAction == specs.ActNotify {
-		errs.Report(func() error {
-			return fmt.Errorf("defaultAction: %w", ErrNotifyUnsupported)
-		})
+		errs.Reportf("defaultAction: %w", ErrNotifyUnsupported)
 	}
 
 	validateArchitecturesAndFlags(&errs, profile)
@@ -306,9 +303,7 @@ func Validate(profile *specs.LinuxSeccomp) error {
 	// Reported once for the profile: the listener is a profile-wide setting,
 	// so naming every entry that notifies would repeat one problem.
 	if notifies && profile.ListenerPath == "" {
-		errs.Report(func() error {
-			return fmt.Errorf("listenerPath: %w", ErrNotifyWithoutListener)
-		})
+		errs.Reportf("listenerPath: %w", ErrNotifyWithoutListener)
 	}
 
 	return errs.Err()
@@ -333,22 +328,18 @@ func validateListenerFlags(profile *specs.LinuxSeccomp) error {
 
 	if idx := slices.Index(profile.Flags, specs.LinuxSeccompFlagWaitKillableRecv); idx >= 0 &&
 		!notifies {
-		errs.Report(func() error {
-			return fmt.Errorf(
-				"flags[%d]: %s: %w (no entry applies SCMP_ACT_NOTIFY)",
-				idx, merge.QuoteBounded(string(specs.LinuxSeccompFlagWaitKillableRecv)),
-				ErrNotifyUnsupported,
-			)
-		})
+		errs.Reportf(
+			"flags[%d]: %s: %w (no entry applies SCMP_ACT_NOTIFY)",
+			idx, merge.QuoteBounded(string(specs.LinuxSeccompFlagWaitKillableRecv)),
+			ErrNotifyUnsupported,
+		)
 	}
 
 	if idx := slices.Index(profile.Flags, flagTsync); idx >= 0 && profile.ListenerPath != "" {
-		errs.Report(func() error {
-			return fmt.Errorf(
-				"flags[%d]: %s: %w (with a listenerPath)",
-				idx, merge.QuoteBounded(string(flagTsync)), ErrNotifyUnsupported,
-			)
-		})
+		errs.Reportf(
+			"flags[%d]: %s: %w (with a listenerPath)",
+			idx, merge.QuoteBounded(string(flagTsync)), ErrNotifyUnsupported,
+		)
 	}
 
 	return errs.Err()
@@ -362,12 +353,9 @@ func validateListenerEncoding(errs *merge.Collector, profile *specs.LinuxSeccomp
 		{"listenerMetadata", profile.ListenerMetadata},
 	} {
 		if !utf8.ValidString(field.value) {
-			errs.Report(func() error {
-				return fmt.Errorf(
-					"%s: %s: %w",
-					field.name, merge.QuoteBounded(field.value), ErrInvalidUTF8Listener,
-				)
-			})
+			errs.Reportf(
+				"%s: %s: %w", field.name, merge.QuoteBounded(field.value), ErrInvalidUTF8Listener,
+			)
 		}
 	}
 }
@@ -637,14 +625,12 @@ func validateByteOrder(profile *specs.LinuxSeccomp, native specs.Arch) error {
 	}
 
 	if native == "" && len(listed[bigEndian]) > 0 && len(listed[littleEndian]) > 0 {
-		errs.Report(func() error {
-			return fmt.Errorf(
-				"architectures: %w (%s %s next to %s %s)",
-				ErrMixedByteOrder,
-				bigEndian, quoteArchs(listed[bigEndian]),
-				littleEndian, quoteArchs(listed[littleEndian]),
-			)
-		})
+		errs.Reportf(
+			"architectures: %w (%s %s next to %s %s)",
+			ErrMixedByteOrder,
+			bigEndian, quoteArchs(listed[bigEndian]),
+			littleEndian, quoteArchs(listed[littleEndian]),
+		)
 	}
 
 	return errs.Err()
@@ -733,8 +719,8 @@ func validateWith(
 func validateWellFormed(profile *specs.LinuxSeccomp) error {
 	var errs merge.Collector
 
-	errs.Add(validateDuplicateArchitectures(profile.Architectures))
-	errs.Add(validateDuplicateFlags(profile.Flags))
+	reportDuplicates(&errs, "architectures", profile.Architectures, ErrDuplicateArch)
+	reportDuplicates(&errs, "flags", profile.Flags, ErrDuplicateFlag)
 	errs.Add(validateErrnoRange(profile))
 
 	return errs.Err()
@@ -747,15 +733,13 @@ func validateErrnoRange(profile *specs.LinuxSeccomp) error {
 
 	ret := profile.DefaultErrnoRet
 	if limit, ok := errnoLimit(profile.DefaultAction); ok && ret != nil && *ret > limit {
-		errs.Report(func() error {
-			return fmt.Errorf(
-				"defaultErrnoRet: %d: %w (max %d for %s)",
-				*ret,
-				ErrErrnoOutOfRange,
-				limit,
-				profile.DefaultAction,
-			)
-		})
+		errs.Reportf(
+			"defaultErrnoRet: %d: %w (max %d for %s)",
+			*ret,
+			ErrErrnoOutOfRange,
+			limit,
+			profile.DefaultAction,
+		)
 	}
 
 	for idx := range profile.Syscalls {
@@ -822,13 +806,11 @@ func validateUnusedErrnoRet(profile *specs.LinuxSeccomp) error {
 	var errs merge.Collector
 
 	if profile.DefaultErrnoRet != nil && !errnoSignificant(profile.DefaultAction) {
-		errs.Report(func() error {
-			return fmt.Errorf(
-				"defaultErrnoRet: %d: %w (defaultAction %s)",
-				*profile.DefaultErrnoRet, ErrUnusedErrnoRet,
-				merge.QuoteBounded(string(profile.DefaultAction)),
-			)
-		})
+		errs.Reportf(
+			"defaultErrnoRet: %d: %w (defaultAction %s)",
+			*profile.DefaultErrnoRet, ErrUnusedErrnoRet,
+			merge.QuoteBounded(string(profile.DefaultAction)),
+		)
 	}
 
 	for idx := range profile.Syscalls {
@@ -851,313 +833,6 @@ func validateUnusedErrnoRet(profile *specs.LinuxSeccomp) error {
 
 func validateDuplicateNames(profile *specs.LinuxSeccomp) error {
 	return validateDuplicateSyscallNames(profile.Syscalls)
-}
-
-// conflictTracker remembers the rules seen for one syscall name, each as
-// the key of its filter and the number of its result. Each condition is
-// numbered once per syscall (see filterKey), and each result once (see
-// resultOf), so comparing two rules compares a few small numbers. A syscall
-// whose rules are checked loads at most MaxArtifactRulesPerSyscall of them,
-// so comparing each with every rule before it costs some 32 thousand
-// comparisons per syscall and tracker, twice that with the tracker for a
-// 32-bit architecture, and up to some two million for a profile at
-// MaxArtifactRules.
-type conflictTracker struct {
-	conditions map[condition]uint16
-	results    []clause
-	rules      []trackedRule
-}
-
-// trackedRule is a rule a conflictTracker has seen.
-type trackedRule struct {
-	key    filterKey
-	result uint16
-}
-
-// condition is one condition of a filter without its argument index, which
-// its position in a filterKey names.
-type condition struct {
-	value    uint64
-	valueTwo uint64
-	op       uint8
-}
-
-// argSlots is how many argument indices a condition can test.
-const argSlots = maxSyscallArgIndex + 1
-
-// filterKey is a rule's filter as the number of the condition on each
-// argument index, or zero where the index carries none. A rule of a profile
-// that passes Validate has at most one condition per index, so every filter
-// of one has a key. Two filters of one syscall have the same key exactly
-// when sortedArgsKey spells them alike.
-type filterKey [argSlots]uint16
-
-// nested reports whether one of the filters k and other is equal to or
-// wider than the other: every condition of one is one of the other's.
-func (k filterKey) nested(other filterKey) bool {
-	kWider, otherWider := true, true
-
-	for idx := range argSlots {
-		if k[idx] == other[idx] {
-			continue
-		}
-
-		kWider = kWider && k[idx] == 0
-		otherWider = otherWider && other[idx] == 0
-
-		if !kWider && !otherWider {
-			return false
-		}
-	}
-
-	return true
-}
-
-func newConflictTracker() *conflictTracker {
-	return &conflictTracker{
-		conditions: make(map[condition]uint16),
-		results:    nil,
-		rules:      nil,
-	}
-}
-
-// keyOf returns the key of a rule's filter, numbering its conditions, or
-// false where the rule has a condition on an index past maxSyscallArgIndex,
-// two on one index or an unknown operator, which no rule of a profile
-// passing Validate has, or where the syscall has more distinct conditions
-// than a key can number, which MaxArtifactRulesPerSyscall rules of six
-// conditions each do not come near.
-func (t *conflictTracker) keyOf(args []specs.LinuxSeccompArg) (filterKey, bool) {
-	var key filterKey
-
-	for _, arg := range args {
-		op := operatorCode(arg.Op)
-		if arg.Index > maxSyscallArgIndex || key[arg.Index] != 0 || op == opUnknown {
-			return key, false
-		}
-
-		cond := condition{value: arg.Value, valueTwo: arg.ValueTwo, op: op}
-
-		number, ok := t.conditions[cond]
-		if !ok {
-			if len(t.conditions) >= math.MaxUint16 {
-				return key, false
-			}
-
-			//nolint:gosec // bounded by math.MaxUint16 just above
-			number = uint16(len(t.conditions) + 1)
-			t.conditions[cond] = number
-		}
-
-		key[arg.Index] = number
-	}
-
-	return key, true
-}
-
-// resultOf returns the number of the result a rule yields, the same for
-// every rule with the same result (see clause.sameResult). A syscall has no
-// more distinct results than rules, which MaxArtifactRulesPerSyscall
-// bounds, so the scan is short and the number fits.
-func (t *conflictTracker) resultOf(next clause) uint16 {
-	var number uint16
-
-	for ; int(number) < len(t.results); number++ {
-		if t.results[number].sameResult(next) {
-			return number
-		}
-	}
-
-	t.results = append(t.results, clause{action: next.action, errnoRet: next.errnoRet, args: nil})
-
-	return number
-}
-
-// The numbers operatorCode gives the operators, zero for an unknown one.
-const (
-	opUnknown uint8 = iota
-	opNotEqual
-	opLessThan
-	opLessEqual
-	opEqualTo
-	opGreaterEqual
-	opGreaterThan
-	opMaskedEqual
-)
-
-// operatorCode numbers the known operators from one, and returns zero for
-// any other.
-func operatorCode(op specs.LinuxSeccompOperator) uint8 {
-	switch op {
-	case specs.OpNotEqual:
-		return opNotEqual
-	case specs.OpLessThan:
-		return opLessThan
-	case specs.OpLessEqual:
-		return opLessEqual
-	case specs.OpEqualTo:
-		return opEqualTo
-	case specs.OpGreaterEqual:
-		return opGreaterEqual
-	case specs.OpGreaterThan:
-		return opGreaterThan
-	case specs.OpMaskedEqual:
-		return opMaskedEqual
-	default:
-		return opUnknown
-	}
-}
-
-// record stores next and reports whether an earlier rule yields a different
-// result while its filter is equal to, wider than, or narrower than the
-// filter of next. A filter is wider when its conditions are a proper subset
-// of the other's.
-func (t *conflictTracker) record(next clause) bool {
-	key, ok := t.keyOf(next.args)
-	if !ok {
-		// Unreachable for a profile that passes Validate, which is the only
-		// one the conflict checks run on.
-		return false
-	}
-
-	result := t.resultOf(next)
-	conflict := slices.ContainsFunc(t.rules, func(earlier trackedRule) bool {
-		return earlier.result != result && earlier.key.nested(key)
-	})
-
-	t.rules = append(t.rules, trackedRule{key: key, result: result})
-
-	return conflict
-}
-
-// truncatedClause returns the rule libseccomp adds for a 32-bit
-// architecture, which compares only the lower 32 bits of each value and
-// therefore drops a masked comparison whose mask is empty there.
-func truncatedClause(current clause) clause {
-	args := make([]specs.LinuxSeccompArg, 0, len(current.args))
-
-	for _, arg := range current.args {
-		arg.Value &= lower32
-		arg.ValueTwo &= lower32
-
-		if !tautology(arg) {
-			args = append(args, arg)
-		}
-	}
-
-	current.args = args
-
-	return current
-}
-
-// syscallRuleState is what validateSyscallRules tracks for one syscall.
-type syscallRuleState struct {
-	// trackers find conflicts among the rules as written and as libseccomp
-	// adds them for a 32-bit architecture. They are dropped once the last
-	// rule of the syscall is recorded, or once it is reported, so that
-	// they are held for one syscall at a time where the entries of a
-	// profile come syscall by syscall, rather than for the whole profile.
-	trackers [2]*conflictTracker
-	// recorded counts the rules recorded so far.
-	recorded uint64
-	// conditional holds the conditional rules.
-	conditional []clause
-	// first is the first rule, and mixedAt the index of the first entry
-	// whose rule yields a different result, or -1.
-	first   clause
-	mixedAt int
-}
-
-// syscallRuleCheck returns validateSyscallRules for a node with the given
-// native architecture, which decides whether the multiplexer copies of the
-// rules are checked.
-func syscallRuleCheck(native specs.Arch) profileCheck {
-	return func(profile *specs.LinuxSeccomp) error {
-		var errs merge.Collector
-
-		errs.Add(validateSyscallRules(profile, native))
-		errs.Add(validateLostRules(profile, native))
-
-		return errs.Err()
-	}
-}
-
-// validateLostRules reports a profile whose filter, loaded as written,
-// holds rules libseccomp loses on a covered architecture (see
-// ErrLostRules), which a runtime loading the profile itself would lose.
-// The merges settle the shapes of the rules first, collapsing rules outside
-// the safe shapes, which can remove the shape, so they may accept a profile
-// this refuses. It runs the check the merges run on their result
-// on the rules the profile loads, read as a runtime adds them (see
-// collectRules): an entry equal to the default adds none, and one that
-// repeats an argument index adds a rule per condition, each of which
-// libseccomp costs on its own. It costs a pass over those rules per covered
-// architecture. A rule that applies to no call of the filter is kept, where
-// the merges drop it: a runtime loading the profile keeps it under a number
-// libseccomp makes up, and it is such a rule that the block tests first.
-//
-// A merge can still produce the shape from inputs that pass, since it
-// drops rules equal to the default and collapses others to unconditional
-// ones; that is what the merges check their result for.
-func validateLostRules(profile *specs.LinuxSeccomp, native specs.Arch) error {
-	def := defaultClause(profile)
-
-	loaded := &specs.LinuxSeccomp{
-		DefaultAction:    profile.DefaultAction,
-		DefaultErrnoRet:  nil,
-		Architectures:    merge.DeduplicateSlice(profile.Architectures),
-		Flags:            nil,
-		ListenerPath:     "",
-		ListenerMetadata: "",
-		Syscalls:         syscallsOfRules(collectRules(profile.Syscalls, def), def),
-	}
-
-	settler := newAbsentSettler(unionRulesFor(native), loaded)
-	settler.asWritten = true
-
-	err := settler.settle()
-	if err != nil {
-		return fmt.Errorf("syscalls: %w", err)
-	}
-
-	return nil
-}
-
-// validateSyscallRules checks the rules each syscall loads: their count
-// (MaxArtifactRulesPerSyscall) and, for syscalls within that bound,
-// conflicts between them (see ValidateArtifact), on the syscall and, where
-// the profile covers an architecture that multiplexes it, on the
-// multiplexer. Rules are expanded the way a runtime adds them: entries equal
-// to the profile default are skipped, an entry with several conditions on
-// one argument index adds one rule per condition, and conditions libseccomp
-// drops do not count. Each syscall is reported once, at the first
-// conflicting entry.
-func validateSyscallRules(profile *specs.LinuxSeccomp, native specs.Arch) error {
-	def := defaultClause(profile)
-
-	checker := &ruleChecker{
-		counts:   clauseCounts(profile.Syscalls, def),
-		truncate: loadsWideValue(profile),
-		states:   make(map[string]*syscallRuleState),
-		reported: make(map[string]struct{}),
-		errs:     merge.Collector{},
-	}
-
-	checker.checkCounts()
-
-	// Past the profile-wide bound, expanding the entries is the very work
-	// that bound exists to prevent. validateWith runs this only after
-	// validateProfileSize has passed, which checks that bound first.
-	if sumCounts(checker.counts) <= MaxArtifactRules {
-		forEachClause(profile.Syscalls, def, checker.skip, checker.record)
-		checker.checkShapes()
-
-		if coversAny(profile.Architectures, multiplexingArchitectures, native) {
-			checker.checkMultiplexed(profile.Syscalls, def)
-		}
-	}
-
-	return checker.errs.Err()
 }
 
 // validateProfileSize bounds the profile as a whole: the entries it may
@@ -1194,186 +869,10 @@ func validateProfileSize(profile *specs.LinuxSeccomp) error {
 
 	total := totalClauses(profile.Syscalls, defaultClause(profile))
 	if total > MaxArtifactRules {
-		errs.Report(func() error {
-			return fmt.Errorf(
-				"syscalls: %d rules: %w (max %d)", total, ErrTooManyRules, MaxArtifactRules,
-			)
-		})
+		errs.Reportf("syscalls: %d rules: %w (max %d)", total, ErrTooManyRules, MaxArtifactRules)
 	}
 
 	return errs.Err()
-}
-
-// ruleChecker carries the state of validateSyscallRules.
-type ruleChecker struct {
-	counts   map[string]uint64
-	truncate bool
-	states   map[string]*syscallRuleState
-	reported map[string]struct{}
-	errs     merge.Collector
-}
-
-// checkCounts reports every syscall over the rule bound, in name order.
-// Only the names it reports are sorted: a profile may name as many syscalls
-// as it has bytes for, while the ones it can put over the bound are limited
-// by the rules it loads.
-func (c *ruleChecker) checkCounts() {
-	var over []string
-
-	for name, count := range c.counts {
-		if count > MaxArtifactRulesPerSyscall {
-			over = append(over, name)
-		}
-	}
-
-	slices.Sort(over)
-
-	for _, name := range over {
-		c.errs.Report(func() error {
-			return fmt.Errorf(
-				"syscalls: %s in %d rules: %w (max %d)",
-				merge.QuoteBounded(name), c.counts[name], ErrTooManyRulesPerSyscall,
-				MaxArtifactRulesPerSyscall,
-			)
-		})
-	}
-}
-
-func (c *ruleChecker) conflict(idx int, name string) {
-	c.reported[name] = struct{}{}
-
-	c.errs.Report(func() error {
-		return fmt.Errorf(
-			"syscalls[%d]: %s: %w", idx, merge.QuoteBounded(name), ErrConflictingEntries,
-		)
-	})
-}
-
-// skip reports whether a syscall needs no further rules: it has been
-// reported already, or it is over the rule bound, which checkCounts reports
-// on its own. forEachClause consults it per name, so the rules of an
-// over-bound syscall are never expanded.
-func (c *ruleChecker) skip(name string) bool {
-	_, done := c.reported[name]
-
-	return done || c.counts[name] > MaxArtifactRulesPerSyscall
-}
-
-// record checks the rule an entry adds for a syscall against the rules
-// before it. forEachClause consults skip once per entry and name, so a
-// conflict reported by an earlier clause of the same entry is caught here
-// instead, which keeps a syscall reported once however many rules one entry
-// loads for it.
-func (c *ruleChecker) record(idx int, name string, next clause) {
-	if c.skip(name) {
-		return
-	}
-
-	state, ok := c.states[name]
-	if !ok {
-		state = &syscallRuleState{
-			trackers:    [2]*conflictTracker{newConflictTracker(), nil},
-			recorded:    0,
-			conditional: nil,
-			first:       next,
-			mixedAt:     -1,
-		}
-
-		if c.truncate {
-			state.trackers[1] = newConflictTracker()
-		}
-
-		c.states[name] = state
-	}
-
-	if state.mixedAt < 0 && !state.first.sameResult(next) {
-		state.mixedAt = idx
-	}
-
-	if !next.unconditional() {
-		state.conditional = append(state.conditional, next)
-	}
-
-	conflict := state.track(next, c.counts[name])
-	if conflict {
-		c.conflict(idx, name)
-	}
-}
-
-// track records next in the trackers of the syscall, which loads total
-// rules, and reports whether it conflicts with a rule before it. No further
-// rule of the syscall is recorded after its last one, nor after it is
-// reported, which skip stops, so the trackers are dropped then.
-func (s *syscallRuleState) track(next clause, total uint64) bool {
-	if s.trackers[0] == nil {
-		// Unreachable: clauseCounts counts the rules forEachClause visits,
-		// so none comes after the last.
-		return false
-	}
-
-	s.recorded++
-
-	conflict := s.trackers[0].record(next)
-	if s.trackers[1] != nil {
-		conflict = s.trackers[1].record(truncatedClause(next)) || conflict
-	}
-
-	if conflict || s.recorded >= total {
-		s.trackers = [2]*conflictTracker{nil, nil}
-	}
-
-	return conflict
-}
-
-// checkShapes reports syscalls whose rules yield different results without
-// forming a safe shape: libseccomp evaluates those in its own order and
-// refuses many of them. A syscall with an unconditional rule gets here only
-// when every rule shares its result, since record reports any other rule as
-// conflicting with it.
-func (c *ruleChecker) checkShapes() {
-	for _, name := range slices.Sorted(maps.Keys(c.states)) {
-		state := c.states[name]
-		if _, done := c.reported[name]; done || state.mixedAt < 0 {
-			continue
-		}
-
-		if !safeShape(dedupeClauses(state.conditional)) {
-			c.conflict(state.mixedAt, name)
-		}
-	}
-}
-
-// checkMultiplexed reports what libseccomp may refuse on a multiplexer: the
-// rules of a multiplexed syscall whose copies, with the condition on the
-// first argument gone, have different results and match the whole sub-call
-// or form no safe shape (see multiplexRules.refused), and conditional rules
-// of the multiplexer itself next to rules of a syscall it carries, which
-// libseccomp interleaves with the copies in an order of its own and refuses
-// where a copy repeats one of their filters. A syscall over its rule bound
-// or reported already is not reported again.
-func (c *ruleChecker) checkMultiplexed(syscalls []specs.LinuxSyscall, def *clause) {
-	rules := collectMultiplexRules(syscalls, def)
-
-	for _, name := range slices.Sorted(maps.Keys(rules)) {
-		if c.skip(name) {
-			continue
-		}
-
-		if _, multiplexed := multiplexedSyscalls[name]; multiplexed {
-			if rules[name].refused() {
-				c.conflict(rules[name].entry, name)
-			}
-
-			continue
-		}
-
-		carried := slices.ContainsFunc(multiplexedBy(name), func(carried string) bool {
-			return rules[carried] != nil
-		})
-		if rules[name].conditional && carried {
-			c.conflict(rules[name].entry, name)
-		}
-	}
 }
 
 // validateSyscallNameSpelling reports a syscall name holding a control
@@ -1383,22 +882,13 @@ func (c *ruleChecker) checkMultiplexed(syscalls []specs.LinuxSyscall, def *claus
 // another name. A name holding a NUL is left to Validate, which reports it
 // for every profile.
 func validateSyscallNameSpelling(profile *specs.LinuxSeccomp) error {
-	return validateSyscallNames(profile.Syscalls, func(name string) bool {
-		return (hasControlByte(name) || !utf8.ValidString(name)) && !hasNUL(name)
-	})
-}
-
-// validateSyscallNames reports every syscall name invalid holds for.
-func validateSyscallNames(syscalls []specs.LinuxSyscall, invalid func(string) bool) error {
 	var errs merge.Collector
 
-	for idx := range syscalls {
-		for nameIdx, name := range syscalls[idx].Names {
-			if !invalid(name) {
-				continue
+	for idx := range profile.Syscalls {
+		for nameIdx, name := range profile.Syscalls[idx].Names {
+			if (hasControlByte(name) || !utf8.ValidString(name)) && !hasNUL(name) {
+				errs.Report(func() error { return invalidNameError(idx, nameIdx, name) })
 			}
-
-			errs.Report(func() error { return invalidNameError(idx, nameIdx, name) })
 		}
 	}
 
@@ -1427,9 +917,7 @@ func validateNoNotify(profile *specs.LinuxSeccomp) error {
 	var errs merge.Collector
 
 	if profile.DefaultAction == specs.ActNotify {
-		errs.Report(func() error {
-			return fmt.Errorf("defaultAction: %w", ErrNotifyNotAllowed)
-		})
+		errs.Reportf("defaultAction: %w", ErrNotifyNotAllowed)
 	}
 
 	for idx := range profile.Syscalls {
@@ -1473,25 +961,19 @@ func validateNoListener(profile *specs.LinuxSeccomp) error {
 	var errs merge.Collector
 
 	if profile.ListenerPath != "" {
-		errs.Report(func() error {
-			return fmt.Errorf("listenerPath: %w", ErrListenerNotAllowed)
-		})
+		errs.Reportf("listenerPath: %w", ErrListenerNotAllowed)
 	}
 
 	if profile.ListenerMetadata != "" {
-		errs.Report(func() error {
-			return fmt.Errorf("listenerMetadata: %w", ErrListenerNotAllowed)
-		})
+		errs.Reportf("listenerMetadata: %w", ErrListenerNotAllowed)
 	}
 
 	if idx := slices.Index(profile.Flags, specs.LinuxSeccompFlagWaitKillableRecv); idx >= 0 {
-		errs.Report(func() error {
-			return fmt.Errorf(
-				"flags[%d]: %s: %w",
-				idx, merge.QuoteBounded(string(specs.LinuxSeccompFlagWaitKillableRecv)),
-				ErrListenerNotAllowed,
-			)
-		})
+		errs.Reportf(
+			"flags[%d]: %s: %w",
+			idx, merge.QuoteBounded(string(specs.LinuxSeccompFlagWaitKillableRecv)),
+			ErrListenerNotAllowed,
+		)
 	}
 
 	return errs.Err()
@@ -1597,35 +1079,15 @@ func isKnownFlag(flag specs.LinuxSeccompFlag) bool {
 	}
 }
 
-// validateDuplicateArchitectures reports every architecture the list
-// repeats.
-func validateDuplicateArchitectures(archs []specs.Arch) error {
-	var errs merge.Collector
-
-	merge.ReportDuplicates(&errs, len(archs),
-		func(idx int) (specs.Arch, bool) { return archs[idx], true },
+// reportDuplicates reports every value of the list field that repeats an
+// earlier one, matching sentinel.
+func reportDuplicates[T ~string](errs *merge.Collector, field string, values []T, sentinel error) {
+	merge.ReportDuplicates(errs, len(values),
+		func(idx int) (T, bool) { return values[idx], true },
 		func(idx, first int) error {
 			return fmt.Errorf(
-				"architectures[%d]: %s: %w (also at architectures[%d])",
-				idx, merge.QuoteBounded(string(archs[idx])), ErrDuplicateArch, first,
+				"%s[%d]: %s: %w (also at %s[%d])",
+				field, idx, merge.QuoteBounded(string(values[idx])), sentinel, field, first,
 			)
 		})
-
-	return errs.Err()
-}
-
-// validateDuplicateFlags reports every flag the list repeats.
-func validateDuplicateFlags(flags []specs.LinuxSeccompFlag) error {
-	var errs merge.Collector
-
-	merge.ReportDuplicates(&errs, len(flags),
-		func(idx int) (specs.LinuxSeccompFlag, bool) { return flags[idx], true },
-		func(idx, first int) error {
-			return fmt.Errorf(
-				"flags[%d]: %s: %w (also at flags[%d])",
-				idx, merge.QuoteBounded(string(flags[idx])), ErrDuplicateFlag, first,
-			)
-		})
-
-	return errs.Err()
 }
