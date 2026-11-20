@@ -204,7 +204,7 @@ func BenchmarkDiff(b *testing.B) {
 	}
 }
 
-func BenchmarkFormatDiff(b *testing.B) {
+func BenchmarkDiffString(b *testing.B) {
 	for _, numSyscalls := range []int{10, 50, 200} {
 		left := buildProfile(numSyscalls)
 		right := buildProfileWithArgs(numSyscalls)
@@ -216,7 +216,7 @@ func BenchmarkFormatDiff(b *testing.B) {
 
 		b.Run(fmt.Sprintf("syscalls=%d", numSyscalls), func(b *testing.B) {
 			for range b.N {
-				_ = seccomp.FormatDiff(diff)
+				_ = diff.String()
 			}
 		})
 	}

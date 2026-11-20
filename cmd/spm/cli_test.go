@@ -511,10 +511,7 @@ func TestJSONOutputEscapesInvisibleRunes(t *testing.T) {
 	}
 
 	profile := apparmor.Profile{
-		Executable:   &apparmor.ExecutableRules{AllowedExecutables: paths, AllowedLibraries: nil},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
+		Executable: &apparmor.ExecutableRules{AllowedExecutables: paths},
 	}
 
 	code, stdout, stderr := runCapture(t,
@@ -781,10 +778,7 @@ func TestHumanOutputWarnsWhenCut(t *testing.T) {
 	}
 
 	large := writeTemp(t, marshal(t, &apparmor.Profile{
-		Executable:   &apparmor.ExecutableRules{AllowedExecutables: paths, AllowedLibraries: nil},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
+		Executable: &apparmor.ExecutableRules{AllowedExecutables: paths},
 	}))
 	small := writeTemp(t, apparmorJSON(t, "CHOWN"))
 

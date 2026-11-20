@@ -46,14 +46,9 @@ func budgetShape(count int) ([]string, []string) {
 // budgetProfile builds a read-only profile of the given paths.
 func budgetProfile(paths ...string) *Profile {
 	return &Profile{
-		Executable: nil,
 		Filesystem: &FilesystemRules{
-			ReadOnlyPaths:  paths,
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
+			ReadOnlyPaths: paths,
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 }
 
@@ -364,9 +359,6 @@ func budgetExecutables(paths ...string) *Profile {
 			AllowedExecutables: paths,
 			AllowedLibraries:   slices.Clone(paths),
 		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
 	}
 }
 

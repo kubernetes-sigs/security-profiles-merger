@@ -42,14 +42,9 @@ func TestConcurrentMergesShareTheGlobCache(t *testing.T) {
 	)
 
 	baseline := &apparmor.Profile{
-		Executable: nil,
 		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{"/etc/**"},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
+			ReadOnlyPaths: []string{"/etc/**"},
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	// What one goroutine computes on its own, for comparison.
@@ -61,7 +56,7 @@ func TestConcurrentMergesShareTheGlobCache(t *testing.T) {
 			t.Fatalf("worker %d: %v", worker, err)
 		}
 
-		want[worker] = apparmor.FormatProfile(merged)
+		want[worker] = merged.String()
 	}
 
 	var group sync.WaitGroup
@@ -81,7 +76,7 @@ func TestConcurrentMergesShareTheGlobCache(t *testing.T) {
 				return
 			}
 
-			got[worker] = apparmor.FormatProfile(merged)
+			got[worker] = merged.String()
 		}()
 	}
 
@@ -114,14 +109,10 @@ func patternProfile(root string, worker, patterns int) *apparmor.Profile {
 	return &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
 			AllowedExecutables: paths[:len(paths)/2],
-			AllowedLibraries:   nil,
 		},
 		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  paths,
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
+			ReadOnlyPaths: paths,
 		},
-		Network: nil,
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{capNetAdmin},
 		},
@@ -149,7 +140,7 @@ func concurrencyOps() []concurrencyOp {
 				return "error: " + err.Error()
 			}
 
-			return apparmor.FormatProfile(result)
+			return result.String()
 		}
 	}
 
@@ -175,7 +166,7 @@ func concurrencyOps() []concurrencyOp {
 				return "error: " + err.Error()
 			}
 
-			return apparmor.FormatDiff(diff)
+			return diff.String()
 		}},
 		{"Validate", validated(apparmor.Validate)},
 		{"ValidateStrict", validated(apparmor.ValidateStrict)},
@@ -198,14 +189,9 @@ func TestConcurrentOperationsAgreeWithSequentialOnes(t *testing.T) {
 	)
 
 	baseline := &apparmor.Profile{
-		Executable: nil,
 		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{"/cold/**"},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
+			ReadOnlyPaths: []string{"/cold/**"},
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	ops := concurrencyOps()

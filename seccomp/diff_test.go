@@ -17,8 +17,9 @@ limitations under the License.
 package seccomp_test
 
 import (
-	"errors"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -28,59 +29,8 @@ import (
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
 
-func TestDiffNil(t *testing.T) {
-	t.Parallel()
-
-	profile := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
-
-	_, err := seccomp.Diff(nil, profile)
-	if !errors.Is(err, seccomp.ErrNilProfile) {
-		t.Fatalf("expected ErrNilProfile for a nil left profile, got: %v", err)
-	}
-
-	_, err = seccomp.Diff(profile, nil)
-	if !errors.Is(err, seccomp.ErrNilProfile) {
-		t.Fatalf("expected ErrNilProfile for a nil right profile, got: %v", err)
-	}
-
-	_, err = seccomp.Diff(nil, nil)
-	if !errors.Is(err, seccomp.ErrNilProfile) {
-		t.Fatalf("expected ErrNilProfile for two nil profiles, got: %v", err)
-	}
-}
-
-// TestDiffNamesTheNilSide checks that Diff reports a nil profile the way the
-// merges do, as an InputError naming its position, so that a caller tells a
-// missing baseline from a missing artifact without reading the message.
-func TestDiffNamesTheNilSide(t *testing.T) {
-	t.Parallel()
-
-	profile := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
-
-	for _, testCase := range []struct {
-		left, right *specs.LinuxSeccomp
-		want        int
-	}{
-		{left: nil, right: profile, want: 0},
-		{left: profile, right: nil, want: 1},
-		{left: nil, right: nil, want: 0},
-	} {
-		diff, err := seccomp.Options{
-			Arch: "",
-		}.Diff(
-			testCase.left,
-			testCase.right,
-		)
-
-		var inputErr *seccomp.InputError
-		if !errors.As(err, &inputErr) || inputErr.Index != testCase.want {
-			t.Errorf("Options.Diff = %v, %v, want an InputError for profile %d",
-				diff, err, testCase.want)
-		}
-	}
-}
-
-// TestProfileDiffString checks that fmt renders a diff as FormatDiff does.
+// TestProfileDiffString pins how a diff renders, through String and through
+// fmt with a pointer and a value alike.
 func TestProfileDiffString(t *testing.T) {
 	t.Parallel()
 
@@ -96,7 +46,7 @@ func TestProfileDiffString(t *testing.T) {
 	// a value, since String has a value receiver.
 	byPointer, byValue := any(diff), any(*diff)
 
-	want := seccomp.FormatDiff(diff)
+	const want = "Diff{default:SCMP_ACT_ERRNO->SCMP_ACT_ALLOW}"
 	for _, got := range []string{diff.String(), fmt.Sprint(byPointer), fmt.Sprint(byValue)} {
 		if got != want {
 			t.Errorf("rendered %q, want %q", got, want)
@@ -104,89 +54,580 @@ func TestProfileDiffString(t *testing.T) {
 	}
 }
 
-func TestDiffEqual(t *testing.T) {
+// TestDiffEqualProfiles covers profiles Diff reports equal, whether written
+// alike or loaded alike.
+func TestDiffEqualProfiles(t *testing.T) {
 	t.Parallel()
 
-	profile := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Architectures: []specs.Arch{specs.ArchX86_64},
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActAllow},
+	eperm, eacces, wrapped := uint(1), uint(13), uint(65537)
+
+	for _, test := range []struct {
+		name  string
+		left  *specs.LinuxSeccomp
+		right *specs.LinuxSeccomp
+	}{
+		{
+			name: "same profile",
+			left: &specs.LinuxSeccomp{
+				DefaultAction: specs.ActErrno,
+				Architectures: []specs.Arch{specs.ArchX86_64},
+				Syscalls:      []specs.LinuxSyscall{filtered(syscallRead, specs.ActAllow)},
+			},
 		},
-	}
+		{
+			name: "same profile without architectures",
+			left: profileOf(specs.ActErrno, filtered(syscallRead, specs.ActAllow)),
+		},
+		{
+			name: "same entries of one syscall",
+			left: profileOf(specs.ActErrno,
+				filtered(syscallClone, specs.ActAllow, arg(0, specs.OpMaskedEqual, 1)),
+				filtered(syscallClone, specs.ActErrno)),
+		},
+		{
+			// runc applies EPERM when errnoRet is unset, so spelling it out
+			// changes nothing, and errnoRet on an action that ignores it is
+			// not a difference either.
+			name: "unset errnoRet and EPERM",
+			left: profileOf(specs.ActErrno,
+				specs.LinuxSyscall{Names: []string{syscallRead}, Action: specs.ActErrno, ErrnoRet: &eperm},
+				specs.LinuxSyscall{
+					Names: []string{syscallWrite}, Action: specs.ActAllow, ErrnoRet: &eacces,
+				}),
+			right: &specs.LinuxSeccomp{
+				DefaultAction:   specs.ActErrno,
+				DefaultErrnoRet: &eperm,
+				Syscalls: []specs.LinuxSyscall{
+					filtered(syscallRead, specs.ActErrno), filtered(syscallWrite, specs.ActAllow),
+				},
+			},
+		},
+		{
+			// runc and crun load the lower 16 bits of errnoRet, so 65537 is
+			// the EPERM an unset errnoRet stands for.
+			name: "errnoRet narrowed as runtimes do",
+			left: &specs.LinuxSeccomp{
+				DefaultAction:   specs.ActErrno,
+				DefaultErrnoRet: &wrapped,
+				Syscalls: []specs.LinuxSyscall{
+					{Names: []string{syscallRead}, Action: specs.ActTrace, ErrnoRet: &wrapped},
+				},
+			},
+			right: profileOf(specs.ActErrno, filtered(syscallRead, specs.ActTrace)),
+		},
+		{
+			// runc since 1.2 and crun set SECCOMP_FILTER_FLAG_SPEC_ALLOW for a
+			// profile without a flag list.
+			name: "absent flag list and SPEC_ALLOW",
+			left: profileOf(specs.ActErrno),
+			right: &specs.LinuxSeccomp{
+				DefaultAction: specs.ActErrno,
+				Flags:         []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagSpecAllow},
+			},
+		},
+		{
+			name:  "SCMP_ACT_KILL and SCMP_ACT_KILL_THREAD",
+			left:  profileOf(specs.ActErrno, filtered(syscallRead, specs.ActKill)),
+			right: profileOf(specs.ActErrno, filtered(syscallRead, specs.ActKillThread)),
+		},
+		{
+			name:  "SCMP_ACT_KILL and SCMP_ACT_KILL_THREAD as the default",
+			left:  profileOf(specs.ActKill),
+			right: profileOf(specs.ActKillThread),
+		},
+		{
+			name: "duplicate entries",
+			left: profileOf(specs.ActErrno,
+				filtered(syscallRead, specs.ActAllow), filtered(syscallRead, specs.ActAllow)),
+			right: profileOf(specs.ActErrno, filtered(syscallRead, specs.ActAllow)),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	diff, err := seccomp.Diff(profile, profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+			right := test.right
+			if right == nil {
+				right = test.left
+			}
 
-	if !diff.Equal {
-		t.Error("expected equal profiles")
-	}
+			diff, err := seccomp.Diff(test.left, right)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 
-	const want = "Diff{equal}"
-	if got := seccomp.FormatDiff(diff); got != want {
-		t.Errorf("FormatDiff() = %q, want %q", got, want)
+			if !reflect.DeepEqual(*diff, seccomp.ProfileDiff{Equal: true}) {
+				t.Errorf("Diff = %s, want equal", diff.String())
+			}
+
+			const want = "Diff{equal}"
+			if got := diff.String(); got != want {
+				t.Errorf("String() = %q, want %q", got, want)
+			}
+		})
 	}
 }
 
-func TestDiffDefaultAction(t *testing.T) {
+// TestDiffIgnoresEntryOrder covers profiles whose entries differ in order
+// only, by a key the sort of the entries of one syscall breaks ties on.
+func TestDiffIgnoresEntryOrder(t *testing.T) {
 	t.Parallel()
 
-	left := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
-	right := &specs.LinuxSeccomp{DefaultAction: specs.ActAllow}
+	eperm, errnoTwo := uint(1), uint(2)
 
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	for _, test := range []struct {
+		name    string
+		entries []specs.LinuxSyscall
+	}{
+		{
+			name: "different syscalls",
+			entries: []specs.LinuxSyscall{
+				filtered(syscallRead, specs.ActAllow), filtered(syscallWrite, specs.ActAllow),
+			},
+		},
+		{
+			name: "same index, different value",
+			entries: []specs.LinuxSyscall{
+				filtered(syscallRead, specs.ActAllow, arg(0, specs.OpEqualTo, 10)),
+				filtered(syscallRead, specs.ActAllow, arg(0, specs.OpEqualTo, 5)),
+			},
+		},
+		{
+			name: "different errnoRet",
+			entries: []specs.LinuxSyscall{
+				{Names: []string{syscallClone}, Action: specs.ActErrno, ErrnoRet: &eperm},
+				{Names: []string{syscallClone}, Action: specs.ActErrno, ErrnoRet: &errnoTwo},
+			},
+		},
+		{
+			name: "unset and set errnoRet",
+			entries: []specs.LinuxSyscall{
+				filtered(syscallClone, specs.ActErrno),
+				{Names: []string{syscallClone}, Action: specs.ActErrno, ErrnoRet: &eperm},
+			},
+		},
+		{
+			name: "different args",
+			entries: []specs.LinuxSyscall{
+				filtered(syscallClone, specs.ActAllow, arg(0, specs.OpEqualTo, 1)),
+				filtered(syscallClone, specs.ActAllow, arg(0, specs.OpEqualTo, 2)),
+			},
+		},
+		{
+			name: "different valueTwo and operator",
+			entries: []specs.LinuxSyscall{
+				filtered(syscallClone, specs.ActAllow, masked(0, 1, 10)),
+				filtered(syscallClone, specs.ActAllow, specs.LinuxSeccompArg{
+					Index: 0, Value: 1, ValueTwo: 20, Op: specs.OpGreaterThan,
+				}),
+			},
+		},
+		{
+			name: "different operator",
+			entries: []specs.LinuxSyscall{
+				filtered(syscallClone, specs.ActAllow, arg(0, specs.OpEqualTo, 1)),
+				filtered(syscallClone, specs.ActAllow, arg(0, specs.OpGreaterThan, 1)),
+			},
+		},
+		{
+			name: "different arg count",
+			entries: []specs.LinuxSyscall{
+				filtered(syscallClone, specs.ActAllow, arg(0, specs.OpEqualTo, 1)),
+				filtered(syscallClone, specs.ActAllow,
+					arg(0, specs.OpEqualTo, 1), arg(1, specs.OpEqualTo, 2)),
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	if diff.Equal {
-		t.Error("expected profiles to differ")
-	}
+			reversed := slices.Clone(test.entries)
+			slices.Reverse(reversed)
 
-	if diff.DefaultAction == nil {
-		t.Fatal("expected DefaultAction diff")
-	}
+			diff, err := seccomp.Diff(profileOf(specs.ActErrno, test.entries...),
+				profileOf(specs.ActErrno, reversed...))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 
-	if diff.DefaultAction.Left != specs.ActErrno {
-		t.Errorf("left action = %v, want SCMP_ACT_ERRNO", diff.DefaultAction.Left)
-	}
-
-	if diff.DefaultAction.Right != specs.ActAllow {
-		t.Errorf("right action = %v, want SCMP_ACT_ALLOW", diff.DefaultAction.Right)
+			if !diff.Equal {
+				t.Errorf("Diff of the entries reordered = %s, want equal", diff.String())
+			}
+		})
 	}
 }
 
-func TestDiffArchitectures(t *testing.T) {
+// TestDiffReportsChanges covers the fields Diff reports a change in, each
+// case by the whole diff.
+func TestDiffReportsChanges(t *testing.T) {
 	t.Parallel()
 
-	// The native architecture is implied on both sides and never reported,
-	// so the diff is taken for an x86_64 node, which lists none of these.
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Architectures: []specs.Arch{specs.ArchMIPS, specs.ArchARM},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Architectures: []specs.Arch{specs.ArchMIPS, specs.ArchPPC64},
-	}
+	eperm, errnoTwo, eacces, enosys := uint(1), uint(2), uint(13), uint(38)
 
-	diff, err := seccomp.Options{Arch: specs.ArchX86_64}.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	for _, test := range []struct {
+		name  string
+		arch  specs.Arch
+		left  *specs.LinuxSeccomp
+		right *specs.LinuxSeccomp
+		want  seccomp.ProfileDiff
+	}{
+		{
+			name:  "default action",
+			left:  profileOf(specs.ActErrno),
+			right: profileOf(specs.ActAllow),
+			want: seccomp.ProfileDiff{
+				DefaultAction: &seccomp.ValueDiff[specs.LinuxSeccompAction]{
+					Left: specs.ActErrno, Right: specs.ActAllow,
+				},
+			},
+		},
+		{
+			// The native architecture is implied on both sides and never
+			// reported, so the diff is taken for an x86_64 node, which lists
+			// none of these.
+			name: "architectures",
+			arch: specs.ArchX86_64,
+			left: &specs.LinuxSeccomp{
+				DefaultAction: specs.ActErrno,
+				Architectures: []specs.Arch{specs.ArchMIPS, specs.ArchARM},
+			},
+			right: &specs.LinuxSeccomp{
+				DefaultAction: specs.ActErrno,
+				Architectures: []specs.Arch{specs.ArchMIPS, specs.ArchPPC64},
+			},
+			want: seccomp.ProfileDiff{
+				Architectures: &seccomp.SliceDiff[specs.Arch]{
+					Added: []specs.Arch{specs.ArchPPC64}, Removed: []specs.Arch{specs.ArchARM},
+				},
+			},
+		},
+		{
+			name: "syscalls added, removed and changed",
+			left: profileOf(specs.ActErrno,
+				filtered(syscallRead, specs.ActAllow), filtered(syscallWrite, specs.ActAllow)),
+			right: profileOf(specs.ActErrno,
+				filtered(syscallRead, specs.ActLog), filtered(syscallClose, specs.ActAllow)),
+			want: seccomp.ProfileDiff{Syscalls: &seccomp.SyscallsDiff{
+				Added:   []seccomp.SyscallEntry{{Name: syscallClose, Action: specs.ActAllow}},
+				Removed: []seccomp.SyscallEntry{{Name: syscallWrite, Action: specs.ActAllow}},
+				Changed: []seccomp.SyscallChange{{
+					Name:  syscallRead,
+					Left:  []seccomp.SyscallDetail{{Action: specs.ActAllow}},
+					Right: []seccomp.SyscallDetail{{Action: specs.ActLog}},
+				}},
+			}},
+		},
+		{
+			name: "default errnoRet",
+			left: &specs.LinuxSeccomp{DefaultAction: specs.ActErrno, DefaultErrnoRet: &enosys},
+			right: &specs.LinuxSeccomp{
+				DefaultAction: specs.ActErrno, DefaultErrnoRet: &eacces,
+			},
+			want: seccomp.ProfileDiff{
+				DefaultErrnoRet: &seccomp.ValueDiff[*uint]{Left: &enosys, Right: &eacces},
+			},
+		},
+		{
+			name:  "default errnoRet set on one side",
+			left:  profileOf(specs.ActErrno),
+			right: &specs.LinuxSeccomp{DefaultAction: specs.ActErrno, DefaultErrnoRet: &eacces},
+			want: seccomp.ProfileDiff{
+				DefaultErrnoRet: &seccomp.ValueDiff[*uint]{Right: &eacces},
+			},
+		},
+		{
+			// The right side lists no flags, so runtimes set
+			// SECCOMP_FILTER_FLAG_SPEC_ALLOW for it.
+			name: "flag removed",
+			left: &specs.LinuxSeccomp{
+				DefaultAction: specs.ActErrno,
+				Flags:         []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagLog},
+			},
+			right: profileOf(specs.ActErrno),
+			want: seccomp.ProfileDiff{
+				Flags: &seccomp.SliceDiff[specs.LinuxSeccompFlag]{
+					Added:   []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagSpecAllow},
+					Removed: []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagLog},
+				},
+			},
+		},
+		{
+			// A flag list that is set but empty turns off the
+			// SECCOMP_FILTER_FLAG_SPEC_ALLOW runtimes set for an absent one.
+			name: "empty flag list",
+			left: profileOf(specs.ActErrno),
+			right: &specs.LinuxSeccomp{
+				DefaultAction: specs.ActErrno, Flags: []specs.LinuxSeccompFlag{},
+			},
+			want: seccomp.ProfileDiff{
+				Flags: &seccomp.SliceDiff[specs.LinuxSeccompFlag]{
+					Removed: []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagSpecAllow},
+				},
+			},
+		},
+		{
+			name: "listener path",
+			left: &specs.LinuxSeccomp{DefaultAction: specs.ActErrno, ListenerPath: listenerSock},
+			right: &specs.LinuxSeccomp{
+				DefaultAction: specs.ActErrno, ListenerPath: "/run/other.sock",
+			},
+			want: seccomp.ProfileDiff{
+				ListenerPath: &seccomp.ValueDiff[string]{
+					Left: listenerSock, Right: "/run/other.sock",
+				},
+			},
+		},
+		{
+			name: "listener metadata",
+			left: &specs.LinuxSeccomp{
+				DefaultAction: specs.ActErrno, ListenerPath: listenerSock, ListenerMetadata: metaA,
+			},
+			right: &specs.LinuxSeccomp{
+				DefaultAction: specs.ActErrno, ListenerPath: listenerSock, ListenerMetadata: "meta-b",
+			},
+			want: seccomp.ProfileDiff{
+				ListenerMetadata: &seccomp.ValueDiff[string]{Left: metaA, Right: "meta-b"},
+			},
+		},
+		{
+			// EPERM is reported as an unset errnoRet, which stands for it.
+			name: "syscall errnoRet",
+			left: profileOf(specs.ActAllow, specs.LinuxSyscall{
+				Names: []string{syscallRead}, Action: specs.ActErrno, ErrnoRet: &eperm,
+			}),
+			right: profileOf(specs.ActAllow, specs.LinuxSyscall{
+				Names: []string{syscallRead}, Action: specs.ActErrno, ErrnoRet: &errnoTwo,
+			}),
+			want: seccomp.ProfileDiff{Syscalls: &seccomp.SyscallsDiff{
+				Changed: []seccomp.SyscallChange{{
+					Name:  syscallRead,
+					Left:  []seccomp.SyscallDetail{{Action: specs.ActErrno}},
+					Right: []seccomp.SyscallDetail{{Action: specs.ActErrno, ErrnoRet: &errnoTwo}},
+				}},
+			}},
+		},
+		{
+			name: "syscall args",
+			left: profileOf(specs.ActErrno,
+				filtered(syscallRead, specs.ActAllow, arg(0, specs.OpEqualTo, 1))),
+			right: profileOf(specs.ActErrno,
+				filtered(syscallRead, specs.ActAllow, arg(0, specs.OpEqualTo, 2))),
+			want: seccomp.ProfileDiff{Syscalls: &seccomp.SyscallsDiff{
+				Changed: []seccomp.SyscallChange{{
+					Name: syscallRead,
+					Left: []seccomp.SyscallDetail{{
+						Action: specs.ActAllow,
+						Args:   []specs.LinuxSeccompArg{arg(0, specs.OpEqualTo, 1)},
+					}},
+					Right: []seccomp.SyscallDetail{{
+						Action: specs.ActAllow,
+						Args:   []specs.LinuxSeccompArg{arg(0, specs.OpEqualTo, 2)},
+					}},
+				}},
+			}},
+		},
+		{
+			name: "name dropped from an entry",
+			left: profileOf(specs.ActErrno, specs.LinuxSyscall{
+				Names: []string{syscallRead, syscallWrite}, Action: specs.ActAllow,
+			}),
+			right: profileOf(specs.ActErrno, filtered(syscallRead, specs.ActAllow)),
+			want: seccomp.ProfileDiff{Syscalls: &seccomp.SyscallsDiff{
+				Removed: []seccomp.SyscallEntry{{Name: syscallWrite, Action: specs.ActAllow}},
+			}},
+		},
+		{
+			name: "entry dropped from a syscall",
+			left: profileOf(specs.ActErrno,
+				filtered(syscallClone, specs.ActAllow, arg(0, specs.OpMaskedEqual, 1)),
+				filtered(syscallClone, specs.ActLog, arg(1, specs.OpEqualTo, 1))),
+			right: profileOf(specs.ActErrno,
+				filtered(syscallClone, specs.ActLog, arg(1, specs.OpEqualTo, 1))),
+			want: seccomp.ProfileDiff{Syscalls: &seccomp.SyscallsDiff{
+				Changed: []seccomp.SyscallChange{{
+					Name: syscallClone,
+					Left: []seccomp.SyscallDetail{
+						{
+							Action: specs.ActAllow,
+							Args:   []specs.LinuxSeccompArg{arg(0, specs.OpMaskedEqual, 1)},
+						},
+						{
+							Action: specs.ActLog,
+							Args:   []specs.LinuxSeccompArg{arg(1, specs.OpEqualTo, 1)},
+						},
+					},
+					Right: []seccomp.SyscallDetail{{
+						Action: specs.ActLog,
+						Args:   []specs.LinuxSeccompArg{arg(1, specs.OpEqualTo, 1)},
+					}},
+				}},
+			}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	if diff.Architectures == nil {
-		t.Fatal("expected Architectures diff")
-	}
+			diff, err := seccomp.Diff(test.left, test.right)
+			if test.arch != "" {
+				diff, err = seccomp.Options{Arch: test.arch}.Diff(test.left, test.right)
+			}
 
-	if len(diff.Architectures.Removed) != 1 || diff.Architectures.Removed[0] != specs.ArchARM {
-		t.Errorf("removed = %v, want [SCMP_ARCH_ARM]", diff.Architectures.Removed)
-	}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 
-	if len(diff.Architectures.Added) != 1 || diff.Architectures.Added[0] != specs.ArchPPC64 {
-		t.Errorf("added = %v, want [SCMP_ARCH_PPC64]", diff.Architectures.Added)
+			if !reflect.DeepEqual(*diff, test.want) {
+				got, _ := json.Marshal(diff)
+				want, _ := json.Marshal(test.want)
+				t.Errorf("Diff =\n%s\nwant\n%s", got, want)
+			}
+		})
+	}
+}
+
+// TestDiffString covers how a diff renders: in full, or by the parts that
+// do not depend on the architecture of the host.
+func TestDiffString(t *testing.T) {
+	t.Parallel()
+
+	enosys := uint(38)
+
+	for _, test := range []struct {
+		name  string
+		left  *specs.LinuxSeccomp
+		right *specs.LinuxSeccomp
+		// want is the whole rendering, contains parts of it.
+		want     string
+		contains []string
+	}{
+		{
+			name: "several changes",
+			left: &specs.LinuxSeccomp{
+				DefaultAction: specs.ActErrno,
+				Architectures: []specs.Arch{specs.ArchMIPS},
+				Syscalls: []specs.LinuxSyscall{
+					filtered(syscallRead, specs.ActAllow), filtered(syscallWrite, specs.ActAllow),
+				},
+			},
+			right: &specs.LinuxSeccomp{
+				DefaultAction: specs.ActAllow,
+				Architectures: []specs.Arch{specs.ArchPPC64},
+				Syscalls: []specs.LinuxSyscall{
+					filtered(syscallRead, specs.ActLog), filtered(syscallClose, specs.ActErrno),
+				},
+			},
+			contains: []string{
+				"default:SCMP_ACT_ERRNO->SCMP_ACT_ALLOW", "-SCMP_ARCH_MIPS", "+SCMP_ARCH_PPC64",
+				"-write->SCMP_ACT_ALLOW", "+close->SCMP_ACT_ERRNO", "~read:",
+			},
+		},
+		{
+			name: "every field",
+			left: &specs.LinuxSeccomp{
+				DefaultAction:    specs.ActErrno,
+				DefaultErrnoRet:  &enosys,
+				Architectures:    []specs.Arch{specs.ArchX86_64},
+				Flags:            []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagLog},
+				ListenerPath:     "/run/a.sock",
+				ListenerMetadata: metaA,
+				Syscalls:         []specs.LinuxSyscall{filtered(syscallWrite, specs.ActAllow)},
+			},
+			right: &specs.LinuxSeccomp{
+				DefaultAction: specs.ActAllow,
+				Architectures: []specs.Arch{specs.ArchARM},
+				Syscalls:      []specs.LinuxSyscall{filtered(syscallClose, specs.ActAllow)},
+			},
+			contains: []string{
+				"defaultErrno:38-><nil>", "flags:", "listener:/run/a.sock-><none>",
+				"listenerMeta:meta-a-><none>",
+			},
+		},
+		{
+			// A syscall past the read budget on the right side only is
+			// compared by the entries that load it, as one summarized on both
+			// sides is.
+			name: "one side summarized",
+			left: profileOf(specs.ActErrno,
+				filtered(syscallRead, specs.ActAllow, arg(0, specs.OpEqualTo, 1))),
+			right: manyReadRules(66000, 1),
+			want:  "Diff{~read:([0]SCMP_CMP_EQ:1)->SCMP_ACT_ALLOW->SCMP_ACT_ALLOW}",
+		},
+		{
+			// The rules of a changed syscall on one side are joined by commas.
+			name: "several rules of a changed syscall",
+			left: profileOf(specs.ActErrno,
+				filtered(syscallRead, specs.ActAllow, arg(0, specs.OpEqualTo, 1)),
+				filtered(syscallRead, specs.ActAllow, arg(0, specs.OpEqualTo, 2))),
+			right: profileOf(specs.ActErrno,
+				filtered(syscallRead, specs.ActAllow, arg(0, specs.OpEqualTo, 1))),
+			want: "Diff{~read:([0]SCMP_CMP_EQ:1)->SCMP_ACT_ALLOW," +
+				"([0]SCMP_CMP_EQ:2)->SCMP_ACT_ALLOW->([0]SCMP_CMP_EQ:1)->SCMP_ACT_ALLOW}",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			diff, err := seccomp.Diff(test.left, test.right)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			got := diff.String()
+			if test.want != "" && got != test.want {
+				t.Errorf("String() = %s, want %s", got, test.want)
+			}
+
+			for _, want := range test.contains {
+				if !strings.Contains(got, want) {
+					t.Errorf("String() = %s, missing %s", got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestDiffListsReports covers the diff of two syscall lists, nil where they
+// load alike.
+func TestDiffListsReports(t *testing.T) {
+	t.Parallel()
+
+	readAllowed := []specs.LinuxSyscall{filtered("read", specs.ActAllow)}
+
+	for _, test := range []struct {
+		name        string
+		left, right []specs.LinuxSyscall
+		want        *seccomp.SyscallsDiff
+	}{
+		{name: "both empty"},
+		{name: "equal", left: readAllowed, right: readAllowed},
+		{
+			name:  "different syscalls",
+			left:  readAllowed,
+			right: []specs.LinuxSyscall{filtered("write", specs.ActAllow)},
+			want: &seccomp.SyscallsDiff{
+				Added:   []seccomp.SyscallEntry{{Name: "write", Action: specs.ActAllow}},
+				Removed: []seccomp.SyscallEntry{{Name: "read", Action: specs.ActAllow}},
+			},
+		},
+		{
+			name:  "changed action",
+			left:  readAllowed,
+			right: []specs.LinuxSyscall{filtered("read", specs.ActErrno)},
+			want: &seccomp.SyscallsDiff{Changed: []seccomp.SyscallChange{{
+				Name:  "read",
+				Left:  []seccomp.SyscallDetail{{Action: specs.ActAllow}},
+				Right: []seccomp.SyscallDetail{{Action: specs.ActErrno}},
+			}}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := diffLists(t, test.left, test.right); !reflect.DeepEqual(got, test.want) {
+				gotJSON, _ := json.Marshal(got)
+				wantJSON, _ := json.Marshal(test.want)
+				t.Errorf("diff of the lists =\n%s\nwant\n%s", gotJSON, wantJSON)
+			}
+		})
 	}
 }
 
@@ -213,379 +654,72 @@ func TestDiffArchitecturesNativeImplied(t *testing.T) {
 	// nothing and the README flow of diffing an artifact against its
 	// intersection with a native-only baseline reports no change.
 	if !diff.Equal {
-		t.Errorf("expected equal, got %s", seccomp.FormatDiff(diff))
+		t.Errorf("expected equal, got %s", diff.String())
 	}
 }
 
-func TestDiffLists(t *testing.T) {
+// TestOptionsDiffIsHostIndependent covers the reason Options.Diff exists:
+// Diff implies the architecture of the running program, so the same pair of
+// profiles compares differently depending on where the comparison runs.
+// Naming the target architecture removes that dependence.
+func TestOptionsDiffIsHostIndependent(t *testing.T) {
 	t.Parallel()
 
-	left := &specs.LinuxSeccomp{
+	listed := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActAllow},
-			{Names: []string{syscallWrite}, Action: specs.ActAllow},
-		},
+		Architectures: []specs.Arch{specs.ArchAARCH64},
 	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActLog},
-			{Names: []string{syscallClose}, Action: specs.ActAllow},
-		},
-	}
+	unlisted := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
 
-	diff, err := seccomp.Diff(left, right)
+	onTarget, err := seccomp.Options{Arch: specs.ArchAARCH64}.Diff(listed, unlisted)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if diff.Syscalls == nil {
-		t.Fatal("expected Syscalls diff")
+	if !onTarget.Equal {
+		t.Errorf("a node running aarch64 covers it either way, got %s",
+			onTarget.String())
 	}
 
-	if len(diff.Syscalls.Removed) != 1 || diff.Syscalls.Removed[0].Name != syscallWrite {
-		t.Errorf("removed = %v, want [write]", diff.Syscalls.Removed)
-	}
-
-	if len(diff.Syscalls.Added) != 1 || diff.Syscalls.Added[0].Name != syscallClose {
-		t.Errorf("added = %v, want [close]", diff.Syscalls.Added)
-	}
-
-	if len(diff.Syscalls.Changed) != 1 || diff.Syscalls.Changed[0].Name != syscallRead {
-		t.Errorf("changed = %v, want [read]", diff.Syscalls.Changed)
-	}
-}
-
-func TestDiffDefaultErrnoRet(t *testing.T) {
-	t.Parallel()
-
-	errnoA := uint(38)
-	errnoB := uint(13)
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction:   specs.ActErrno,
-		DefaultErrnoRet: &errnoA,
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction:   specs.ActErrno,
-		DefaultErrnoRet: &errnoB,
-	}
-
-	diff, err := seccomp.Diff(left, right)
+	elsewhere, err := seccomp.Options{Arch: specs.ArchX86_64}.Diff(listed, unlisted)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if diff.DefaultErrnoRet == nil {
-		t.Fatal("expected DefaultErrnoRet diff")
+	if elsewhere.Equal {
+		t.Error("a node running x86_64 loses aarch64, want a difference")
 	}
 
-	if *diff.DefaultErrnoRet.Left != 38 {
-		t.Errorf("left errno = %d, want 38", *diff.DefaultErrnoRet.Left)
-	}
-
-	if *diff.DefaultErrnoRet.Right != 13 {
-		t.Errorf("right errno = %d, want 13", *diff.DefaultErrnoRet.Right)
-	}
-}
-
-func TestDiffErrnoRetUnsetEqualsEPERM(t *testing.T) {
-	t.Parallel()
-
-	// runc applies EPERM when errnoRet is unset, so spelling it out changes
-	// nothing, and errnoRet on an action that ignores it is not a
-	// difference either.
-	eperm := uint(1)
-	ignored := uint(13)
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActErrno, ErrnoRet: &eperm},
-			{Names: []string{syscallWrite}, Action: specs.ActAllow, ErrnoRet: &ignored},
-		},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction:   specs.ActErrno,
-		DefaultErrnoRet: &eperm,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActErrno},
-			{Names: []string{syscallWrite}, Action: specs.ActAllow},
-		},
-	}
-
-	diff, err := seccomp.Diff(left, right)
+	none, err := seccomp.Options{Arch: ""}.Diff(listed, unlisted)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !diff.Equal {
-		t.Errorf("expected equal profiles, got %s", seccomp.FormatDiff(diff))
+	if none.Equal {
+		t.Error("with no implied architecture the lists differ as written")
 	}
 }
 
-func TestDiffNarrowsErrnoRetAsRuntimesDo(t *testing.T) {
-	t.Parallel()
+// neutralProfile returns a profile without syscall entries, with the
+// architectures of profile and those of its flags that the merge direction
+// combines with the other side: SECCOMP_FILTER_FLAG_SPEC_ALLOW for both
+// directions, and SECCOMP_FILTER_FLAG_LOG as well for union.
+func neutralProfile(
+	profile *specs.LinuxSeccomp, def specs.LinuxSeccompAction, keepLog bool,
+) *specs.LinuxSeccomp {
+	var flags []specs.LinuxSeccompFlag
 
-	// runc and crun load the lower 16 bits of errnoRet, so 65537 is the
-	// EPERM an unset errnoRet stands for.
-	wrapped := uint(65537)
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction:   specs.ActErrno,
-		DefaultErrnoRet: &wrapped,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActTrace, ErrnoRet: &wrapped},
-		},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActTrace},
-		},
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !diff.Equal {
-		t.Errorf("expected equal profiles, got %s", seccomp.FormatDiff(diff))
-	}
-}
-
-func TestDiffFlags(t *testing.T) {
-	t.Parallel()
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Flags:         []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagLog},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Flags:         nil,
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.Flags == nil {
-		t.Fatal("expected Flags diff")
-	}
-
-	if len(diff.Flags.Removed) != 1 {
-		t.Errorf("removed flags = %v, want 1", diff.Flags.Removed)
-	}
-}
-
-// TestDiffFlagsReadsAbsentListAsRuntimesDo pins how Diff reads a profile
-// without a flag list: runc since 1.2 and crun set
-// SECCOMP_FILTER_FLAG_SPEC_ALLOW for it, which a list that is set but empty
-// turns off.
-func TestDiffFlagsReadsAbsentListAsRuntimesDo(t *testing.T) {
-	t.Parallel()
-
-	withFlags := func(flags []specs.LinuxSeccompFlag) *specs.LinuxSeccomp {
-		return &specs.LinuxSeccomp{DefaultAction: specs.ActErrno, Flags: flags}
-	}
-
-	spec := []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagSpecAllow}
-
-	diff, err := seccomp.Diff(withFlags(nil), withFlags(spec))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !diff.Equal {
-		t.Errorf("absent list and SPEC_ALLOW should be equal, got %s", seccomp.FormatDiff(diff))
-	}
-
-	diff, err = seccomp.Diff(withFlags(nil), withFlags([]specs.LinuxSeccompFlag{}))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.Flags == nil || !slices.Equal(diff.Flags.Removed, spec) || len(diff.Flags.Added) != 0 {
-		t.Errorf("empty list should remove SPEC_ALLOW, got %s", seccomp.FormatDiff(diff))
-	}
-}
-
-func TestDiffListener(t *testing.T) {
-	t.Parallel()
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		ListenerPath:  listenerSock,
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		ListenerPath:  "/run/other.sock",
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.ListenerPath == nil {
-		t.Fatal("expected ListenerPath diff")
-	}
-}
-
-func TestDiffFormatNil(t *testing.T) {
-	t.Parallel()
-
-	const want = "Diff{<nil>}"
-	if got := seccomp.FormatDiff(nil); got != want {
-		t.Errorf("FormatDiff(nil) = %q, want %q", got, want)
-	}
-}
-
-func TestDiffFormatComplex(t *testing.T) {
-	t.Parallel()
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Architectures: []specs.Arch{specs.ArchMIPS},
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActAllow},
-			{Names: []string{syscallWrite}, Action: specs.ActAllow},
-		},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActAllow,
-		Architectures: []specs.Arch{specs.ArchPPC64},
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActLog},
-			{Names: []string{syscallClose}, Action: specs.ActErrno},
-		},
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	got := seccomp.FormatDiff(diff)
-	if got == "Diff{equal}" {
-		t.Error("expected non-equal diff")
-	}
-
-	for _, want := range []string{
-		"default:SCMP_ACT_ERRNO->SCMP_ACT_ALLOW",
-		"-SCMP_ARCH_MIPS",
-		"+SCMP_ARCH_PPC64",
-		"-write->SCMP_ACT_ALLOW",
-		"+close->SCMP_ACT_ERRNO",
-		"~read:",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("FormatDiff() = %q, missing %q", got, want)
+	for _, flag := range profile.Flags {
+		if flag == specs.LinuxSeccompFlagSpecAllow ||
+			(keepLog && flag == specs.LinuxSeccompFlagLog) {
+			flags = append(flags, flag)
 		}
 	}
-}
 
-func TestDiffListenerMetadata(t *testing.T) {
-	t.Parallel()
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction:    specs.ActErrno,
-		ListenerPath:     listenerSock,
-		ListenerMetadata: metaA,
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction:    specs.ActErrno,
-		ListenerPath:     listenerSock,
-		ListenerMetadata: "meta-b",
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.ListenerPath != nil {
-		t.Error("ListenerPath should be nil (unchanged)")
-	}
-
-	if diff.ListenerMetadata == nil {
-		t.Fatal("expected ListenerMetadata diff")
-	}
-
-	if diff.ListenerMetadata.Left != metaA || diff.ListenerMetadata.Right != "meta-b" {
-		t.Errorf("metadata = %v/%v, want meta-a/meta-b",
-			diff.ListenerMetadata.Left, diff.ListenerMetadata.Right)
-	}
-}
-
-func TestDiffSyscallErrnoRet(t *testing.T) {
-	t.Parallel()
-
-	errnoA := uint(1)
-	errnoB := uint(2)
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActAllow,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActErrno, ErrnoRet: &errnoA},
-		},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActAllow,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActErrno, ErrnoRet: &errnoB},
-		},
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.Syscalls == nil {
-		t.Fatal("expected Syscalls diff")
-	}
-
-	if len(diff.Syscalls.Changed) != 1 {
-		t.Fatalf("changed = %d, want 1", len(diff.Syscalls.Changed))
-	}
-}
-
-func TestDiffSyscallArgs(t *testing.T) {
-	t.Parallel()
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{
-				Names:  []string{syscallRead},
-				Action: specs.ActAllow,
-				Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 1, Op: specs.OpEqualTo}},
-			},
-		},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{
-				Names:  []string{syscallRead},
-				Action: specs.ActAllow,
-				Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 2, Op: specs.OpEqualTo}},
-			},
-		},
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.Syscalls == nil || len(diff.Syscalls.Changed) != 1 {
-		t.Fatal("expected one changed syscall")
+	return &specs.LinuxSeccomp{
+		DefaultAction: def,
+		Architectures: profile.Architectures,
+		Flags:         flags,
 	}
 }
 
@@ -613,784 +747,6 @@ func TestDiffOperatorSpellingTwoConditions(t *testing.T) {
 	if diff.Equal || diff.Syscalls == nil || len(diff.Syscalls.Changed) != 1 ||
 		len(diff.Syscalls.Changed[0].Right) != 2 {
 		t.Errorf("Diff = %s, want read changed to two rules", diff)
-	}
-}
-
-func TestDiffSyscallArgsSameIndexDifferentValue(t *testing.T) {
-	t.Parallel()
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{
-				Names:  []string{syscallRead},
-				Action: specs.ActAllow,
-				Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 10, Op: specs.OpEqualTo}},
-			},
-			{
-				Names:  []string{syscallRead},
-				Action: specs.ActAllow,
-				Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 5, Op: specs.OpEqualTo}},
-			},
-		},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{
-				Names:  []string{syscallRead},
-				Action: specs.ActAllow,
-				Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 5, Op: specs.OpEqualTo}},
-			},
-			{
-				Names:  []string{syscallRead},
-				Action: specs.ActAllow,
-				Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 10, Op: specs.OpEqualTo}},
-			},
-		},
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !diff.Equal {
-		t.Error("expected equal profiles after sorting")
-	}
-}
-
-func TestDiffDefaultErrnoRetNilVsSet(t *testing.T) {
-	t.Parallel()
-
-	errnoVal := uint(13)
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction:   specs.ActErrno,
-		DefaultErrnoRet: nil,
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction:   specs.ActErrno,
-		DefaultErrnoRet: &errnoVal,
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.DefaultErrnoRet == nil {
-		t.Fatal("expected DefaultErrnoRet diff")
-	}
-
-	if diff.DefaultErrnoRet.Left != nil {
-		t.Error("left should be nil")
-	}
-
-	if diff.DefaultErrnoRet.Right == nil || *diff.DefaultErrnoRet.Right != 13 {
-		t.Error("right should be 13")
-	}
-}
-
-func TestDiffFormatAllFields(t *testing.T) {
-	t.Parallel()
-
-	errnoA := uint(38)
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction:    specs.ActErrno,
-		DefaultErrnoRet:  &errnoA,
-		Architectures:    []specs.Arch{specs.ArchX86_64},
-		Flags:            []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagLog},
-		ListenerPath:     "/run/a.sock",
-		ListenerMetadata: metaA,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallWrite}, Action: specs.ActAllow},
-		},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction:    specs.ActAllow,
-		DefaultErrnoRet:  nil,
-		Architectures:    []specs.Arch{specs.ArchARM},
-		Flags:            nil,
-		ListenerPath:     "",
-		ListenerMetadata: "",
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallClose}, Action: specs.ActAllow},
-		},
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	got := seccomp.FormatDiff(diff)
-
-	for _, want := range []string{
-		"defaultErrno:38-><nil>",
-		"flags:",
-		"listener:/run/a.sock-><none>",
-		"listenerMeta:meta-a-><none>",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("FormatDiff() = %q, missing %q", got, want)
-		}
-	}
-}
-
-func TestDiffMultiNameSyscalls(t *testing.T) {
-	t.Parallel()
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallRead, syscallWrite}, Action: specs.ActAllow},
-		},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActAllow},
-		},
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.Syscalls == nil {
-		t.Fatal("expected Syscalls diff")
-	}
-
-	if len(diff.Syscalls.Removed) != 1 || diff.Syscalls.Removed[0].Name != syscallWrite {
-		t.Errorf("removed = %v, want [write]", diff.Syscalls.Removed)
-	}
-}
-
-func TestDiffMultiEntrySameSyscall(t *testing.T) {
-	t.Parallel()
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActAllow,
-				Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 1, Op: specs.OpMaskedEqual}},
-			},
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActLog,
-				Args:   []specs.LinuxSeccompArg{{Index: 1, Value: 1, Op: specs.OpEqualTo}},
-			},
-		},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActLog,
-				Args:   []specs.LinuxSeccompArg{{Index: 1, Value: 1, Op: specs.OpEqualTo}},
-			},
-		},
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.Syscalls == nil {
-		t.Fatal("expected Syscalls diff for multi-entry syscall")
-	}
-
-	if len(diff.Syscalls.Changed) != 1 || diff.Syscalls.Changed[0].Name != syscallClone {
-		t.Errorf("changed = %v, want [clone]", diff.Syscalls.Changed)
-	}
-
-	if len(diff.Syscalls.Changed[0].Left) != 2 {
-		t.Errorf("left details = %d, want 2", len(diff.Syscalls.Changed[0].Left))
-	}
-
-	if len(diff.Syscalls.Changed[0].Right) != 1 {
-		t.Errorf("right details = %d, want 1", len(diff.Syscalls.Changed[0].Right))
-	}
-}
-
-func TestDiffMultiEntryEqual(t *testing.T) {
-	t.Parallel()
-
-	profile := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActAllow,
-				Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 1, Op: specs.OpMaskedEqual}},
-			},
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActErrno,
-			},
-		},
-	}
-
-	diff, err := seccomp.Diff(profile, profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !diff.Equal {
-		t.Error("expected equal profiles with identical multi-entry syscalls")
-	}
-}
-
-func TestDiffReorderedEntries(t *testing.T) {
-	t.Parallel()
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActAllow},
-			{Names: []string{syscallWrite}, Action: specs.ActAllow},
-		},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallWrite}, Action: specs.ActAllow},
-			{Names: []string{syscallRead}, Action: specs.ActAllow},
-		},
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !diff.Equal {
-		t.Error("expected equal profiles regardless of entry order")
-	}
-}
-
-func TestDiffMultiEntryEqualSortedByErrnoRet(t *testing.T) {
-	t.Parallel()
-
-	errnoA := uint(1)
-	errnoB := uint(2)
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallClone}, Action: specs.ActErrno, ErrnoRet: &errnoA},
-			{Names: []string{syscallClone}, Action: specs.ActErrno, ErrnoRet: &errnoB},
-		},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallClone}, Action: specs.ActErrno, ErrnoRet: &errnoB},
-			{Names: []string{syscallClone}, Action: specs.ActErrno, ErrnoRet: &errnoA},
-		},
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !diff.Equal {
-		t.Error("expected equal profiles with reordered ErrnoRet entries")
-	}
-}
-
-func TestDiffMultiEntryEqualSortedByArgs(t *testing.T) {
-	t.Parallel()
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActAllow,
-				Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 1, Op: specs.OpEqualTo}},
-			},
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActAllow,
-				Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 2, Op: specs.OpEqualTo}},
-			},
-		},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActAllow,
-				Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 2, Op: specs.OpEqualTo}},
-			},
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActAllow,
-				Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 1, Op: specs.OpEqualTo}},
-			},
-		},
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !diff.Equal {
-		t.Error("expected equal profiles with reordered Args entries")
-	}
-}
-
-func TestDiffMultiEntryEqualSortedByArgFields(t *testing.T) {
-	t.Parallel()
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActAllow,
-				Args: []specs.LinuxSeccompArg{
-					{Index: 0, Value: 1, ValueTwo: 10, Op: specs.OpMaskedEqual},
-				},
-			},
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActAllow,
-				Args: []specs.LinuxSeccompArg{
-					{Index: 0, Value: 1, ValueTwo: 20, Op: specs.OpGreaterThan},
-				},
-			},
-		},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActAllow,
-				Args: []specs.LinuxSeccompArg{
-					{Index: 0, Value: 1, ValueTwo: 20, Op: specs.OpGreaterThan},
-				},
-			},
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActAllow,
-				Args: []specs.LinuxSeccompArg{
-					{Index: 0, Value: 1, ValueTwo: 10, Op: specs.OpMaskedEqual},
-				},
-			},
-		},
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !diff.Equal {
-		t.Error("expected equal profiles with reordered arg fields")
-	}
-}
-
-func TestDiffMultiEntryEqualSortedByOp(t *testing.T) {
-	t.Parallel()
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActAllow,
-				Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 1, Op: specs.OpEqualTo}},
-			},
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActAllow,
-				Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 1, Op: specs.OpGreaterThan}},
-			},
-		},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActAllow,
-				Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 1, Op: specs.OpGreaterThan}},
-			},
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActAllow,
-				Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 1, Op: specs.OpEqualTo}},
-			},
-		},
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !diff.Equal {
-		t.Error("expected equal profiles with reordered Op entries")
-	}
-}
-
-func TestDiffMultiEntryEqualSortedByArgLen(t *testing.T) {
-	t.Parallel()
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActAllow,
-				Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 1, Op: specs.OpEqualTo}},
-			},
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActAllow,
-				Args: []specs.LinuxSeccompArg{
-					{Index: 0, Value: 1, Op: specs.OpEqualTo},
-					{Index: 1, Value: 2, Op: specs.OpEqualTo},
-				},
-			},
-		},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActAllow,
-				Args: []specs.LinuxSeccompArg{
-					{Index: 0, Value: 1, Op: specs.OpEqualTo},
-					{Index: 1, Value: 2, Op: specs.OpEqualTo},
-				},
-			},
-			{
-				Names:  []string{syscallClone},
-				Action: specs.ActAllow,
-				Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 1, Op: specs.OpEqualTo}},
-			},
-		},
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !diff.Equal {
-		t.Error("expected equal profiles with reordered arg-length entries")
-	}
-}
-
-func TestDiffMultiEntryEqualNilVsSetErrnoRet(t *testing.T) {
-	t.Parallel()
-
-	errnoA := uint(1)
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallClone}, Action: specs.ActErrno, ErrnoRet: nil},
-			{Names: []string{syscallClone}, Action: specs.ActErrno, ErrnoRet: &errnoA},
-		},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallClone}, Action: specs.ActErrno, ErrnoRet: &errnoA},
-			{Names: []string{syscallClone}, Action: specs.ActErrno, ErrnoRet: nil},
-		},
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !diff.Equal {
-		t.Error("expected equal profiles with nil vs set ErrnoRet reordered")
-	}
-}
-
-func TestDiffIsEqualTrue(t *testing.T) {
-	t.Parallel()
-
-	profile := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActAllow},
-		},
-	}
-
-	diff, err := seccomp.Diff(profile, profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !diff.IsEqual() {
-		t.Error("IsEqual() should return true for identical profiles")
-	}
-}
-
-func TestDiffIsEqualFalse(t *testing.T) {
-	t.Parallel()
-
-	left := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
-	right := &specs.LinuxSeccomp{DefaultAction: specs.ActAllow}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.IsEqual() {
-		t.Error("IsEqual() should return false for different profiles")
-	}
-}
-
-func TestDiffActKillEquivalence(t *testing.T) {
-	t.Parallel()
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActKill},
-		},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActKillThread},
-		},
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !diff.Equal {
-		t.Error("expected equal: ActKill and ActKillThread are semantically equivalent")
-	}
-}
-
-func TestDiffDuplicateEntries(t *testing.T) {
-	t.Parallel()
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActAllow},
-			{Names: []string{syscallRead}, Action: specs.ActAllow},
-		},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActAllow},
-		},
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !diff.Equal {
-		t.Error("expected equal: duplicate identical entries should be deduplicated")
-	}
-}
-
-func TestDiffDefaultActionKillEquivalence(t *testing.T) {
-	t.Parallel()
-
-	left := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActKill,
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActKillThread,
-	}
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !diff.Equal {
-		t.Error(
-			"expected equal: ActKill and ActKillThread default actions" +
-				" are semantically equivalent",
-		)
-	}
-
-	if diff.DefaultAction != nil {
-		t.Error("expected no DefaultAction diff")
-	}
-}
-
-func TestDiffListsNil(t *testing.T) {
-	t.Parallel()
-
-	result := diffLists(t, nil, nil)
-	if result != nil {
-		t.Errorf("expected nil for empty-vs-empty diff, got %v", result)
-	}
-}
-
-func TestDiffListsEqual(t *testing.T) {
-	t.Parallel()
-
-	list := []specs.LinuxSyscall{{
-		Names:  []string{"read"},
-		Action: specs.ActAllow,
-	}}
-
-	result := diffLists(t, list, list)
-	if result != nil {
-		t.Errorf("expected nil for equal syscall lists, got %v", result)
-	}
-}
-
-func TestDiffListsDiffers(t *testing.T) {
-	t.Parallel()
-
-	left := []specs.LinuxSyscall{{
-		Names:  []string{"read"},
-		Action: specs.ActAllow,
-	}}
-
-	right := []specs.LinuxSyscall{{
-		Names:  []string{"write"},
-		Action: specs.ActAllow,
-	}}
-
-	result := diffLists(t, left, right)
-	if result == nil {
-		t.Fatal("expected non-nil diff for different syscall lists")
-	}
-
-	if len(result.Removed) != 1 || result.Removed[0].Name != "read" {
-		t.Errorf("removed = %v, want [read]", result.Removed)
-	}
-
-	if len(result.Added) != 1 || result.Added[0].Name != "write" {
-		t.Errorf("added = %v, want [write]", result.Added)
-	}
-}
-
-func TestDiffListsChanged(t *testing.T) {
-	t.Parallel()
-
-	left := []specs.LinuxSyscall{{
-		Names:  []string{"read"},
-		Action: specs.ActAllow,
-	}}
-
-	right := []specs.LinuxSyscall{{
-		Names:  []string{"read"},
-		Action: specs.ActErrno,
-	}}
-
-	result := diffLists(t, left, right)
-	if result == nil {
-		t.Fatal("expected non-nil diff for changed action")
-	}
-
-	if len(result.Changed) != 1 {
-		t.Fatalf("changed = %v, want 1 entry", result.Changed)
-	}
-
-	if result.Changed[0].Name != "read" {
-		t.Errorf("changed name = %q, want read", result.Changed[0].Name)
-	}
-}
-
-// TestOptionsDiffIsHostIndependent covers the reason Options.Diff exists:
-// Diff implies the architecture of the running program, so the same pair of
-// profiles compares differently depending on where the comparison runs.
-// Naming the target architecture removes that dependence.
-func TestOptionsDiffIsHostIndependent(t *testing.T) {
-	t.Parallel()
-
-	listed := &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
-		Architectures: []specs.Arch{specs.ArchAARCH64},
-	}
-	unlisted := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
-
-	onTarget, err := seccomp.Options{Arch: specs.ArchAARCH64}.Diff(listed, unlisted)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !onTarget.Equal {
-		t.Errorf("a node running aarch64 covers it either way, got %s",
-			seccomp.FormatDiff(onTarget))
-	}
-
-	elsewhere, err := seccomp.Options{Arch: specs.ArchX86_64}.Diff(listed, unlisted)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if elsewhere.Equal {
-		t.Error("a node running x86_64 loses aarch64, want a difference")
-	}
-
-	none, err := seccomp.Options{Arch: ""}.Diff(listed, unlisted)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if none.Equal {
-		t.Error("with no implied architecture the lists differ as written")
-	}
-}
-
-func TestOptionsDiffNilProfile(t *testing.T) {
-	t.Parallel()
-
-	_, err := seccomp.Options{Arch: specs.ArchX86_64}.Diff(nil, &specs.LinuxSeccomp{})
-	if !errors.Is(err, seccomp.ErrNilProfile) {
-		t.Errorf("expected ErrNilProfile, got: %v", err)
-	}
-}
-
-// neutralProfile returns a profile without syscall entries, with the
-// architectures of profile and those of its flags that the merge direction
-// combines with the other side: SECCOMP_FILTER_FLAG_SPEC_ALLOW for both
-// directions, and SECCOMP_FILTER_FLAG_LOG as well for union.
-func neutralProfile(
-	profile *specs.LinuxSeccomp, def specs.LinuxSeccompAction, keepLog bool,
-) *specs.LinuxSeccomp {
-	var flags []specs.LinuxSeccompFlag
-
-	for _, flag := range profile.Flags {
-		if flag == specs.LinuxSeccompFlagSpecAllow ||
-			(keepLog && flag == specs.LinuxSeccompFlagLog) {
-			flags = append(flags, flag)
-		}
-	}
-
-	return &specs.LinuxSeccomp{
-		DefaultAction: def,
-		Architectures: profile.Architectures,
-		Flags:         flags,
 	}
 }
 
@@ -1448,9 +804,9 @@ func TestMergeWithNeutralProfileIsIdentity(t *testing.T) {
 				t.Fatalf("profile %d: diff: %v", idx, err)
 			}
 
-			if !diff.IsEqual() {
+			if !diff.Equal {
 				t.Errorf("profile %d: merge with a neutral profile differs:\n%s",
-					idx, seccomp.FormatDiff(diff))
+					idx, diff.String())
 			}
 		}
 	}
@@ -1490,7 +846,7 @@ func TestDiffKeepsUnknownActionsApart(t *testing.T) {
 	}
 
 	if !same.Equal {
-		t.Errorf("Diff of %q with itself reports %s, want equal", first, seccomp.FormatDiff(same))
+		t.Errorf("Diff of %q with itself reports %s, want equal", first, same.String())
 	}
 }
 
@@ -1571,11 +927,11 @@ func TestDiffListsIgnoresEntryOrder(t *testing.T) {
 	}
 }
 
-// TestFormatDiffQuotesUnsafeBytes covers the rendering of a diff, which a
+// TestDiffStringQuotesUnsafeBytes covers the rendering of a diff, which a
 // runtime logs and which is computed over profiles nothing has validated:
 // every string a profile supplies is quoted when it holds a control byte,
 // wherever in the diff it appears.
-func TestFormatDiffQuotesUnsafeBytes(t *testing.T) {
+func TestDiffStringQuotesUnsafeBytes(t *testing.T) {
 	t.Parallel()
 
 	const hostile = "x\nFORGED \x1b[31mred"
@@ -1609,8 +965,8 @@ func TestFormatDiffQuotesUnsafeBytes(t *testing.T) {
 	}
 
 	for name, formatted := range map[string]string{
-		"FormatDiff":    seccomp.FormatDiff(diff),
-		"FormatProfile": seccomp.FormatProfile(right),
+		"ProfileDiff.String": diff.String(),
+		"FormatProfile":      seccomp.FormatProfile(right),
 	} {
 		if strings.ContainsAny(formatted, "\n\x1b") {
 			t.Errorf("%s writes control bytes through: %q", name, formatted)
@@ -1651,7 +1007,7 @@ func TestDiffComparesSummarizedSyscallsByRules(t *testing.T) {
 
 	if diff.Equal || diff.Syscalls == nil || len(diff.Syscalls.Changed) != 1 ||
 		diff.Syscalls.Changed[0].Name != syscallRead {
-		t.Fatalf("Diff of different rules = %s, want read changed", seccomp.FormatDiff(diff))
+		t.Fatalf("Diff of different rules = %s, want read changed", diff.String())
 	}
 
 	if diffLists(t, left.Syscalls, right.Syscalls) == nil {
@@ -1668,7 +1024,7 @@ func TestDiffComparesSummarizedSyscallsByRules(t *testing.T) {
 	}
 
 	if !diff.Equal {
-		t.Fatalf("Diff of the same rules = %s, want equal", seccomp.FormatDiff(diff))
+		t.Fatalf("Diff of the same rules = %s, want equal", diff.String())
 	}
 }
 
@@ -1676,90 +1032,122 @@ func TestDiffComparesSummarizedSyscallsByRules(t *testing.T) {
 // order they were added: conditions on one argument against one value with
 // a different operator of one class or a different mask. The same rules
 // added in the other order decide a call differently, as seccomp_export_pfc
-// of libseccomp 2.6.1 shows, so the two profiles are not equal.
+// of libseccomp 2.6.1 shows, so the two profiles are not equal. The rules
+// libseccomp compiles alike in either order are equal.
 func TestDiffComparesAddOrderOfSiblings(t *testing.T) {
 	t.Parallel()
 
 	const wideMask = 1<<32 | 2
 
-	for name, entries := range map[string][]specs.LinuxSyscall{
-		// read(1, 0) is LOG one way and KILL the other.
-		"wide masks": {
-			filtered("read", specs.ActLog,
-				arg(1, specs.OpNotEqual, wideMask), masked(0, wideMask, 0)),
-			filtered("read", specs.ActKill, masked(0, 1, 1)),
+	for _, test := range []struct {
+		name    string
+		entries []specs.LinuxSyscall
+		ordered bool
+	}{
+		{
+			// read(1, 0) is LOG one way and KILL the other.
+			name: "wide masks",
+			entries: []specs.LinuxSyscall{
+				filtered("read", specs.ActLog,
+					arg(1, specs.OpNotEqual, wideMask), masked(0, wideMask, 0)),
+				filtered("read", specs.ActKill, masked(0, 1, 1)),
+			},
+			ordered: true,
 		},
-		// read(0x11) is LOG one way and KILL the other.
-		"masked next to an equality": {
-			filtered("read", specs.ActLog, masked(0, 0xF0, 0x10)),
-			filtered("read", specs.ActKill, arg(0, specs.OpEqualTo, 0x11)),
+		{
+			// read(0x11) is LOG one way and KILL the other.
+			name: "masked next to an equality",
+			entries: []specs.LinuxSyscall{
+				filtered("read", specs.ActLog, masked(0, 0xF0, 0x10)),
+				filtered("read", specs.ActKill, arg(0, specs.OpEqualTo, 0x11)),
+			},
+			ordered: true,
 		},
-		// read(3) is KILL one way and LOG the other.
-		"less than next to less or equal": {
-			filtered("read", specs.ActKill, arg(0, specs.OpLessThan, 5)),
-			filtered("read", specs.ActLog, arg(0, specs.OpLessEqual, 5)),
+		{
+			// read(3) is KILL one way and LOG the other.
+			name: "less than next to less or equal",
+			entries: []specs.LinuxSyscall{
+				filtered("read", specs.ActKill, arg(0, specs.OpLessThan, 5)),
+				filtered("read", specs.ActLog, arg(0, specs.OpLessEqual, 5)),
+			},
+			ordered: true,
 		},
-		// read(6) and read(1<<32) are KILL one way and LOG the other.
-		"greater than next to greater or equal": {
-			filtered("read", specs.ActKill, arg(0, specs.OpGreaterThan, 5)),
-			filtered("read", specs.ActLog, arg(0, specs.OpGreaterEqual, 5)),
+		{
+			// read(6) and read(1<<32) are KILL one way and LOG the other.
+			name: "greater than next to greater or equal",
+			entries: []specs.LinuxSyscall{
+				filtered("read", specs.ActKill, arg(0, specs.OpGreaterThan, 5)),
+				filtered("read", specs.ActLog, arg(0, specs.OpGreaterEqual, 5)),
+			},
+			ordered: true,
+		},
+		{
+			name: "one class, different values",
+			entries: []specs.LinuxSyscall{
+				filtered("read", specs.ActKill, arg(0, specs.OpLessThan, 5)),
+				filtered("read", specs.ActLog, arg(0, specs.OpLessEqual, 7)),
+			},
+		},
+		{
+			name: "different classes",
+			entries: []specs.LinuxSyscall{
+				filtered("read", specs.ActKill, arg(0, specs.OpLessThan, 5)),
+				filtered("read", specs.ActLog, arg(0, specs.OpGreaterEqual, 3)),
+			},
+		},
+		{
+			name: "below and above one value",
+			entries: []specs.LinuxSyscall{
+				filtered("read", specs.ActKill, arg(0, specs.OpLessThan, 5)),
+				filtered("read", specs.ActLog, arg(0, specs.OpGreaterThan, 5)),
+			},
+		},
+		{
+			// libseccomp compiles an inequality as an equality, here against
+			// another value.
+			name: "equality next to an inequality",
+			entries: []specs.LinuxSyscall{
+				filtered("read", specs.ActKill, arg(0, specs.OpEqualTo, 3)),
+				filtered("read", specs.ActLog,
+					arg(0, specs.OpNotEqual, 5), arg(1, specs.OpEqualTo, 1)),
+			},
 		},
 	} {
-		reversed := slices.Clone(entries)
-		slices.Reverse(reversed)
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-		diff, err := seccomp.Diff(profileOf(specs.ActErrno, entries...),
-			profileOf(specs.ActErrno, reversed...))
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
+			reversed := slices.Clone(test.entries)
+			slices.Reverse(reversed)
 
-		if diff.Equal {
-			t.Errorf("%s: Diff of the entries reordered is equal, want a change", name)
-		}
+			diff, err := seccomp.Diff(profileOf(specs.ActErrno, test.entries...),
+				profileOf(specs.ActErrno, reversed...))
+			if err != nil {
+				t.Fatal(err)
+			}
 
-		if diffLists(t, entries, reversed) == nil {
-			t.Errorf("%s: diff of the lists reordered = nil, want a change", name)
-		}
+			if !test.ordered {
+				if !diff.Equal {
+					t.Errorf("Diff of the entries reordered = %s, want equal", diff.String())
+				}
 
-		// The same order is equal.
-		diff, err = seccomp.Diff(profileOf(specs.ActErrno, entries...),
-			profileOf(specs.ActErrno, slices.Clone(entries)...))
-		if err != nil || !diff.Equal {
-			t.Errorf("%s: Diff of the same entries = %v, %v, want equal", name, diff, err)
-		}
-	}
+				return
+			}
 
-	// libseccomp compiles these alike in either order: one class against
-	// different values, different classes, and an inequality, which it
-	// compiles as an equality, against another value.
-	for name, entries := range map[string][]specs.LinuxSyscall{
-		"one class, different values": {
-			filtered("read", specs.ActKill, arg(0, specs.OpLessThan, 5)),
-			filtered("read", specs.ActLog, arg(0, specs.OpLessEqual, 7)),
-		},
-		"different classes": {
-			filtered("read", specs.ActKill, arg(0, specs.OpLessThan, 5)),
-			filtered("read", specs.ActLog, arg(0, specs.OpGreaterEqual, 3)),
-		},
-		"below and above one value": {
-			filtered("read", specs.ActKill, arg(0, specs.OpLessThan, 5)),
-			filtered("read", specs.ActLog, arg(0, specs.OpGreaterThan, 5)),
-		},
-		"equality next to an inequality": {
-			filtered("read", specs.ActKill, arg(0, specs.OpEqualTo, 3)),
-			filtered("read", specs.ActLog, arg(0, specs.OpNotEqual, 5), arg(1, specs.OpEqualTo, 1)),
-		},
-	} {
-		reversed := slices.Clone(entries)
-		slices.Reverse(reversed)
+			if diff.Equal {
+				t.Error("Diff of the entries reordered is equal, want a change")
+			}
 
-		diff, err := seccomp.Diff(profileOf(specs.ActErrno, entries...),
-			profileOf(specs.ActErrno, reversed...))
-		if err != nil || !diff.Equal {
-			t.Errorf("%s: Diff of the entries reordered = %s, %v, want equal",
-				name, seccomp.FormatDiff(diff), err)
-		}
+			if diffLists(t, test.entries, reversed) == nil {
+				t.Error("diff of the lists reordered = nil, want a change")
+			}
+
+			// The same order is equal.
+			diff, err = seccomp.Diff(profileOf(specs.ActErrno, test.entries...),
+				profileOf(specs.ActErrno, slices.Clone(test.entries)...))
+			if err != nil || !diff.Equal {
+				t.Errorf("Diff of the same entries = %v, %v, want equal", diff, err)
+			}
+		})
 	}
 }
 
@@ -1782,11 +1170,11 @@ func TestDiffReportsWideDefaultErrnoAsWritten(t *testing.T) {
 
 	if diff.DefaultErrnoRet == nil || diff.DefaultErrnoRet.Left == nil ||
 		*diff.DefaultErrnoRet.Left != wide {
-		t.Fatalf("Diff = %s, want the left errno reported as %d", seccomp.FormatDiff(diff), wide)
+		t.Fatalf("Diff = %s, want the left errno reported as %d", diff.String(), wide)
 	}
 
-	if !strings.Contains(seccomp.FormatDiff(diff), "99999") {
-		t.Errorf("FormatDiff = %s, want it to name 99999", seccomp.FormatDiff(diff))
+	if !strings.Contains(diff.String(), "99999") {
+		t.Errorf("String() = %s, want it to name 99999", diff.String())
 	}
 
 	// A runtime loads the two alike, so they compare equal.
@@ -1795,7 +1183,7 @@ func TestDiffReportsWideDefaultErrnoAsWritten(t *testing.T) {
 		&specs.LinuxSeccomp{DefaultAction: specs.ActErrno, DefaultErrnoRet: &aliased},
 	)
 	if err != nil || !diff.Equal {
-		t.Errorf("Diff(99999, %d) = %s, %v, want equal", aliased, seccomp.FormatDiff(diff), err)
+		t.Errorf("Diff(99999, %d) = %s, %v, want equal", aliased, diff.String(), err)
 	}
 }
 
@@ -1816,14 +1204,14 @@ func TestDiffComparesAddOrderWithinSiblingGroups(t *testing.T) {
 		profileOf(specs.ActErrno, below, other, atMost))
 	if err != nil || !diff.Equal {
 		t.Errorf("Diff with an unrelated rule moved = %s, %v, want equal",
-			seccomp.FormatDiff(diff), err)
+			diff.String(), err)
 	}
 
 	diff, err = seccomp.Diff(profileOf(specs.ActErrno, below, atMost, other),
 		profileOf(specs.ActErrno, atMost, other, below))
 	if err != nil || diff.Equal || diff.Syscalls == nil || len(diff.Syscalls.Changed) != 1 {
 		t.Fatalf("Diff with the pair reordered = %s, %v, want read changed",
-			seccomp.FormatDiff(diff), err)
+			diff.String(), err)
 	}
 
 	actions := func(details []seccomp.SyscallDetail) []specs.LinuxSeccompAction {
@@ -1862,7 +1250,7 @@ func TestDiffOrderIgnoresRulesOfOneNodeAndResult(t *testing.T) {
 		profileOf(specs.ActErrno, second, first, atMost))
 	if err != nil || !diff.Equal {
 		t.Errorf("Diff of two KILL rules on a0 < 5 swapped = %s, %v, want equal",
-			seccomp.FormatDiff(diff), err)
+			diff.String(), err)
 	}
 
 	// Moving the LOG rule ahead of both reorders the group.
@@ -1870,7 +1258,7 @@ func TestDiffOrderIgnoresRulesOfOneNodeAndResult(t *testing.T) {
 		profileOf(specs.ActErrno, atMost, second, first))
 	if err != nil || diff.Equal {
 		t.Errorf("Diff with the LOG rule moved first = %s, %v, want a change",
-			seccomp.FormatDiff(diff), err)
+			diff.String(), err)
 	}
 }
 
@@ -1889,7 +1277,7 @@ func TestDiffOrderReadsTheLoadedRules(t *testing.T) {
 	diff, err := seccomp.Diff(profileOf(specs.ActErrno, atMost, below, hiding),
 		profileOf(specs.ActErrno, below, atMost))
 	if err != nil || diff.Syscalls == nil || len(diff.Syscalls.Changed) != 1 {
-		t.Fatalf("Diff = %s, %v, want read changed", seccomp.FormatDiff(diff), err)
+		t.Fatalf("Diff = %s, %v, want read changed", diff.String(), err)
 	}
 
 	change := diff.Syscalls.Changed[0]
@@ -1901,51 +1289,8 @@ func TestDiffOrderReadsTheLoadedRules(t *testing.T) {
 	alone, err := seccomp.Diff(profileOf(specs.ActErrno, hiding),
 		profileOf(specs.ActErrno, below, atMost))
 	if err != nil || alone.Syscalls == nil ||
-		seccomp.FormatDiff(alone) != seccomp.FormatDiff(diff) {
+		alone.String() != diff.String() {
 		t.Errorf("Diff = %s, want %s as for the unconditional rule alone",
-			seccomp.FormatDiff(diff), seccomp.FormatDiff(alone))
-	}
-}
-
-// TestDiffSummarizesOneSide covers a syscall past the read budget on the
-// right side only, which is compared by the entries that load it as one
-// summarized on both sides is.
-func TestDiffSummarizesOneSide(t *testing.T) {
-	t.Parallel()
-
-	left := profileOf(specs.ActErrno,
-		filtered(syscallRead, specs.ActAllow, arg(0, specs.OpEqualTo, 1)))
-
-	diff, err := seccomp.Diff(left, manyReadRules(66000, 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	const want = "Diff{~read:([0]SCMP_CMP_EQ:1)->SCMP_ACT_ALLOW->SCMP_ACT_ALLOW}"
-	if got := seccomp.FormatDiff(diff); got != want {
-		t.Errorf("FormatDiff = %s, want %s", got, want)
-	}
-}
-
-// TestFormatDiffJoinsTheRulesOfAChangedSyscall covers a changed syscall
-// holding more than one rule on a side, which are joined by commas.
-func TestFormatDiffJoinsTheRulesOfAChangedSyscall(t *testing.T) {
-	t.Parallel()
-
-	left := profileOf(specs.ActErrno,
-		filtered(syscallRead, specs.ActAllow, arg(0, specs.OpEqualTo, 1)),
-		filtered(syscallRead, specs.ActAllow, arg(0, specs.OpEqualTo, 2)))
-	right := profileOf(specs.ActErrno,
-		filtered(syscallRead, specs.ActAllow, arg(0, specs.OpEqualTo, 1)))
-
-	diff, err := seccomp.Diff(left, right)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	const want = "Diff{~read:([0]SCMP_CMP_EQ:1)->SCMP_ACT_ALLOW," +
-		"([0]SCMP_CMP_EQ:2)->SCMP_ACT_ALLOW->([0]SCMP_CMP_EQ:1)->SCMP_ACT_ALLOW}"
-	if got := seccomp.FormatDiff(diff); got != want {
-		t.Errorf("FormatDiff = %s, want %s", got, want)
+			diff.String(), alone.String())
 	}
 }

@@ -67,14 +67,9 @@ func TestIsGlobPatternSyntax(t *testing.T) {
 
 func readOnlyProfile(paths []string) *apparmor.Profile {
 	return &apparmor.Profile{
-		Executable: nil,
 		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  paths,
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
+			ReadOnlyPaths: paths,
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 }
 

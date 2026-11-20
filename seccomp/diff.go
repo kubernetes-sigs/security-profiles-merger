@@ -40,11 +40,17 @@ type ProfileDiff struct {
 	// order decides a call, which Diff compares as well.
 	Equal bool `json:"equal"`
 
-	// DefaultAction is set when the default actions differ.
-	DefaultAction *ActionDiff `json:"defaultAction,omitempty"`
+	// DefaultAction is set when the default actions differ. The actions are
+	// reported as the profiles write them, except that
+	// SCMP_ACT_KILL_THREAD, which libseccomp defines as the same action as
+	// SCMP_ACT_KILL, is reported as SCMP_ACT_KILL, the spelling a merge
+	// result uses; the two compare equal and are never reported as a
+	// change.
+	DefaultAction *ValueDiff[specs.LinuxSeccompAction] `json:"defaultAction,omitempty"`
 
 	// DefaultErrnoRet is set when the default errno return values differ.
-	DefaultErrnoRet *UintPtrDiff `json:"defaultErrnoRet,omitempty"`
+	// A nil side stands for no value, which is distinct from 0.
+	DefaultErrnoRet *ValueDiff[*uint] `json:"defaultErrnoRet,omitempty"`
 
 	// Architectures is set when the architecture lists differ.
 	Architectures *SliceDiff[specs.Arch] `json:"architectures,omitempty"`
@@ -52,57 +58,21 @@ type ProfileDiff struct {
 	// Flags is set when the flag lists differ.
 	Flags *SliceDiff[specs.LinuxSeccompFlag] `json:"flags,omitempty"`
 
-	// ListenerPath is set when the listener paths differ.
-	ListenerPath *StringDiff `json:"listenerPath,omitempty"`
+	// ListenerPath is set when the listener paths differ. The empty string
+	// stands for no value.
+	ListenerPath *ValueDiff[string] `json:"listenerPath,omitempty"`
 
-	// ListenerMetadata is set when the listener metadata differs.
-	ListenerMetadata *StringDiff `json:"listenerMetadata,omitempty"`
+	// ListenerMetadata is set when the listener metadata differs. The empty
+	// string stands for no value.
+	ListenerMetadata *ValueDiff[string] `json:"listenerMetadata,omitempty"`
 
 	// Syscalls is set when the syscall entries differ.
 	Syscalls *SyscallsDiff `json:"syscalls,omitempty"`
 }
 
-// IsEqual reports Equal: whether the two profiles compare equal in the
-// normalized form Diff describes.
-//
-// IsEqual and String have value receivers, so a ProfileDiff and a pointer to
-// one both implement fmt.Stringer. Diff returns a non-nil diff whenever its
-// error is nil; called through a nil pointer, either method panics.
-func (d ProfileDiff) IsEqual() bool { return d.Equal }
-
-// String returns FormatDiff of the diff, so that fmt prints a diff the way
-// FormatDiff renders it.
-func (d ProfileDiff) String() string { return FormatDiff(&d) }
-
-// ActionDiff represents a change in seccomp action. The actions are
-// reported as the profiles write them, except that SCMP_ACT_KILL_THREAD,
-// which libseccomp defines as the same action as SCMP_ACT_KILL, is reported
-// as SCMP_ACT_KILL, the spelling a merge result uses; the two compare equal
-// and are never reported as a change.
-type ActionDiff struct {
-	// Left is the action of the left profile.
-	Left specs.LinuxSeccompAction `json:"left"`
-	// Right is the action of the right profile.
-	Right specs.LinuxSeccompAction `json:"right"`
-}
-
-// UintPtrDiff represents a change in an optional uint value, such as an
-// errno. A nil side stands for no value, which is distinct from 0.
-type UintPtrDiff struct {
-	// Left is the value of the left profile, or nil where it has none.
-	Left *uint `json:"left"`
-	// Right is the value of the right profile, or nil where it has none.
-	Right *uint `json:"right"`
-}
-
-// StringDiff represents a change in a string value. The empty string
-// stands for no value.
-type StringDiff struct {
-	// Left is the value of the left profile.
-	Left string `json:"left"`
-	// Right is the value of the right profile.
-	Right string `json:"right"`
-}
+// ValueDiff represents a changed value. It is [spm.ValueDiff], which the
+// apparmor diff names as well.
+type ValueDiff[T any] = spm.ValueDiff[T]
 
 // SliceDiff represents added and removed items in a set-like slice. It is
 // [spm.SliceDiff], which the apparmor and landlock diffs name as well.
@@ -716,7 +686,7 @@ func diffDefaultAction(
 
 	if leftAction != rightAction {
 		diff.Equal = false
-		diff.DefaultAction = &ActionDiff{
+		diff.DefaultAction = &ValueDiff[specs.LinuxSeccompAction]{
 			Left:  leftAction,
 			Right: rightAction,
 		}
@@ -731,9 +701,9 @@ func diffDefaultErrnoRet(
 	leftRet := outputErrno(left.DefaultAction, left.DefaultErrnoRet)
 	rightRet := outputErrno(right.DefaultAction, right.DefaultErrnoRet)
 
-	if !equalUintPtr(leftRet, rightRet) {
+	if compareUintPtr(leftRet, rightRet) != 0 {
 		diff.Equal = false
-		diff.DefaultErrnoRet = &UintPtrDiff{
+		diff.DefaultErrnoRet = &ValueDiff[*uint]{
 			Left:  reportedErrno(left.DefaultAction, left.DefaultErrnoRet),
 			Right: reportedErrno(right.DefaultAction, right.DefaultErrnoRet),
 		}
@@ -752,18 +722,6 @@ func reportedErrno(action specs.LinuxSeccompAction, ret *uint) *uint {
 	}
 
 	return outputErrno(action, ret)
-}
-
-func equalUintPtr(first, second *uint) bool {
-	if first == nil && second == nil {
-		return true
-	}
-
-	if first == nil || second == nil {
-		return false
-	}
-
-	return *first == *second
 }
 
 // diffArchitectures compares the architecture lists with the given native
@@ -805,7 +763,7 @@ func diffListener(
 ) {
 	if left.ListenerPath != right.ListenerPath {
 		diff.Equal = false
-		diff.ListenerPath = &StringDiff{
+		diff.ListenerPath = &ValueDiff[string]{
 			Left:  left.ListenerPath,
 			Right: right.ListenerPath,
 		}
@@ -813,7 +771,7 @@ func diffListener(
 
 	if left.ListenerMetadata != right.ListenerMetadata {
 		diff.Equal = false
-		diff.ListenerMetadata = &StringDiff{
+		diff.ListenerMetadata = &ValueDiff[string]{
 			Left:  left.ListenerMetadata,
 			Right: right.ListenerMetadata,
 		}
@@ -934,7 +892,7 @@ func buildSyscallMap(
 	return result
 }
 
-// syscallEntryKey formats the fields equalSyscallEntry compares, so that
+// syscallEntryKey formats the fields compareSyscallEntry compares, so that
 // entries compare equal exactly when their keys do.
 func syscallEntryKey(entry SyscallEntry) string {
 	return resultKey(entry.Action, entry.ErrnoRet, entry.Args)
@@ -954,40 +912,34 @@ func entriesToDetails(entries []SyscallEntry) []SyscallDetail {
 	return details
 }
 
+// equalSyscallEntrySlices reports whether two lists hold the same entries,
+// in any order.
 func equalSyscallEntrySlices(left, right []SyscallEntry) bool {
 	if len(left) != len(right) {
 		return false
 	}
 
-	left = slices.Clone(left)
-	right = slices.Clone(right)
+	left, right = slices.Clone(left), slices.Clone(right)
+	slices.SortFunc(left, compareSyscallEntry)
+	slices.SortFunc(right, compareSyscallEntry)
 
-	sortSyscallEntries(left)
-	sortSyscallEntries(right)
-
-	for idx := range left {
-		if !equalSyscallEntry(left[idx], right[idx]) {
-			return false
-		}
-	}
-
-	return true
-}
-
-func sortSyscallEntries(entries []SyscallEntry) {
-	slices.SortFunc(entries, func(left, right SyscallEntry) int {
-		if result := cmp.Compare(left.Action, right.Action); result != 0 {
-			return result
-		}
-
-		if result := compareUintPtr(left.ErrnoRet, right.ErrnoRet); result != 0 {
-			return result
-		}
-
-		return compareSyscallArgs(left.Args, right.Args)
+	return slices.EqualFunc(left, right, func(first, second SyscallEntry) bool {
+		return compareSyscallEntry(first, second) == 0
 	})
 }
 
+// compareSyscallEntry orders entries by action, errno and arguments, which
+// are all an entry of one name holds, so it returns 0 exactly when the two
+// are equal.
+func compareSyscallEntry(left, right SyscallEntry) int {
+	return cmp.Or(
+		cmp.Compare(left.Action, right.Action),
+		compareUintPtr(left.ErrnoRet, right.ErrnoRet),
+		slices.CompareFunc(left.Args, right.Args, compareArg),
+	)
+}
+
+// compareUintPtr orders optional values, no value first.
 func compareUintPtr(left, right *uint) int {
 	if left == nil && right == nil {
 		return 0
@@ -1004,29 +956,15 @@ func compareUintPtr(left, right *uint) int {
 	return cmp.Compare(*left, *right)
 }
 
-func compareSyscallArgs(left, right []specs.LinuxSeccompArg) int {
-	return slices.CompareFunc(left, right, compareArg)
-}
-
-func equalSyscallEntry(first, second SyscallEntry) bool {
-	if first.Action != second.Action {
-		return false
-	}
-
-	if !equalUintPtr(first.ErrnoRet, second.ErrnoRet) {
-		return false
-	}
-
-	return slices.Equal(first.Args, second.Args)
-}
-
-// FormatDiff returns a human-readable representation of a seccomp profile
-// diff, quoted and bounded as FormatProfile is, so that a runtime can log
-// the diff of an artifact it was handed.
-func FormatDiff(diff *ProfileDiff) string {
-	if diff == nil {
-		return "Diff{<nil>}"
-	}
+// String returns a human-readable representation of the diff, as a single
+// line quoted and bounded as FormatProfile is, so that a runtime can log the
+// diff of an artifact it was handed.
+//
+// String has a value receiver, so a ProfileDiff and a pointer to one both
+// implement fmt.Stringer. Diff returns a non-nil diff whenever its error is
+// nil; called through a nil pointer, String panics.
+func (d ProfileDiff) String() string {
+	diff := &d
 
 	if diff.Equal {
 		return "Diff{equal}"

@@ -397,8 +397,6 @@ const BinaryTree = 2
 
 // optimize is the SCMP_FLTATR_CTL_OPTIMIZE level every filter is built
 // with, or zero for libseccomp's default.
-//
-//nolint:gochecknoglobals // a setting of the test process, see SetOptimize
 var optimize atomic.Uint32
 
 // SetOptimize sets the optimization level the filters of this process are

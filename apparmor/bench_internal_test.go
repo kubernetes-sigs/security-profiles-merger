@@ -97,13 +97,8 @@ func coldProfile(numPaths int, prefix string) *Profile {
 	}
 
 	return &Profile{
-		Executable: nil,
 		Filesystem: &FilesystemRules{
-			ReadOnlyPaths:  paths,
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
+			ReadOnlyPaths: paths,
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 }

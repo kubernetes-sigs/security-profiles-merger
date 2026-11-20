@@ -22,21 +22,15 @@ import (
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
-// FormatProfile returns a human-readable representation of an AppArmor
-// profile, as a single line that is safe to log: a value holding a control
-// character, an invisible rune, a byte that is not valid UTF-8 or the
-// punctuation the format is built from is quoted, and the line is cut at
-// 64 KiB, ending in "... (output truncated)" where it is. No real profile
-// comes near that bound; it is there because an artifact chooses how many
-// paths it holds and how many of their bytes need escaping. The result is
-// for people, not for apparmor_parser.
-func FormatProfile(profile *Profile) string {
-	return profile.String()
-}
-
-// String returns a human-readable representation of the profile, or
-// "Profile{<nil>}" for a nil profile, as FormatProfile does. The receiver is
-// a pointer so that calling String on a nil profile reports it rather than
+// String returns a human-readable representation of the profile, as a
+// single line that is safe to log: a value holding a control character, an
+// invisible rune, a byte that is not valid UTF-8 or the punctuation the
+// format is built from is quoted, and the line is cut at 64 KiB, ending in
+// "... (output truncated)" where it is. No real profile comes near that
+// bound; it is there because an artifact chooses how many paths it holds
+// and how many of their bytes need escaping. The result is for people, not
+// for apparmor_parser. A nil profile reads "Profile{<nil>}": the receiver
+// is a pointer so that calling String on one reports it rather than
 // panicking.
 func (p *Profile) String() string {
 	if p == nil {
@@ -75,7 +69,7 @@ func (p *Profile) String() string {
 }
 
 // String returns a human-readable representation of the executable rules,
-// quoted and bounded as FormatProfile is.
+// quoted and bounded as Profile.String is.
 func (e ExecutableRules) String() string {
 	var out merge.Builder
 
@@ -97,7 +91,7 @@ func (e ExecutableRules) writeTo(out *merge.Builder) {
 }
 
 // String returns a human-readable representation of the filesystem rules,
-// quoted and bounded as FormatProfile is.
+// quoted and bounded as Profile.String is.
 func (f FilesystemRules) String() string {
 	var out merge.Builder
 
@@ -184,7 +178,7 @@ func writeBool(out *merge.Builder, name string, val bool) {
 const emptyCapabilities = "none"
 
 // String returns a human-readable representation of the capability rules,
-// quoted and bounded as FormatProfile is. An empty list reads "none", so a
+// quoted and bounded as Profile.String is. An empty list reads "none", so a
 // capability spelled that way is quoted, which keeps a profile naming it
 // apart from one granting nothing.
 func (c CapabilityRules) String() string {

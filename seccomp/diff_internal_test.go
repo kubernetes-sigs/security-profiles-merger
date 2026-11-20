@@ -17,12 +17,13 @@ limitations under the License.
 package seccomp
 
 import (
+	"slices"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
 
-// TestSortSyscallEntriesTieBreaks covers the comparator directly. Through
+// TestSortSyscallEntriesTieBreaks covers compareSyscallEntry directly. Through
 // Diff it is unfalsifiable: the entries it is given were already ordered by
 // the rule collection, so the whole sort could be a no-op and every diff
 // would still come out right. What it has to be is a total order with the
@@ -76,22 +77,18 @@ func TestSortSyscallEntriesTieBreaks(t *testing.T) {
 			t.Parallel()
 
 			entries := []SyscallEntry{testCase.second, testCase.first}
-			sortSyscallEntries(entries)
+			slices.SortFunc(entries, compareSyscallEntry)
 
-			if entries[0].Action != testCase.first.Action ||
-				compareUintPtr(entries[0].ErrnoRet, testCase.first.ErrnoRet) != 0 ||
-				compareSyscallArgs(entries[0].Args, testCase.first.Args) != 0 {
+			if compareSyscallEntry(entries[0], testCase.first) != 0 {
 				t.Errorf("sorted %v first, want %v", entries[0], testCase.first)
 			}
 
 			// A comparator must be antisymmetric, or the sort is not a
 			// total order and its result depends on the input order.
 			entries = []SyscallEntry{testCase.first, testCase.second}
-			sortSyscallEntries(entries)
+			slices.SortFunc(entries, compareSyscallEntry)
 
-			if entries[0].Action != testCase.first.Action ||
-				compareUintPtr(entries[0].ErrnoRet, testCase.first.ErrnoRet) != 0 ||
-				compareSyscallArgs(entries[0].Args, testCase.first.Args) != 0 {
+			if compareSyscallEntry(entries[0], testCase.first) != 0 {
 				t.Errorf("the order depends on the input order: %v", entries)
 			}
 		})

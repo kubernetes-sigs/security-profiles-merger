@@ -86,7 +86,7 @@ func Example() {
 		panic(err)
 	}
 
-	fmt.Println(seccomp.FormatDiff(diff))
+	fmt.Println(diff.String())
 
 	// Output:
 	// read,write -> SCMP_ACT_ALLOW
@@ -237,22 +237,6 @@ func ExampleValidate_valid() {
 	// <nil>
 }
 
-func ExampleMoreRestrictive() {
-	result := seccomp.MoreRestrictive(specs.ActAllow, specs.ActErrno)
-	fmt.Println(result)
-
-	// Output:
-	// SCMP_ACT_ERRNO
-}
-
-func ExampleLessRestrictive() {
-	result := seccomp.LessRestrictive(specs.ActAllow, specs.ActErrno)
-	fmt.Println(result)
-
-	// Output:
-	// SCMP_ACT_ALLOW
-}
-
 func ExampleFormatProfile() {
 	profile := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
@@ -281,7 +265,7 @@ func ExampleValidateStrict() {
 	fmt.Println(err)
 
 	// Output:
-	// syscalls[1]: "read": duplicate syscall name (named by entries 0 and 1)
+	// syscalls[1]: "read": duplicate syscall name (first named by entry 0)
 }
 
 func ExampleDiff() {
@@ -320,7 +304,7 @@ func ExampleDiff() {
 	// Added: open
 }
 
-func ExampleFormatDiff() {
+func ExampleProfileDiff_String() {
 	left := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
 		Syscalls: []specs.LinuxSyscall{
@@ -340,7 +324,7 @@ func ExampleFormatDiff() {
 		panic(err)
 	}
 
-	fmt.Println(seccomp.FormatDiff(diff))
+	fmt.Println(diff.String())
 
 	// Output:
 	// Diff{-write->SCMP_ACT_ALLOW +open->SCMP_ACT_ALLOW}

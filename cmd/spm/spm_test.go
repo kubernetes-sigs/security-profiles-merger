@@ -199,9 +199,6 @@ func apparmorJSON(t *testing.T, caps ...string) string {
 	t.Helper()
 
 	return marshal(t, &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: caps,
 		},
@@ -217,13 +214,10 @@ func landlockJSON(t *testing.T, rights ...string) string {
 	}
 
 	return marshal(t, &landlock.Profile{
-		HandledAccessFS:  fsRights,
-		HandledAccessNet: nil,
-		Scoped:           nil,
+		HandledAccessFS: fsRights,
 		PathRules: []landlock.PathRule{{
 			Path:     testEtcPath,
 			AccessFS: fsRights,
 		}},
-		NetRules: nil,
 	})
 }

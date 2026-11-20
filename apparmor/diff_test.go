@@ -28,41 +28,8 @@ import (
 	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 )
 
-func TestDiffNil(t *testing.T) {
-	t.Parallel()
-
-	profile := &apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	for _, testCase := range []struct {
-		name        string
-		left, right *apparmor.Profile
-		index       int
-	}{
-		{"left", nil, profile, 0},
-		{"right", profile, nil, 1},
-		{"both", nil, nil, 0},
-	} {
-		_, err := apparmor.Diff(testCase.left, testCase.right)
-
-		var inputErr *apparmor.InputError
-		if !errors.As(err, &inputErr) || inputErr.Index != testCase.index {
-			t.Errorf("%s nil: Diff = %v, want an InputError for input %d",
-				testCase.name, err, testCase.index)
-		}
-
-		if !errors.Is(err, apparmor.ErrNilProfile) {
-			t.Errorf("%s nil: Diff = %v, want ErrNilProfile", testCase.name, err)
-		}
-	}
-}
-
-// TestProfileDiffString pins that a diff prints as FormatDiff renders it,
-// through a pointer and a value alike, and that fmt prints a nil pointer as
+// TestProfileDiffString pins how a diff renders, through String and through
+// fmt with a pointer and a value alike, and that fmt prints a nil pointer as
 // it prints any.
 func TestProfileDiffString(t *testing.T) {
 	t.Parallel()
@@ -72,7 +39,7 @@ func TestProfileDiffString(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := apparmor.FormatDiff(diff)
+	const want = "Diff{r:-/etc/passwd,+/etc/shadow}"
 
 	if got := diff.String(); got != want {
 		t.Errorf("String = %q, want %q", got, want)
@@ -88,9 +55,9 @@ func TestProfileDiffString(t *testing.T) {
 	}
 }
 
-// equalDiffProfile builds the profile TestDiffEqual compares against itself.
-// Two calls give two profiles that are equal and share nothing, so that the
-// comparison is of their contents rather than of one pointer with itself.
+// equalDiffProfile builds a profile with three sections. Two calls give two
+// profiles that are equal and share nothing, so that comparing them is of
+// their contents rather than of one pointer with itself.
 func equalDiffProfile() *apparmor.Profile {
 	return &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
@@ -98,647 +65,41 @@ func equalDiffProfile() *apparmor.Profile {
 			AllowedLibraries:   []string{pathLibC},
 		},
 		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
-		},
-		Network: nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin},
-		},
-	}
-}
-
-func TestDiffEqual(t *testing.T) {
-	t.Parallel()
-
-	diff, err := apparmor.Diff(equalDiffProfile(), equalDiffProfile())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !diff.Equal {
-		t.Error("expected equal profiles")
-	}
-
-	const want = "Diff{equal}"
-	if got := apparmor.FormatDiff(diff); got != want {
-		t.Errorf("FormatDiff() = %q, want %q", got, want)
-	}
-}
-
-func TestDiffCapabilities(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin, capSysTime},
-		},
-	}
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin, capChown},
-		},
-	}
-
-	diff, err := apparmor.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.Capabilities == nil {
-		t.Fatal("expected Capabilities diff")
-	}
-
-	if len(diff.Capabilities.AllowedCapabilities.Removed) != 1 ||
-		diff.Capabilities.AllowedCapabilities.Removed[0] != capSysTime {
-		t.Errorf("removed = %v, want [SYS_TIME]", diff.Capabilities.AllowedCapabilities.Removed)
-	}
-
-	if len(diff.Capabilities.AllowedCapabilities.Added) != 1 ||
-		diff.Capabilities.AllowedCapabilities.Added[0] != capChown {
-		t.Errorf("added = %v, want [CHOWN]", diff.Capabilities.AllowedCapabilities.Added)
-	}
-}
-
-func TestDiffFilesystem(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig, pathVarLog},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig},
-			WriteOnlyPaths: []string{pathTmp},
-			ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	diff, err := apparmor.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.Filesystem == nil {
-		t.Fatal("expected Filesystem diff")
-	}
-
-	if diff.Filesystem.ReadOnlyPaths == nil {
-		t.Fatal("expected ReadOnly diff")
-	}
-
-	if got := diff.Filesystem.ReadOnlyPaths.Removed; !slices.Equal(got, []string{pathVarLog}) {
-		t.Errorf("ReadOnly removed = %v, want [%s]", got, pathVarLog)
-	}
-
-	if got := diff.Filesystem.ReadOnlyPaths.Added; len(got) != 0 {
-		t.Errorf("ReadOnly added = %v, want none", got)
-	}
-
-	if diff.Filesystem.WriteOnlyPaths == nil {
-		t.Fatal("expected WriteOnly diff")
-	}
-
-	if got := diff.Filesystem.WriteOnlyPaths.Added; !slices.Equal(got, []string{pathTmp}) {
-		t.Errorf("WriteOnly added = %v, want [%s]", got, pathTmp)
-	}
-
-	if got := diff.Filesystem.WriteOnlyPaths.Removed; len(got) != 0 {
-		t.Errorf("WriteOnly removed = %v, want none", got)
-	}
-
-	if diff.Filesystem.ReadWritePaths != nil {
-		t.Errorf("ReadWrite = %v, want nil", diff.Filesystem.ReadWritePaths)
-	}
-}
-
-func TestDiffNetwork(t *testing.T) {
-	t.Parallel()
-
-	trueVal := true
-	falseVal := false
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw: &trueVal,
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: &trueVal,
-				AllowUDP: &falseVal,
-			},
-		},
-		Capabilities: nil,
-	}
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw: &falseVal,
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: &trueVal,
-				AllowUDP: &trueVal,
-			},
-		},
-		Capabilities: nil,
-	}
-
-	diff, err := apparmor.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.Network == nil {
-		t.Fatal("expected Network diff")
-	}
-
-	if diff.Network.AllowRaw == nil {
-		t.Error("expected AllowRaw diff")
-	}
-
-	if diff.Network.Protocols.AllowTCP != nil {
-		t.Error("AllowTCP should be nil (unchanged)")
-	}
-
-	if diff.Network.Protocols.AllowUDP == nil {
-		t.Error("expected AllowUDP diff")
-	}
-}
-
-func TestDiffExecutables(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{pathBinBash, pathBinPython},
-			AllowedLibraries:   []string{pathLibC},
-		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-	right := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{pathBinBash},
-			AllowedLibraries:   []string{pathLibC, pathLibM},
-		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	diff, err := apparmor.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.Executable.AllowedExecutables == nil {
-		t.Fatal("expected Executables diff")
-	}
-
-	if got := diff.Executable.AllowedExecutables.Removed; !slices.Equal(
-		got,
-		[]string{pathBinPython},
-	) {
-		t.Errorf("removed executables = %v, want [%s]", got, pathBinPython)
-	}
-
-	if got := diff.Executable.AllowedExecutables.Added; len(got) != 0 {
-		t.Errorf("added executables = %v, want none", got)
-	}
-
-	if diff.Executable.AllowedLibraries == nil {
-		t.Fatal("expected Libraries diff")
-	}
-
-	if got := diff.Executable.AllowedLibraries.Added; !slices.Equal(got, []string{pathLibM}) {
-		t.Errorf("added libraries = %v, want [%s]", got, pathLibM)
-	}
-
-	if got := diff.Executable.AllowedLibraries.Removed; len(got) != 0 {
-		t.Errorf("removed libraries = %v, want none", got)
-	}
-}
-
-func TestDiffFormatNil(t *testing.T) {
-	t.Parallel()
-
-	const want = "Diff{<nil>}"
-	if got := apparmor.FormatDiff(nil); got != want {
-		t.Errorf("FormatDiff(nil) = %q, want %q", got, want)
-	}
-}
-
-func TestDiffFormatComplex(t *testing.T) {
-	t.Parallel()
-
-	trueVal := true
-	falseVal := false
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathEtcConfig},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
-		},
-		Network: &apparmor.NetworkRules{
-			AllowRaw: &trueVal,
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: &falseVal,
-				AllowUDP: nil,
-			},
+			ReadOnlyPaths: []string{pathEtcConfig},
 		},
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{capNetAdmin},
 		},
 	}
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{pathVarLog},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
-		},
-		Network: &apparmor.NetworkRules{
-			AllowRaw: &falseVal,
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: &falseVal,
-				AllowUDP: nil,
-			},
-		},
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capChown},
-		},
-	}
-
-	diff, err := apparmor.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	got := apparmor.FormatDiff(diff)
-
-	for _, want := range []string{
-		"-" + pathEtcConfig,
-		"+" + pathVarLog,
-		"raw:true->false",
-		"-" + capNetAdmin,
-		"+" + capChown,
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("FormatDiff() = %q, missing %q", got, want)
-		}
-	}
 }
 
-func fullDiffProfile(
-	execs, libs, roPaths, woPaths, rwPaths []string,
-	raw, tcp, udp *bool, caps []string,
-) *apparmor.Profile {
-	return &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: execs,
-			AllowedLibraries:   libs,
-		},
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  roPaths,
-			WriteOnlyPaths: woPaths,
-			ReadWritePaths: rwPaths,
-		},
-		Network: &apparmor.NetworkRules{
-			AllowRaw: raw,
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: tcp,
-				AllowUDP: udp,
-			},
-		},
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: caps,
-		},
-	}
+// sliceDiff builds the diff of a list.
+func sliceDiff(added, removed []string) *apparmor.SliceDiff[string] {
+	return &apparmor.SliceDiff[string]{Added: added, Removed: removed}
 }
 
-func TestDiffFormatAllFields(t *testing.T) {
-	t.Parallel()
-
-	trueVal := true
-	falseVal := false
-
-	left := fullDiffProfile(
-		[]string{pathBinBash}, []string{pathLibC},
-		[]string{pathEtcConfig}, []string{pathVarLog}, []string{pathTmp},
-		&trueVal, &trueVal, &falseVal, []string{capNetAdmin},
-	)
-	right := fullDiffProfile(
-		[]string{pathBinPython}, []string{pathLibM},
-		nil, nil, nil,
-		&falseVal, &falseVal, &trueVal, []string{capChown},
-	)
-
-	diff, err := apparmor.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	got := apparmor.FormatDiff(diff)
-
-	for _, want := range []string{
-		"exec:", "lib:", "r:", "w:", "rw:",
-		"tcp:true->false", "udp:false->true", "raw:true->false",
-		"caps:",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("FormatDiff() = %q, missing %q", got, want)
-		}
-	}
+// boolDiff builds the diff of a network boolean, as Diff reports it: with
+// both sides set.
+func boolDiff(left, right bool) *apparmor.ValueDiff[*bool] {
+	return &apparmor.ValueDiff[*bool]{Left: boolPtr(left), Right: boolPtr(right)}
 }
 
-func TestDiffFilesystemReadWrite(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  nil,
-			WriteOnlyPaths: nil,
-			ReadWritePaths: []string{pathEtcConfig, pathVarLog},
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  nil,
-			WriteOnlyPaths: nil,
-			ReadWritePaths: []string{pathEtcConfig, pathTmp},
-		},
-		Network:      nil,
-		Capabilities: nil,
-	}
-
-	diff, err := apparmor.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.Filesystem == nil {
-		t.Fatal("expected Filesystem diff")
-	}
-
-	if diff.Filesystem.ReadWritePaths == nil {
-		t.Fatal("expected ReadWrite diff")
-	}
-
-	if len(diff.Filesystem.ReadWritePaths.Removed) != 1 ||
-		diff.Filesystem.ReadWritePaths.Removed[0] != pathVarLog {
-		t.Errorf("ReadWrite removed = %v, want [%s]",
-			diff.Filesystem.ReadWritePaths.Removed, pathVarLog)
-	}
-
-	if len(diff.Filesystem.ReadWritePaths.Added) != 1 ||
-		diff.Filesystem.ReadWritePaths.Added[0] != pathTmp {
-		t.Errorf("ReadWrite added = %v, want [%s]",
-			diff.Filesystem.ReadWritePaths.Added, pathTmp)
-	}
-
-	got := apparmor.FormatDiff(diff)
-	if !strings.Contains(got, "rw:") {
-		t.Errorf("FormatDiff() = %q, missing rw:", got)
-	}
+// diffCase is a pair of profiles and the whole diff of them, with how
+// String renders it.
+type diffCase struct {
+	name        string
+	left, right *apparmor.Profile
+	want        *apparmor.ProfileDiff
+	str         string
 }
 
-func TestDiffNilVsNonNilNetwork(t *testing.T) {
-	t.Parallel()
+// checkDiffCases runs each case as a subtest. It compares whole diffs with
+// reflect.DeepEqual, so that a part reported empty is told apart from one
+// not reported, and checks that String writes no control byte through.
+func checkDiffCases(t *testing.T, cases []diffCase) {
+	t.Helper()
 
-	trueVal := true
-
-	left := &apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw:  &trueVal,
-			Protocols: nil,
-		},
-		Capabilities: nil,
-	}
-
-	diff, err := apparmor.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.Network == nil {
-		t.Fatal("expected Network diff for nil vs non-nil")
-	}
-
-	if diff.Network.AllowRaw == nil {
-		t.Error("expected AllowRaw diff")
-	}
-}
-
-func TestDiffIsEqualTrue(t *testing.T) {
-	t.Parallel()
-
-	profile := func() *apparmor.Profile {
-		return &apparmor.Profile{
-			Executable: nil,
-			Filesystem: nil,
-			Network:    nil,
-			Capabilities: &apparmor.CapabilityRules{
-				AllowedCapabilities: []string{capNetAdmin},
-			},
-		}
-	}
-
-	// Equal but distinct profiles: the same pointer twice would only catch a
-	// Diff that is not deterministic.
-	diff, err := apparmor.Diff(profile(), profile())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !diff.IsEqual() {
-		t.Error("IsEqual() should return true for identical profiles")
-	}
-}
-
-func TestDiffIsEqualFalse(t *testing.T) {
-	t.Parallel()
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin},
-		},
-	}
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capChown},
-		},
-	}
-
-	diff, err := apparmor.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.IsEqual() {
-		t.Error("IsEqual() should return false for different profiles")
-	}
-}
-
-func TestDiffNormalizesPathsBeforeComparing(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		left  *apparmor.Profile
-		right *apparmor.Profile
-	}{
-		{
-			name: "ReadOnlyPaths",
-			left: &apparmor.Profile{
-				Executable: nil,
-				Filesystem: &apparmor.FilesystemRules{
-					ReadOnlyPaths:  []string{"/foo//bar"},
-					WriteOnlyPaths: nil,
-					ReadWritePaths: nil,
-				},
-				Network:      nil,
-				Capabilities: nil,
-			},
-			right: &apparmor.Profile{
-				Executable: nil,
-				Filesystem: &apparmor.FilesystemRules{
-					ReadOnlyPaths:  []string{"/foo/bar"},
-					WriteOnlyPaths: nil,
-					ReadWritePaths: nil,
-				},
-				Network:      nil,
-				Capabilities: nil,
-			},
-		},
-		{
-			name: "WriteOnlyPaths",
-			left: &apparmor.Profile{
-				Executable: nil,
-				Filesystem: &apparmor.FilesystemRules{
-					ReadOnlyPaths:  nil,
-					WriteOnlyPaths: []string{"/var//log"},
-					ReadWritePaths: nil,
-				},
-				Network:      nil,
-				Capabilities: nil,
-			},
-			right: &apparmor.Profile{
-				Executable: nil,
-				Filesystem: &apparmor.FilesystemRules{
-					ReadOnlyPaths:  nil,
-					WriteOnlyPaths: []string{"/var/log"},
-					ReadWritePaths: nil,
-				},
-				Network:      nil,
-				Capabilities: nil,
-			},
-		},
-		{
-			name: "ReadWritePaths",
-			left: &apparmor.Profile{
-				Executable: nil,
-				Filesystem: &apparmor.FilesystemRules{
-					ReadOnlyPaths:  nil,
-					WriteOnlyPaths: nil,
-					ReadWritePaths: []string{"/a///c"},
-				},
-				Network:      nil,
-				Capabilities: nil,
-			},
-			right: &apparmor.Profile{
-				Executable: nil,
-				Filesystem: &apparmor.FilesystemRules{
-					ReadOnlyPaths:  nil,
-					WriteOnlyPaths: nil,
-					ReadWritePaths: []string{"/a/c"},
-				},
-				Network:      nil,
-				Capabilities: nil,
-			},
-		},
-		{
-			name: "AllowedExecutables",
-			left: &apparmor.Profile{
-				Executable: &apparmor.ExecutableRules{
-					AllowedExecutables: []string{"/usr//bin/ls"},
-					AllowedLibraries:   nil,
-				},
-				Filesystem:   nil,
-				Network:      nil,
-				Capabilities: nil,
-			},
-			right: &apparmor.Profile{
-				Executable: &apparmor.ExecutableRules{
-					AllowedExecutables: []string{"/usr/bin/ls"},
-					AllowedLibraries:   nil,
-				},
-				Filesystem:   nil,
-				Network:      nil,
-				Capabilities: nil,
-			},
-		},
-		{
-			name: "AllowedLibraries",
-			left: &apparmor.Profile{
-				Executable: &apparmor.ExecutableRules{
-					AllowedExecutables: nil,
-					AllowedLibraries:   []string{"/usr/lib//libc.so"},
-				},
-				Filesystem:   nil,
-				Network:      nil,
-				Capabilities: nil,
-			},
-			right: &apparmor.Profile{
-				Executable: &apparmor.ExecutableRules{
-					AllowedExecutables: nil,
-					AllowedLibraries:   []string{"/usr/lib/libc.so"},
-				},
-				Filesystem:   nil,
-				Network:      nil,
-				Capabilities: nil,
-			},
-		},
-	}
-
-	for _, test := range tests {
+	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -747,124 +108,556 @@ func TestDiffNormalizesPathsBeforeComparing(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			if !diff.IsEqual() {
-				t.Errorf("Diff should normalize %s, got non-equal", test.name)
+			if !reflect.DeepEqual(diff, test.want) {
+				t.Errorf("Diff = %s, want %s (or a nil and an empty part apart)", diff, test.want)
+			}
+
+			got := diff.String()
+			if got != test.str {
+				t.Errorf("String() = %q, want %q", got, test.str)
+			}
+
+			if strings.ContainsAny(got, "\n\x1b") {
+				t.Errorf("String() writes control bytes through: %q", got)
 			}
 		})
 	}
 }
 
-// TestDiffKeepsDotComponents covers "." and ".." components, which AppArmor
-// does not resolve: a rule containing one matches nothing, so it differs
-// from the rule it seems to name.
-func TestDiffKeepsDotComponents(t *testing.T) {
+// TestDiffSections pins whole diffs of the path lists and capabilities.
+func TestDiffSections(t *testing.T) {
 	t.Parallel()
 
-	for _, path := range []string{"/foo/./bar", "/tmp/../foo/bar", "/foo/bar/."} {
-		left := &apparmor.Profile{
-			Executable: nil,
-			Filesystem: &apparmor.FilesystemRules{
-				ReadOnlyPaths: []string{path}, WriteOnlyPaths: nil, ReadWritePaths: nil,
-			},
-			Network:      nil,
-			Capabilities: nil,
-		}
-		right := &apparmor.Profile{
-			Executable: nil,
-			Filesystem: &apparmor.FilesystemRules{
-				ReadOnlyPaths: []string{"/foo/bar"}, WriteOnlyPaths: nil, ReadWritePaths: nil,
-			},
-			Network:      nil,
-			Capabilities: nil,
-		}
-
-		diff, err := apparmor.Diff(left, right)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		if diff.IsEqual() {
-			t.Errorf("Diff treats %q and /foo/bar as equal", path)
-		}
-	}
-}
-
-// TestDiffUnsetBoolComparesAsFalse covers the deny-equivalent comparison: an
-// unset network boolean forbids what it covers, exactly as false does, so
-// Diff reports the value AppArmor loads rather than the absence.
-func TestDiffUnsetBoolComparesAsFalse(t *testing.T) {
-	t.Parallel()
-
-	trueVal := true
-
-	left := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw: nil,
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: nil,
-				AllowUDP: nil,
-			},
+	checkDiffCases(t, []diffCase{
+		{
+			name:  "equal profiles",
+			left:  equalDiffProfile(),
+			right: equalDiffProfile(),
+			want:  &apparmor.ProfileDiff{Equal: true},
+			str:   "Diff{equal}",
 		},
-		Capabilities: nil,
-	}
-	right := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw: &trueVal,
-			Protocols: &apparmor.AllowedProtocols{
-				AllowTCP: &trueVal,
-				AllowUDP: nil,
+		{
+			name:  "equal capabilities",
+			left:  capsOnly(capNetAdmin),
+			right: capsOnly(capNetAdmin),
+			want:  &apparmor.ProfileDiff{Equal: true},
+			str:   "Diff{equal}",
+		},
+		{
+			name:  "capabilities",
+			left:  capsOnly(capNetAdmin, capSysTime),
+			right: capsOnly(capNetAdmin, capChown),
+			want: &apparmor.ProfileDiff{Capabilities: &apparmor.CapabilityDiff{
+				AllowedCapabilities: sliceDiff([]string{capChown}, []string{capSysTime}),
+			}},
+			str: "Diff{caps:-SYS_TIME,+CHOWN}",
+		},
+		{
+			name:  "one capability for another",
+			left:  capsOnly(capNetAdmin),
+			right: capsOnly(capChown),
+			want: &apparmor.ProfileDiff{Capabilities: &apparmor.CapabilityDiff{
+				AllowedCapabilities: sliceDiff([]string{capChown}, []string{capNetAdmin}),
+			}},
+			str: "Diff{caps:-NET_ADMIN,+CHOWN}",
+		},
+		{
+			name: "filesystem",
+			left: readOnly(pathEtcConfig, pathVarLog),
+			right: fsProfile(&apparmor.FilesystemRules{
+				ReadOnlyPaths:  []string{pathEtcConfig},
+				WriteOnlyPaths: []string{pathTmp},
+			}),
+			want: &apparmor.ProfileDiff{Filesystem: &apparmor.FilesystemDiff{
+				ReadOnlyPaths:  sliceDiff(nil, []string{pathVarLog}),
+				WriteOnlyPaths: sliceDiff([]string{pathTmp}, nil),
+			}},
+			str: "Diff{r:-/var/log w:+/tmp}",
+		},
+		{
+			name:  "read-write paths",
+			left:  readWrite(pathEtcConfig, pathVarLog),
+			right: readWrite(pathEtcConfig, pathTmp),
+			want: &apparmor.ProfileDiff{Filesystem: &apparmor.FilesystemDiff{
+				ReadWritePaths: sliceDiff([]string{pathTmp}, []string{pathVarLog}),
+			}},
+			str: "Diff{rw:-/var/log,+/tmp}",
+		},
+		{
+			name: "executables",
+			left: &apparmor.Profile{Executable: &apparmor.ExecutableRules{
+				AllowedExecutables: []string{pathBinBash, pathBinPython},
+				AllowedLibraries:   []string{pathLibC},
+			}},
+			right: &apparmor.Profile{Executable: &apparmor.ExecutableRules{
+				AllowedExecutables: []string{pathBinBash},
+				AllowedLibraries:   []string{pathLibC, pathLibM},
+			}},
+			want: &apparmor.ProfileDiff{Executable: &apparmor.ExecutableDiff{
+				AllowedExecutables: sliceDiff(nil, []string{pathBinPython}),
+				AllowedLibraries:   sliceDiff([]string{pathLibM}, nil),
+			}},
+			str: "Diff{exec:-/usr/bin/python lib:+/usr/lib/libm.so}",
+		},
+		{
+			name: "several sections",
+			left: &apparmor.Profile{
+				Filesystem: &apparmor.FilesystemRules{ReadOnlyPaths: []string{pathEtcConfig}},
+				Network: &apparmor.NetworkRules{
+					AllowRaw:  boolPtr(true),
+					Protocols: &apparmor.AllowedProtocols{AllowTCP: boolPtr(false)},
+				},
+				Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{capNetAdmin}},
 			},
+			right: &apparmor.Profile{
+				Filesystem: &apparmor.FilesystemRules{ReadOnlyPaths: []string{pathVarLog}},
+				Network: &apparmor.NetworkRules{
+					AllowRaw:  boolPtr(false),
+					Protocols: &apparmor.AllowedProtocols{AllowTCP: boolPtr(false)},
+				},
+				Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{capChown}},
+			},
+			want: &apparmor.ProfileDiff{
+				Filesystem: &apparmor.FilesystemDiff{
+					ReadOnlyPaths: sliceDiff([]string{pathVarLog}, []string{pathEtcConfig}),
+				},
+				Network: &apparmor.NetworkDiff{AllowRaw: boolDiff(true, false)},
+				Capabilities: &apparmor.CapabilityDiff{
+					AllowedCapabilities: sliceDiff([]string{capChown}, []string{capNetAdmin}),
+				},
+			},
+			str: "Diff{r:-/etc/config,+/var/log net:raw:true->false caps:-NET_ADMIN,+CHOWN}",
 		},
-		Capabilities: nil,
-	}
-
-	diff, err := apparmor.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	got := apparmor.FormatDiff(diff)
-
-	if strings.Contains(got, "<nil>") {
-		t.Errorf("FormatDiff() = %q, expected no <nil> for an unset bool", got)
-	}
-
-	if !strings.Contains(got, "raw:false->true") {
-		t.Errorf("FormatDiff() = %q, missing raw:false->true", got)
-	}
-
-	// AllowUDP is unset on both sides, so it denies the same on both and is
-	// not a difference.
-	if strings.Contains(got, "udp") {
-		t.Errorf("FormatDiff() = %q, unset on both sides is not a difference", got)
-	}
-}
-
-// TestFormatDiffNilBoolPtr covers the formatter directly: BoolPtrDiff is
-// exported, so a caller can still hand it a nil side even though Diff no
-// longer produces one.
-func TestFormatDiffNilBoolPtr(t *testing.T) {
-	t.Parallel()
-
-	trueVal := true
-
-	got := apparmor.FormatDiff(&apparmor.ProfileDiff{
-		Equal:      false,
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkDiff{
-			AllowRaw:  &apparmor.BoolPtrDiff{Left: nil, Right: &trueVal},
-			Protocols: nil,
+		{
+			name: "every field",
+			left: &apparmor.Profile{
+				Executable: &apparmor.ExecutableRules{
+					AllowedExecutables: []string{pathBinBash},
+					AllowedLibraries:   []string{pathLibC},
+				},
+				Filesystem: &apparmor.FilesystemRules{
+					ReadOnlyPaths:  []string{pathEtcConfig},
+					WriteOnlyPaths: []string{pathVarLog},
+					ReadWritePaths: []string{pathTmp},
+				},
+				Network:      netRules(boolPtr(true), boolPtr(true), boolPtr(false)),
+				Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{capNetAdmin}},
+			},
+			right: &apparmor.Profile{
+				Executable: &apparmor.ExecutableRules{
+					AllowedExecutables: []string{pathBinPython},
+					AllowedLibraries:   []string{pathLibM},
+				},
+				Filesystem:   &apparmor.FilesystemRules{},
+				Network:      netRules(boolPtr(false), boolPtr(false), boolPtr(true)),
+				Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{capChown}},
+			},
+			want: &apparmor.ProfileDiff{
+				Executable: &apparmor.ExecutableDiff{
+					AllowedExecutables: sliceDiff([]string{pathBinPython}, []string{pathBinBash}),
+					AllowedLibraries:   sliceDiff([]string{pathLibM}, []string{pathLibC}),
+				},
+				Filesystem: &apparmor.FilesystemDiff{
+					ReadOnlyPaths:  sliceDiff(nil, []string{pathEtcConfig}),
+					WriteOnlyPaths: sliceDiff(nil, []string{pathVarLog}),
+					ReadWritePaths: sliceDiff(nil, []string{pathTmp}),
+				},
+				Network: &apparmor.NetworkDiff{
+					AllowRaw: boolDiff(true, false),
+					Protocols: &apparmor.AllowedProtocolsDiff{
+						AllowTCP: boolDiff(true, false),
+						AllowUDP: boolDiff(false, true),
+					},
+				},
+				Capabilities: &apparmor.CapabilityDiff{
+					AllowedCapabilities: sliceDiff([]string{capChown}, []string{capNetAdmin}),
+				},
+			},
+			str: "Diff{exec:-/usr/bin/bash,+/usr/bin/python lib:-/usr/lib/libc.so,+/usr/lib/libm.so " +
+				"r:-/etc/config w:-/var/log rw:-/tmp " +
+				"net:raw:true->false,tcp:true->false,udp:false->true caps:-NET_ADMIN,+CHOWN}",
 		},
-		Capabilities: nil,
 	})
+}
+
+// TestDiffNetwork pins whole diffs of the network section.
+func TestDiffNetwork(t *testing.T) {
+	t.Parallel()
+
+	// A network boolean set on one side and absent on the other: an absent
+	// boolean denies what it covers, so it says what an explicit false says
+	// and differs from an explicit true.
+	setNetwork := func(value bool) *apparmor.Profile {
+		return &apparmor.Profile{Network: &apparmor.NetworkRules{
+			AllowRaw:  &value,
+			Protocols: &apparmor.AllowedProtocols{AllowTCP: &value},
+		}}
+	}
+	absentNetwork := &apparmor.Profile{
+		Network: &apparmor.NetworkRules{Protocols: &apparmor.AllowedProtocols{}},
+	}
+
+	checkDiffCases(t, []diffCase{
+		{
+			// TCP is allowed on both sides, so it is no difference.
+			name: "network",
+			left: &apparmor.Profile{
+				Network: netRules(boolPtr(true), boolPtr(true), boolPtr(false)),
+			},
+			right: &apparmor.Profile{
+				Network: netRules(boolPtr(false), boolPtr(true), boolPtr(true)),
+			},
+			want: &apparmor.ProfileDiff{Network: &apparmor.NetworkDiff{
+				AllowRaw:  boolDiff(true, false),
+				Protocols: &apparmor.AllowedProtocolsDiff{AllowUDP: boolDiff(false, true)},
+			}},
+			str: "Diff{net:raw:true->false,udp:false->true}",
+		},
+		{
+			name:  "network on one side",
+			left:  &apparmor.Profile{},
+			right: &apparmor.Profile{Network: &apparmor.NetworkRules{AllowRaw: boolPtr(true)}},
+			want: &apparmor.ProfileDiff{Network: &apparmor.NetworkDiff{
+				AllowRaw: boolDiff(false, true),
+			}},
+			str: "Diff{net:raw:false->true}",
+		},
+		{
+			// An unset network boolean forbids what it covers, exactly as
+			// false does, so Diff reports the value AppArmor loads rather
+			// than the absence. AllowUDP is unset on both sides, so it
+			// denies the same on both and is no difference.
+			name: "unset boolean compares as false",
+			left: &apparmor.Profile{
+				Network: &apparmor.NetworkRules{Protocols: &apparmor.AllowedProtocols{}},
+			},
+			right: &apparmor.Profile{Network: &apparmor.NetworkRules{
+				AllowRaw:  boolPtr(true),
+				Protocols: &apparmor.AllowedProtocols{AllowTCP: boolPtr(true)},
+			}},
+			want: &apparmor.ProfileDiff{Network: &apparmor.NetworkDiff{
+				AllowRaw:  boolDiff(false, true),
+				Protocols: &apparmor.AllowedProtocolsDiff{AllowTCP: boolDiff(false, true)},
+			}},
+			str: "Diff{net:raw:false->true,tcp:false->true}",
+		},
+		{
+			name:  "set true against absent",
+			left:  setNetwork(true),
+			right: absentNetwork,
+			want: &apparmor.ProfileDiff{Network: &apparmor.NetworkDiff{
+				AllowRaw:  boolDiff(true, false),
+				Protocols: &apparmor.AllowedProtocolsDiff{AllowTCP: boolDiff(true, false)},
+			}},
+			str: "Diff{net:raw:true->false,tcp:true->false}",
+		},
+		{
+			name:  "absent against set true",
+			left:  absentNetwork,
+			right: setNetwork(true),
+			want: &apparmor.ProfileDiff{Network: &apparmor.NetworkDiff{
+				AllowRaw:  boolDiff(false, true),
+				Protocols: &apparmor.AllowedProtocolsDiff{AllowTCP: boolDiff(false, true)},
+			}},
+			str: "Diff{net:raw:false->true,tcp:false->true}",
+		},
+		{
+			name:  "set false against absent",
+			left:  setNetwork(false),
+			right: absentNetwork,
+			want:  &apparmor.ProfileDiff{Equal: true},
+			str:   "Diff{equal}",
+		},
+		{
+			name:  "absent against set false",
+			left:  absentNetwork,
+			right: setNetwork(false),
+			want:  &apparmor.ProfileDiff{Equal: true},
+			str:   "Diff{equal}",
+		},
+	})
+}
+
+// TestDiffPaths pins how Diff compares and renders paths: by the rule they
+// spell, normalized, and quoted where they hold unsafe bytes.
+func TestDiffPaths(t *testing.T) {
+	t.Parallel()
+
+	// A path or capability holding a newline or an escape sequence.
+	const hostile = "/a\nFORGED \x1b[31mred"
+
+	checkDiffCases(t, []diffCase{
+		{
+			// A diff, which a runtime logs, is computed over profiles
+			// nothing has validated: a path or capability holding a newline
+			// or an escape sequence is quoted, as Profile.String quotes it,
+			// rather than written through.
+			name: "unsafe bytes are quoted",
+			left: &apparmor.Profile{
+				Executable:   &apparmor.ExecutableRules{},
+				Filesystem:   &apparmor.FilesystemRules{ReadOnlyPaths: []string{"/a"}},
+				Capabilities: &apparmor.CapabilityRules{},
+			},
+			right: &apparmor.Profile{
+				Executable:   &apparmor.ExecutableRules{AllowedExecutables: []string{hostile}},
+				Filesystem:   &apparmor.FilesystemRules{ReadOnlyPaths: []string{hostile}},
+				Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{"X\nY"}},
+			},
+			want: &apparmor.ProfileDiff{
+				Executable: &apparmor.ExecutableDiff{
+					AllowedExecutables: sliceDiff([]string{hostile}, nil),
+				},
+				Filesystem: &apparmor.FilesystemDiff{
+					ReadOnlyPaths: sliceDiff([]string{hostile}, []string{"/a"}),
+				},
+				Capabilities: &apparmor.CapabilityDiff{
+					AllowedCapabilities: sliceDiff([]string{"X\nY"}, nil),
+				},
+			},
+			str: `Diff{exec:+"/a\nFORGED \x1b[31mred" r:-/a,+"/a\nFORGED \x1b[31mred" caps:+"X\nY"}`,
+		},
+		// Paths are normalized before they are compared.
+		{
+			name:  "read-only paths normalized",
+			left:  readOnly("/foo//bar"),
+			right: readOnly("/foo/bar"),
+			want:  &apparmor.ProfileDiff{Equal: true},
+			str:   "Diff{equal}",
+		},
+		{
+			name:  "write-only paths normalized",
+			left:  fsProfile(&apparmor.FilesystemRules{WriteOnlyPaths: []string{"/var//log"}}),
+			right: fsProfile(&apparmor.FilesystemRules{WriteOnlyPaths: []string{"/var/log"}}),
+			want:  &apparmor.ProfileDiff{Equal: true},
+			str:   "Diff{equal}",
+		},
+		{
+			name:  "read-write paths normalized",
+			left:  readWrite("/a///c"),
+			right: readWrite("/a/c"),
+			want:  &apparmor.ProfileDiff{Equal: true},
+			str:   "Diff{equal}",
+		},
+		{
+			name:  "executables normalized",
+			left:  execProfile("/usr//bin/ls"),
+			right: execProfile("/usr/bin/ls"),
+			want:  &apparmor.ProfileDiff{Equal: true},
+			str:   "Diff{equal}",
+		},
+		{
+			name: "libraries normalized",
+			left: &apparmor.Profile{
+				Executable: &apparmor.ExecutableRules{
+					AllowedLibraries: []string{"/usr/lib//libc.so"},
+				},
+			},
+			right: &apparmor.Profile{
+				Executable: &apparmor.ExecutableRules{
+					AllowedLibraries: []string{"/usr/lib/libc.so"},
+				},
+			},
+			want: &apparmor.ProfileDiff{Equal: true},
+			str:  "Diff{equal}",
+		},
+		// AppArmor does not resolve "." and ".." components: a rule
+		// containing one matches nothing, so it differs from the rule it
+		// seems to name.
+		{
+			name:  "dot component",
+			left:  readOnly("/foo/./bar"),
+			right: readOnly("/foo/bar"),
+			want: &apparmor.ProfileDiff{Filesystem: &apparmor.FilesystemDiff{
+				ReadOnlyPaths: sliceDiff([]string{"/foo/bar"}, []string{"/foo/./bar"}),
+			}},
+			str: "Diff{r:-/foo/./bar,+/foo/bar}",
+		},
+		{
+			name:  "dot-dot component",
+			left:  readOnly("/tmp/../foo/bar"),
+			right: readOnly("/foo/bar"),
+			want: &apparmor.ProfileDiff{Filesystem: &apparmor.FilesystemDiff{
+				ReadOnlyPaths: sliceDiff([]string{"/foo/bar"}, []string{"/tmp/../foo/bar"}),
+			}},
+			str: "Diff{r:-/tmp/../foo/bar,+/foo/bar}",
+		},
+		{
+			name:  "trailing dot component",
+			left:  readOnly("/foo/bar/."),
+			right: readOnly("/foo/bar"),
+			want: &apparmor.ProfileDiff{Filesystem: &apparmor.FilesystemDiff{
+				ReadOnlyPaths: sliceDiff([]string{"/foo/bar"}, []string{"/foo/bar/."}),
+			}},
+			str: "Diff{r:-/foo/bar/.,+/foo/bar}",
+		},
+		{
+			// Two spellings of one character class are one rule to Validate
+			// and to the merge, so they have to be one rule to Diff.
+			name:  "class spellings",
+			left:  readOnly("/x[bc]", "/x[cb]"),
+			right: readOnly("/x[b-c]"),
+			want:  &apparmor.ProfileDiff{Equal: true},
+			str:   "Diff{equal}",
+		},
+		{
+			// A rule only one side holds is reported in that side's
+			// spelling.
+			name: "a rule on one side keeps its spelling",
+			left: &apparmor.Profile{
+				Executable: &apparmor.ExecutableRules{
+					AllowedExecutables: []string{`/etc/\x70asswd`},
+				},
+				Filesystem: &apparmor.FilesystemRules{ReadOnlyPaths: []string{`/etc/\x70asswd`}},
+			},
+			right: &apparmor.Profile{
+				Executable: &apparmor.ExecutableRules{AllowedExecutables: []string{"/etc/shadow"}},
+				Filesystem: &apparmor.FilesystemRules{ReadOnlyPaths: []string{"/etc/shadow"}},
+			},
+			want: &apparmor.ProfileDiff{
+				Executable: &apparmor.ExecutableDiff{
+					AllowedExecutables: sliceDiff(
+						[]string{"/etc/shadow"},
+						[]string{`/etc/\x70asswd`},
+					),
+				},
+				Filesystem: &apparmor.FilesystemDiff{
+					ReadOnlyPaths: sliceDiff([]string{"/etc/shadow"}, []string{`/etc/\x70asswd`}),
+				},
+			},
+			str: `Diff{exec:-/etc/\x70asswd,+/etc/shadow r:-/etc/\x70asswd,+/etc/shadow}`,
+		},
+	})
+}
+
+// TestDiffOfMergeResult covers a profile against a merge result: Intersect
+// writes every section explicitly and keeps one spelling per rule, and Diff
+// compares what AppArmor loads, so normalizing a profile is not reported as
+// a change. A caller logging what a baseline took away from an artifact
+// would otherwise see the normalization as a constraint, or a spelling the
+// merge dropped as removed and the one it kept as added.
+func TestDiffOfMergeResult(t *testing.T) {
+	t.Parallel()
+
+	paths := func(list ...string) *apparmor.Profile {
+		return &apparmor.Profile{
+			Executable: &apparmor.ExecutableRules{AllowedExecutables: list},
+			Filesystem: &apparmor.FilesystemRules{ReadOnlyPaths: list},
+		}
+	}
+
+	artifact := paths(`/etc/\x70asswd`, `/var/l\og/*`)
+	twice := paths("/bin/A", `/bin/\x41`)
+	classes := readOnly("/x[bc]", "/x[cb]")
+	baseline := &apparmor.Profile{
+		Network:      &apparmor.NetworkRules{},
+		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{capNetAdmin}},
+	}
+	withChown := &apparmor.Profile{
+		Network: &apparmor.NetworkRules{},
+		Capabilities: &apparmor.CapabilityRules{
+			AllowedCapabilities: []string{capNetAdmin, capChown},
+		},
+	}
+
+	for _, test := range []struct {
+		name    string
+		profile *apparmor.Profile
+		// merged are the profiles Intersect merges into the profile to
+		// compare against.
+		merged []*apparmor.Profile
+		want   *apparmor.ProfileDiff
+	}{
+		{
+			name:    "capabilities only",
+			profile: capsOnly(capNetAdmin),
+			merged:  []*apparmor.Profile{capsOnly(capNetAdmin)},
+			want:    &apparmor.ProfileDiff{Equal: true},
+		},
+		{
+			name: "an executable and an empty network",
+			profile: &apparmor.Profile{
+				Executable: &apparmor.ExecutableRules{AllowedExecutables: []string{pathBinSh}},
+				Network:    &apparmor.NetworkRules{},
+			},
+			merged: []*apparmor.Profile{{
+				Executable: &apparmor.ExecutableRules{AllowedExecutables: []string{pathBinSh}},
+				Network:    &apparmor.NetworkRules{},
+			}},
+			want: &apparmor.ProfileDiff{Equal: true},
+		},
+		{
+			name:    "a read-only path",
+			profile: readOnly("/etc/hostname"),
+			merged:  []*apparmor.Profile{readOnly("/etc/hostname")},
+			want:    &apparmor.ProfileDiff{Equal: true},
+		},
+		{
+			name:    "class spellings",
+			profile: classes,
+			merged:  []*apparmor.Profile{classes},
+			want:    &apparmor.ProfileDiff{Equal: true},
+		},
+		{
+			name:    "spellings the merge drops",
+			profile: artifact,
+			merged:  []*apparmor.Profile{paths("/etc/passwd", "/var/log/*"), artifact},
+			want:    &apparmor.ProfileDiff{Equal: true},
+		},
+		{
+			// A profile naming one rule twice equals its merge result,
+			// which names it once.
+			name:    "one rule named twice",
+			profile: twice,
+			merged:  []*apparmor.Profile{twice},
+			want:    &apparmor.ProfileDiff{Equal: true},
+		},
+		{
+			// Normalization is invisible, but a capability the baseline
+			// withholds is not.
+			name:    "a capability the baseline withholds",
+			profile: withChown,
+			merged:  []*apparmor.Profile{baseline, withChown},
+			want: &apparmor.ProfileDiff{Capabilities: &apparmor.CapabilityDiff{
+				AllowedCapabilities: sliceDiff(nil, []string{capChown}),
+			}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			merged, err := apparmor.Intersect(test.merged...)
+			if err != nil {
+				t.Fatalf("Intersect: %v", err)
+			}
+
+			diff, err := apparmor.Diff(test.profile, merged)
+			if err != nil {
+				t.Fatalf("Diff: %v", err)
+			}
+
+			if !reflect.DeepEqual(diff, test.want) {
+				t.Errorf("Diff = %s, want %s", diff, test.want)
+			}
+		})
+	}
+}
+
+// TestProfileDiffStringNilBool covers String directly: ValueDiff is
+// exported, so a caller can still hand String a nil side even though Diff
+// no longer produces one.
+func TestProfileDiffStringNilBool(t *testing.T) {
+	t.Parallel()
+
+	trueVal := true
+
+	got := (&apparmor.ProfileDiff{
+		Network: &apparmor.NetworkDiff{
+			AllowRaw: &apparmor.ValueDiff[*bool]{Left: nil, Right: &trueVal},
+		},
+	}).String()
 
 	if !strings.Contains(got, "raw:<nil>->true") {
-		t.Errorf("FormatDiff() = %q, missing raw:<nil>->true", got)
+		t.Errorf("String() = %q, missing raw:<nil>->true", got)
 	}
 }
 
@@ -874,16 +667,10 @@ func TestDiffBoolPtrIsolation(t *testing.T) {
 	boolTrue := true
 
 	left := &apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      &apparmor.NetworkRules{AllowRaw: &boolTrue, Protocols: nil},
-		Capabilities: nil,
+		Network: &apparmor.NetworkRules{AllowRaw: &boolTrue, Protocols: nil},
 	}
 	right := &apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      &apparmor.NetworkRules{AllowRaw: nil, Protocols: nil},
-		Capabilities: nil,
+		Network: &apparmor.NetworkRules{AllowRaw: nil, Protocols: nil},
 	}
 
 	diff, err := apparmor.Diff(left, right)
@@ -897,317 +684,6 @@ func TestDiffBoolPtrIsolation(t *testing.T) {
 
 	if diff.Network.AllowRaw.Left == left.Network.AllowRaw {
 		t.Error("diff Left should not alias source pointer")
-	}
-}
-
-// TestDiffOfIntersectIsEqual covers the round-trip the merge documents:
-// Intersect writes every section explicitly, and Diff compares what AppArmor
-// loads, so normalizing a profile is not reported as a change. A caller
-// logging what a baseline took away from an artifact would otherwise see the
-// normalization as a constraint.
-func TestDiffOfIntersectIsEqual(t *testing.T) {
-	t.Parallel()
-
-	profiles := []*apparmor.Profile{
-		{
-			Executable: nil, Filesystem: nil, Network: nil,
-			Capabilities: &apparmor.CapabilityRules{
-				AllowedCapabilities: []string{capNetAdmin},
-			},
-		},
-		{
-			Executable: &apparmor.ExecutableRules{
-				AllowedExecutables: []string{pathBinSh},
-				AllowedLibraries:   nil,
-			},
-			Filesystem:   nil,
-			Network:      &apparmor.NetworkRules{AllowRaw: nil, Protocols: nil},
-			Capabilities: nil,
-		},
-		{
-			Executable: nil,
-			Filesystem: &apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{"/etc/hostname"},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
-			},
-			Network:      nil,
-			Capabilities: nil,
-		},
-	}
-
-	for idx, profile := range profiles {
-		normalized, err := apparmor.Intersect(profile)
-		if err != nil {
-			t.Fatalf("profile %d: unexpected error: %v", idx, err)
-		}
-
-		diff, err := apparmor.Diff(profile, normalized)
-		if err != nil {
-			t.Fatalf("profile %d: unexpected error: %v", idx, err)
-		}
-
-		if !diff.Equal {
-			t.Errorf("profile %d: Diff(p, Intersect(p)) = %s, want equal",
-				idx, apparmor.FormatDiff(diff))
-		}
-	}
-}
-
-// TestDiffReportsRealConstraintOnly checks the other half: normalization is
-// invisible, but a capability the baseline withholds is not.
-func TestDiffReportsRealConstraintOnly(t *testing.T) {
-	t.Parallel()
-
-	baseline := &apparmor.Profile{
-		Executable: nil, Filesystem: nil,
-		Network: &apparmor.NetworkRules{AllowRaw: nil, Protocols: nil},
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin},
-		},
-	}
-	artifact := &apparmor.Profile{
-		Executable: nil, Filesystem: nil,
-		Network: &apparmor.NetworkRules{AllowRaw: nil, Protocols: nil},
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: []string{capNetAdmin, capChown},
-		},
-	}
-
-	effective, err := apparmor.Intersect(baseline, artifact)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	diff, err := apparmor.Diff(artifact, effective)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.Equal {
-		t.Fatal("the baseline withheld a capability, want a difference")
-	}
-
-	if diff.Network != nil {
-		t.Errorf("network was not constrained, got %s", apparmor.FormatDiff(diff))
-	}
-
-	if diff.Capabilities == nil ||
-		!slices.Contains(diff.Capabilities.AllowedCapabilities.Removed, capChown) {
-		t.Errorf("expected %s to be removed, got %s",
-			capChown, apparmor.FormatDiff(diff))
-	}
-}
-
-// TestDiffNetworkBooleanOneSided covers a network boolean set on one side
-// and absent on the other, which no other case here does: they all set both
-// sides. An absent boolean denies what it covers, so it says what an
-// explicit false says and differs from an explicit true.
-func TestDiffNetworkBooleanOneSided(t *testing.T) {
-	t.Parallel()
-
-	set := func(value bool) *apparmor.Profile {
-		return &apparmor.Profile{
-			Executable: nil,
-			Filesystem: nil,
-			Network: &apparmor.NetworkRules{
-				AllowRaw: &value,
-				Protocols: &apparmor.AllowedProtocols{
-					AllowTCP: &value,
-					AllowUDP: nil,
-				},
-			},
-			Capabilities: nil,
-		}
-	}
-
-	absent := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network: &apparmor.NetworkRules{
-			AllowRaw:  nil,
-			Protocols: &apparmor.AllowedProtocols{AllowTCP: nil, AllowUDP: nil},
-		},
-		Capabilities: nil,
-	}
-
-	for _, testCase := range []struct {
-		value     bool
-		wantEqual bool
-	}{
-		{value: true, wantEqual: false},
-		{value: false, wantEqual: true},
-	} {
-		for _, pair := range [][2]*apparmor.Profile{
-			{set(testCase.value), absent}, {absent, set(testCase.value)},
-		} {
-			diff, err := apparmor.Diff(pair[0], pair[1])
-			if err != nil {
-				t.Fatalf("Diff: %v", err)
-			}
-
-			if diff.Equal != testCase.wantEqual {
-				t.Errorf(
-					"Diff(%s, %s).Equal = %v, want %v",
-					apparmor.FormatProfile(pair[0]), apparmor.FormatProfile(pair[1]),
-					diff.Equal, testCase.wantEqual,
-				)
-
-				continue
-			}
-
-			if testCase.wantEqual {
-				continue
-			}
-
-			if diff.Network == nil || diff.Network.AllowRaw == nil ||
-				diff.Network.Protocols.AllowTCP == nil {
-				t.Errorf("Diff = %s, want both booleans reported",
-					apparmor.FormatDiff(diff))
-			}
-		}
-	}
-}
-
-// TestFormatDiffQuotesUnsafeBytes covers the rendering of a diff, which a
-// runtime logs and which is computed over profiles nothing has validated: a
-// path or capability holding a newline or an escape sequence is quoted, as
-// FormatProfile quotes it, rather than written through.
-func TestFormatDiffQuotesUnsafeBytes(t *testing.T) {
-	t.Parallel()
-
-	const hostile = "/a\nFORGED \x1b[31mred"
-
-	left := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{AllowedExecutables: nil, AllowedLibraries: nil},
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths: []string{"/a"}, WriteOnlyPaths: nil, ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: nil},
-	}
-	right := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{hostile}, AllowedLibraries: nil,
-		},
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths: []string{hostile}, WriteOnlyPaths: nil, ReadWritePaths: nil,
-		},
-		Network:      nil,
-		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{"X\nY"}},
-	}
-
-	diff, err := apparmor.Diff(left, right)
-	if err != nil {
-		t.Fatalf("Diff: %v", err)
-	}
-
-	if formatted := apparmor.FormatDiff(diff); strings.ContainsAny(formatted, "\n\x1b") {
-		t.Errorf("FormatDiff writes control bytes through: %q", formatted)
-	}
-}
-
-// TestDiffComparesClassSpellings covers two spellings of one character
-// class, which are one rule to Validate and to the merge, which keeps one of
-// them, and so have to be one rule to Diff.
-func TestDiffComparesClassSpellings(t *testing.T) {
-	t.Parallel()
-
-	readOnly := func(list ...string) *apparmor.Profile {
-		return &apparmor.Profile{
-			Executable: nil,
-			Filesystem: &apparmor.FilesystemRules{
-				ReadOnlyPaths: list, WriteOnlyPaths: nil, ReadWritePaths: nil,
-			},
-			Network:      nil,
-			Capabilities: nil,
-		}
-	}
-
-	classes := readOnly("/x[bc]", "/x[cb]")
-
-	merged, err := apparmor.Intersect(classes)
-	if err != nil {
-		t.Fatalf("Intersect: %v", err)
-	}
-
-	for _, other := range []*apparmor.Profile{merged, readOnly("/x[b-c]")} {
-		diff, err := apparmor.Diff(classes, other)
-		if err != nil {
-			t.Fatalf("Diff: %v", err)
-		}
-
-		if !diff.Equal {
-			t.Errorf("Diff of class spellings = %s, want equal", apparmor.FormatDiff(diff))
-		}
-	}
-}
-
-// TestDiffComparesRulesNotSpellings covers a profile against its own merge
-// result. The merge keeps one spelling per rule, so a diff that compared the
-// text would report the spelling it dropped as removed and the one it kept
-// as added: a constraint log naming an added path where nothing was added.
-func TestDiffComparesRulesNotSpellings(t *testing.T) {
-	t.Parallel()
-
-	paths := func(list ...string) *apparmor.Profile {
-		return &apparmor.Profile{
-			Executable: &apparmor.ExecutableRules{
-				AllowedExecutables: list, AllowedLibraries: nil,
-			},
-			Filesystem: &apparmor.FilesystemRules{
-				ReadOnlyPaths: list, WriteOnlyPaths: nil, ReadWritePaths: nil,
-			},
-			Network:      nil,
-			Capabilities: nil,
-		}
-	}
-
-	artifact := paths(`/etc/\x70asswd`, `/var/l\og/*`)
-
-	effective, err := apparmor.Intersect(paths("/etc/passwd", "/var/log/*"), artifact)
-	if err != nil {
-		t.Fatalf("Intersect: %v", err)
-	}
-
-	diff, err := apparmor.Diff(artifact, effective)
-	if err != nil {
-		t.Fatalf("Diff: %v", err)
-	}
-
-	if !diff.Equal {
-		t.Errorf("Diff(artifact, effective) = %s, want equal", apparmor.FormatDiff(diff))
-	}
-
-	// A profile naming one rule twice equals its merge result, which names
-	// it once.
-	twice := paths("/bin/A", `/bin/\x41`)
-
-	merged, err := apparmor.Intersect(twice)
-	if err != nil {
-		t.Fatalf("Intersect: %v", err)
-	}
-
-	diff, err = apparmor.Diff(twice, merged)
-	if err != nil {
-		t.Fatalf("Diff: %v", err)
-	}
-
-	if !diff.Equal {
-		t.Errorf("Diff(p, Intersect(p)) = %s, want equal", apparmor.FormatDiff(diff))
-	}
-
-	// A rule only one side holds is still reported, in that side's spelling.
-	diff, err = apparmor.Diff(paths(`/etc/\x70asswd`), paths("/etc/shadow"))
-	if err != nil {
-		t.Fatalf("Diff: %v", err)
-	}
-
-	want := &apparmor.SliceDiff[string]{
-		Added: []string{"/etc/shadow"}, Removed: []string{`/etc/\x70asswd`},
-	}
-	if diff.Equal || !reflect.DeepEqual(diff.Executable.AllowedExecutables, want) {
-		t.Errorf("Diff = %s, want %v", apparmor.FormatDiff(diff), want)
 	}
 }
 
@@ -1270,7 +746,7 @@ func TestPathIdentityIsSharedByDiffAndValidate(t *testing.T) {
 		}
 
 		if !diff.Equal {
-			t.Errorf("Diff of two spellings of one rule = %s", apparmor.FormatDiff(diff))
+			t.Errorf("Diff of two spellings of one rule = %s", diff.String())
 		}
 	}
 
@@ -1307,7 +783,7 @@ func TestDiffRelativeLiteral(t *testing.T) {
 
 		if diff.Equal != testCase.equal {
 			t.Errorf("Diff(%q, %q) = %s, want equal %t",
-				testCase.left, testCase.right, apparmor.FormatDiff(diff), testCase.equal)
+				testCase.left, testCase.right, diff.String(), testCase.equal)
 		}
 	}
 }

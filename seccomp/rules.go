@@ -55,7 +55,7 @@ func (c clause) sameResult(other clause) bool {
 		return false
 	}
 
-	return !errnoSignificant(c.action) || equalUintPtr(c.errnoRet, other.errnoRet)
+	return !errnoSignificant(c.action) || compareUintPtr(c.errnoRet, other.errnoRet) == 0
 }
 
 // pickClause selects between two clauses using the given action preference.
@@ -131,12 +131,10 @@ func forEachClause(
 }
 
 // maxLoadedClauses bounds how many clauses collectRules materializes for one
-// input. An entry contributes one clause per name, so the clauses of a
-// profile grow as the product of its name and condition counts rather than
-// with its size: 40000 names against 256 conditions fit in 441 KB of JSON and
-// expand to ten million clauses. Past this bound an input is read in
-// summarized form instead, which costs one pass over the entries and no
-// memory per clause (see summarizeRules).
+// input: the read budget of the Cost bounds section of the package
+// documentation, which says why the clauses can outgrow the profile. Past
+// this bound an input is read in summarized form instead, which costs one
+// pass over the entries and no memory per clause (see summarizeRules).
 //
 // No profile a runtime should accept comes near the bound. ValidateArtifact
 // rejects an artifact loading more than MaxArtifactRules rules, which is a
@@ -756,7 +754,7 @@ func errnoUnifiable(clauses []clause) bool {
 
 		filters[filter] = struct{}{}
 
-		if !equalUintPtr(current.errnoRet, clauses[0].errnoRet) {
+		if compareUintPtr(current.errnoRet, clauses[0].errnoRet) != 0 {
 			differs = true
 		}
 	}
@@ -971,8 +969,6 @@ func complementArg(arg specs.LinuxSeccompArg) (specs.LinuxSeccompArg, bool) {
 
 // complementOps maps each comparison operator to the one matching exactly
 // the remaining values. Masked comparisons have no complement.
-//
-//nolint:gochecknoglobals // immutable lookup table
 var complementOps = map[specs.LinuxSeccompOperator]specs.LinuxSeccompOperator{
 	specs.OpEqualTo:      specs.OpNotEqual,
 	specs.OpNotEqual:     specs.OpEqualTo,

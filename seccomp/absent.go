@@ -90,8 +90,6 @@ type syscallPlacement struct {
 
 // sharedAuditArch pairs the architectures that share an AUDIT_ARCH value,
 // which lose rules only together (see above).
-//
-//nolint:gochecknoglobals // immutable lookup table
 var sharedAuditArch = map[specs.Arch]specs.Arch{
 	specs.ArchX86_64: specs.ArchX32,
 	specs.ArchX32:    specs.ArchX86_64,
@@ -99,8 +97,6 @@ var sharedAuditArch = map[specs.Arch]specs.Arch{
 
 // syscallArchitectures are the architectures syscallPlacements describes,
 // in the order of its bits.
-//
-//nolint:gochecknoglobals // immutable lookup table
 var syscallArchitectures = [...]specs.Arch{
 	specs.ArchX86, specs.ArchX86_64, specs.ArchX32,
 	specs.ArchARM, specs.ArchAARCH64,
@@ -578,8 +574,6 @@ func (s *absentSettler) losingBlockOf() (specs.Arch, []string, []specs.Arch) {
 
 // possibleNatives are the architectures a runtime may add to a filter as
 // its native one: those of the platforms Go runs on, sorted.
-//
-//nolint:gochecknoglobals // immutable lookup table derived from another
 var possibleNatives = slices.Sorted(maps.Values(nativeArchitectures))
 
 // appliesNowhere returns the offending syscalls a rule on applies to no

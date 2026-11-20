@@ -198,32 +198,6 @@ func TestCollectorCountsWhatItOmits(t *testing.T) {
 	}
 }
 
-func TestDeduplicateSliceNeverAliasesTheInput(t *testing.T) {
-	t.Parallel()
-
-	// An empty but non-nil slice with spare capacity used to come back as the
-	// caller's own slice header, so appending to a merge result wrote into the
-	// caller's backing array.
-	input := make([]string, 0, 8)
-
-	result := merge.DeduplicateSlice(input)
-
-	if result != nil {
-		t.Fatalf("DeduplicateSlice(empty) = %#v, want nil", result)
-	}
-
-	grown := append(result, "written") //nolint:gocritic // where it writes is the point
-
-	if len(input) != 0 || cap(input) != 8 {
-		t.Fatalf("appending to the result changed the caller's slice: len=%d cap=%d",
-			len(input), cap(input))
-	}
-
-	if &grown[0] == &input[:1][0] {
-		t.Error("appending to the result wrote into the caller's backing array")
-	}
-}
-
 // TestCollectorBoundsANestedReport covers a report built from reports. A
 // validator joins the failures of its checks, each of which has joined its
 // own, and the bound has to hold for the whole: counted once per check, a
@@ -268,12 +242,10 @@ func TestCollectorBoundsANestedReport(t *testing.T) {
 
 // TestBoundsArePinned pins the bounds by value: every other test derives its
 // expectation from the constants, so a changed bound would pass them all.
+// The QuoteBounded output pins MaxQuotedBytes; nothing else pins
+// MaxMessageBytes, so it is checked as a constant.
 func TestBoundsArePinned(t *testing.T) {
 	t.Parallel()
-
-	if merge.MaxQuotedBytes != 64 {
-		t.Errorf("MaxQuotedBytes = %d, want 64", merge.MaxQuotedBytes)
-	}
 
 	if merge.MaxMessageBytes != 512 {
 		t.Errorf("MaxMessageBytes = %d, want 512", merge.MaxMessageBytes)

@@ -36,7 +36,6 @@ func TestProfileClone(t *testing.T) {
 	profile := &landlock.Profile{
 		HandledAccessFS:  read,
 		HandledAccessNet: []landlock.NetAccessRight{},
-		Scoped:           nil,
 		PathRules: []landlock.PathRule{
 			{Path: "/srv", AccessFS: fsRights{landlock.FSAccessReadFile}},
 			{Path: "/tmp", AccessFS: nil},

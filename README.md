@@ -109,8 +109,10 @@ make build   # produces build/spm
 ## Packages
 
 Each profile package provides `Intersect`, `Union`, `Validate`,
-`ValidateStrict`, `ValidateArtifact`, `UnmarshalStrict`, `FormatProfile`,
-`Diff`, and `FormatDiff` functions. `ValidateArtifact` runs the checks a
+`ValidateStrict`, `ValidateArtifact`, `UnmarshalStrict` and `Diff`
+functions, and a `String` method on its diff type; `seccomp.FormatProfile`
+renders a `specs.LinuxSeccomp`, where the other two packages' profile types
+have a `String` method. `ValidateArtifact` runs the checks a
 runtime applies to an artifact, a profile it did not author
 ([KEP-6061](https://github.com/kubernetes/enhancements/issues/6061)).
 
@@ -158,8 +160,8 @@ runtime loads. From v1.0.0 on:
   release removes or renames; a release may add sentinels, and an error may
   match additional ones.
 - **Diff JSON** keeps its field names and shape within a major release, and
-  a minor release may add fields. `FormatProfile`, `FormatDiff` and the
-  `String` methods are for people and may change in any release.
+  a minor release may add fields. `seccomp.FormatProfile` and the `String`
+  methods are for people and may change in any release.
 - **`landlock.LatestABIVersion`** rises in a minor release when the package
   learns the rights of a newer Landlock ABI, which adds rights `Validate`
   accepts and constants for them.
@@ -201,7 +203,7 @@ if err != nil {
     return err
 }
 if !diff.Equal {
-    return fmt.Errorf("baseline has rules the merge cannot apply: %s", seccomp.FormatDiff(diff))
+    return fmt.Errorf("baseline has rules the merge cannot apply: %s", diff)
 }
 
 // Per artifact.
@@ -259,7 +261,7 @@ aaEffective, err := apparmor.Intersect(baseline, artifact)
 if err != nil {
     return err
 }
-log.Print(apparmor.FormatProfile(aaEffective))
+log.Print(aaEffective)
 
 // Capability names come back upper-cased ("CHOWN"), while apparmor_parser
 // accepts only lower-case ones, so lower-case them when rendering rules; see
@@ -276,7 +278,7 @@ if err != nil {
     return err
 }
 // aaCombined permits every path and capability either recording saw.
-log.Print(apparmor.FormatProfile(aaCombined))
+log.Print(aaCombined)
 ```
 
 ### Landlock profile merge
@@ -303,7 +305,7 @@ if err != nil {
     return err
 }
 // llCombined permits every access either recording saw.
-log.Print(landlock.FormatProfile(llCombined))
+log.Print(llCombined)
 ```
 
 ## Examples

@@ -192,9 +192,9 @@ cat profiles.json | spm merge --type landlock --strategy intersect
 spm merge --type seccomp --strategy intersect baseline.json - < recording.json
 ```
 
-`--format=human` prints the result with `FormatProfile`. `--output` writes it
-to a file instead of stdout, and `--output -` means stdout, as `-` means stdin
-for an input:
+`--format=human` prints the result as `String` renders it (`FormatProfile` for
+seccomp). `--output` writes it to a file instead of stdout, and `--output -`
+means stdout, as `-` means stdin for an input:
 
 - The file is only written once the merge has succeeded.
 - A regular file is never written in place: the result goes to a new file in

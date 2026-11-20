@@ -17,7 +17,7 @@ limitations under the License.
 package landlock_test
 
 import (
-	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -25,48 +25,8 @@ import (
 	"sigs.k8s.io/security-profiles-merger/landlock"
 )
 
-func TestDiffNil(t *testing.T) {
-	t.Parallel()
-
-	profile := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
-	}
-
-	_, err := landlock.Diff(nil, profile)
-	if !errors.Is(err, landlock.ErrNilProfile) {
-		t.Fatalf("Diff(nil, profile) = %v, want ErrNilProfile", err)
-	}
-
-	_, err = landlock.Diff(profile, nil)
-	if !errors.Is(err, landlock.ErrNilProfile) {
-		t.Fatalf("Diff(profile, nil) = %v, want ErrNilProfile", err)
-	}
-
-	_, err = landlock.Diff(nil, nil)
-	if !errors.Is(err, landlock.ErrNilProfile) {
-		t.Fatalf("Diff(nil, nil) = %v, want ErrNilProfile", err)
-	}
-
-	// The error names the nil argument, as a merge names a bad input.
-	for want, args := range map[int][2]*landlock.Profile{
-		0: {nil, profile},
-		1: {profile, nil},
-	} {
-		_, err := landlock.Diff(args[0], args[1])
-
-		var inputErr *landlock.InputError
-		if !errors.As(err, &inputErr) || inputErr.Index != want {
-			t.Errorf("Diff with argument %d nil = %v, want an InputError with Index %d",
-				want, err, want)
-		}
-	}
-}
-
-// TestProfileDiffString covers the Stringer, which formats as FormatDiff.
+// TestProfileDiffString covers the Stringer, which renders a value as it
+// renders a pointer, and that fmt prints a nil pointer as it prints any.
 func TestProfileDiffString(t *testing.T) {
 	t.Parallel()
 
@@ -79,550 +39,193 @@ func TestProfileDiffString(t *testing.T) {
 		t.Fatalf("Diff = %v", err)
 	}
 
-	want := landlock.FormatDiff(diff)
-	if got := diff.String(); got != want {
-		t.Errorf("String = %q, want %q", got, want)
+	want := "diff " + diff.String()
+	if got := fmt.Sprintf("diff %v", *diff); got != want {
+		t.Errorf("formatting the value = %q, want %q", got, want)
+	}
+
+	var none *landlock.ProfileDiff
+	if got := fmt.Sprintf("diff %v", none); got != "diff <nil>" {
+		t.Errorf("formatting a nil diff = %q, want %q", got, "diff <nil>")
 	}
 }
 
-func TestDiffEqual(t *testing.T) {
+// TestDiff pins each case's diff as String renders it, which names every
+// section and entry that differs, and checks Equal agrees with it.
+func TestDiff(t *testing.T) {
 	t.Parallel()
 
-	profile := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
-			landlock.FSAccessWriteFile,
+	read := fsRights{landlock.FSAccessReadFile}
+	write := fsRights{landlock.FSAccessWriteFile}
+	readWrite := fsRights{landlock.FSAccessReadFile, landlock.FSAccessWriteFile}
+	bind := []landlock.NetAccessRight{landlock.NetAccessBindTCP}
+	connect := []landlock.NetAccessRight{landlock.NetAccessConnectTCP}
+	bindConnect := []landlock.NetAccessRight{
+		landlock.NetAccessBindTCP,
+		landlock.NetAccessConnectTCP,
+	}
+
+	rule := func(path string, access fsRights) landlock.PathRule {
+		return landlock.PathRule{Path: path, AccessFS: access}
+	}
+
+	everySection := &landlock.Profile{
+		HandledAccessFS:  readWrite,
+		HandledAccessNet: bind,
+		PathRules:        []landlock.PathRule{rule(pathEtc, read)},
+		NetRules:         []landlock.NetRule{{Port: 80, AccessNet: bind}},
+	}
+	readEtc := fsProfile(read, rule(pathEtc, read))
+	varData := func(path string, access ...landlock.FSAccessRight) *landlock.Profile {
+		return fsProfile(readWrite, landlock.PathRule{Path: path, AccessFS: access})
+	}
+
+	for _, test := range []struct {
+		name        string
+		left, right *landlock.Profile
+		want        string
+	}{
+		{name: "equal profiles", left: everySection, right: everySection, want: "Diff{equal}"},
+		{name: "equal path rules", left: readEtc, right: readEtc, want: "Diff{equal}"},
+		{
+			name:  "handled filesystem rights",
+			left:  fsProfile(readWrite),
+			right: fsProfile(fsRights{landlock.FSAccessReadFile, landlock.FSAccessExecute}),
+			want:  "Diff{fs:-write_file,+execute}",
 		},
-		HandledAccessNet: []landlock.NetAccessRight{
-			landlock.NetAccessBindTCP,
+		{
+			name:  "handled network rights",
+			left:  netProfile(bind),
+			right: netProfile(connect),
+			want:  "Diff{net:-bind_tcp,+connect_tcp}",
 		},
-		Scoped: nil,
-		PathRules: []landlock.PathRule{{
-			Path:     pathEtc,
-			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
-		}},
-		NetRules: []landlock.NetRule{{
-			Port:      80,
-			AccessNet: []landlock.NetAccessRight{landlock.NetAccessBindTCP},
-		}},
-	}
-
-	diff, err := landlock.Diff(profile, profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !diff.Equal {
-		t.Error("expected equal profiles")
-	}
-
-	const want = "Diff{equal}"
-	if got := landlock.FormatDiff(diff); got != want {
-		t.Errorf("FormatDiff() = %q, want %q", got, want)
-	}
-}
-
-func TestDiffHandledAccessFS(t *testing.T) {
-	t.Parallel()
-
-	left := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
-			landlock.FSAccessWriteFile,
+		{
+			name:  "different handled rights",
+			left:  fsProfile(read),
+			right: fsProfile(write),
+			want:  "Diff{fs:-read_file,+write_file}",
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
-	}
-	right := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
-			landlock.FSAccessExecute,
+		{
+			name:  "scope added",
+			left:  &landlock.Profile{},
+			right: &landlock.Profile{Scoped: []landlock.ScopeRight{landlock.ScopeSignal}},
+			want:  "Diff{scoped:+signal}",
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
-	}
-
-	diff, err := landlock.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.HandledAccessFS == nil {
-		t.Fatal("expected HandledAccessFS diff")
-	}
-
-	if len(diff.HandledAccessFS.Removed) != 1 ||
-		diff.HandledAccessFS.Removed[0] != landlock.FSAccessWriteFile {
-		t.Errorf("removed = %v, want [write_file]", diff.HandledAccessFS.Removed)
-	}
-
-	if len(diff.HandledAccessFS.Added) != 1 ||
-		diff.HandledAccessFS.Added[0] != landlock.FSAccessExecute {
-		t.Errorf("added = %v, want [execute]", diff.HandledAccessFS.Added)
-	}
-}
-
-func TestDiffScoped(t *testing.T) {
-	t.Parallel()
-
-	left := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
-	}
-	right := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped:           []landlock.ScopeRight{landlock.ScopeSignal},
-		PathRules:        nil,
-		NetRules:         nil,
-	}
-
-	diff, err := landlock.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.Scoped == nil {
-		t.Fatal("expected Scoped diff")
-	}
-
-	if len(diff.Scoped.Added) != 1 ||
-		diff.Scoped.Added[0] != landlock.ScopeSignal {
-		t.Errorf("added = %v, want [signal]", diff.Scoped.Added)
-	}
-}
-
-func TestDiffPathRules(t *testing.T) {
-	t.Parallel()
-
-	left := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{
-			{
-				Path:     pathEtc,
-				AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
+		{
+			name:  "path rules removed, added and changed",
+			left:  fsProfile(nil, rule(pathEtc, read), rule(pathVar, read)),
+			right: fsProfile(nil, rule(pathTmp, write), rule(pathVar, readWrite)),
+			want:  "Diff{-/etc(read_file) +/tmp(write_file) ~/var:[read_file]->[read_file,write_file]}",
+		},
+		{
+			name: "network rules removed, added and changed",
+			left: netProfile(nil,
+				landlock.NetRule{Port: 80, AccessNet: bind},
+				landlock.NetRule{Port: 443, AccessNet: bind},
+			),
+			right: netProfile(nil,
+				landlock.NetRule{Port: 443, AccessNet: bindConnect},
+				landlock.NetRule{Port: 8080, AccessNet: connect},
+			),
+			want: "Diff{-:80(bind_tcp) +:8080(connect_tcp) ~:443:[bind_tcp]->[bind_tcp,connect_tcp]}",
+		},
+		{
+			name: "changed rules",
+			left: &landlock.Profile{
+				PathRules: []landlock.PathRule{rule(pathVar, read)},
+				NetRules:  []landlock.NetRule{{Port: 443, AccessNet: bind}},
 			},
-			{
-				Path: pathVar,
-				AccessFS: []landlock.FSAccessRight{
-					landlock.FSAccessReadFile,
+			right: &landlock.Profile{
+				PathRules: []landlock.PathRule{rule(pathVar, readWrite)},
+				NetRules:  []landlock.NetRule{{Port: 443, AccessNet: bindConnect}},
+			},
+			want: "Diff{~/var:[read_file]->[read_file,write_file] ~:443:[bind_tcp]->[bind_tcp,connect_tcp]}",
+		},
+		{
+			name: "every section",
+			left: &landlock.Profile{
+				HandledAccessFS: read,
+				PathRules:       []landlock.PathRule{rule(pathEtc, read)},
+				NetRules:        []landlock.NetRule{{Port: 80, AccessNet: bind}},
+			},
+			right: &landlock.Profile{
+				HandledAccessFS: write,
+				Scoped:          []landlock.ScopeRight{landlock.ScopeSignal},
+				PathRules:       []landlock.PathRule{rule(pathTmp, write)},
+				NetRules:        []landlock.NetRule{{Port: 443, AccessNet: connect}},
+			},
+			want: "Diff{fs:-read_file,+write_file scoped:+signal " +
+				"-/etc(read_file) +/tmp(write_file) -:80(bind_tcp) +:443(connect_tcp)}",
+		},
+		{
+			// Rule rights are compared as sets and rendered sorted.
+			name: "unsorted rule rights",
+			left: &landlock.Profile{
+				HandledAccessFS:  fsRights{"execute", "read_file"},
+				HandledAccessNet: []landlock.NetAccessRight{"connect_tcp", "bind_tcp"},
+				PathRules:        []landlock.PathRule{rule("/var", fsRights{"read_file"})},
+				NetRules: []landlock.NetRule{
+					{Port: 80, AccessNet: []landlock.NetAccessRight{"connect_tcp"}},
 				},
 			},
-		},
-		NetRules: nil,
-	}
-	right := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{
-			{
-				Path:     pathTmp,
-				AccessFS: []landlock.FSAccessRight{landlock.FSAccessWriteFile},
-			},
-			{
-				Path: pathVar,
-				AccessFS: []landlock.FSAccessRight{
-					landlock.FSAccessReadFile,
-					landlock.FSAccessWriteFile,
+			right: &landlock.Profile{
+				HandledAccessFS:  fsRights{"execute", "read_file"},
+				HandledAccessNet: []landlock.NetAccessRight{"connect_tcp", "bind_tcp"},
+				PathRules:        []landlock.PathRule{rule("/var", fsRights{"read_file", "execute"})},
+				NetRules: []landlock.NetRule{
+					{Port: 80, AccessNet: []landlock.NetAccessRight{"connect_tcp", "bind_tcp"}},
 				},
 			},
+			want: "Diff{~/var:[read_file]->[execute,read_file] ~:80:[connect_tcp]->[bind_tcp,connect_tcp]}",
 		},
-		NetRules: nil,
-	}
-
-	diff, err := landlock.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.PathRules == nil {
-		t.Fatal("expected PathRules diff")
-	}
-
-	if len(diff.PathRules.Removed) != 1 || diff.PathRules.Removed[0].Path != pathEtc {
-		t.Errorf("removed = %v, want [/etc]", diff.PathRules.Removed)
-	}
-
-	if len(diff.PathRules.Added) != 1 || diff.PathRules.Added[0].Path != pathTmp {
-		t.Errorf("added = %v, want [/tmp]", diff.PathRules.Added)
-	}
-
-	if len(diff.PathRules.Changed) != 1 || diff.PathRules.Changed[0].Path != pathVar {
-		t.Errorf("changed = %v, want [/var]", diff.PathRules.Changed)
-	}
-}
-
-func TestDiffNetRules(t *testing.T) {
-	t.Parallel()
-
-	left := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules: []landlock.NetRule{
-			{
-				Port: 80,
-				AccessNet: []landlock.NetAccessRight{
-					landlock.NetAccessBindTCP,
-				},
-			},
-			{
-				Port: 443,
-				AccessNet: []landlock.NetAccessRight{
-					landlock.NetAccessBindTCP,
-				},
-			},
+		// Paths are cleaned before comparing, and rule rights deduplicated.
+		{
+			name:  "doubled and trailing slashes",
+			left:  varData("/var//data/", "write_file", "read_file", "write_file"),
+			right: varData("/var/data", "read_file", "write_file"),
+			want:  "Diff{equal}",
 		},
-	}
-	right := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules: []landlock.NetRule{
-			{
-				Port: 443,
-				AccessNet: []landlock.NetAccessRight{
-					landlock.NetAccessBindTCP,
-					landlock.NetAccessConnectTCP,
-				},
-			},
-			{
-				Port: 8080,
-				AccessNet: []landlock.NetAccessRight{
-					landlock.NetAccessConnectTCP,
-				},
-			},
+		{
+			name:  "dot component",
+			left:  varData("/var/./data", "write_file", "read_file", "write_file"),
+			right: varData("/var/data", "read_file", "write_file"),
+			want:  "Diff{equal}",
 		},
-	}
-
-	diff, err := landlock.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.NetRules == nil {
-		t.Fatal("expected NetRules diff")
-	}
-
-	if len(diff.NetRules.Removed) != 1 || diff.NetRules.Removed[0].Port != 80 {
-		t.Errorf("removed = %v, want [:80]", diff.NetRules.Removed)
-	}
-
-	if len(diff.NetRules.Added) != 1 || diff.NetRules.Added[0].Port != 8080 {
-		t.Errorf("added = %v, want [:8080]", diff.NetRules.Added)
-	}
-
-	if len(diff.NetRules.Changed) != 1 || diff.NetRules.Changed[0].Port != 443 {
-		t.Errorf("changed = %v, want [:443]", diff.NetRules.Changed)
-	}
-}
-
-func TestDiffHandledAccessNet(t *testing.T) {
-	t.Parallel()
-
-	left := &landlock.Profile{
-		HandledAccessFS: nil,
-		HandledAccessNet: []landlock.NetAccessRight{
-			landlock.NetAccessBindTCP,
+		{
+			name:  "leading double slash",
+			left:  varData("//var/data", "write_file", "read_file", "write_file"),
+			right: varData("/var/data", "read_file", "write_file"),
+			want:  "Diff{equal}",
 		},
-		Scoped:    nil,
-		PathRules: nil,
-		NetRules:  nil,
-	}
-	right := &landlock.Profile{
-		HandledAccessFS: nil,
-		HandledAccessNet: []landlock.NetAccessRight{
-			landlock.NetAccessConnectTCP,
+		{
+			// ".." depends on symlinks, so it is not folded.
+			name:  "parent component",
+			left:  varData("/var/log/../data", "read_file", "write_file"),
+			right: varData("/var/data", "read_file", "write_file"),
+			want:  "Diff{-/var/log/../data(read_file,write_file) +/var/data(read_file,write_file)}",
 		},
-		Scoped:    nil,
-		PathRules: nil,
-		NetRules:  nil,
-	}
-
-	diff, err := landlock.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.HandledAccessNet == nil {
-		t.Fatal("expected HandledAccessNet diff")
-	}
-
-	if len(diff.HandledAccessNet.Removed) != 1 {
-		t.Errorf("removed = %v, want 1", diff.HandledAccessNet.Removed)
-	}
-
-	if len(diff.HandledAccessNet.Added) != 1 {
-		t.Errorf("added = %v, want 1", diff.HandledAccessNet.Added)
-	}
-
-	got := landlock.FormatDiff(diff)
-	if !strings.Contains(got, "net:") {
-		t.Errorf("FormatDiff() = %q, missing net:", got)
-	}
-}
-
-func TestDiffFormatChangedRules(t *testing.T) {
-	t.Parallel()
-
-	left := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path:     pathVar,
-			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
-		}},
-		NetRules: []landlock.NetRule{{
-			Port: 443,
-			AccessNet: []landlock.NetAccessRight{
-				landlock.NetAccessBindTCP,
-			},
-		}},
-	}
-	right := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path: pathVar,
-			AccessFS: []landlock.FSAccessRight{
-				landlock.FSAccessReadFile,
-				landlock.FSAccessWriteFile,
-			},
-		}},
-		NetRules: []landlock.NetRule{{
-			Port: 443,
-			AccessNet: []landlock.NetAccessRight{
-				landlock.NetAccessBindTCP,
-				landlock.NetAccessConnectTCP,
-			},
-		}},
-	}
-
-	diff, err := landlock.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	got := landlock.FormatDiff(diff)
-
-	for _, want := range []string{
-		"~" + pathVar + ":",
-		"~:443:",
 	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("FormatDiff() = %q, missing %q", got, want)
-		}
-	}
-}
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-func TestDiffFormatNil(t *testing.T) {
-	t.Parallel()
+			diff, err := landlock.Diff(test.left, test.right)
+			if err != nil {
+				t.Fatalf("Diff: %v", err)
+			}
 
-	const want = "Diff{<nil>}"
-	if got := landlock.FormatDiff(nil); got != want {
-		t.Errorf("FormatDiff(nil) = %q, want %q", got, want)
-	}
-}
+			if got := diff.String(); got != test.want {
+				t.Errorf("String() = %s, want %s", got, test.want)
+			}
 
-func TestDiffIsEqualTrue(t *testing.T) {
-	t.Parallel()
-
-	profile := &landlock.Profile{
-		HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessReadFile},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path:     pathEtc,
-			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
-		}},
-		NetRules: nil,
-	}
-
-	diff, err := landlock.Diff(profile, profile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !diff.IsEqual() {
-		t.Error("IsEqual() should return true for identical profiles")
-	}
-}
-
-func TestDiffIsEqualFalse(t *testing.T) {
-	t.Parallel()
-
-	left := &landlock.Profile{
-		HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessReadFile},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
-	}
-	right := &landlock.Profile{
-		HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessWriteFile},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
-	}
-
-	diff, err := landlock.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if diff.IsEqual() {
-		t.Error("IsEqual() should return false for different profiles")
-	}
-}
-
-func TestDiffFormatComplex(t *testing.T) {
-	t.Parallel()
-
-	left := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessReadFile,
-		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{{
-			Path:     pathEtc,
-			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
-		}},
-		NetRules: []landlock.NetRule{{
-			Port:      80,
-			AccessNet: []landlock.NetAccessRight{landlock.NetAccessBindTCP},
-		}},
-	}
-	right := &landlock.Profile{
-		HandledAccessFS: []landlock.FSAccessRight{
-			landlock.FSAccessWriteFile,
-		},
-		HandledAccessNet: nil,
-		Scoped:           []landlock.ScopeRight{landlock.ScopeSignal},
-		PathRules: []landlock.PathRule{{
-			Path:     pathTmp,
-			AccessFS: []landlock.FSAccessRight{landlock.FSAccessWriteFile},
-		}},
-		NetRules: []landlock.NetRule{{
-			Port:      443,
-			AccessNet: []landlock.NetAccessRight{landlock.NetAccessConnectTCP},
-		}},
-	}
-
-	diff, err := landlock.Diff(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	got := landlock.FormatDiff(diff)
-
-	for _, want := range []string{
-		"-read_file",
-		"+write_file",
-		"+signal",
-		"-/etc",
-		"+/tmp",
-		"-:80",
-		"+:443",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("FormatDiff() = %q, missing %q", got, want)
-		}
-	}
-}
-
-func TestDiffNormalizesPathsBeforeComparing(t *testing.T) {
-	t.Parallel()
-
-	profile := func(path string, rights ...landlock.FSAccessRight) *landlock.Profile {
-		return &landlock.Profile{
-			HandledAccessFS:  []landlock.FSAccessRight{"read_file", "write_file"},
-			HandledAccessNet: nil,
-			Scoped:           nil,
-			PathRules:        []landlock.PathRule{{Path: path, AccessFS: rights}},
-			NetRules:         nil,
-		}
-	}
-
-	right := profile("/var/data", "read_file", "write_file")
-
-	for _, path := range []string{"/var//data/", "/var/./data", "//var/data"} {
-		diff, err := landlock.Diff(profile(path, "write_file", "read_file", "write_file"), right)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		if !diff.IsEqual() {
-			t.Errorf("Diff(%q) = %s, want equal", path, landlock.FormatDiff(diff))
-		}
-	}
-
-	// ".." depends on symlinks, so it is not folded.
-	diff, err := landlock.Diff(profile("/var/log/../data", "read_file", "write_file"), right)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if diff.IsEqual() {
-		t.Error(`Diff folded ".." in "/var/log/../data"`)
-	}
-}
-
-func TestDiffSortsRuleRights(t *testing.T) {
-	t.Parallel()
-
-	handled := []landlock.FSAccessRight{"execute", "read_file"}
-	left := &landlock.Profile{
-		HandledAccessFS:  handled,
-		HandledAccessNet: []landlock.NetAccessRight{"connect_tcp", "bind_tcp"},
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{
-			{Path: "/var", AccessFS: []landlock.FSAccessRight{"read_file"}},
-		},
-		NetRules: []landlock.NetRule{
-			{Port: 80, AccessNet: []landlock.NetAccessRight{"connect_tcp"}},
-		},
-	}
-	right := &landlock.Profile{
-		HandledAccessFS:  handled,
-		HandledAccessNet: []landlock.NetAccessRight{"connect_tcp", "bind_tcp"},
-		Scoped:           nil,
-		PathRules: []landlock.PathRule{
-			{Path: "/var", AccessFS: []landlock.FSAccessRight{"read_file", "execute"}},
-		},
-		NetRules: []landlock.NetRule{
-			{Port: 80, AccessNet: []landlock.NetAccessRight{"connect_tcp", "bind_tcp"}},
-		},
-	}
-
-	diff, err := landlock.Diff(left, right)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	want := "Diff{~/var:[read_file]->[execute,read_file] ~:80:[connect_tcp]->[bind_tcp,connect_tcp]}"
-	if got := landlock.FormatDiff(diff); got != want {
-		t.Errorf("FormatDiff = %s, want %s", got, want)
+			if want := test.want == "Diff{equal}"; diff.Equal != want {
+				t.Errorf("Equal = %t, want %t", diff.Equal, want)
+			}
+		})
 	}
 }
 
 // TestDiffReportsEachChangeKindAlone covers a diff whose rules changed in
-// one way only. The case above populates added, removed and changed rules
+// one way only. TestDiff populates added, removed and changed rules
 // at once, so the gate that decides whether a section is reported could
 // have required two of the three and still passed: a pure addition or a
 // pure removal would then have been reported as equal.
@@ -641,7 +244,6 @@ func TestDiffReportsEachChangeKindAlone(t *testing.T) {
 		return &landlock.Profile{
 			HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessReadFile},
 			HandledAccessNet: []landlock.NetAccessRight{landlock.NetAccessBindTCP},
-			Scoped:           nil,
 			PathRules:        paths,
 			NetRules:         nets,
 		}
@@ -677,28 +279,22 @@ func TestDiffReportsEachChangeKindAlone(t *testing.T) {
 			if diff.Equal {
 				t.Errorf(
 					"Diff(%s, %s).Equal = true, want a difference",
-					landlock.FormatProfile(testCase.left),
-					landlock.FormatProfile(testCase.right),
+					testCase.left.String(),
+					testCase.right.String(),
 				)
 			}
 		})
 	}
 }
 
-// TestFormatDiffQuotesUnsafeBytes covers the rendering of a diff, which a
+// TestDiffStringQuotesUnsafeBytes covers the rendering of a diff, which a
 // runtime logs and which is computed over profiles nothing has validated.
-func TestFormatDiffQuotesUnsafeBytes(t *testing.T) {
+func TestDiffStringQuotesUnsafeBytes(t *testing.T) {
 	t.Parallel()
 
 	const hostile = "x\nFORGED \x1b[31mred"
 
-	left := &landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
-	}
+	left := &landlock.Profile{}
 	right := &landlock.Profile{
 		HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessRight(hostile)},
 		HandledAccessNet: []landlock.NetAccessRight{landlock.NetAccessRight(hostile)},
@@ -707,7 +303,6 @@ func TestFormatDiffQuotesUnsafeBytes(t *testing.T) {
 			Path:     "/" + hostile,
 			AccessFS: []landlock.FSAccessRight{landlock.FSAccessRight(hostile)},
 		}},
-		NetRules: nil,
 	}
 
 	diff, err := landlock.Diff(left, right)
@@ -715,7 +310,7 @@ func TestFormatDiffQuotesUnsafeBytes(t *testing.T) {
 		t.Fatalf("Diff: %v", err)
 	}
 
-	if formatted := landlock.FormatDiff(diff); strings.ContainsAny(formatted, "\n\x1b") {
-		t.Errorf("FormatDiff writes control bytes through: %q", formatted)
+	if formatted := diff.String(); strings.ContainsAny(formatted, "\n\x1b") {
+		t.Errorf("String() writes control bytes through: %q", formatted)
 	}
 }

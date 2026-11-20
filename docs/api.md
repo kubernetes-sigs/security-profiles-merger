@@ -192,27 +192,26 @@ import "sigs.k8s.io/security-profiles-merger/seccomp"
 | `Options.Intersect`, `Options.Union`, `Options.Diff`, `Options.ValidateArtifact`, `Options.ValidateStrict` | The functions of the same name for the node `Options.Arch` names: one whose architecture is not known for the zero value, the running program's for `NativeHost`, which the plain functions assume, or another node's. An unknown `Arch` is `ErrUnknownArch` |
 | `Validate` | What a runtime needs to load the profile at all; what the merges run on every input |
 | `ValidateArtifact` | `Validate` plus what an artifact needs to load on every runtime: the [limits](#limits), no notify or listener settings, no rules of one syscall with different results outside a safe shape, on the syscall or on a multiplexer that carries it, and no filter in which libseccomp loses the rules of an architecture as written. It does not promise an exact merge: same-result rules outside a safe shape pass it and are still settled (see [Conflicting rules](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Conflicting_rules)) |
-| `ValidateStrict` | `ValidateArtifact` plus duplicate syscall names and `valueTwo` on operators that ignore it |
+| `ValidateStrict` | `ValidateArtifact` plus duplicate syscall names, `valueTwo` on operators that ignore it, and the listener flags some runtime refuses (`ErrNotifyUnsupported`) |
 | `UnmarshalStrict` | Decode a profile, refusing what `encoding/json` accepts silently (see [Strict decoding](#strict-decoding)) |
 | `Marshal` | Encode a profile as `json.Marshal` does, except that an empty `Flags` list is written as `"flags": []`, which a runtime reads differently from no list ([Flags](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Flags)) |
 | `Clone` | A deep copy of a profile, keeping nil and empty lists apart |
-| `MoreRestrictive`, `LessRestrictive` | Rank two actions in the [action order](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Action_order) |
 | `NativeArchitecture` | The seccomp architecture of the running program, from `runtime.GOARCH` |
-| `FormatProfile`, `FormatDiff` | Human-readable representation of a profile or a diff, on one line that is safe to log: a value that could be misread is quoted, and the line is cut at 64 KiB, ending in `... (output truncated)`. No real profile comes near the bound; an artifact chooses how much it holds |
+| `FormatProfile` | Human-readable representation of a profile, on one line that is safe to log: a value that could be misread is quoted, and the line is cut at 64 KiB, ending in `... (output truncated)`. No real profile comes near the bound; an artifact chooses how much it holds |
 
 ### Types
 
 `Options` with the constant `NativeHost`, and the diff types
-(`ProfileDiff`, `ActionDiff`, `UintPtrDiff`, `StringDiff`, `SliceDiff`,
-`SyscallsDiff`, `SyscallEntry`, `SyscallChange`, `SyscallDetail`), which are
+(`ProfileDiff`, `ValueDiff[T]`, `SliceDiff[T]`, `SyscallsDiff`,
+`SyscallEntry`, `SyscallChange`, `SyscallDetail`), which are
 documented field by field in the
 [package reference](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#ProfileDiff).
 
 `ProfileDiff`, `SyscallEntry` and `SyscallDetail` implement `fmt.Stringer`
-for human-readable formatting, quoted and bounded as `FormatProfile` is; a
-`ProfileDiff` renders as `FormatDiff` does. Its `IsEqual` and `String` have
-value receivers, so a diff and a pointer to one both implement them; `Diff`
-returns a non-nil diff whenever its error is nil.
+for human-readable formatting, quoted and bounded as `FormatProfile` is.
+`ProfileDiff.String` has a value receiver, so a diff and a pointer to one
+both implement `fmt.Stringer`; `Diff` returns a non-nil diff whenever its
+error is nil.
 
 ### Errors
 
@@ -324,7 +323,6 @@ import "sigs.k8s.io/security-profiles-merger/apparmor"
 | `ValidateStrict` | `ValidateArtifact` plus capability names outside the known set and duplicate executable or library paths |
 | `UnmarshalStrict` | Decode a profile, refusing what `encoding/json` accepts silently; see [strict decoding](#strict-decoding) |
 | `Diff` | Structured diff, comparing what AppArmor loads from the two profiles. A nil profile is an `InputError` naming it, wrapping `ErrNilProfile` |
-| `FormatProfile`, `FormatDiff` | Human-readable profile and diff, quoted and cut at 64 KiB as in [seccomp](#functions) |
 | `IsGlobPattern` | Whether a path holds glob syntax, including syntax apparmor_parser rejects |
 
 ### Types
@@ -333,10 +331,11 @@ The types are `Profile` with its sections (`ExecutableRules`,
 `FilesystemRules`, `NetworkRules`, `AllowedProtocols`, `CapabilityRules`) and
 the diff types (`ProfileDiff`, `SliceDiff[T]`, `ExecutableDiff`,
 `FilesystemDiff`, `NetworkDiff`, `AllowedProtocolsDiff`, `CapabilityDiff`,
-`BoolPtrDiff`), whose fields and JSON names follow those of `Profile`.
+`ValueDiff[T]`), whose fields and JSON names follow those of `Profile`.
 `*Profile`, `ExecutableRules`, `FilesystemRules`, `NetworkRules`,
 `CapabilityRules` and `ProfileDiff` implement `fmt.Stringer`, quoted and
-bounded as `FormatProfile` is; a nil `*Profile` formats as `Profile{<nil>}`.
+cut at 64 KiB as in [seccomp](#functions); a nil `*Profile` formats as
+`Profile{<nil>}`.
 `ProfileDiff` has value receivers, as in seccomp. `(*Profile).Clone` returns
 a deep copy, or nil for a nil profile.
 
@@ -433,7 +432,6 @@ import "sigs.k8s.io/security-profiles-merger/landlock"
 | `LoweredRulePaths` | The rule paths of a result that carry access an input granted only on an ancestor path, after `Validate` of the result and of every input. An input that is nil or fails is an `InputError` whose `Index` is its position among the inputs, so the baseline of `LoweredRulePaths(effective, baseline, artifact)` is 0, as in `Intersect`; a result that is nil or fails is an error prefixed `result: `, not an `InputError`. Without inputs it returns nil |
 | `UnmarshalStrict` | Decode a profile, refusing what `encoding/json` accepts silently; see [strict decoding](#strict-decoding) |
 | `Diff` | Structured diff of the cleaned rules as written, not of the access they grant. A nil profile is an `InputError` naming it, wrapping `ErrNilProfile` |
-| `FormatProfile`, `FormatDiff` | Human-readable profile and diff, quoted and cut at 64 KiB as in [seccomp](#functions) |
 
 ### Types
 
@@ -443,8 +441,8 @@ constants `ABIV1` to `ABIV11` and `LatestABIVersion`, and the diff types
 (`ProfileDiff`, `SliceDiff[T]`, `PathRulesDiff`, `PathRuleChange`,
 `NetRulesDiff`, `NetRuleChange`). The access rights mirror the Landlock UAPI,
 and each names the ABI version that introduced it. `*Profile`, `PathRule`,
-`NetRule`, `ProfileDiff` and `ABIVersion` implement `fmt.Stringer`, the
-first four quoted and bounded as `FormatProfile` is; a nil `*Profile`
+`NetRule`, `ProfileDiff` and `ABIVersion` implement `fmt.Stringer`, the first
+four quoted and cut at 64 KiB as in [seccomp](#functions); a nil `*Profile`
 formats as `Profile{<nil>}`, and `ProfileDiff` has value receivers, as in
 seccomp.
 `(*Profile).Clone` returns a deep copy, or nil for a nil profile.

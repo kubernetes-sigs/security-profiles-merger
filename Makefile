@@ -11,8 +11,8 @@ GOLANGCI_LINT_VERSION = 2.15.0
 # module's go line can be newer than the floor in go.mod, since no consumer
 # builds it. The go command picks its toolchain from go.mod and not from
 # -modfile, so the targets that run these tools need a Go on PATH at least
-# as new as that go line. CI runs them with GO_VERSION of the workflows, so
-# a tools bump that raises that go line has to raise GO_VERSION as well.
+# as new as that go line. CI runs them with the Go in .go-version, so a
+# tools bump that raises that go line has to raise .go-version as well.
 TOOL = $(GO) tool -modfile=hack/tools/go.mod
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -22,7 +22,7 @@ BUILD_DIR := build
 COLOR := \033[36m
 NOCOLOR := \033[0m
 
-PACKAGES := $(shell $(GO) list ./...)
+PACKAGES = $(shell $(GO) list ./...)
 
 # verify is deliberately not part of all: verify-tidy and verify-golden
 # rewrite tracked files in place before checking that nothing changed, which
@@ -59,17 +59,27 @@ build: ## Build the spm binary (static)
 .PHONY: test
 test: ## Run tests with race detection and coverage report (set RACE= to skip the race detector, which needs cgo)
 	@mkdir -p $(BUILD_DIR)
-	$(GO) test -v $(RACE) -count=1 -coverprofile=$(BUILD_DIR)/coverage.out -covermode=atomic -coverpkg=./... ./...
+	$(GO) test $(RACE) -count=1 -coverprofile=$(BUILD_DIR)/coverage.out -covermode=atomic -coverpkg=./... ./...
 	$(GO) tool cover -html=$(BUILD_DIR)/coverage.out -o $(BUILD_DIR)/coverage.html
 
 # TestLibseccompVersion names the library that answered. Set
 # LIBSECCOMP_VERSION to require a particular one, as CI does, and
 # SPM_LIBSECCOMP_OPTIMIZE=2 to compile every filter as a binary tree, as
-# runc does above 32 syscall names. TESTFLAGS go to go test, as
-# TESTFLAGS='-run Libseccomp' for the tests that need the library alone.
+# runc does above 32 syscall names. Only the tests the libseccomp tag adds
+# run: the tag adds files and changes nothing the other tests read, which
+# make test runs. TESTFLAGS go to go test after that selection; a -run
+# among them replaces it.
 .PHONY: test-libseccomp
 test-libseccomp: ## Check the seccomp evaluation model against libseccomp itself (needs cgo and the libseccomp headers)
-	CGO_ENABLED=1 $(GO) test -v -count=1 -tags libseccomp $(TESTFLAGS) ./seccomp/
+	@set -e; untagged=$$(mktemp); tagged=$$(mktemp); \
+	trap 'rm -f "$$untagged" "$$tagged"' EXIT; \
+	$(GO) test -list . ./seccomp/ > "$$untagged"; \
+	CGO_ENABLED=1 $(GO) test -tags libseccomp -list . ./seccomp/ > "$$tagged"; \
+	tests=$$(grep -E '^(Test|Example|Fuzz)' "$$tagged" | \
+		grep -vxF -f "$$untagged" | paste -sd '|' -); \
+	if [ -z "$$tests" ]; then echo "the libseccomp tag adds no tests"; exit 1; fi; \
+	echo "CGO_ENABLED=1 $(GO) test -v -count=1 -tags libseccomp -run '^($$tests)$$' $(TESTFLAGS) ./seccomp/"; \
+	CGO_ENABLED=1 $(GO) test -v -count=1 -tags libseccomp -run "^($$tests)\$$" $(TESTFLAGS) ./seccomp/
 
 .PHONY: fuzz
 fuzz: ## Run all fuzz tests (use FUZZTIME to adjust, default 30s)
@@ -81,11 +91,10 @@ fuzz: ## Run all fuzz tests (use FUZZTIME to adjust, default 30s)
 		done; \
 	done
 
+# -p 1 runs one package at a time, so that no two measure each other.
 .PHONY: bench
 bench: ## Run benchmarks
-	@for pkg in $(PACKAGES); do \
-		$(GO) test -bench=. -benchmem -count=5 -run='^$$' $$pkg || exit 1; \
-	done
+	$(GO) test -p 1 -bench=. -benchmem -count=5 -run='^$$' ./...
 
 # The floor, not the target: the suite sits well above this, and the drift
 # codecov reports on a pull request is the tighter check.
@@ -111,10 +120,10 @@ verify-coverage: test ## Verify test coverage meets threshold
 #
 # What it cannot reproduce is what needs another machine or a tool this
 # Makefile does not install: the typos scan, the release snapshot build,
-# the macOS and Windows runs, the cross-architecture vet, the fuzz matrix,
-# the benchmarks, the uninstrumented bounds run, the test run on the Go the
-# release is built with, the API report, and the libseccomp differential
-# tests. test-libseccomp, fuzz, bench and api-report run those locally.
+# the macOS and Windows runs, the cross-architecture tests and vet, the fuzz
+# matrix, the test run on the Go the release is built with, the API report,
+# and the libseccomp differential tests. test-libseccomp, fuzz and
+# api-report run those locally.
 #
 # verify-tidy and verify-golden rewrite files in place and then check that
 # nothing changed, which is why verify is not part of the default target.
@@ -164,23 +173,13 @@ verify-dependencies: ## Verify external dependencies
 		validate --local-only --base-path . --config dependencies.yaml
 
 # Only the remote command can reach upstream; the plain one refuses. It
-# reports an outdated pin on stdout and still exits 0. Neither target is
-# part of verify: they need the network and a token, and a release someone
-# else cut is not a reason to fail a pull request.
-ZEITGEIST_REMOTE = $(TOOL) sigs.k8s.io/zeitgeist/remote/zeitgeist \
-	validate --local-only=false --base-path . --config dependencies.yaml
-
+# reports an outdated pin on stdout and still exits 0. It is not part of
+# verify: it needs the network and a token, and a release someone else cut
+# is not a reason to fail a pull request.
 .PHONY: report-upstream
 report-upstream: ## Print the pinned versions that are behind their upstream releases (needs GITHUB_TOKEN)
-	$(ZEITGEIST_REMOTE)
-
-# Reading what the report printed is what turns it into an answer.
-.PHONY: verify-upstream
-verify-upstream: ## Fail if a pinned version is behind its upstream release (needs GITHUB_TOKEN)
-	@set -e; \
-	out=$$($(ZEITGEIST_REMOTE)); \
-	echo "$${out}"; \
-	if echo "$${out}" | grep -q 'Update available'; then exit 1; fi
+	$(TOOL) sigs.k8s.io/zeitgeist/remote/zeitgeist \
+		validate --local-only=false --base-path . --config dependencies.yaml
 
 # The libseccomp releases whose syscalls.csv seccomp/syscalls.go is
 # generated from, with the SHA-256 of each file. Keep the versions in step

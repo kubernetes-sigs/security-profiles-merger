@@ -49,9 +49,8 @@ func filteredOnIndex(name string, index uint) []specs.LinuxSyscall {
 
 	for idx := range budgetEntries {
 		entries = append(entries, specs.LinuxSyscall{
-			Names:    []string{name},
-			Action:   specs.ActAllow,
-			ErrnoRet: nil,
+			Names:  []string{name},
+			Action: specs.ActAllow,
 			Args: []specs.LinuxSeccompArg{{
 				Index: index, Value: uint64(idx), Op: specs.OpEqualTo, ValueTwo: 0,
 			}},
@@ -188,9 +187,8 @@ func ioctlEqualities(count int) []specs.LinuxSyscall {
 
 	for idx := range count {
 		entries = append(entries, specs.LinuxSyscall{
-			Names:    []string{"ioctl"},
-			Action:   specs.ActAllow,
-			ErrnoRet: nil,
+			Names:  []string{"ioctl"},
+			Action: specs.ActAllow,
 			Args: []specs.LinuxSeccompArg{{
 				Index: 1, Value: uint64(idx), Op: specs.OpEqualTo, ValueTwo: 0,
 			}},
@@ -311,10 +309,9 @@ func TestIntersectListsOverBudgetDropsSyscall(t *testing.T) {
 // condition and name.
 func multiNameEntry(names, conditions int) specs.LinuxSyscall {
 	entry := specs.LinuxSyscall{
-		Names:    make([]string, 0, names),
-		Action:   specs.ActAllow,
-		ErrnoRet: nil,
-		Args:     make([]specs.LinuxSeccompArg, 0, conditions),
+		Names:  make([]string, 0, names),
+		Action: specs.ActAllow,
+		Args:   make([]specs.LinuxSeccompArg, 0, conditions),
 	}
 
 	for idx := range names {
@@ -350,9 +347,8 @@ func TestMergeBoundsMultiNameExpansion(t *testing.T) {
 	right := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
 		Syscalls: []specs.LinuxSyscall{{
-			Names:    []string{"sys0"},
-			Action:   specs.ActAllow,
-			ErrnoRet: nil,
+			Names:  []string{"sys0"},
+			Action: specs.ActAllow,
 			Args: []specs.LinuxSeccompArg{{
 				Index: 0, Value: 1, Op: specs.OpEqualTo, ValueTwo: 0,
 			}},
@@ -412,10 +408,9 @@ func TestMergeBoundsRepeatedMultiplexedName(t *testing.T) {
 	)
 
 	entry := specs.LinuxSyscall{
-		Names:    slices.Repeat([]string{syscallSocket}, names),
-		Action:   specs.ActAllow,
-		ErrnoRet: nil,
-		Args:     make([]specs.LinuxSeccompArg, 0, conditions),
+		Names:  slices.Repeat([]string{syscallSocket}, names),
+		Action: specs.ActAllow,
+		Args:   make([]specs.LinuxSeccompArg, 0, conditions),
 	}
 
 	for idx := range conditions {

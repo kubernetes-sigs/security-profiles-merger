@@ -2,17 +2,23 @@
 version: "2"
 run:
   # The cgo bridge and the tests that check the model against libseccomp
-  # itself sit behind this tag, so without it roughly a fifth of the tree
-  # is never analyzed. The exclusions below only apply under it too.
+  # itself sit behind the libseccomp tag, so without it roughly a fifth of
+  # the tree is never analyzed, and the check of the apparmor port against
+  # apparmor_parser behind its own. The exclusions below only apply under
+  # them too.
   build-tags:
+    - apparmor_parser
     - libseccomp
 linters:
   # Every linter, so that one a new release adds is enabled by the bump
-  # rather than by someone remembering to list it. The disabled ones are
-  # deprecated; exhaustruct_v5, gomodguard_v2 and wsl_v5 replace them.
+  # rather than by someone remembering to list it. exhaustruct, gomodguard
+  # and wsl are deprecated; exhaustruct_v5, gomodguard_v2 and wsl_v5
+  # replace them. gochecknoglobals is off: the module's globals are lookup
+  # tables and caches, which a nolint on each only restated.
   default: all
   disable:
     - exhaustruct
+    - gochecknoglobals
     - gomodguard
     - wsl
   settings:
@@ -20,6 +26,20 @@ linters:
       # The failures internal/merge joins are this module's own.
       ignore-package-globs:
         - sigs.k8s.io/security-profiles-merger/internal/*
+      # The defaults, and the errors of a json.Decoder reading a document
+      # token by token, which a caller reports as the decoder's.
+      ignore-sigs:
+        - .Errorf(
+        - errors.New(
+        - errors.Unwrap(
+        - errors.Join(
+        - .Wrap(
+        - .Wrapf(
+        - .WithMessage(
+        - .WithMessagef(
+        - .WithStack(
+        - (*encoding/json.Decoder).Token(
+        - (*encoding/json.Decoder).Decode(
     depguard:
       rules:
         main:
@@ -63,14 +83,11 @@ linters:
     rules:
       - linters:
           - dupl
+          - exhaustruct_v5
           - funlen
-          - gochecknoglobals
           - goconst
           - gosec
         path: _test\.go
-      - linters:
-          - gochecknoglobals
-        path: apparmor/glob\.go
       - linters:
           - tagliatelle
         path: apparmor/(types|diff)\.go

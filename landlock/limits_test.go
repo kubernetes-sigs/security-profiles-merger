@@ -44,24 +44,18 @@ func TestArtifactLimitsAtTheirBoundary(t *testing.T) {
 		}
 
 		return &landlock.Profile{
-			HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessReadFile},
-			HandledAccessNet: nil,
-			Scoped:           nil,
-			PathRules:        list,
-			NetRules:         nil,
+			HandledAccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
+			PathRules:       list,
 		}
 	}
 
 	pathLength := func(length int) *landlock.Profile {
 		return &landlock.Profile{
-			HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessReadFile},
-			HandledAccessNet: nil,
-			Scoped:           nil,
+			HandledAccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
 			PathRules: []landlock.PathRule{{
 				Path:     "/" + strings.Repeat("a", length-1),
 				AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
 			}},
-			NetRules: nil,
 		}
 	}
 
@@ -112,10 +106,7 @@ func TestArtifactLimitsAtTheirBoundary(t *testing.T) {
 // counts one each.
 func portsProfile(count int) *landlock.Profile {
 	profile := &landlock.Profile{
-		HandledAccessFS:  nil,
 		HandledAccessNet: []landlock.NetAccessRight{landlock.NetAccessBindTCP},
-		Scoped:           nil,
-		PathRules:        nil,
 		NetRules:         make([]landlock.NetRule, count),
 	}
 

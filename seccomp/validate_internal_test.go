@@ -26,68 +26,57 @@ import (
 	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 )
 
-// TestFilterKeyEnumeratesSubsets pins the enumeration the artifact conflict
-// tracker files a rule under, and the guard that keeps a rule with more
-// conditions than a profile passing Validate can carry from being filed.
-func TestFilterKeyEnumeratesSubsets(t *testing.T) {
+// TestFilterKeyNested pins the relation the artifact conflict tracker
+// compares two rules by, in both orders, and the guard that keeps a rule
+// with more conditions than a profile passing Validate can carry from being
+// keyed.
+func TestFilterKeyNested(t *testing.T) {
 	t.Parallel()
 
-	args := func(count int) []specs.LinuxSeccompArg {
-		result := make([]specs.LinuxSeccompArg, 0, count)
-		for idx := range count {
-			result = append(result, specs.LinuxSeccompArg{
-				Index: uint(idx), Value: uint64(idx), ValueTwo: 0, Op: specs.OpEqualTo,
-			})
+	tracker := newConflictTracker()
+
+	keyOf := func(args ...specs.LinuxSeccompArg) filterKey {
+		key, ok := tracker.keyOf(args)
+		if !ok {
+			t.Fatalf("keyOf(%v) refused a valid filter", args)
 		}
 
-		return result
+		return key
 	}
 
+	equal := func(index uint, value uint64) specs.LinuxSeccompArg {
+		return specs.LinuxSeccompArg{Index: index, Value: value, ValueTwo: 0, Op: specs.OpEqualTo}
+	}
+
+	none := keyOf()
+	first := keyOf(equal(0, 1))
+	otherValue := keyOf(equal(0, 2))
+	both := keyOf(equal(0, 1), equal(1, 1))
+	second := keyOf(equal(1, 1))
+	every := keyOf(equal(0, 1), equal(1, 1), equal(2, 1), equal(3, 1), equal(4, 1), equal(5, 1))
+
 	for _, testCase := range []struct {
-		name  string
-		count int
-		want  int
+		name        string
+		left, right filterKey
+		want        bool
 	}{
-		{name: "no conditions", count: 0, want: 0},
-		{name: "one condition", count: 1, want: 1},
-		{name: "three conditions", count: 3, want: 7},
-		{name: "every valid argument index", count: maxSyscallArgIndex + 1, want: 63},
+		{"no conditions and no conditions", none, none, true},
+		{"no conditions and any filter", none, every, true},
+		{"a filter and itself", both, both, true},
+		{"a subset and the whole", first, both, true},
+		{"the other subset and the whole", second, both, true},
+		{"a subset and every index", both, every, true},
+		{"another value on the same index", first, otherValue, false},
+		{"disjoint indices", first, second, false},
+		{"another value besides a shared condition", both, keyOf(equal(0, 1), equal(1, 2)), false},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-
-			tracker := newConflictTracker()
-
-			key, ok := tracker.keyOf(args(testCase.count))
-			if !ok {
-				t.Fatal("keyOf refused a valid filter")
+		for _, pair := range [2][2]filterKey{
+			{testCase.left, testCase.right}, {testCase.right, testCase.left},
+		} {
+			if got := pair[0].nested(pair[1]); got != testCase.want {
+				t.Errorf("%s: nested = %v, want %v", testCase.name, got, testCase.want)
 			}
-
-			seen := make(map[filterKey]bool)
-
-			forEachProperSubmask(key.mask(), func(submask uint8) {
-				subset := key.subset(submask)
-
-				// The key of a subset is the key of the subset's conditions.
-				var conditions []specs.LinuxSeccompArg
-
-				for _, arg := range args(testCase.count) {
-					if submask&(1<<arg.Index) != 0 {
-						conditions = append(conditions, arg)
-					}
-				}
-
-				if want, _ := tracker.keyOf(conditions); subset != want {
-					t.Errorf("subset %b = %+v, want %+v", submask, subset, want)
-				}
-
-				seen[subset] = true
-			})
-
-			if len(seen) != testCase.want {
-				t.Errorf("visited %d distinct subsets, want %d", len(seen), testCase.want)
-			}
-		})
+		}
 	}
 
 	// Validate limits indices to 0-5 and an entry repeating one is loaded as
@@ -103,28 +92,91 @@ func TestFilterKeyEnumeratesSubsets(t *testing.T) {
 	}
 }
 
-// TestFormatEntries pins the list rendering of duplicate syscall entry
-// indices, including the single-entry form the duplicate report itself never
-// reaches and the elision that keeps the list from growing with the profile.
-func TestFormatEntries(t *testing.T) {
+// TestConflictTrackerRecord pins when a rule conflicts with the rules before
+// it: an earlier rule yields another result and one of the two filters is
+// equal to or wider than the other. Rules whose filters only overlap, and
+// rules with the same result, do not conflict, and every earlier rule
+// counts, not only the first under a filter.
+func TestConflictTrackerRecord(t *testing.T) {
 	t.Parallel()
 
+	equal := func(index uint, value uint64) specs.LinuxSeccompArg {
+		return specs.LinuxSeccompArg{Index: index, Value: value, ValueTwo: 0, Op: specs.OpEqualTo}
+	}
+
+	one, two := uint(1), uint(2)
+	rule := func(action specs.LinuxSeccompAction, errno *uint, args ...specs.LinuxSeccompArg) clause {
+		return clause{action: action, errnoRet: errno, args: args}
+	}
+
 	for _, testCase := range []struct {
-		entries []int
-		want    string
+		name  string
+		rules []clause
+		want  []bool
 	}{
-		{entries: nil, want: ""},
-		{entries: []int{0}, want: "0"},
-		{entries: []int{0, 1}, want: "0 and 1"},
-		{entries: []int{0, 1, 2}, want: "0, 1 and 2"},
-		{entries: []int{0, 1, 2, 3, 4, 5, 6, 7}, want: "0, 1, 2, 3, 4, 5, 6 and 7"},
 		{
-			entries: []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
-			want:    "0, 1, 2, 3, 4, 5, 6, 7 and 2 more",
+			"a narrower rule after a wider one",
+			[]clause{rule(specs.ActAllow, nil), rule(specs.ActErrno, &one, equal(0, 1))},
+			[]bool{false, true},
+		},
+		{
+			"a wider rule after a narrower one",
+			[]clause{rule(specs.ActErrno, &one, equal(0, 1)), rule(specs.ActAllow, nil)},
+			[]bool{false, true},
+		},
+		{
+			"equal filters",
+			[]clause{rule(specs.ActAllow, nil, equal(0, 1)), rule(specs.ActLog, nil, equal(0, 1))},
+			[]bool{false, true},
+		},
+		{
+			"equal filters with another errno",
+			[]clause{
+				rule(specs.ActErrno, &one, equal(0, 1)), rule(specs.ActErrno, &two, equal(0, 1)),
+			},
+			[]bool{false, true},
+		},
+		{
+			"the same result",
+			[]clause{rule(specs.ActAllow, nil), rule(specs.ActAllow, nil, equal(0, 1))},
+			[]bool{false, false},
+		},
+		{
+			"overlapping filters",
+			[]clause{rule(specs.ActAllow, nil, equal(0, 1)), rule(specs.ActErrno, &one, equal(1, 1))},
+			[]bool{false, false},
+		},
+		{
+			"another value on the same index",
+			[]clause{rule(specs.ActAllow, nil, equal(0, 1)), rule(specs.ActErrno, &one, equal(0, 2))},
+			[]bool{false, false},
+		},
+		{
+			"a later rule under the filter",
+			[]clause{
+				rule(specs.ActAllow, nil, equal(0, 1)),
+				rule(specs.ActErrno, &one, equal(1, 1)),
+				rule(specs.ActAllow, nil, equal(0, 1), equal(1, 1)),
+			},
+			[]bool{false, false, true},
+		},
+		{
+			"two results under one filter",
+			[]clause{
+				rule(specs.ActAllow, nil, equal(0, 1), equal(1, 1)),
+				rule(specs.ActErrno, &one, equal(0, 1), equal(1, 1)),
+				rule(specs.ActAllow, nil, equal(0, 1)),
+			},
+			[]bool{false, true, true},
 		},
 	} {
-		if got := formatEntries(testCase.entries); got != testCase.want {
-			t.Errorf("formatEntries(%v) = %q, want %q", testCase.entries, got, testCase.want)
+		tracker := newConflictTracker()
+
+		for idx, next := range testCase.rules {
+			if got := tracker.record(next); got != testCase.want[idx] {
+				t.Errorf("%s: rule %d conflicts = %v, want %v",
+					testCase.name, idx, got, testCase.want[idx])
+			}
 		}
 	}
 }
@@ -136,13 +188,7 @@ func failingProfile(count int) *specs.LinuxSeccomp {
 	one, large := uint(1), uint(maxErrno+1)
 
 	profile := &specs.LinuxSeccomp{
-		DefaultAction:    specs.ActErrno,
-		DefaultErrnoRet:  nil,
-		Architectures:    nil,
-		Flags:            nil,
-		ListenerPath:     "",
-		ListenerMetadata: "",
-		Syscalls:         nil,
+		DefaultAction: specs.ActErrno,
 	}
 
 	for range count {
@@ -154,9 +200,8 @@ func failingProfile(count int) *specs.LinuxSeccomp {
 		)
 		profile.Syscalls = append(profile.Syscalls,
 			specs.LinuxSyscall{
-				Names:    []string{"re\x00ad", "", "x\x01y"},
-				Action:   "SCMP_ACT_BOGUS",
-				ErrnoRet: nil,
+				Names:  []string{"re\x00ad", "", "x\x01y"},
+				Action: "SCMP_ACT_BOGUS",
 				Args: []specs.LinuxSeccompArg{
 					{Index: maxSyscallArgIndex + 1, Value: 0, ValueTwo: 1, Op: "SCMP_CMP_BOGUS"},
 				},
@@ -167,7 +212,6 @@ func failingProfile(count int) *specs.LinuxSeccomp {
 				},
 				Action:   specs.ActNotify,
 				ErrnoRet: &one,
-				Args:     nil,
 			},
 			specs.LinuxSyscall{
 				Names:    []string{"read"},
@@ -251,20 +295,13 @@ func TestValidatorsDoNotBuildFailuresPastTheLimit(t *testing.T) {
 func TestValidateCostsNothingPerValidEntry(t *testing.T) {
 	valid := func(count int) *specs.LinuxSeccomp {
 		profile := &specs.LinuxSeccomp{
-			DefaultAction:    specs.ActErrno,
-			DefaultErrnoRet:  nil,
-			Architectures:    nil,
-			Flags:            nil,
-			ListenerPath:     "",
-			ListenerMetadata: "",
-			Syscalls:         nil,
+			DefaultAction: specs.ActErrno,
 		}
 
 		for range count {
 			profile.Syscalls = append(profile.Syscalls, specs.LinuxSyscall{
-				Names:    []string{"read", "write"},
-				Action:   specs.ActAllow,
-				ErrnoRet: nil,
+				Names:  []string{"read", "write"},
+				Action: specs.ActAllow,
 				Args: []specs.LinuxSeccompArg{
 					{Index: 0, Value: 1, ValueTwo: 0, Op: specs.OpEqualTo},
 				},
@@ -302,13 +339,8 @@ func TestValidateCostsNothingPerValidEntry(t *testing.T) {
 func TestValidateArtifactRefusesTooManyEntriesFirst(t *testing.T) {
 	empty := func(count int) *specs.LinuxSeccomp {
 		return &specs.LinuxSeccomp{
-			DefaultAction:    specs.ActErrno,
-			DefaultErrnoRet:  nil,
-			Architectures:    nil,
-			Flags:            nil,
-			ListenerPath:     "",
-			ListenerMetadata: "",
-			Syscalls:         make([]specs.LinuxSyscall, count),
+			DefaultAction: specs.ActErrno,
+			Syscalls:      make([]specs.LinuxSyscall, count),
 		}
 	}
 

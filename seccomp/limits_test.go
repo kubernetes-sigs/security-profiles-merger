@@ -193,6 +193,6 @@ func TestDiffSeesPastTheClauseBudget(t *testing.T) {
 	}
 
 	if !diff.Equal {
-		t.Errorf("Diff of one profile with itself = %s", seccomp.FormatDiff(diff))
+		t.Errorf("Diff of one profile with itself = %s", diff.String())
 	}
 }

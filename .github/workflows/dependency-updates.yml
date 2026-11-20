@@ -26,10 +26,9 @@ concurrency:
   group: dependency-updates
   cancel-in-progress: false
 
+# The tools in hack/tools/go.mod run with the Go in .go-version, as in
+# ci.yml.
 env:
-  # The Go the tools in hack/tools/go.mod run with, the one ci.yml pins;
-  # dependencies.yaml keeps the copies in sync.
-  GO_VERSION: "1.27.4"
   ISSUE_TITLE: "Tool pins behind their upstream releases"
   ISSUE_LABEL: dependency-updates
 
@@ -49,7 +48,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
           cache-dependency-path: hack/tools/go.sum
       - run: make govulncheck
         env:
@@ -73,7 +72,7 @@ jobs:
       # need.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
       - name: Check the pinned versions against their upstreams
         id: check
         env:

@@ -42,8 +42,6 @@ var ErrUnsupportedSpecField = errors.New("field this package does not read")
 // The fields of the runtime-spec types the package reads. A field a newer
 // runtime-spec adds is not in these lists, and Validate rejects a profile
 // that sets it.
-//
-//nolint:gochecknoglobals // immutable lookup tables
 var (
 	readProfileFields = []string{
 		"DefaultAction", "DefaultErrnoRet", "Architectures", "Flags",

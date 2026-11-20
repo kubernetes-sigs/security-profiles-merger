@@ -595,11 +595,8 @@ const (
 // parseCompressedDFA reads the tables of the one DFA the dump holds.
 func parseCompressedDFA(out string) (*parserDFA, error) {
 	dfa := &parserDFA{
-		accept:   nil,
-		fallback: nil,
-		base:     nil,
-		next:     make(map[int]int),
-		check:    make(map[int]int),
+		next:  make(map[int]int),
+		check: make(map[int]int),
 	}
 
 	var section string

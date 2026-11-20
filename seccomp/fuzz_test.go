@@ -17,6 +17,7 @@ limitations under the License.
 package seccomp_test
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -706,14 +707,14 @@ func FuzzDiff(f *testing.F) {
 			t.Fatal(err)
 		}
 
-		seccomp.FormatDiff(diff)
+		_ = diff.String()
 
 		reverse, err := seccomp.Diff(right, left)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		seccomp.FormatDiff(reverse)
+		_ = reverse.String()
 
 		if diff.Equal != reverse.Equal {
 			t.Error("Diff(L,R).Equal != Diff(R,L).Equal")
@@ -731,64 +732,6 @@ func FuzzDiff(f *testing.F) {
 		if !selfDiff.Equal {
 			t.Error("Diff(X, X) must be equal")
 		}
-	})
-}
-
-func FuzzValidateStrict(f *testing.F) {
-	f.Add(
-		uint8(4), uint8(8), uint8(8),
-		"read", "write",
-		false, false, uint64(0), uint64(0),
-		uint32(0), uint8(0),
-		uint16(0), uint16(0), uint16(0),
-	)
-	f.Add(
-		uint8(4), uint8(8), uint8(3),
-		"read", "open",
-		true, false, uint64(65536), uint64(0),
-		uint32(0x02), uint8(0x01),
-		uint16(0), uint16(0), uint16(0),
-	)
-	f.Add(
-		uint8(0), uint8(7), uint8(8),
-		"mmap", "brk",
-		true, false, uint64(0xFFFF), uint64(0),
-		uint32(0x13), uint8(0x07),
-		uint16(0), uint16(0), uint16(0),
-	)
-	f.Add(
-		uint8(0), uint8(5), uint8(6),
-		"read", "write",
-		false, false, uint64(0), uint64(0),
-		uint32(0), uint8(0),
-		uint16(0), uint16(0), uint16(0),
-	)
-	f.Add(
-		uint8(4), uint8(4), uint8(8),
-		"read", "write",
-		false, false, uint64(0), uint64(0),
-		uint32(0), uint8(0),
-		uint16(1), uint16(13), uint16(42),
-	)
-
-	f.Fuzz(func(
-		_ *testing.T,
-		defIdx, act1Idx, act2Idx uint8,
-		name1, name2 string,
-		hasArgs1, hasArgs2 bool,
-		argVal1, argVal2 uint64,
-		archMask uint32, flagMask uint8,
-		defErrno, errno1, errno2 uint16,
-	) {
-		profile := fuzzProfile(
-			defIdx, act1Idx, act2Idx,
-			name1, name2, hasArgs1, hasArgs2,
-			argVal1, argVal2,
-			archMask, flagMask,
-			defErrno, errno1, errno2,
-		)
-
-		_ = seccomp.ValidateStrict(profile)
 	})
 }
 
@@ -864,12 +807,33 @@ func nativeByteOrder(archs []specs.Arch, mask uint32) []specs.Arch {
 	})
 }
 
+// assertStrictOrdering checks ValidateStrict against what ValidateArtifact
+// returned for the profile: it accepts nothing ValidateArtifact rejects,
+// and where ValidateArtifact accepts, which is the only way to reach the
+// checks ValidateStrict adds, it rejects only for one of those.
+func assertStrictOrdering(t *testing.T, profile *specs.LinuxSeccomp, artifactErr error) {
+	t.Helper()
+
+	strictErr := seccomp.ValidateStrict(profile)
+
+	switch {
+	case artifactErr != nil && strictErr == nil:
+		t.Fatalf("ValidateStrict accepted a profile ValidateArtifact rejects: %v", artifactErr)
+	case artifactErr == nil && strictErr != nil &&
+		!errors.Is(strictErr, seccomp.ErrDuplicateSyscallName) &&
+		!errors.Is(strictErr, seccomp.ErrUnusedValueTwo):
+		t.Fatalf("ValidateStrict rejected an accepted artifact for a check of "+
+			"ValidateArtifact's: %v", strictErr)
+	}
+}
+
 // FuzzValidateArtifact fuzzes the check a runtime applies to a profile it
 // did not author, which is the entry point KEP-6061 points at untrusted
 // input. Beyond crashes and hangs it pins the contract callers rely on: a
 // profile ValidateArtifact accepts is one Validate accepts, carries no
 // listener settings and no SCMP_ACT_NOTIFY, and merges without error into a
-// result a runtime can load.
+// result a runtime can load; and a profile ValidateStrict accepts is one
+// ValidateArtifact accepts, since the strict checks add to the artifact ones.
 func FuzzValidateArtifact(f *testing.F) {
 	f.Add(
 		uint8(4), uint8(8), uint8(8),
@@ -892,6 +856,34 @@ func FuzzValidateArtifact(f *testing.F) {
 		uint32(0x13), uint8(0x07),
 		uint16(4094), uint16(4095), uint16(1),
 	)
+	f.Add(
+		uint8(4), uint8(8), uint8(3),
+		"read", "open",
+		true, false, uint64(65536), uint64(0),
+		uint32(0x02), uint8(0x01),
+		uint16(0), uint16(0), uint16(0),
+	)
+	f.Add(
+		uint8(0), uint8(7), uint8(8),
+		"mmap", "brk",
+		true, false, uint64(0xFFFF), uint64(0),
+		uint32(0x13), uint8(0x07),
+		uint16(0), uint16(0), uint16(0),
+	)
+	f.Add(
+		uint8(0), uint8(5), uint8(6),
+		"read", "write",
+		false, false, uint64(0), uint64(0),
+		uint32(0), uint8(0),
+		uint16(0), uint16(0), uint16(0),
+	)
+	f.Add(
+		uint8(4), uint8(4), uint8(8),
+		"read", "write",
+		false, false, uint64(0), uint64(0),
+		uint32(0), uint8(0),
+		uint16(1), uint16(13), uint16(42),
+	)
 
 	f.Fuzz(func(
 		t *testing.T,
@@ -912,11 +904,14 @@ func FuzzValidateArtifact(f *testing.F) {
 
 		profile.Architectures = nativeByteOrder(profile.Architectures, archMask)
 
-		if seccomp.ValidateArtifact(profile) != nil {
+		err := seccomp.ValidateArtifact(profile)
+		assertStrictOrdering(t, profile, err)
+
+		if err != nil {
 			return
 		}
 
-		err := seccomp.Validate(profile)
+		err = seccomp.Validate(profile)
 		if err != nil {
 			t.Fatalf("ValidateArtifact accepted a profile Validate rejects: %v", err)
 		}

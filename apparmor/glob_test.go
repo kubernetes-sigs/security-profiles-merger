@@ -254,35 +254,25 @@ func TestUnionFilesystemGlob(t *testing.T) {
 		{
 			name: "read-only glob covers write-only literal",
 			left: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{globProcStatus},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{globProcStatus},
 			},
 			right: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
 				WriteOnlyPaths: []string{pathProc1Status},
-				ReadWritePaths: nil,
 			},
 			want: apparmor.FilesystemRules{
 				ReadOnlyPaths:  []string{globProcStatus},
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{pathProc1Status},
 			},
 		},
 		{
 			name: "write-only glob covers read-only literal",
 			left: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
 				WriteOnlyPaths: []string{globDataStar},
-				ReadWritePaths: nil,
 			},
 			right: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{pathDataFile},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{pathDataFile},
 			},
 			want: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
 				WriteOnlyPaths: []string{globDataStar},
 				ReadWritePaths: []string{pathDataFile},
 			},
@@ -290,18 +280,12 @@ func TestUnionFilesystemGlob(t *testing.T) {
 		{
 			name: "read-write glob subsumes read-only literal",
 			left: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{globVarLogDS},
 			},
 			right: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{"/var/log/syslog"},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{"/var/log/syslog"},
 			},
 			want: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{globVarLogDS},
 			},
 		},
@@ -326,89 +310,60 @@ func TestUnionFilesystemGlob(t *testing.T) {
 		{
 			name: "RW promotes from read set",
 			left: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{pathDataFile},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{pathDataFile},
 			},
 			right: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{pathDataFile},
 			},
 			want: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{pathDataFile},
 			},
 		},
 		{
 			name: "RW promotes from write set",
 			left: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
 				WriteOnlyPaths: []string{pathDataFile},
-				ReadWritePaths: nil,
 			},
 			right: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{pathDataFile},
 			},
 			want: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{pathDataFile},
 			},
 		},
 		{
 			name: "RW literal already in RW set",
 			left: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{globDataStar},
 			},
 			right: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{pathDataFile},
 			},
 			want: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{globDataStar},
 			},
 		},
 		{
 			name: "write literal already in RW set",
 			left: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{globDataStar},
 			},
 			right: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
 				WriteOnlyPaths: []string{pathDataFile},
-				ReadWritePaths: nil,
 			},
 			want: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{globDataStar},
 			},
 		},
 		{
 			name: "broader right glob promotes",
 			left: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{pathDataFile},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{pathDataFile},
 			},
 			right: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
 				WriteOnlyPaths: []string{globDataStar},
-				ReadWritePaths: nil,
 			},
 			want: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
 				WriteOnlyPaths: []string{globDataStar},
 				ReadWritePaths: []string{pathDataFile},
 			},
@@ -418,15 +373,11 @@ func TestUnionFilesystemGlob(t *testing.T) {
 			left: apparmor.FilesystemRules{
 				ReadOnlyPaths:  []string{pathDataFile},
 				WriteOnlyPaths: []string{pathBinLs},
-				ReadWritePaths: nil,
 			},
 			right: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{globDataStar},
 			},
 			want: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
 				WriteOnlyPaths: []string{pathBinLs},
 				ReadWritePaths: []string{globDataStar},
 			},
@@ -434,53 +385,38 @@ func TestUnionFilesystemGlob(t *testing.T) {
 		{
 			name: "read glob promotes write literals",
 			left: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
 				WriteOnlyPaths: []string{pathDataFile},
-				ReadWritePaths: nil,
 			},
 			right: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{globDataStar},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{globDataStar},
 			},
 			want: apparmor.FilesystemRules{
 				ReadOnlyPaths:  []string{globDataStar},
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{pathDataFile},
 			},
 		},
 		{
 			name: "literal RW matched by glob in read set",
 			left: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{globDataStar},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{globDataStar},
 			},
 			right: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{pathDataFile},
 			},
 			want: apparmor.FilesystemRules{
 				ReadOnlyPaths:  []string{globDataStar},
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{pathDataFile},
 			},
 		},
 		{
 			name: "literal RW matched by glob in write set",
 			left: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
 				WriteOnlyPaths: []string{globDataStar},
-				ReadWritePaths: nil,
 			},
 			right: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{pathDataFile},
 			},
 			want: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
 				WriteOnlyPaths: []string{globDataStar},
 				ReadWritePaths: []string{pathDataFile},
 			},
@@ -499,31 +435,19 @@ func TestUnionGlobThreeWay(t *testing.T) {
 	first := &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
 			AllowedExecutables: []string{pathBinLs, pathBinCat},
-			AllowedLibraries:   nil,
 		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	second := &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
 			AllowedExecutables: []string{globBinStar},
-			AllowedLibraries:   nil,
 		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	third := &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
 			AllowedExecutables: []string{pathBinSh, "/opt/tool"},
-			AllowedLibraries:   nil,
 		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	result, err := apparmor.Union(first, second, third)
@@ -674,145 +598,92 @@ func TestIntersectFilesystemGlob(t *testing.T) {
 		{
 			name: "glob read intersects literal read",
 			left: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{globUsrLib},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{globUsrLib},
 			},
 			right: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{pathLibC},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{pathLibC},
 			},
 			want: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{pathLibC},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{pathLibC},
 			},
 		},
 		{
 			name: "glob rw intersects literal read keeps read",
 			left: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{globUsrLib},
 			},
 			right: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{pathLibC},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{pathLibC},
 			},
 			want: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{pathLibC},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{pathLibC},
 			},
 		},
 		{
 			name: "different globs return empty",
 			left: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{"/tmp/*.log"},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{"/tmp/*.log"},
 			},
 			right: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{globVarDS},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{globVarDS},
 			},
-			want: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
-			},
+			want: apparmor.FilesystemRules{},
 		},
 		{
 			name: "literal left glob right",
 			left: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{pathUsrLibSO},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{pathUsrLibSO},
 			},
 			right: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{globUsrLib},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{globUsrLib},
 			},
 			want: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{pathUsrLibSO},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{pathUsrLibSO},
 			},
 		},
 		{
 			name: "glob read intersects literal write drops",
 			left: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{globUsrLib},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{globUsrLib},
 			},
 			right: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
 				WriteOnlyPaths: []string{pathLibC},
-				ReadWritePaths: nil,
 			},
-			want: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
-			},
+			want: apparmor.FilesystemRules{},
 		},
 		{
 			name: "no match returns empty",
 			left: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{globBinStar},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{globBinStar},
 			},
 			right: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{pathLibC},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{pathLibC},
 			},
-			want: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
-			},
+			want: apparmor.FilesystemRules{},
 		},
 		{
 			name: "glob and literal permissions combine",
 			left: apparmor.FilesystemRules{
 				ReadOnlyPaths:  []string{"/lib/*"},
 				WriteOnlyPaths: []string{pathLibFoo},
-				ReadWritePaths: nil,
 			},
 			right: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{pathLibFoo},
 			},
 			want: apparmor.FilesystemRules{
-				ReadOnlyPaths:  nil,
-				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{pathLibFoo},
 			},
 		},
 		{
 			name: "deeper prefix narrows to more specific glob",
 			left: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{globVarDS},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{globVarDS},
 			},
 			right: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{globVarLogDS},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{globVarLogDS},
 			},
 			want: apparmor.FilesystemRules{
-				ReadOnlyPaths:  []string{globVarLogDS},
-				WriteOnlyPaths: nil,
-				ReadWritePaths: nil,
+				ReadOnlyPaths: []string{globVarLogDS},
 			},
 		},
 	} {
@@ -831,11 +702,7 @@ func TestGlobPatternTooLong(t *testing.T) {
 	profile := &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
 			AllowedExecutables: []string{long},
-			AllowedLibraries:   nil,
 		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	_, err := apparmor.Intersect(profile, profile)
@@ -868,21 +735,13 @@ func assertGlobIntersect(t *testing.T, left, right, want []string) {
 	leftProfile := &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
 			AllowedExecutables: left,
-			AllowedLibraries:   nil,
 		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	rightProfile := &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
 			AllowedExecutables: right,
-			AllowedLibraries:   nil,
 		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	result, err := apparmor.Intersect(leftProfile, rightProfile)
@@ -915,21 +774,13 @@ func assertGlobUnion(t *testing.T, left, right, want []string) {
 	leftProfile := &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
 			AllowedExecutables: left,
-			AllowedLibraries:   nil,
 		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	rightProfile := &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
 			AllowedExecutables: right,
-			AllowedLibraries:   nil,
 		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	result, err := apparmor.Union(leftProfile, rightProfile)
@@ -962,25 +813,19 @@ func assertFilesystemGlobMerge(
 	t.Helper()
 
 	leftProfile := &apparmor.Profile{
-		Executable: nil,
 		Filesystem: &apparmor.FilesystemRules{
 			ReadOnlyPaths:  slices.Clone(left.ReadOnlyPaths),
 			WriteOnlyPaths: slices.Clone(left.WriteOnlyPaths),
 			ReadWritePaths: slices.Clone(left.ReadWritePaths),
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	rightProfile := &apparmor.Profile{
-		Executable: nil,
 		Filesystem: &apparmor.FilesystemRules{
 			ReadOnlyPaths:  slices.Clone(right.ReadOnlyPaths),
 			WriteOnlyPaths: slices.Clone(right.WriteOnlyPaths),
 			ReadWritePaths: slices.Clone(right.ReadWritePaths),
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	result, err := merge(leftProfile, rightProfile)

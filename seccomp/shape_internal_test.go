@@ -106,8 +106,7 @@ func clauseOn(
 	value uint64,
 ) clause {
 	return clause{
-		action:   action,
-		errnoRet: nil,
+		action: action,
 		args: []specs.LinuxSeccompArg{{
 			Index: index, Value: value, ValueTwo: 0, Op: operator,
 		}},

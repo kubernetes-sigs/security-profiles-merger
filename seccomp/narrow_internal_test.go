@@ -37,10 +37,9 @@ func TestSettleWithArchitecturesRebuildsWithout32Bit(t *testing.T) {
 	}
 	entry := func(action specs.LinuxSeccompAction, value uint64) specs.LinuxSyscall {
 		return specs.LinuxSyscall{
-			Names:    []string{"socket"},
-			Action:   action,
-			ErrnoRet: nil,
-			Args:     equal(value),
+			Names:  []string{"socket"},
+			Action: action,
+			Args:   equal(value),
 		}
 	}
 	profile := func(def specs.LinuxSeccompAction, entries ...specs.LinuxSyscall) *specs.LinuxSeccomp {

@@ -61,8 +61,6 @@ const (
 // multiplexer. Each is a different sub-call, so no two of them share a
 // multiplexed rule. Checked against libseccomp 2.6.1 by adding a rule for
 // every syscall name it knows on every architecture it knows.
-//
-//nolint:gochecknoglobals // immutable lookup table
 var multiplexedSyscalls = map[string]string{
 	"socket":      socketMultiplexer,
 	"bind":        socketMultiplexer,
@@ -106,8 +104,6 @@ func multiplexedBy(multiplexer string) []string {
 
 // carriedSyscalls inverts multiplexedSyscalls once, at package
 // initialization, rather than on every lookup.
-//
-//nolint:gochecknoglobals // immutable lookup table derived from another
 var carriedSyscalls = func() map[string][]string {
 	carried := make(map[string][]string)
 

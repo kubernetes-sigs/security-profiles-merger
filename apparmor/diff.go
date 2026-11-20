@@ -46,17 +46,6 @@ type ProfileDiff struct {
 	Capabilities *CapabilityDiff `json:"capability,omitempty"`
 }
 
-// IsEqual reports whether the two compared profiles are equivalent after
-// normalization, as Equal does.
-//
-// IsEqual and String have value receivers, so a ProfileDiff and a pointer to
-// one both implement fmt.Stringer. Diff returns a non-nil diff whenever its
-// error is nil; called through a nil pointer, either method panics.
-func (d ProfileDiff) IsEqual() bool { return d.Equal }
-
-// String returns what FormatDiff returns for the diff.
-func (d ProfileDiff) String() string { return FormatDiff(&d) }
-
 // SliceDiff represents added and removed items in a set-like slice. It is
 // spm.SliceDiff, the slice diff every package of this module produces, so
 // a value of it is a seccomp.SliceDiff or landlock.SliceDiff of the same
@@ -86,7 +75,7 @@ type FilesystemDiff struct {
 // NetworkDiff describes differences in network rules.
 type NetworkDiff struct {
 	// AllowRaw is set when the raw socket permission differs.
-	AllowRaw *BoolPtrDiff `json:"allowRaw,omitempty"`
+	AllowRaw *ValueDiff[*bool] `json:"allowRaw,omitempty"`
 	// Protocols is set when the TCP or UDP permission differs.
 	Protocols *AllowedProtocolsDiff `json:"allowedProtocols,omitempty"`
 }
@@ -94,9 +83,9 @@ type NetworkDiff struct {
 // AllowedProtocolsDiff describes differences in the permitted protocols.
 type AllowedProtocolsDiff struct {
 	// AllowTCP is set when the TCP permission differs.
-	AllowTCP *BoolPtrDiff `json:"allowTcp,omitempty"`
+	AllowTCP *ValueDiff[*bool] `json:"allowTcp,omitempty"`
 	// AllowUDP is set when the UDP permission differs.
-	AllowUDP *BoolPtrDiff `json:"allowUdp,omitempty"`
+	AllowUDP *ValueDiff[*bool] `json:"allowUdp,omitempty"`
 }
 
 // CapabilityDiff describes differences in the capability rules.
@@ -106,14 +95,11 @@ type CapabilityDiff struct {
 	AllowedCapabilities *SliceDiff[string] `json:"allowedCapabilities,omitempty"`
 }
 
-// BoolPtrDiff represents a change in an optional boolean value. Diff sets
-// both sides, since it compares an unset boolean as false.
-type BoolPtrDiff struct {
-	// Left is the value of the left profile, false where it sets none.
-	Left *bool `json:"left"`
-	// Right is the value of the right profile, false where it sets none.
-	Right *bool `json:"right"`
-}
+// ValueDiff represents a changed value. It is [spm.ValueDiff], which the
+// seccomp diff names as well. For an optional boolean, Diff sets both
+// sides, false where a profile sets none, since it compares an unset
+// boolean as false.
+type ValueDiff[T any] = spm.ValueDiff[T]
 
 // Diff compares two AppArmor profiles and returns a structured diff. Unlike
 // Intersect and Union, Diff does not validate profiles before comparing.
@@ -212,12 +198,12 @@ func diffNetwork(diff *ProfileDiff, left, right *Profile) {
 
 // diffBool compares two network booleans, which populateEmpty has set, and
 // returns nil when they agree. The diff holds copies of the values.
-func diffBool(left, right *bool) *BoolPtrDiff {
+func diffBool(left, right *bool) *ValueDiff[*bool] {
 	if *left == *right {
 		return nil
 	}
 
-	return &BoolPtrDiff{Left: merge.ClonePtr(left), Right: merge.ClonePtr(right)}
+	return &ValueDiff[*bool]{Left: merge.ClonePtr(left), Right: merge.ClonePtr(right)}
 }
 
 func diffCapabilities(diff *ProfileDiff, left, right *Profile) {
@@ -291,13 +277,15 @@ func ruleKey(path string) pathKey {
 	return matcherKey(path, keyAnalysis(path))
 }
 
-// FormatDiff returns a human-readable representation of an AppArmor
-// profile diff, quoted and bounded as FormatProfile is, so that a runtime
-// can log the diff of an artifact it was handed.
-func FormatDiff(diff *ProfileDiff) string {
-	if diff == nil {
-		return "Diff{<nil>}"
-	}
+// String returns a human-readable representation of the diff, as a single
+// line quoted and bounded as Profile.String is, so that a runtime can log
+// the diff of an artifact it was handed.
+//
+// String has a value receiver, so a ProfileDiff and a pointer to one both
+// implement fmt.Stringer. Diff returns a non-nil diff whenever its error is
+// nil; called through a nil pointer, String panics.
+func (d ProfileDiff) String() string {
+	diff := &d
 
 	if diff.Equal {
 		return "Diff{equal}"
@@ -339,14 +327,14 @@ func writeNetworkDiff(out *merge.Builder, networkDiff *NetworkDiff) {
 
 	parts := merge.NewJoiner(out, ",")
 
-	var tcpDiff, udpDiff *BoolPtrDiff
+	var tcpDiff, udpDiff *ValueDiff[*bool]
 	if networkDiff.Protocols != nil {
 		tcpDiff, udpDiff = networkDiff.Protocols.AllowTCP, networkDiff.Protocols.AllowUDP
 	}
 
 	for _, field := range [...]struct {
 		name string
-		diff *BoolPtrDiff
+		diff *ValueDiff[*bool]
 	}{
 		{name: "raw", diff: networkDiff.AllowRaw},
 		{name: "tcp", diff: tcpDiff},

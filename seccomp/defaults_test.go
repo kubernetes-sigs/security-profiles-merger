@@ -95,7 +95,7 @@ func TestCRIODefaultNeedsRestating(t *testing.T) {
 		t.Fatal("expected the intersection to settle the default")
 	}
 
-	text := seccomp.FormatDiff(diff)
+	text := diff.String()
 	for _, name := range []string{"clone", "socket"} {
 		if !strings.Contains(text, name) {
 			t.Errorf("expected the diff to name %s, got %s", name, text)
@@ -139,7 +139,7 @@ func TestCRIODefaultRestated(t *testing.T) {
 
 		if diff := selfDiff(t, native, read); !diff.Equal {
 			t.Errorf("%s: expected the restated default to be read exactly, got %s",
-				native, seccomp.FormatDiff(diff))
+				native, diff.String())
 		}
 	}
 
@@ -219,7 +219,7 @@ func TestMobyAndContainerdDefaultsPass(t *testing.T) {
 			for _, native := range []specs.Arch{specs.ArchX86_64, specs.ArchX86} {
 				if diff := selfDiff(t, native, profile); !diff.Equal {
 					t.Errorf("%s: expected the default to be read exactly, got %s",
-						native, seccomp.FormatDiff(diff))
+						native, diff.String())
 				}
 			}
 		})
@@ -241,13 +241,10 @@ func TestMobyAndContainerdDefaultSocketRules(t *testing.T) {
 			rules := socketRules(t, profile)
 
 			socket := &specs.LinuxSeccomp{
-				DefaultAction:    profile.DefaultAction,
-				DefaultErrnoRet:  profile.DefaultErrnoRet,
-				Architectures:    profile.Architectures,
-				Flags:            nil,
-				ListenerPath:     "",
-				ListenerMetadata: "",
-				Syscalls:         rules,
+				DefaultAction:   profile.DefaultAction,
+				DefaultErrnoRet: profile.DefaultErrnoRet,
+				Architectures:   profile.Architectures,
+				Syscalls:        rules,
 			}
 
 			err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(socket)
@@ -258,7 +255,7 @@ func TestMobyAndContainerdDefaultSocketRules(t *testing.T) {
 			for _, native := range []specs.Arch{specs.ArchX86_64, specs.ArchX86} {
 				if diff := selfDiff(t, native, socket); !diff.Equal {
 					t.Errorf("%s: expected the socket rules to be read exactly, got %s",
-						native, seccomp.FormatDiff(diff))
+						native, diff.String())
 				}
 			}
 		})

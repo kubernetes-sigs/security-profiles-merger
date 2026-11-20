@@ -35,8 +35,6 @@ import (
 // Profiles Operator writes them with omitempty, so a0 == 0 arrives as
 // {"index":0,"op":"SCMP_CMP_EQ"}, and 0 is what the member would say.
 // It is shared, so that what it learns of each type is learned once.
-//
-//nolint:gochecknoglobals // a lookup table and its caches
 var Required = strictjson.NewRequired(map[reflect.Type][]string{
 	reflect.TypeFor[specs.LinuxSeccompArg](): {"Index", "Op"},
 })

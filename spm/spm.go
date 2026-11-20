@@ -218,3 +218,14 @@ type SliceDiff[T comparable] struct {
 	// Removed holds the items only the left profile lists, sorted.
 	Removed []T `json:"removed,omitempty"`
 }
+
+// ValueDiff represents a changed value: seccomp.ValueDiff and
+// apparmor.ValueDiff name this type. A diff field of this type is nil when
+// the two values are equal; the field says what a side holds where its
+// profile sets no value.
+type ValueDiff[T any] struct {
+	// Left is the value of the left profile.
+	Left T `json:"left"`
+	// Right is the value of the right profile.
+	Right T `json:"right"`
+}

@@ -38,8 +38,6 @@ func NativeArchitecture() (specs.Arch, bool) {
 }
 
 // nativeArchitectures maps runtime.GOARCH values to seccomp architectures.
-//
-//nolint:gochecknoglobals // immutable lookup table
 var nativeArchitectures = map[string]specs.Arch{
 	"386":      specs.ArchX86,
 	"amd64":    specs.ArchX86_64,
@@ -64,8 +62,6 @@ var nativeArchitectures = map[string]specs.Arch{
 // x32 and the MIPS n32 ABIs count as 32-bit here, as libseccomp compiles
 // them that way. Checked against libseccomp 2.6.1 with every architecture
 // it knows.
-//
-//nolint:gochecknoglobals // immutable lookup table
 var narrowArchitectures = map[specs.Arch]bool{
 	specs.ArchX86:         true,
 	specs.ArchX32:         true,
@@ -86,8 +82,6 @@ var narrowArchitectures = map[specs.Arch]bool{
 // a rule for a socket or SysV IPC syscall a second time, on the multiplexer
 // socketcall(2) or ipc(2) (see multiplexedSyscalls). Checked against
 // libseccomp 2.6.1 with every architecture it knows.
-//
-//nolint:gochecknoglobals // immutable lookup table
 var multiplexingArchitectures = map[specs.Arch]bool{
 	specs.ArchX86:     true,
 	specs.ArchMIPS:    true,

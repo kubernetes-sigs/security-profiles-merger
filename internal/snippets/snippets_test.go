@@ -231,10 +231,7 @@ func check(exports map[string]string, goVersion string, snip snippet) []error {
 	var errs []error
 
 	conf := types.Config{
-		Context:          nil,
-		GoVersion:        goVersion,
-		IgnoreFuncBodies: false,
-		FakeImportC:      false,
+		GoVersion: goVersion,
 		// A fragment need not use every package it is given.
 		DisableUnusedImportCheck: true,
 		Importer:                 newImporter(exports),

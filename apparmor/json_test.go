@@ -57,12 +57,7 @@ func TestJSONRoundTripFull(t *testing.T) {
 func TestJSONRoundTripNilFields(t *testing.T) {
 	t.Parallel()
 
-	profile := apparmor.Profile{
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
-	}
+	profile := apparmor.Profile{}
 
 	testutil.AssertJSONRoundTrip(t, profile)
 }
@@ -71,22 +66,10 @@ func TestJSONRoundTripEmptySubStructs(t *testing.T) {
 	t.Parallel()
 
 	profile := apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: nil,
-			AllowedLibraries:   nil,
-		},
-		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  nil,
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
-		},
-		Network: &apparmor.NetworkRules{
-			AllowRaw:  nil,
-			Protocols: nil,
-		},
-		Capabilities: &apparmor.CapabilityRules{
-			AllowedCapabilities: nil,
-		},
+		Executable:   &apparmor.ExecutableRules{},
+		Filesystem:   &apparmor.FilesystemRules{},
+		Network:      &apparmor.NetworkRules{},
+		Capabilities: &apparmor.CapabilityRules{},
 	}
 
 	data, err := json.Marshal(profile)
@@ -122,11 +105,8 @@ func TestJSONRoundTripPartialFields(t *testing.T) {
 	t.Parallel()
 
 	profile := apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
 		Network: &apparmor.NetworkRules{
-			AllowRaw:  boolPtr(false),
-			Protocols: nil,
+			AllowRaw: boolPtr(false),
 		},
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{capChown},

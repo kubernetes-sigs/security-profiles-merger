@@ -63,7 +63,6 @@ func TestProfileString(t *testing.T) {
 		HandledAccessNet: []landlock.NetAccessRight{
 			landlock.NetAccessBindTCP,
 		},
-		Scoped: nil,
 		PathRules: []landlock.PathRule{{
 			Path:     pathHome,
 			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
@@ -84,14 +83,10 @@ func TestProfileStringScoped(t *testing.T) {
 	t.Parallel()
 
 	profile := landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
 		Scoped: []landlock.ScopeRight{
 			landlock.ScopeAbstractUnixSocket,
 			landlock.ScopeSignal,
 		},
-		PathRules: nil,
-		NetRules:  nil,
 	}
 
 	want := "Profile{scoped:abstract_unix_socket,signal}"
@@ -103,13 +98,7 @@ func TestProfileStringScoped(t *testing.T) {
 func TestProfileStringEmpty(t *testing.T) {
 	t.Parallel()
 
-	profile := landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
-	}
+	profile := landlock.Profile{}
 
 	want := "Profile{}"
 	if got := profile.String(); got != want {
@@ -117,14 +106,10 @@ func TestProfileStringEmpty(t *testing.T) {
 	}
 }
 
-func TestFormatProfileNil(t *testing.T) {
+func TestProfileStringNil(t *testing.T) {
 	t.Parallel()
 
 	const want = "Profile{<nil>}"
-
-	if got := landlock.FormatProfile(nil); got != want {
-		t.Errorf("FormatProfile(nil) = %q, want %q", got, want)
-	}
 
 	var profile *landlock.Profile
 	if got := profile.String(); got != want {
@@ -132,44 +117,36 @@ func TestFormatProfileNil(t *testing.T) {
 	}
 }
 
-func TestFormatProfileNonNil(t *testing.T) {
+func TestProfileStringNonNil(t *testing.T) {
 	t.Parallel()
 
 	profile := &landlock.Profile{
 		HandledAccessFS: []landlock.FSAccessRight{
 			landlock.FSAccessReadFile,
 		},
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
 	}
 
 	const want = "Profile{fs:read_file}"
 
-	if got := landlock.FormatProfile(profile); got != want {
-		t.Errorf("FormatProfile() = %q, want %q", got, want)
+	if got := profile.String(); got != want {
+		t.Errorf("String() = %q, want %q", got, want)
 	}
 }
 
-// TestFormatProfileQuotesSeparators covers a path holding the characters a
+// TestProfileStringQuotesSeparators covers a path holding the characters a
 // rule is built from: unquoted, it could spell a second rule.
-func TestFormatProfileQuotesSeparators(t *testing.T) {
+func TestProfileStringQuotesSeparators(t *testing.T) {
 	t.Parallel()
 
-	got := landlock.FormatProfile(&landlock.Profile{
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped:           nil,
+	got := (&landlock.Profile{
 		PathRules: []landlock.PathRule{{
 			Path:     "/a(read_file) /b",
 			AccessFS: []landlock.FSAccessRight{"read_file"},
 		}},
-		NetRules: nil,
-	})
+	}).String()
 
 	if want := `Profile{"/a(read_file) /b"(read_file)}`; got != want {
-		t.Errorf("FormatProfile() = %s, want %s", got, want)
+		t.Errorf("String() = %s, want %s", got, want)
 	}
 }
 
@@ -225,10 +202,10 @@ func TestFormattersAreBounded(t *testing.T) {
 	}
 
 	for name, format := range map[string]func() string{
-		"FormatProfile":       func() string { return landlock.FormatProfile(artifact) },
-		"FormatDiff":          func() string { return landlock.FormatDiff(diff) },
-		"FormatDiff(changed)": func() string { return landlock.FormatDiff(changed) },
-		"PathRule.String":     longRule.String,
+		"Profile.String":              func() string { return artifact.String() },
+		"ProfileDiff.String":          func() string { return diff.String() },
+		"ProfileDiff.String(changed)": func() string { return changed.String() },
+		"PathRule.String":             longRule.String,
 		"NetRule.String": func() string {
 			return landlock.NetRule{Port: 80, AccessNet: manyRights}.String()
 		},

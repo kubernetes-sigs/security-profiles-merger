@@ -17,6 +17,7 @@ limitations under the License.
 package apparmor
 
 import (
+	"math"
 	"reflect"
 	"slices"
 	"strings"
@@ -568,7 +569,6 @@ func evalProfile(fsSelector uint64, execMask, capMask uint32, netBits uint8) *Pr
 	return &Profile{
 		Executable: &ExecutableRules{
 			AllowedExecutables: executables,
-			AllowedLibraries:   nil,
 		},
 		Filesystem: &FilesystemRules{
 			ReadOnlyPaths:  readOnly,
@@ -694,7 +694,7 @@ func assertCapabilityAndNetworkPermissions(
 			t.Fatalf(
 				"merged profile grants %s: %v, inputs: %v\nleft=%s\nright=%s\nresult=%s",
 				name, got, want,
-				FormatProfile(left), FormatProfile(right), FormatProfile(result),
+				left.String(), right.String(), result.String(),
 			)
 		}
 	}
@@ -705,7 +705,7 @@ func assertCapabilityAndNetworkPermissions(
 			t.Fatalf(
 				"merged profile grants %s: %v, inputs: %v\nleft=%s\nright=%s\nresult=%s",
 				perm, got, want,
-				FormatProfile(left), FormatProfile(right), FormatProfile(result),
+				left.String(), right.String(), result.String(),
 			)
 		}
 	}
@@ -790,6 +790,30 @@ func addEvalSeeds(f *testing.F) {
 	// "?" against a multibyte name.
 	f.Add(uint64(0b01)<<(fsSelectorBits*17), uint32(1<<17), uint32(0b1000), uint8(netUDPBit),
 		uint64(0b01)<<(fsSelectorBits*9), uint32(1<<9), uint32(0b1000), uint8(netUDPBit))
+
+	// Sections one side leaves out.
+	f.Add(
+		uint64(1), uint32(1), uint32(256), uint8(16),
+		uint64(4), uint32(1), uint32(3), uint8(8),
+	)
+
+	// Capabilities and network rules alone.
+	f.Add(
+		uint64(1), uint32(0), uint32(255), uint8(7),
+		uint64(4), uint32(0), uint32(0), uint8(0),
+	)
+
+	// Everything set on both sides.
+	f.Add(
+		uint64(math.MaxUint64), uint32(math.MaxUint32), uint32(255), uint8(7),
+		uint64(math.MaxUint64), uint32(math.MaxUint32), uint32(255), uint8(7),
+	)
+
+	// A literal under two patterns.
+	f.Add(
+		uint64(1), uint32(1), uint32(3), uint8(1),
+		uint64(1073741828), uint32(32770), uint32(3), uint8(1),
+	)
 }
 
 // assertPermits runs one safety property over every probe and operation.
@@ -869,7 +893,7 @@ func TestIntersectGroupingStaysSafe(t *testing.T) {
 
 		for _, result := range results {
 			for _, other := range results {
-				if FormatProfile(result) != FormatProfile(other) {
+				if result.String() != other.String() {
 					ordered = true
 				}
 			}
@@ -922,7 +946,7 @@ func TestUnionGroupingIsExact(t *testing.T) {
 					if got := permits(result, access, probe); got != want {
 						t.Fatalf(
 							"triple %d grouped %s permits %s on %q: %v, inputs: %v\nresult=%s",
-							idx, name, access, probe, got, want, FormatProfile(result),
+							idx, name, access, probe, got, want, result.String(),
 						)
 					}
 				}
@@ -992,7 +1016,7 @@ func assertGroupingSafe(
 						"triple %d grouped %s permits %s on %q that input %d denies"+
 							"\ninput=%s\nresult=%s",
 						idx, name, access, probe, side,
-						FormatProfile(input), FormatProfile(result),
+						input.String(), result.String(),
 					)
 				}
 			}
@@ -1033,7 +1057,7 @@ func FuzzAppArmorIntersectPermits(f *testing.F) {
 				t.Fatalf(
 					"intersect permits %s on %q that an input denies\nleft=%s\nright=%s\nresult=%s",
 					access, probe,
-					FormatProfile(left), FormatProfile(right), FormatProfile(result),
+					left.String(), right.String(), result.String(),
 				)
 			}
 		})
@@ -1072,7 +1096,7 @@ func FuzzAppArmorUnionPermits(f *testing.F) {
 				t.Fatalf(
 					"union permits %s on %q: %v, inputs: %v\nleft=%s\nright=%s\nresult=%s",
 					access, probe, !inputs, inputs,
-					FormatProfile(left), FormatProfile(right), FormatProfile(result),
+					left.String(), right.String(), result.String(),
 				)
 			}
 		})
@@ -1080,7 +1104,7 @@ func FuzzAppArmorUnionPermits(f *testing.F) {
 		// A union result must itself be a valid profile.
 		err = Validate(result)
 		if err != nil {
-			t.Fatalf("union result is invalid: %v\nresult=%s", err, FormatProfile(result))
+			t.Fatalf("union result is invalid: %v\nresult=%s", err, result.String())
 		}
 
 		// The order of the inputs must not change the result.
@@ -1092,8 +1116,8 @@ func FuzzAppArmorUnionPermits(f *testing.F) {
 		if !reflect.DeepEqual(swapped, result) {
 			t.Fatalf(
 				"union depends on input order\nleft=%s\nright=%s\nforward=%s\nswapped=%s",
-				FormatProfile(left), FormatProfile(right),
-				FormatProfile(result), FormatProfile(swapped),
+				left.String(), right.String(),
+				result.String(), swapped.String(),
 			)
 		}
 	})

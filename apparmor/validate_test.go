@@ -54,21 +54,6 @@ func validationProfile(fsLists [3][]string, exec [2][]string, caps []string) *ap
 	return profile
 }
 
-func TestValidateNil(t *testing.T) {
-	t.Parallel()
-
-	for name, validate := range map[string]func(*apparmor.Profile) error{
-		"Validate":         apparmor.Validate,
-		"ValidateStrict":   apparmor.ValidateStrict,
-		"ValidateArtifact": apparmor.ValidateArtifact,
-	} {
-		err := validate(nil)
-		if !errors.Is(err, apparmor.ErrNilProfile) {
-			t.Errorf("%s(nil) = %v, want %v", name, err, apparmor.ErrNilProfile)
-		}
-	}
-}
-
 // TestValidateAccepts covers profiles the validators accept, among them
 // what Validate leaves to ValidateStrict: duplicate executables and
 // libraries, and capability names in any case.
@@ -333,9 +318,6 @@ func TestValidateAllowsUnknownCapability(t *testing.T) {
 
 	withFuture := func() *apparmor.Profile {
 		return &apparmor.Profile{
-			Executable: nil,
-			Filesystem: nil,
-			Network:    nil,
 			Capabilities: &apparmor.CapabilityRules{
 				AllowedCapabilities: []string{capNetAdmin, "SOME_FUTURE_CAP"},
 			},
@@ -358,9 +340,6 @@ func TestValidateAllowsUnknownCapability(t *testing.T) {
 	}
 
 	onlyKnown := &apparmor.Profile{
-		Executable: nil,
-		Filesystem: nil,
-		Network:    nil,
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{capNetAdmin},
 		},
@@ -386,15 +365,10 @@ func TestValidateStrictGlobTooComplex(t *testing.T) {
 	profile := &apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
 			AllowedExecutables: []string{tooManyNested},
-			AllowedLibraries:   nil,
 		},
 		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{"/etc/passwd", tooManyAlternatives},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
+			ReadOnlyPaths: []string{"/etc/passwd", tooManyAlternatives},
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	err := apparmor.ValidateStrict(profile)
@@ -420,7 +394,7 @@ func TestValidateStrictGlobTooComplex(t *testing.T) {
 	}
 
 	want := "Profile{r:/etc/passwd net:!raw,!tcp,!udp caps:none}"
-	if got := apparmor.FormatProfile(result); got != want {
+	if got := result.String(); got != want {
 		t.Errorf("Intersect = %s, want %s", got, want)
 	}
 }
@@ -436,8 +410,6 @@ func TestValidateRejectsVariables(t *testing.T) {
 			ReadOnlyPaths:  []string{"/etc/passwd", "@{PROC}/[0-9]*/status"},
 			WriteOnlyPaths: nil, ReadWritePaths: nil,
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	err := apparmor.Validate(profile)
@@ -495,12 +467,8 @@ func TestValidateStrictRejectsRelativePaths(t *testing.T) {
 			AllowedExecutables: []string{"bin/sh", "/bin/sh"}, AllowedLibraries: nil,
 		},
 		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  []string{"etc/**", "/etc/**", "{/usr,/opt}/**", "./etc/x"},
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
+			ReadOnlyPaths: []string{"etc/**", "/etc/**", "{/usr,/opt}/**", "./etc/x"},
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	err := apparmor.Validate(profile)
@@ -540,12 +508,9 @@ func TestValidateStrictEmptyPathReportedOnce(t *testing.T) {
 	t.Parallel()
 
 	profile := &apparmor.Profile{
-		Executable: nil,
 		Filesystem: &apparmor.FilesystemRules{
 			ReadOnlyPaths: []string{""}, WriteOnlyPaths: nil, ReadWritePaths: nil,
 		},
-		Network:      nil,
-		Capabilities: nil,
 	}
 
 	err := apparmor.ValidateStrict(profile)
@@ -571,11 +536,7 @@ func TestValidateArtifact(t *testing.T) {
 			profile: &apparmor.Profile{
 				Executable: &apparmor.ExecutableRules{
 					AllowedExecutables: []string{pathBinSh},
-					AllowedLibraries:   nil,
 				},
-				Filesystem:   nil,
-				Network:      nil,
-				Capabilities: nil,
 			},
 			wantErr: nil,
 		},
@@ -584,39 +545,25 @@ func TestValidateArtifact(t *testing.T) {
 			profile: &apparmor.Profile{
 				Executable: &apparmor.ExecutableRules{
 					AllowedExecutables: []string{"usr/bin/sh"},
-					AllowedLibraries:   nil,
 				},
-				Filesystem:   nil,
-				Network:      nil,
-				Capabilities: nil,
 			},
 			wantErr: apparmor.ErrRelativePath,
 		},
 		{
 			name: "rejects a variable",
 			profile: &apparmor.Profile{
-				Executable: nil,
 				Filesystem: &apparmor.FilesystemRules{
-					ReadOnlyPaths:  []string{"@{HOME}/x"},
-					WriteOnlyPaths: nil,
-					ReadWritePaths: nil,
+					ReadOnlyPaths: []string{"@{HOME}/x"},
 				},
-				Network:      nil,
-				Capabilities: nil,
 			},
 			wantErr: apparmor.ErrUnsupportedVariable,
 		},
 		{
 			name: "rejects a glob that never matches",
 			profile: &apparmor.Profile{
-				Executable: nil,
 				Filesystem: &apparmor.FilesystemRules{
-					ReadOnlyPaths:  []string{oversizeGlob()},
-					WriteOnlyPaths: nil,
-					ReadWritePaths: nil,
+					ReadOnlyPaths: []string{oversizeGlob()},
 				},
-				Network:      nil,
-				Capabilities: nil,
 			},
 			wantErr: apparmor.ErrGlobTooComplex,
 		},
@@ -625,9 +572,6 @@ func TestValidateArtifact(t *testing.T) {
 			// package does not know must not fail an artifact either.
 			name: "accepts an unknown capability",
 			profile: &apparmor.Profile{
-				Executable: nil,
-				Filesystem: nil,
-				Network:    nil,
 				Capabilities: &apparmor.CapabilityRules{
 					AllowedCapabilities: []string{"SOME_FUTURE_CAP"},
 				},
@@ -654,15 +598,6 @@ func TestValidateArtifact(t *testing.T) {
 				t.Errorf("expected %v, got: %v", test.wantErr, err)
 			}
 		})
-	}
-}
-
-func TestValidateArtifactNil(t *testing.T) {
-	t.Parallel()
-
-	err := apparmor.ValidateArtifact(nil)
-	if !errors.Is(err, apparmor.ErrNilProfile) {
-		t.Errorf("expected ErrNilProfile, got: %v", err)
 	}
 }
 
@@ -695,9 +630,6 @@ func TestValidateDoesNotNormalizeExecutables(t *testing.T) {
 			Executable: &apparmor.ExecutableRules{
 				AllowedExecutables: paths, AllowedLibraries: paths,
 			},
-			Filesystem:   nil,
-			Network:      nil,
-			Capabilities: nil,
 		}
 
 		return testing.AllocsPerRun(10, func() {
@@ -723,13 +655,10 @@ func TestValidateMessages(t *testing.T) {
 	long := "/" + strings.Repeat("a", apparmor.MaxPathLen)
 
 	err := apparmor.Validate(&apparmor.Profile{
-		Executable: nil,
 		Filesystem: &apparmor.FilesystemRules{
 			ReadOnlyPaths:  []string{"/etc", "/etc"},
-			WriteOnlyPaths: nil,
 			ReadWritePaths: []string{"/srv", "/etc"},
 		},
-		Network: nil,
 		Capabilities: &apparmor.CapabilityRules{
 			AllowedCapabilities: []string{"CHOWN", "chown"},
 		},
@@ -750,11 +679,7 @@ func TestValidateMessages(t *testing.T) {
 	err = apparmor.Validate(&apparmor.Profile{
 		Executable: &apparmor.ExecutableRules{
 			AllowedExecutables: []string{long},
-			AllowedLibraries:   nil,
 		},
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
 	})
 
 	want = "executable.allowedExecutables[0]: 4096 bytes: path exceeds 4095 bytes"
@@ -763,14 +688,9 @@ func TestValidateMessages(t *testing.T) {
 	}
 
 	err = apparmor.ValidateArtifact(&apparmor.Profile{
-		Executable: nil,
 		Filesystem: &apparmor.FilesystemRules{
-			ReadOnlyPaths:  make([]string, apparmor.MaxArtifactPaths+1),
-			WriteOnlyPaths: nil,
-			ReadWritePaths: nil,
+			ReadOnlyPaths: make([]string, apparmor.MaxArtifactPaths+1),
 		},
-		Network:      nil,
-		Capabilities: nil,
 	})
 
 	want = fmt.Sprintf("executable, filesystem: %d paths: too many paths (max %d)",
