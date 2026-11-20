@@ -18,6 +18,7 @@ package spm_test
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -191,12 +192,17 @@ func TestSliceDiffIsTheSameType(t *testing.T) {
 	}
 }
 
-// TestProfileDiffsSatisfyDiff checks the one method the three diff results
-// share. It is a compile-time claim as much as a test: if a package's
-// ProfileDiff lost IsEqual or changed its receiver, the assignments below
-// would not build, and code holding a diff whose type was decided elsewhere
-// could no longer ask for the verdict.
-func TestProfileDiffsSatisfyDiff(t *testing.T) {
+// profileDiff is what the three ProfileDiff types share.
+type profileDiff interface {
+	IsEqual() bool
+	String() string
+}
+
+// TestProfileDiffsHaveValueMethods checks that IsEqual and String have
+// value receivers on all three ProfileDiff types, so that a diff held by
+// value is a fmt.Stringer as much as a pointer to one. The assignments
+// below would not build otherwise.
+func TestProfileDiffsHaveValueMethods(t *testing.T) {
 	t.Parallel()
 
 	var (
@@ -205,42 +211,28 @@ func TestProfileDiffsSatisfyDiff(t *testing.T) {
 		landlockDiff landlock.ProfileDiff
 	)
 
-	byValue := map[string]spm.Diff{
-		"seccomp":  seccompDiff,
-		"apparmor": apparmorDiff,
-		"landlock": landlockDiff,
-	}
-
-	byPointer := map[string]spm.Diff{
-		"seccomp":  &seccompDiff,
-		"apparmor": &apparmorDiff,
-		"landlock": &landlockDiff,
-	}
-
-	// The zero value of every ProfileDiff has Equal false, so IsEqual has to
-	// report false here; a method returning a constant would pass only one of
-	// the two halves of this test.
-	for name, diff := range byValue {
-		if diff.IsEqual() {
-			t.Errorf("%s: zero ProfileDiff reports equal", name)
-		}
-	}
-
 	seccompDiff.Equal = true
 	apparmorDiff.Equal = true
 	landlockDiff.Equal = true
 
-	for name, diff := range byPointer {
+	for name, diff := range map[string]profileDiff{
+		"seccomp":  seccompDiff,
+		"apparmor": apparmorDiff,
+		"landlock": landlockDiff,
+	} {
 		if !diff.IsEqual() {
 			t.Errorf("%s: ProfileDiff with Equal set reports not equal", name)
+		}
+
+		if got, want := fmt.Sprintf("diff %v", diff), "diff Diff{equal}"; got != want {
+			t.Errorf("%s: a ProfileDiff by value prints %q, want %q", name, got, want)
 		}
 	}
 }
 
-// TestDiffsFromTheAPISatisfyDiff checks the same through the API, so that the
-// interface holds for the values the packages actually hand out rather than
-// only for a literal written here.
-func TestDiffsFromTheAPISatisfyDiff(t *testing.T) {
+// TestDiffsFromTheAPIReportEqual checks IsEqual on the values the packages
+// hand out, for a profile compared with itself.
+func TestDiffsFromTheAPIReportEqual(t *testing.T) {
 	t.Parallel()
 
 	seccompProfile := &specs.LinuxSeccomp{
@@ -290,7 +282,7 @@ func TestDiffsFromTheAPISatisfyDiff(t *testing.T) {
 		t.Fatalf("landlock.Diff: %v", err)
 	}
 
-	for name, diff := range map[string]spm.Diff{
+	for name, diff := range map[string]profileDiff{
 		"seccomp":  seccompDiff,
 		"apparmor": apparmorDiff,
 		"landlock": landlockDiff,

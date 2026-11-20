@@ -289,15 +289,22 @@ func plural(count int, noun string) string {
 
 // encodeJSON writes value as indented JSON. HTML characters are written as
 // they are: the output is a profile, not markup. A seccomp profile is
-// written in its seccompOutput form. A rune that does not print as itself
-// is escaped (see escapeInvisible) on its way to writer, so that a large
-// output that needs no escaping is not held a second time.
+// written as seccomp.Marshal writes it, handed to the encoder as raw JSON,
+// so that the output is held once by the encoder beyond the bytes Marshal
+// returns. A rune that does not print as itself is escaped (see
+// escapeInvisible) on its way to writer, which copies the output only when
+// it needs escaping.
 func encodeJSON(writer io.Writer, value any) error {
+	written, err := seccompOutput(value)
+	if err != nil {
+		return fmt.Errorf("encoding output: %w", err)
+	}
+
 	enc := json.NewEncoder(escapingWriter{writer: writer})
 	enc.SetIndent("", "  ")
 	enc.SetEscapeHTML(false)
 
-	err := enc.Encode(jsonValue(value))
+	err = enc.Encode(written)
 	if err != nil {
 		return fmt.Errorf("encoding output: %w", err)
 	}

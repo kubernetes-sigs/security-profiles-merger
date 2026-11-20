@@ -29,7 +29,12 @@ limitations under the License.
 // worth making on a profile a person wrote, and [ValidateArtifact] the ones
 // a runtime applies to an artifact. [UnmarshalStrict] decodes a profile and
 // refuses what encoding/json accepts silently, which is where an artifact
-// should enter.
+// should enter, and [Marshal] writes one as a runtime is to read it.
+//
+// What the merges, [Diff] and the artifact checks return depends on the
+// native architecture of the node that loads the result. The functions
+// assume the node the program runs on; the methods of [Options] take another
+// (see the Architectures section).
 //
 // The sections below state the merge semantics the functions share. The
 // function comments state each contract and point here for the detail.
@@ -51,8 +56,6 @@ limitations under the License.
 // writing the result into a profile writes an action a runtime loads rather
 // than the unknown one back. [Intersect] and [Union] validate their inputs
 // first and reject unknown actions with [ErrUnknownAction].
-// [IntersectSyscalls] and [UnionSyscalls] do not validate, and keep the
-// action an entry carries rather than the ranking's stand-in for it.
 //
 // # Evaluation model
 //
@@ -394,13 +397,10 @@ limitations under the License.
 // Dropping an architecture from the list does not remove it from a filter
 // where it is native, so [Intersect] is meant to run on the node that loads
 // its result. For [Diff] the native architecture means the same two profiles
-// compare differently depending on where the comparison runs; [DiffForArch]
-// names it instead, as [IntersectForArch], [UnionForArch],
-// [ValidateArtifactForArch] and [ValidateStrictForArch] do for a merge that
-// does not run on the node loading its result. [IntersectSyscalls] and
-// [UnionSyscalls] know no architectures and apply neither settling: a
-// caller loading their result for such an architecture gets the settling by
-// merging whole profiles.
+// compare differently depending on where the comparison runs. [Options]
+// names the native architecture of the node a merge, diff or check is for:
+// its zero value one that is not known, [NativeHost] the running program's,
+// which the plain functions assume, or another node's.
 //
 // # Flags
 //
@@ -423,8 +423,8 @@ limitations under the License.
 // flag survives through an input that left it to the runtime and no other
 // flag does; a list cannot leave one flag to the runtime and set another,
 // so next to other flags the result names it. specs.LinuxSeccomp leaves an
-// empty list out when it is marshaled, so a caller writing a result as JSON
-// has to write "flags": [] itself to keep the flag off.
+// empty list out when it is marshaled, so write a result as JSON with
+// [Marshal], which writes "flags": [] and keeps the flag off.
 //
 // # Listener
 //
@@ -544,16 +544,13 @@ limitations under the License.
 //     the filtered rule counts of both sides exceeds this budget. A side
 //     without filtered rules adds no work, so a large artifact against a
 //     baseline that allows or denies the syscall unconditionally is merged
-//     precisely. The budget admits [MaxArtifactClausesPerSyscall] rules
+//     precisely. The budget admits [MaxArtifactRulesPerSyscall] rules
 //     against a dozen filtered rules on the other side.
 //   - Combined budget (union only): union also compares all rules of both
 //     sides pairwise when raising overlapping rules, so a syscall also
 //     collapses once the filtered rules of both sides together exceed this
 //     budget, even when one side has none. A union where one side has
 //     several hundred filtered rules for a syscall therefore collapses it.
-//     [UnionSyscalls] skips this budget and the pair budget for a syscall
-//     without an unconditional entry in either list, since that union takes
-//     linear work.
 //   - Read budget: an entry loads one rule per name it lists, and one per
 //     condition per name when it repeats an argument index, so the rules a
 //     profile loads grow as the product of its name and condition counts
@@ -562,14 +559,14 @@ limitations under the License.
 //     input, the syscalls loading the most rules (ties by name) are read as
 //     the clause a collapse picks until the rest fit, which costs one pass
 //     over their entries, so an oversized syscall costs its own filters and
-//     not those of every other syscall. This is what bounds [Diff],
-//     [IntersectSyscalls] and [UnionSyscalls], which validate nothing.
+//     not those of every other syscall. This is what bounds [Diff], which
+//     validates nothing.
 //
 // [ValidateArtifact] bounds an artifact so that it reports one too large to
 // merge precisely instead of the merge silently collapsing a syscall.
-// [MaxArtifactEntriesPerSyscall] and [MaxArtifactClausesPerSyscall] bound
+// [MaxArtifactEntriesPerSyscall] and [MaxArtifactRulesPerSyscall] bound
 // one syscall; they count per name, so [MaxArtifactNamesPerEntry] bounds the
-// names of one entry and [MaxArtifactClauses] the rules of the whole
+// names of one entry and [MaxArtifactRules] the rules of the whole
 // profile, a quarter of the read budget, so an accepted artifact is always
 // read rule by rule. The pair and combined budgets also depend on the other
 // input: an accepted artifact stays inside the pair budget against a
@@ -579,30 +576,6 @@ limitations under the License.
 // every check visits. The limits on the whole profile are checked before
 // anything else and reported on their own. [Validate] enforces none of the
 // limits, since a runtime loads a profile past them.
-//
-// # Bare syscall lists
-//
-// [IntersectSyscalls], [UnionSyscalls] and [DiffSyscalls] take syscall
-// slices without a DefaultAction to reason with. The merges assume that the
-// caller loads both lists and the result with one default that is more
-// restrictive than every action in the lists, as in an allowlist, and that
-// no entry equals it, since a runtime would skip that entry. Under that
-// assumption [IntersectSyscalls] never permits more than either list and
-// [UnionSyscalls] never less, as a filter of a 64-bit architecture that
-// multiplexes nothing loads them: without a profile they know no
-// architectures, and read no rule as it loads on a 32-bit or multiplexing
-// one (see the Architectures section).
-//
-// [IntersectSyscalls] leaves calls a list leaves to the default to it:
-// syscalls in only one list are dropped, a conditional entry survives only
-// where the other list constrains every call it matches, and a syscall that
-// is not in a safe shape or exceeds the pair budget is dropped.
-// [UnionSyscalls] keeps everything, and collapses a syscall that is not in a
-// safe shape to its least restrictive action, which decides calls the lists
-// leave to the default but never less permissively than the default would.
-// Neither validates its inputs: callers ensure that actions are known, that
-// every entry has at least one name and that no name holds a NUL byte, or
-// call [Validate] on the enclosing profile first.
 //
 // # Conflicting rules
 //

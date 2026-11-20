@@ -95,6 +95,14 @@ func TestIntersectSlice(t *testing.T) {
 					testCase.left, testCase.right, got, testCase.want,
 				)
 			}
+
+			// An empty intersection is nil however it comes about, so that
+			// a list encodes as one JSON value whether a side was empty or
+			// the two were disjoint.
+			if testCase.want == nil && got != nil {
+				t.Errorf("IntersectSlice(%v, %v) = %#v, want nil",
+					testCase.left, testCase.right, got)
+			}
 		})
 	}
 }
@@ -347,7 +355,9 @@ func TestWriteSliceDiff(t *testing.T) {
 
 			var out merge.Builder
 
-			merge.WriteSliceDiff(&out, test.prefix, spm.SliceDiff[string]{
+			parts := merge.NewJoiner(&out, " ")
+
+			merge.WriteSliceDiff(&out, &parts, test.prefix, &spm.SliceDiff[string]{
 				Added:   test.added,
 				Removed: test.removed,
 			})
@@ -359,16 +369,60 @@ func TestWriteSliceDiff(t *testing.T) {
 	}
 }
 
+// TestWriteSliceDiffSkipsNil checks that a nil diff, which NewSliceDiff
+// returns for equal lists, writes no part, and that the parts around it are
+// separated once.
+func TestWriteSliceDiffSkipsNil(t *testing.T) {
+	t.Parallel()
+
+	var out merge.Builder
+
+	parts := merge.NewJoiner(&out, " ")
+
+	merge.WriteSliceDiff(&out, &parts, "a", merge.NewSliceDiff([]string{"x"}, []string{"y"}))
+	merge.WriteSliceDiff(&out, &parts, "b", merge.NewSliceDiff([]string{"x"}, []string{"x"}))
+	merge.WriteSliceDiff(&out, &parts, "c", merge.NewSliceDiff(nil, []string{"z"}))
+
+	if got, want := out.String(), "a:-x,+y c:+z"; got != want {
+		t.Errorf("WriteSliceDiff() = %q, want %q", got, want)
+	}
+}
+
+func TestNewSliceDiff(t *testing.T) {
+	t.Parallel()
+
+	if got := merge.NewSliceDiff([]string{"b", "a", "a"}, []string{"a", "b"}); got != nil {
+		t.Errorf("NewSliceDiff of equal sets = %+v, want nil", got)
+	}
+
+	if got := merge.NewSliceDiff[string](nil, []string{}); got != nil {
+		t.Errorf("NewSliceDiff of nil and empty = %+v, want nil", got)
+	}
+
+	got := merge.NewSliceDiff([]string{"c", "a"}, []string{"b", "a", "d"})
+	want := &spm.SliceDiff[string]{Added: []string{"b", "d"}, Removed: []string{"c"}}
+
+	if got == nil || !slices.Equal(got.Added, want.Added) ||
+		!slices.Equal(got.Removed, want.Removed) {
+		t.Errorf("NewSliceDiff() = %+v, want %+v", got, want)
+	}
+}
+
 // TestWriteSliceDiffOfDiffSlice checks that the results of DiffSlice land
 // on the right side of the formatted diff.
 func TestWriteSliceDiffOfDiffSlice(t *testing.T) {
 	t.Parallel()
 
-	added, removed := merge.DiffSlice([]string{"a", "b"}, []string{"b", "c"})
-
 	var out merge.Builder
 
-	merge.WriteSliceDiff(&out, "x", spm.SliceDiff[string]{Added: added, Removed: removed})
+	parts := merge.NewJoiner(&out, " ")
+
+	merge.WriteSliceDiff(
+		&out,
+		&parts,
+		"x",
+		merge.NewSliceDiff([]string{"a", "b"}, []string{"b", "c"}),
+	)
 
 	if got, want := out.String(), "x:-a,+c"; got != want {
 		t.Errorf("WriteSliceDiff() = %q, want %q", got, want)

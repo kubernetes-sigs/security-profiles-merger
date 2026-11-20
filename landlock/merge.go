@@ -34,16 +34,31 @@ var (
 	ErrNoProfiles = spm.ErrNoProfiles
 	// ErrNilProfile is returned when a nil profile is provided.
 	ErrNilProfile = spm.ErrNilProfile
-	// ErrMoreProblems is returned alongside the failures a report lists
-	// when it left others out: every validator bounds how many it reports,
-	// since a profile holds as many as it holds rules. A caller matching a
-	// sentinel must read a match here as "and possibly others", because a
-	// failure the profile holds can be absent from the error reporting it.
+	// ErrMoreProblems is spm.ErrMoreProblems, which a validation report
+	// matches when it left failures out: read a match as "and possibly
+	// others" before dispatching on another sentinel.
 	ErrMoreProblems = spm.ErrMoreProblems
+	// ErrBudgetExceeded is returned by Intersect and Union when merging
+	// their inputs would cost more than the merge budget (see the Cost
+	// bounds section of the package documentation). It is not wrapped in an
+	// InputError.
+	ErrBudgetExceeded = spm.ErrBudgetExceeded
 )
 
-// InputError is returned by Intersect and Union when one of the profiles
-// they were given fails validation, naming its position among the arguments.
+// maxMergeWork is the budget of Intersect and Union, in lookups of a rule
+// path's ancestors (see mergeLookups). Both merges look up the ancestors of
+// rule paths among rules, and settling refer does so once per input over the
+// rule paths of every input, as the pairwise fold does over the result, so
+// the work grows with the number of inputs times the ancestors of all their
+// rule paths. The budget admits three inputs of MaxArtifactRules rules on
+// paths of MaxPathLen bytes and the most components such a path can hold,
+// or a hundred recordings of a few dozen rules each.
+const maxMergeWork = 1 << 25
+
+// InputError is [spm.InputError], the error a merge or Diff returns for
+// one of its inputs, naming it by its position among the arguments. See
+// spm.InputError for its fields, and for the errors a merge returns without
+// it.
 type InputError = spm.InputError
 
 // Intersect merges multiple Landlock profiles via intersection: the
@@ -76,13 +91,16 @@ type InputError = spm.InputError
 // rights pass; the merge folds them. A failure is returned as an InputError
 // naming the input.
 //
-// The merge has no budget of its own. On any input Validate accepts, it
-// takes memory in proportion to the size of the inputs, and time in
-// proportion to the number of rules times the depth of their paths times
+// The merge takes memory in proportion to the size of the inputs, and time
+// in proportion to the number of rules times the depth of their paths times
 // the length of those paths, since it looks up every ancestor of every rule
-// path; MaxPathLen bounds the depth and the length. Validate does not bound
-// how many rules there are, so an untrusted artifact must pass
-// ValidateArtifact, whose MaxArtifactRules does, before it is merged.
+// path, once per input to settle refer; MaxPathLen bounds the depth and the
+// length. Inputs whose merge would exceed the budget are refused with
+// ErrBudgetExceeded after validation and before anything is merged (see the
+// Cost bounds section).
+// Validate does not bound how many rules one input holds, so an untrusted
+// artifact must still pass ValidateArtifact, whose MaxArtifactRules does,
+// before it is merged.
 //
 // A result that handles and scopes nothing, which happens only when no input
 // handles or scopes anything, restricts nothing; the kernel refuses to load
@@ -113,11 +131,12 @@ func Intersect(profiles ...*Profile) (*Profile, error) {
 // documentation.
 //
 // Inputs are validated as for Intersect, and the cost is bounded as for
-// Intersect: an untrusted input must pass ValidateArtifact first, since
-// Validate bounds no rule count. A result that handles and scopes nothing,
-// for example the union of a profile handling only filesystem rights with
-// one handling only network rights, restricts nothing; the kernel refuses to
-// load it, and ValidateArtifact reports it with ErrEmptyRuleset.
+// Intersect, with the same budget and ErrBudgetExceeded: an untrusted input
+// must pass ValidateArtifact first, since Validate bounds no rule count. A
+// result that handles and scopes nothing, for example the union of a
+// profile handling only filesystem rights with one handling only network
+// rights, restricts nothing; the kernel refuses to load it, and
+// ValidateArtifact reports it with ErrEmptyRuleset.
 func Union(profiles ...*Profile) (*Profile, error) {
 	return foldProfiles(profiles, unionTwo, finishUnion)
 }
@@ -132,17 +151,30 @@ func foldProfiles(
 	mergeTwo func(left, right *Profile) *Profile,
 	finish func(result *Profile, inputs []*Profile),
 ) (*Profile, error) {
-	normalized := make([]*Profile, len(profiles))
+	// Validate the caller's profiles first, so errors name their own
+	// indices and paths, and so that a path past MaxPathLen is reported as
+	// such rather than counted against the budget. Validation is linear in
+	// the inputs; the budget then bounds the merge.
+	cleaned := make([][]string, len(profiles))
 
 	for idx, profile := range profiles {
-		// Validate the caller's profile, so errors name its own indices
-		// and paths, then normalize using the paths validation cleaned.
-		cleaned, err := validateProfile(profile, tierMerge)
+		paths, err := validateProfile(profile, tierMerge)
 		if err != nil {
 			return nil, &spm.InputError{Index: idx, Err: err}
 		}
 
-		normalized[idx] = normalizeProfile(profile, cleaned)
+		cleaned[idx] = paths
+	}
+
+	err := checkMergeBudget(profiles)
+	if err != nil {
+		return nil, err
+	}
+
+	normalized := make([]*Profile, len(profiles))
+
+	for idx, profile := range profiles {
+		normalized[idx] = normalizeProfile(profile, cleaned[idx])
 		pruneUnhandledRights(normalized[idx])
 	}
 
@@ -163,6 +195,77 @@ func foldProfiles(
 }
 
 func ownedProfile(profile *Profile) *Profile { return profile }
+
+// checkMergeBudget refuses inputs whose merge would cost more than
+// maxMergeWork. It runs after validation and before anything is merged, and
+// it stops counting as soon as the budget is exceeded, so that the count
+// costs no more than the budget.
+func checkMergeBudget(profiles []*Profile) error {
+	if len(profiles) == 0 {
+		return nil
+	}
+
+	inputs := uint64(len(profiles))
+
+	_, exceeded := mergeLookups(profiles, maxMergeWork/inputs)
+	if exceeded {
+		return fmt.Errorf("merge: %d inputs need more than %d ancestor lookups: %w",
+			inputs, maxMergeWork, ErrBudgetExceeded)
+	}
+
+	return nil
+}
+
+// mergeLookups counts the paths every rule of every input has as itself or
+// an ancestor, as the ancestor walk of the merge visits them on the cleaned
+// path, and one for a network rule. Merging costs that count times the
+// number of inputs. It stops as soon as the count exceeds limit and reports
+// whether it did, so that neither the count nor the product can wrap
+// however many inputs or rules there are. A nil input counts nothing;
+// the merges validate their inputs before counting, which reports it, and a
+// caller counting without validating gets no answer for it.
+func mergeLookups(profiles []*Profile, limit uint64) (uint64, bool) {
+	var lookups uint64
+
+	for _, profile := range profiles {
+		if profile == nil {
+			continue
+		}
+
+		lookups += uint64(len(profile.NetRules))
+		if lookups > limit {
+			return lookups, true
+		}
+
+		for _, rule := range profile.PathRules {
+			lookups += pathLookups(rule.Path, limit-min(lookups, limit))
+			if lookups > limit {
+				return lookups, true
+			}
+		}
+	}
+
+	return lookups, false
+}
+
+// pathLookups returns how many paths the ancestor walk of the merge visits
+// for a rule path: the cleaned path itself and each of its parents, one per
+// component that is neither empty nor ".", so that repeated slashes and "."
+// components count nothing. It stops once the count exceeds limit.
+func pathLookups(path string, limit uint64) uint64 {
+	lookups := uint64(1)
+
+	for rest, more := path, true; more && lookups <= limit; {
+		var part string
+
+		part, rest, more = strings.Cut(rest, "/")
+		if part != "" && part != "." {
+			lookups++
+		}
+	}
+
+	return lookups
+}
 
 // finishIntersect drops refer where the result could allow a move or link an
 // input denies, then drops the rights that ancestor rules already grant.
@@ -654,15 +757,14 @@ func minimizePathRules(rules []PathRule) []PathRule {
 // input named.
 //
 // The paths are cleaned as the merge cleans them, reported once each and
-// sorted. A nil result, a nil input, or a path no grant was lowered onto
-// yields nothing. The function validates nothing and returns no error: it
-// reads each input as the merge reads it after Validate, with its paths
-// cleaned, its rules for one path folded, and the rights its handled sets do
-// not list dropped from its rules, since such a grant permits nothing the
-// input does not permit anyway and the merge ignores it. An input Validate
-// rejects, which no merge would have accepted, gets an answer that means
-// nothing, and a right this package does not know is never reported as
-// lowered; validate the inputs first.
+// sorted, or nil when no grant was lowered. The result and every input are
+// checked with Validate first, and read as the merge reads an input: with
+// paths cleaned, rules for one path folded, and the rights a handled set
+// does not list dropped from the rules, since such a grant permits nothing
+// the input does not permit anyway and the merge ignores it. An input that
+// fails is reported as an InputError whose Index is its position among the
+// inputs, as Intersect numbers them, and a result that fails as an error
+// that is not one.
 //
 // The Lowered rule paths section of the package documentation explains why
 // this matters: hierarchy resolution is textual, while the kernel binds a
@@ -675,23 +777,33 @@ func minimizePathRules(rules []PathRule) []PathRule {
 // separate Landlock layers instead of merging them. For a Union result the
 // answer is informational: union grants what any input grants, and the
 // input naming the path granted the access there itself.
-func LoweredRulePaths(result *Profile, inputs ...*Profile) []string {
-	if result == nil || len(result.PathRules) == 0 {
-		return nil
+func LoweredRulePaths(result *Profile, inputs ...*Profile) ([]string, error) {
+	resultPaths, err := validateProfile(result, tierMerge)
+	if err != nil {
+		return nil, fmt.Errorf("result: %w", err)
 	}
 
-	resultRules := pathKind().ruleMap(normalizeProfile(result, cleanPaths(result.PathRules)).PathRules)
+	cleaned := make([][]string, len(inputs))
+
+	for idx, input := range inputs {
+		cleaned[idx], err = validateProfile(input, tierMerge)
+		if err != nil {
+			return nil, &spm.InputError{Index: idx, Err: err}
+		}
+	}
+
+	if len(result.PathRules) == 0 {
+		return nil, nil
+	}
+
+	resultRules := pathKind().ruleMap(normalizeProfile(result, resultPaths).PathRules)
 
 	var lowered []string
 
-	for _, input := range inputs {
-		if input == nil {
-			continue
-		}
-
+	for idx, input := range inputs {
 		// Read the input as the merge does, so that a grant the merge
 		// ignores is not reported as lowered.
-		normalized := normalizeProfile(input, cleanPaths(input.PathRules))
+		normalized := normalizeProfile(input, cleaned[idx])
 		pruneUnhandledRights(normalized)
 		inputMasks := pathRuleMasks(normalized.PathRules)
 
@@ -704,7 +816,7 @@ func LoweredRulePaths(result *Profile, inputs ...*Profile) []string {
 
 	slices.Sort(lowered)
 
-	return nilIfEmpty(slices.Compact(lowered))
+	return nilIfEmpty(slices.Compact(lowered)), nil
 }
 
 // loweredAt reports whether the input grants one of the rights only on a

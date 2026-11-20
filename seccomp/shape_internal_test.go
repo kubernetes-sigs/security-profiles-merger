@@ -221,8 +221,8 @@ func TestSafeShapeUniformResultRejectsWideRange(t *testing.T) {
 
 // TestSafeShapeWideRangeOnOutOfRangeIndex reaches the overflow map of
 // indexSet, which holds the argument indices beyond the bitmap. Validate
-// rejects those, but Diff and the bare syscall-list functions do not
-// validate, so the shape classification still has to handle them.
+// rejects those, but Diff does not validate, so the shape classification
+// still has to handle them.
 func TestSafeShapeWideRangeOnOutOfRangeIndex(t *testing.T) {
 	t.Parallel()
 
@@ -249,8 +249,8 @@ func TestSafeShapeWideRangeOnOutOfRangeIndex(t *testing.T) {
 }
 
 // TestIsRangeOpUnknownOperator pins the conservative answer for an operator
-// the package does not know. Validate rejects those, but Diff and the bare
-// syscall-list functions classify unvalidated rules.
+// the package does not know. Validate rejects those, but Diff classifies
+// unvalidated rules.
 func TestIsRangeOpUnknownOperator(t *testing.T) {
 	t.Parallel()
 
@@ -304,9 +304,9 @@ func TestDedupeClausesRemovesRepeats(t *testing.T) {
 
 // TestIndexSetBeyondItsBits covers the map an indexSet falls back to past
 // the 64 indices it tracks in a word. Validate rejects an argument index
-// past the six the kernel passes, so no profile reaches the map; the
-// bare-list functions validate nothing, which is the path that can, and the
-// set is what tells a shape check whether two conditions share an index.
+// past the six the kernel passes, so no validated profile reaches the map;
+// Diff validates nothing, which is the path that can, and the set is what
+// tells a shape check whether two conditions share an index.
 func TestIndexSetBeyondItsBits(t *testing.T) {
 	t.Parallel()
 

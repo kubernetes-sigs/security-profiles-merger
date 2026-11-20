@@ -23,8 +23,6 @@ import (
 	"fmt"
 	"io"
 	"slices"
-
-	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 const (
@@ -177,11 +175,12 @@ func readDiffInputs(
 	return data, nil
 }
 
-func diffProfiles[T any, D spm.Diff](
+func diffProfiles[T any, D any](
 	inputs []profileInput,
 	format string,
 	diffFn func(*T, *T) (*D, error),
 	formatFn func(*D) string,
+	equalFn func(*D) bool,
 	stdout, stderr io.Writer,
 ) int {
 	profiles, err := unmarshalAll[T](inputs, lenientDecode(len(inputs)), stderr)
@@ -202,7 +201,7 @@ func diffProfiles[T any, D spm.Diff](
 		return exitUsage
 	}
 
-	if !(*result).IsEqual() {
+	if !equalFn(result) {
 		return exitDiff
 	}
 

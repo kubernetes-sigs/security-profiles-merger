@@ -56,12 +56,12 @@ func loadDefault(t *testing.T, name string) *specs.LinuxSeccomp {
 func selfDiff(t *testing.T, native specs.Arch, profile *specs.LinuxSeccomp) *seccomp.ProfileDiff {
 	t.Helper()
 
-	settled, err := seccomp.IntersectForArch(native, profile)
+	settled, err := forNode(native).Intersect(profile)
 	if err != nil {
 		t.Fatalf("%s: %v", native, err)
 	}
 
-	diff, err := seccomp.DiffForArch(native, profile, settled)
+	diff, err := forNode(native).Diff(profile, settled)
 	if err != nil {
 		t.Fatalf("%s: %v", native, err)
 	}

@@ -114,7 +114,31 @@ func ExampleUnmarshalStrict() {
 	// duplicate key "syscalls[0].action"
 }
 
-func ExampleDiffForArch() {
+// A control plane merging for a node of another architecture names that
+// node's native architecture. A 32-bit node compares only the lower 32 bits
+// of an argument, so the rule against a wider value cannot be read as
+// written there, while a 64-bit node keeps it.
+func ExampleOptions() {
+	artifact := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls: []specs.LinuxSyscall{{
+			Names:  []string{"personality"},
+			Action: specs.ActAllow,
+			Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 1<<32 | 8, Op: specs.OpEqualTo}},
+		}},
+	}
+
+	for _, native := range []specs.Arch{specs.ArchX86, specs.ArchAARCH64} {
+		err := seccomp.Options{Arch: native}.ValidateArtifact(artifact)
+		fmt.Printf("%s: value too wide: %v\n", native, errors.Is(err, seccomp.ErrValueTooWide))
+	}
+
+	// Output:
+	// SCMP_ARCH_X86: value too wide: true
+	// SCMP_ARCH_AARCH64: value too wide: false
+}
+
+func ExampleOptions_Diff() {
 	// Both profiles filter the native architecture of an arm64 node, whether
 	// or not they list it, so only s390x differs there.
 	left := &specs.LinuxSeccomp{
@@ -127,7 +151,7 @@ func ExampleDiffForArch() {
 		Architectures: []specs.Arch{specs.ArchS390X},
 	}
 
-	diff, err := seccomp.DiffForArch(specs.ArchAARCH64, left, right)
+	diff, err := seccomp.Options{Arch: specs.ArchAARCH64}.Diff(left, right)
 	if err != nil {
 		panic(err)
 	}
@@ -135,8 +159,9 @@ func ExampleDiffForArch() {
 	fmt.Println("added:", diff.Architectures.Added)
 	fmt.Println("removed:", diff.Architectures.Removed)
 
-	// Without a native architecture the lists compare as written.
-	diff, err = seccomp.DiffForArch("", left, right)
+	// The zero Options know no native architecture, so the lists compare as
+	// written.
+	diff, err = seccomp.Options{Arch: ""}.Diff(left, right)
 	if err != nil {
 		panic(err)
 	}
@@ -226,43 +251,6 @@ func ExampleLessRestrictive() {
 
 	// Output:
 	// SCMP_ACT_ALLOW
-}
-
-func ExampleUnionSyscalls() {
-	result := seccomp.UnionSyscalls(
-		[]specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActAllow},
-		},
-		[]specs.LinuxSyscall{
-			{Names: []string{syscallWrite}, Action: specs.ActAllow},
-		},
-	)
-
-	for _, sc := range result {
-		fmt.Printf("%s -> %s\n", strings.Join(sc.Names, ","), sc.Action)
-	}
-
-	// Output:
-	// read,write -> SCMP_ACT_ALLOW
-}
-
-func ExampleIntersectSyscalls() {
-	result := seccomp.IntersectSyscalls(
-		[]specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActAllow},
-			{Names: []string{syscallWrite}, Action: specs.ActAllow},
-		},
-		[]specs.LinuxSyscall{
-			{Names: []string{syscallRead}, Action: specs.ActErrno},
-		},
-	)
-
-	for _, sc := range result {
-		fmt.Printf("%s -> %s\n", sc.Names[0], sc.Action)
-	}
-
-	// Output:
-	// read -> SCMP_ACT_ERRNO
 }
 
 func ExampleFormatProfile() {
@@ -358,29 +346,6 @@ func ExampleFormatDiff() {
 	// Diff{-write->SCMP_ACT_ALLOW +open->SCMP_ACT_ALLOW}
 }
 
-func ExampleDiffSyscalls() {
-	diff := seccomp.DiffSyscalls(
-		[]specs.LinuxSyscall{
-			{Names: []string{syscallRead, syscallWrite}, Action: specs.ActAllow},
-		},
-		[]specs.LinuxSyscall{
-			{Names: []string{syscallRead, syscallOpen}, Action: specs.ActAllow},
-		},
-	)
-
-	for _, r := range diff.Removed {
-		fmt.Println("Removed:", r.Name)
-	}
-
-	for _, a := range diff.Added {
-		fmt.Println("Added:", a.Name)
-	}
-
-	// Output:
-	// Removed: write
-	// Added: open
-}
-
 func ExampleUnion() {
 	recording1 := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
@@ -428,4 +393,83 @@ func ExampleValidateArtifact() {
 	// Output:
 	// syscall entry 1 action: SCMP_ACT_NOTIFY is not allowed
 	// listenerPath: listener settings are not allowed
+}
+
+// A merge result keeps an empty flag list apart from a missing one, which a
+// runtime reads differently, and Marshal writes it so.
+func ExampleMarshal() {
+	baseline := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Flags:         []specs.LinuxSeccompFlag{},
+	}
+	artifact := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
+
+	effective, err := seccomp.Intersect(baseline, artifact)
+	if err != nil {
+		panic(err)
+	}
+
+	data, err := seccomp.Marshal(effective)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(string(data))
+
+	// Output:
+	// {"defaultAction":"SCMP_ACT_ERRNO","flags":[]}
+}
+
+func ExampleClone() {
+	profile := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls:      []specs.LinuxSyscall{{Names: []string{syscallRead}, Action: specs.ActAllow}},
+	}
+
+	clone := seccomp.Clone(profile)
+	clone.Syscalls[0].Names[0] = syscallWrite
+
+	fmt.Println(profile.Syscalls[0].Names[0], clone.Syscalls[0].Names[0])
+
+	// Output:
+	// read write
+}
+
+// A validation error reports every failure it found, up to a bound. Where it
+// holds more than one, it implements Unwrap() []error, so a caller can walk
+// the failures one by one; a single failure is the error itself.
+func ExampleValidate_failures() {
+	profile := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls: []specs.LinuxSyscall{
+			{Names: nil, Action: specs.ActAllow},
+			{Names: []string{syscallRead}, Action: "SCMP_ACT_BOGUS"},
+		},
+	}
+
+	failures := func(err error) []error {
+		var report interface{ Unwrap() []error }
+		if errors.As(err, &report) {
+			return report.Unwrap()
+		}
+
+		return []error{err}
+	}
+
+	for _, failure := range failures(seccomp.Validate(profile)) {
+		fmt.Println(errors.Is(failure, seccomp.ErrEmptySyscallNames),
+			errors.Is(failure, seccomp.ErrUnknownAction))
+	}
+
+	profile.Syscalls = profile.Syscalls[1:]
+
+	for _, failure := range failures(seccomp.Validate(profile)) {
+		fmt.Println(errors.Is(failure, seccomp.ErrEmptySyscallNames),
+			errors.Is(failure, seccomp.ErrUnknownAction))
+	}
+
+	// Output:
+	// true false
+	// false true
+	// false true
 }

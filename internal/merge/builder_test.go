@@ -180,7 +180,9 @@ func TestWriteSliceDiffStopsAtTheBound(t *testing.T) {
 		items[idx] = "a\nb"
 	}
 
-	merge.WriteSliceDiff(&out, "caps", spm.SliceDiff[string]{Added: items, Removed: items})
+	parts := merge.NewJoiner(&out, " ")
+
+	merge.WriteSliceDiff(&out, &parts, "caps", &spm.SliceDiff[string]{Added: items, Removed: items})
 
 	got := out.String()
 	if !strings.HasPrefix(got, `caps:-"a\nb",-"a\nb"`) ||

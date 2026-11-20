@@ -40,9 +40,10 @@ var (
 	// or a path that cleans to ".", such as "./".
 	ErrEmptyPath = spm.ErrEmptyPath
 
-	// ErrInvalidPath is returned when a path rule contains a NUL byte,
-	// which no file system path can contain.
-	ErrInvalidPath = errors.New("invalid path")
+	// ErrNulInPath is returned by every validator and merge when a path
+	// rule holds a NUL byte, which no file system path can hold. It is
+	// spm.ErrNulInPath, which the apparmor package returns as well.
+	ErrNulInPath = spm.ErrNulInPath
 
 	// ErrPathTooLong is returned when a path rule is longer than
 	// MaxPathLen bytes. The length is checked before the path is scanned,
@@ -102,14 +103,14 @@ var (
 	// refuses to create it with ENOMSG.
 	ErrEmptyRuleset = errors.New("ruleset handles no access right and scopes nothing")
 
-	// ErrUnsupportedABIRight is returned by ValidateForABI when a profile
-	// uses an access right the given Landlock ABI version does not know.
-	// The kernel rejects such a ruleset with EINVAL.
+	// ErrUnsupportedABIRight is returned by the validators of Options when
+	// a profile uses an access right the ABI version they name does not
+	// know. The kernel rejects such a ruleset with EINVAL.
 	ErrUnsupportedABIRight = errors.New("access right needs a newer Landlock ABI")
 
-	// ErrUnknownABIVersion is returned by ValidateForABI for a version
-	// below ABIV1, which names no kernel. A version above LatestABIVersion
-	// is accepted and read as LatestABIVersion.
+	// ErrUnknownABIVersion is returned by every method of Options for a
+	// version below ABIV1, 0 included, which names no kernel. A version
+	// above LatestABIVersion is accepted and read as LatestABIVersion.
 	ErrUnknownABIVersion = errors.New("unknown Landlock ABI version")
 )
 
@@ -334,7 +335,7 @@ func (p pathProblem) err(path string) error {
 	case pathTooLong:
 		return fmt.Errorf("%d bytes: %w", len(path), ErrPathTooLong)
 	case pathNUL:
-		return fmt.Errorf("%s contains a NUL byte: %w", merge.QuoteBounded(path), ErrInvalidPath)
+		return fmt.Errorf("%s: %w", merge.QuoteBounded(path), ErrNulInPath)
 	case pathParent:
 		return fmt.Errorf("%s: %w", merge.QuoteBounded(path), ErrParentPath)
 	case pathDot:
@@ -493,9 +494,9 @@ func isKnownNetRight(right NetAccessRight) bool {
 // Duplicate rules and rights are accepted, as the kernel and the merge fold
 // them; ValidateStrict reports them. ValidateArtifact does not check the
 // profile against a kernel's ABI, since the artifact does not know where it
-// will run; call ValidateForABI with the node's ABI version for that. It
-// does not compare the profile against a baseline either; callers intersect
-// the result with their baseline afterwards.
+// will run; Options.ValidateArtifact names the node's ABI version for that.
+// It does not compare the profile against a baseline either; callers
+// intersect the result with their baseline afterwards.
 //
 // A profile it accepts still chooses its own rule paths, which Intersect
 // may give access the baseline grants on an ancestor. ValidateArtifact
@@ -542,13 +543,14 @@ func ValidateStrict(profile *Profile) error {
 }
 
 // RequiredABIVersion returns the lowest Landlock ABI version supporting every
-// access right the profile uses, or ABIV1 for a profile that uses none.
-// Rights this package does not know are ignored; Validate reports them. It
-// returns no error, so a nil profile, which uses no right either, yields
-// ABIV1 too; validate the profile first where nil must be rejected.
-func RequiredABIVersion(profile *Profile) ABIVersion {
-	if profile == nil {
-		return ABIV1
+// access right the profile uses, or ABIV1 for a profile that uses none. The
+// profile is checked with Validate first, and its error returned, so that a
+// right this package does not know cannot be read as needing no newer
+// version; a nil profile is reported with ErrNilProfile.
+func RequiredABIVersion(profile *Profile) (ABIVersion, error) {
+	err := Validate(profile)
+	if err != nil {
+		return 0, err
 	}
 
 	required := ABIV1
@@ -566,7 +568,7 @@ func RequiredABIVersion(profile *Profile) ABIVersion {
 		highestABI(profile.HandledAccessFS, fsAccessABI),
 		highestABI(profile.HandledAccessNet, netAccessABI),
 		highestABI(profile.Scoped, scopeABI),
-	)
+	), nil
 }
 
 // highestABI returns the newest ABI version any right of the list needs, or
@@ -583,64 +585,56 @@ func highestABI[T ~string](rights []T, table map[T]ABIVersion) ABIVersion {
 	return highest
 }
 
-// ValidateForABI performs all checks from Validate and additionally reports
-// every access right the given Landlock ABI version does not support. A
-// kernel rejects a ruleset carrying a right its ABI does not know, so a
-// profile passing this uses no right a node reporting that ABI version
-// rejects. It does not check that the kernel can load the profile otherwise;
-// combine it with ValidateArtifact or ValidateStrict for that.
+// Options names the Landlock ABI version of the kernel a profile is
+// checked for. A kernel rejects a ruleset carrying a right its ABI does not
+// know, and a runtime that treats a ruleset failing to load as "run without
+// Landlock" would then fail open, so a runtime checks a merge result with
+// the methods of Options before it applies it.
 //
-// A version newer than LatestABIVersion is treated as LatestABIVersion.
-// Landlock ABI versions are cumulative, so a kernel reporting one supports
-// every right this package knows, and a node running ahead of this library
-// must not fail validation for profiles it can load. A version below ABIV1
-// names no kernel and is reported with ErrUnknownABIVersion.
+// The zero value names no version and every method reports it with
+// ErrUnknownABIVersion, so that a runtime whose probe of the kernel failed
+// and left the version at 0 does not pass every profile. A kernel without
+// Landlock reports no version at all; such a node applies no ruleset.
+type Options struct {
+	// ABI is the version the kernel reports, as
+	// landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)
+	// returns it. A version newer than LatestABIVersion is read as
+	// LatestABIVersion: Landlock ABI versions are cumulative, so a kernel
+	// reporting one supports every right this package knows, and a node
+	// running ahead of this package must not fail validation for profiles
+	// it can load. A version below ABIV1, 0 included, names no kernel and is
+	// reported with ErrUnknownABIVersion.
+	ABI ABIVersion
+}
+
+// Validate runs Validate and reports every access right the ABI version
+// does not support (ErrUnsupportedABIRight), in one report.
 //
 // Use RequiredABIVersion to ask the same question the other way round: which
 // ABI version a profile needs. An Intersect result can require up to the
 // highest version any input needs; Union can raise it to ABIV2 in one case.
 // See the ABI versions section of the package documentation.
-func ValidateForABI(profile *Profile, abi ABIVersion) error {
-	var report merge.Collector
-
-	if profile == nil {
-		report.Add(ErrNilProfile)
-	} else {
-		collectProfile(&report, profile, tierMerge)
-	}
-
-	if abi < ABIV1 {
-		report.Report(func() error {
-			return fmt.Errorf("%w: v%d (the first is v%d)", ErrUnknownABIVersion, abi, ABIV1)
-		})
-
-		return report.Err()
-	}
-
-	if profile == nil {
-		return report.Err()
-	}
-
-	abiErrors(&report, handledFSRef(), profile.HandledAccessFS, abi, fsAccessABI)
-	abiErrors(&report, handledNetRef(), profile.HandledAccessNet, abi, netAccessABI)
-	abiErrors(&report, scopedRef(), profile.Scoped, abi, scopeABI)
-
-	for idx, rule := range profile.PathRules {
-		abiErrors(&report, pathRuleRef(idx), rule.AccessFS, abi, fsAccessABI)
-	}
-
-	for idx, rule := range profile.NetRules {
-		abiErrors(&report, netRuleRef(idx), rule.AccessNet, abi, netAccessABI)
-	}
-
-	return report.Err()
+func (o Options) Validate(profile *Profile) error {
+	return o.validate(profile, tierMerge)
 }
 
-// DowngradeToABI returns a copy of the profile without the access rights the
-// given Landlock ABI version does not support, so that a kernel reporting
-// that version does not reject it for them. It is for a node that prefers
+// ValidateArtifact runs ValidateArtifact and reports every access right the
+// ABI version does not support, as Validate of the options does.
+func (o Options) ValidateArtifact(profile *Profile) error {
+	return o.validate(profile, tierArtifact)
+}
+
+// ValidateStrict runs ValidateStrict and reports every access right the ABI
+// version does not support, as Validate of the options does.
+func (o Options) ValidateStrict(profile *Profile) error {
+	return o.validate(profile, tierStrict)
+}
+
+// Downgrade returns a copy of the profile without the access rights the ABI
+// version of the options does not support, so that a kernel reporting that
+// version does not reject it for them. It is for a node that prefers
 // enforcing what its kernel can enforce over enforcing nothing when a
-// profile fails ValidateForABI.
+// profile fails Validate of the same options.
 //
 // The copy is not the same policy:
 //
@@ -658,18 +652,22 @@ func ValidateForABI(profile *Profile, abi ABIVersion) error {
 // to load it, and ValidateArtifact reports it with ErrEmptyRuleset. Rights
 // this package does not know are kept for Validate to report.
 //
-// A version newer than LatestABIVersion drops nothing, as ValidateForABI
-// rejects nothing for it, and one below ABIV1 is reported with
-// ErrUnknownABIVersion. A nil profile is reported with ErrNilProfile. The
-// profile is not validated otherwise and not modified.
-func DowngradeToABI(profile *Profile, abi ABIVersion) (*Profile, error) {
+// A version newer than LatestABIVersion drops nothing, as Validate rejects
+// nothing for it, and one below ABIV1, 0 included, is reported with
+// ErrUnknownABIVersion, as the validators of Options report it. A nil
+// profile is reported with ErrNilProfile. The profile is not validated
+// otherwise and not modified.
+func (o Options) Downgrade(profile *Profile) (*Profile, error) {
+	err := o.checkABI()
+	if err != nil {
+		return nil, err
+	}
+
 	if profile == nil {
 		return nil, ErrNilProfile
 	}
 
-	if abi < ABIV1 {
-		return nil, fmt.Errorf("%w: v%d (the first is v%d)", ErrUnknownABIVersion, abi, ABIV1)
-	}
+	abi := o.ABI
 
 	downgraded := &Profile{
 		HandledAccessFS:  supportedRights(profile.HandledAccessFS, abi, fsAccessABI),
@@ -694,6 +692,57 @@ func DowngradeToABI(profile *Profile, abi ABIVersion) (*Profile, error) {
 	}
 
 	return downgraded, nil
+}
+
+// validate runs the checks of the tier, and those of the ABI version the
+// options name, into one report. A version that names no kernel is reported
+// on its own, before the profile is looked at, and so is a profile past
+// MaxArtifactRules at the tiers that check it, as the plain validators
+// report it.
+func (o Options) validate(profile *Profile, tier validationTier) error {
+	err := o.checkABI()
+	if err != nil {
+		return err
+	}
+
+	// validateProfile returns no cleaned paths for a nil profile and for
+	// one past MaxArtifactRules, whose error stands on its own.
+	cleaned, err := validateProfile(profile, tier)
+	if cleaned == nil {
+		return err
+	}
+
+	var report merge.Collector
+
+	report.Add(err)
+	collectABI(&report, profile, o.ABI)
+
+	return report.Err()
+}
+
+// checkABI reports a version below ABIV1, which names no kernel.
+func (o Options) checkABI() error {
+	if o.ABI < ABIV1 {
+		return fmt.Errorf("%w: v%d (the first is v%d)", ErrUnknownABIVersion, o.ABI, ABIV1)
+	}
+
+	return nil
+}
+
+// collectABI reports every right of the profile that needs a newer ABI
+// version than the given one.
+func collectABI(report *merge.Collector, profile *Profile, abi ABIVersion) {
+	abiErrors(report, handledFSRef(), profile.HandledAccessFS, abi, fsAccessABI)
+	abiErrors(report, handledNetRef(), profile.HandledAccessNet, abi, netAccessABI)
+	abiErrors(report, scopedRef(), profile.Scoped, abi, scopeABI)
+
+	for idx, rule := range profile.PathRules {
+		abiErrors(report, pathRuleRef(idx), rule.AccessFS, abi, fsAccessABI)
+	}
+
+	for idx, rule := range profile.NetRules {
+		abiErrors(report, netRuleRef(idx), rule.AccessNet, abi, netAccessABI)
+	}
 }
 
 // supportedRights returns a copy of the rights without the ones that need a

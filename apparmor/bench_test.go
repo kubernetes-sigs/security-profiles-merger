@@ -17,6 +17,7 @@ limitations under the License.
 package apparmor_test
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
@@ -25,8 +26,10 @@ import (
 
 // benchPathCounts are the profile sizes every benchmark runs at. The two
 // largest sit past maxGlobCacheEntries, where a merge of distinct patterns
-// evicts entries it still needs, and past the merge's pair budget, where it
-// stops matching altogether: both are cliffs the smaller sizes hide.
+// evicts entries it still needs, and the largest past the merge's pair
+// budget, where it stops matching altogether and Intersect fails with
+// ErrBudgetExceeded unless it keeps a side whole: both are cliffs the
+// smaller sizes hide.
 var benchPathCounts = []int{10, 50, 200, 1024, 2000}
 
 // benchProfilePaths returns how many paths buildAppArmorProfile writes for a
@@ -353,6 +356,10 @@ func buildAppArmorSharedPrefixProfile(numPaths int, literals bool) *apparmor.Pro
 	}
 }
 
+// BenchmarkAppArmorIntersectSharedPrefix measures the matching the pair
+// budget bounds. Past the budget, at the largest size, Intersect stops
+// matching and fails with ErrBudgetExceeded, which is the cost it measures
+// there.
 func BenchmarkAppArmorIntersectSharedPrefix(b *testing.B) {
 	for _, numPaths := range benchPathCounts {
 		left := buildAppArmorSharedPrefixProfile(numPaths, true)
@@ -363,7 +370,7 @@ func BenchmarkAppArmorIntersectSharedPrefix(b *testing.B) {
 
 			for range b.N {
 				result, err := apparmor.Intersect(left, right)
-				if err != nil {
+				if err != nil && !errors.Is(err, apparmor.ErrBudgetExceeded) {
 					b.Fatal(err)
 				}
 

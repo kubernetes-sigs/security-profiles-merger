@@ -46,13 +46,13 @@ rejects, returns differently or adds.
 The codebase is organized in layers:
 
 - `spm/` is the public home of what the three profile packages have in
-  common: `SliceDiff`, `InputError`, `MaxPathLen`, the sentinel errors they
-  share (such as `ErrNilProfile`, `ErrMoreProblems` and the ones
-  `UnmarshalStrict` returns), and `Diff`, the `IsEqual() bool` method all
-  three `ProfileDiff` types carry. Each profile package re-exports what it
-  uses under its own name, so a caller need not import `spm`, but naming
-  them once is what makes `seccomp.SliceDiff` and `apparmor.SliceDiff` the
-  same type rather than twins, and what lets pkg.go.dev link them. Keep
+  common: `SliceDiff`, `InputError`, `MaxPathLen` and the sentinel errors
+  they share (such as `ErrNilProfile`, `ErrMoreProblems`,
+  `ErrBudgetExceeded` and the ones `UnmarshalStrict` returns). Each profile
+  package re-exports what it uses under its own name, so a caller need not
+  import `spm`, but naming them once is what makes `seccomp.SliceDiff` and
+  `apparmor.SliceDiff` the same type rather than twins, and what lets
+  pkg.go.dev link them. Keep
   it this small: the three profile types have no common shape, so nothing
   that needs to know which type it has belongs here. `cmd/spm/kinds.go` is
   where that knowledge lives, as a table of per-type function values.
@@ -60,8 +60,9 @@ The codebase is organized in layers:
   merge primitives: `Fold` folds any profile type pairwise,
   `IntersectSlice`, `UnionSlice` and `DeduplicateSlice` work with any
   comparable element type, and `DiffSlice` with ordered element types only,
-  since it sorts its results; `FormatSliceDiff` formats an `spm.SliceDiff`
-  for string-like types. `ClonePtr` copies an optional value and `IsAbsPath`
+  since it sorts its results; `NewSliceDiff` builds an `spm.SliceDiff`, nil
+  for equal lists, and `WriteSliceDiff` formats one for string-like types,
+  skipping a nil one. `ClonePtr` copies an optional value and `IsAbsPath`
   handles Linux profile paths on any host. All three profile packages merge
   through `Fold`; seccomp passes it a clone function that normalizes, since a
   single profile is normalized rather than merged. It also holds the bounds
@@ -78,7 +79,9 @@ The codebase is organized in layers:
   of the documentation (see [Documentation](#documentation)).
 - `seccomp/`, `apparmor/`, `landlock/` each expose the same public API surface:
   `Intersect`, `Union`, `Validate`, `ValidateStrict`, `ValidateArtifact`,
-  `UnmarshalStrict`, `Diff`, `FormatDiff`, and `FormatProfile`. Each package
+  `UnmarshalStrict`, `Diff`, `FormatDiff`, and `FormatProfile`; `seccomp` and
+  `landlock` add an `Options` type whose methods run those functions for
+  another node. Each package
   defines its own types (seccomp uses OCI runtime-spec types, apparmor and
   landlock define their own) and implements profile-specific normalization,
   deduplication, and merge logic on top of `internal/merge/`. The seccomp

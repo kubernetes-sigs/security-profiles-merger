@@ -79,9 +79,8 @@ func knownAction(action specs.LinuxSeccompAction) specs.LinuxSeccompAction {
 // either. The merge picks between two clauses by asking which action wins
 // and then keeping that clause whole (see pickClause), so it needs the
 // action it passed in back, unknown or not: a profile the merge reads
-// unvalidated, as IntersectSyscalls does, keeps the action it carries rather
-// than having it turn into SCMP_ACT_KILL on one side of the comparison and
-// not the other.
+// unvalidated keeps the action it carries rather than having it turn into
+// SCMP_ACT_KILL on one side of the comparison and not the other.
 func moreRestrictive(first, second specs.LinuxSeccompAction) specs.LinuxSeccompAction {
 	if restrictiveness(first) <= restrictiveness(second) {
 		return first

@@ -17,44 +17,9 @@ limitations under the License.
 package main
 
 import (
-	"reflect"
 	"strings"
 	"testing"
-
-	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
-
-// TestSeccompOutputMirrorsSpec keeps seccompOutput in step with
-// specs.LinuxSeccomp: a field the spec gains must be added to it, or the
-// CLI would stop writing that field without a word.
-func TestSeccompOutputMirrorsSpec(t *testing.T) {
-	t.Parallel()
-
-	spec := reflect.TypeFor[specs.LinuxSeccomp]()
-	written := reflect.TypeFor[seccompOutput]()
-
-	if spec.NumField() != written.NumField() {
-		t.Fatalf("seccompOutput has %d fields, specs.LinuxSeccomp %d",
-			written.NumField(), spec.NumField())
-	}
-
-	for idx := range spec.NumField() {
-		want, got := spec.Field(idx), written.Field(idx)
-
-		if got.Name != want.Name || got.Tag != want.Tag {
-			t.Errorf("field %d is %s %q, want %s %q", idx, got.Name, got.Tag, want.Name, want.Tag)
-		}
-
-		wantType := want.Type
-		if want.Name == "Flags" {
-			wantType = reflect.PointerTo(wantType)
-		}
-
-		if got.Type != wantType {
-			t.Errorf("field %s has type %s, want %s", got.Name, got.Type, wantType)
-		}
-	}
-}
 
 // TestSeccompOutputKeepsEmptyFlagList pins the one difference to
 // specs.LinuxSeccomp: a runtime sets SECCOMP_FILTER_FLAG_SPEC_ALLOW for a

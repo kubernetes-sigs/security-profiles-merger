@@ -173,12 +173,18 @@ func WriteTexts[T ~string](out *Builder, values []T, sep string) {
 	}
 }
 
-// WriteSliceDiff writes a SliceDiff as a prefixed diff, listing the removed
-// items with a "-" and then the added items with a "+", as in
-// "caps:-CHOWN,+KILL". An item holding bytes that are not safe to print is
-// quoted (see SafeText): a diff is computed over profiles nothing validated,
-// and its rendering is what a runtime logs.
-func WriteSliceDiff[T ~string](out *Builder, prefix string, diff spm.SliceDiff[T]) {
+// WriteSliceDiff writes a SliceDiff as a part of a diff, listing the
+// removed items with a "-" and then the added items with a "+", as in
+// "caps:-CHOWN,+KILL", and writes nothing for a nil diff, which stands for
+// an equal list (see NewSliceDiff). An item holding bytes that are not safe
+// to print is quoted (see SafeText): a diff is computed over profiles
+// nothing validated, and its rendering is what a runtime logs.
+func WriteSliceDiff[T ~string](out *Builder, parts *Joiner, prefix string, diff *spm.SliceDiff[T]) {
+	if diff == nil {
+		return
+	}
+
+	parts.Next()
 	out.WriteString(prefix)
 	out.WriteString(":")
 	writeSigned(out, "-", diff.Removed, "")

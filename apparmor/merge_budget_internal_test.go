@@ -17,6 +17,7 @@ limitations under the License.
 package apparmor
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -76,13 +77,24 @@ func TestMergesStayWithinTheirPairBudget(t *testing.T) {
 		start := time.Now()
 
 		result, err := mergeFn(budgetProfile(literals...), budgetProfile(globs...))
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
 
 		elapsed := time.Since(start)
 		if testutil.UninstrumentedRun() && elapsed > 2*time.Second {
 			t.Errorf("%s of %d paths took %v", name, 2*len(literals), elapsed)
+		}
+
+		// Past the budget an intersection fails, and a union keeps every
+		// path (see TestUnionPastItsBudgetKeepsEveryPath).
+		if name == "Intersect" {
+			if !errors.Is(err, ErrBudgetExceeded) || result != nil {
+				t.Errorf("Intersect = %v, %v, want ErrBudgetExceeded", result, err)
+			}
+
+			continue
+		}
+
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
 		}
 
 		if result.Filesystem == nil {
@@ -91,10 +103,12 @@ func TestMergesStayWithinTheirPairBudget(t *testing.T) {
 	}
 }
 
-// TestIntersectPastItsBudgetKeepsOnlyCommonPaths pins the fallback: an
-// intersection that cannot afford to match keeps what both sides spell
-// alike, which permits no more than matching would have kept.
-func TestIntersectPastItsBudgetKeepsOnlyCommonPaths(t *testing.T) {
+// TestIntersectPastItsBudgetFails pins what an intersection does that cannot
+// afford to match: matching stops, the paths both sides spell alike are all
+// it could keep, which denies more than the inputs do, so Intersect reports
+// ErrBudgetExceeded rather than return them, which would read as a baseline
+// that permits nothing.
+func TestIntersectPastItsBudgetFails(t *testing.T) {
 	t.Parallel()
 
 	literals, globs := budgetShape(2048)
@@ -104,12 +118,33 @@ func TestIntersectPastItsBudgetKeepsOnlyCommonPaths(t *testing.T) {
 	right := budgetProfile(append(slices.Clone(globs), shared)...)
 
 	result, err := Intersect(left, right)
-	if err != nil {
-		t.Fatalf("Intersect: %v", err)
+	if !errors.Is(err, ErrBudgetExceeded) || result != nil {
+		t.Fatalf("Intersect = %v, %v, want ErrBudgetExceeded", result, err)
 	}
 
-	if got := result.Filesystem.ReadOnlyPaths; !slices.Equal(got, []string{shared}) {
-		t.Errorf("Intersect kept %d paths, want only %q", len(got), shared)
+	var inputErr *InputError
+	if errors.As(err, &inputErr) {
+		t.Errorf("Intersect = %v, want no InputError: no single input is at fault", err)
+	}
+
+	// The matching itself stops at the budget and keeps what both sides
+	// spell alike.
+	merged, exceeded := intersectPerms(
+		expandFsPerms(left.Filesystem), expandFsPerms(right.Filesystem), newMatcherCache(),
+	)
+	if !exceeded || len(merged) != 1 {
+		t.Errorf("intersectPerms past the budget = %d paths, exceeded %t, want %q alone",
+			len(merged), exceeded, shared)
+	}
+
+	// Where one side is kept whole, which is all the exact intersection
+	// could keep, nothing is lost and the intersection succeeds past the
+	// budget too: a profile intersected with itself.
+	both := budgetProfile(append(slices.Clone(literals), globs...)...)
+
+	result, err = Intersect(both, both)
+	if err != nil || len(result.Filesystem.ReadOnlyPaths) != len(literals)+len(globs) {
+		t.Errorf("Intersect of a profile past the budget with itself = %v, want it whole", err)
 	}
 
 	// Inside the budget the same shape is merged exactly: every literal is
@@ -294,28 +329,28 @@ func TestMergesBoundTheirRegexWork(t *testing.T) {
 		start := time.Now()
 
 		result, err := mergeFn(globs, names)
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
 
 		elapsed := time.Since(start)
 		if testutil.UninstrumentedRun() && elapsed > 2*time.Second {
 			t.Errorf("%s took %v", name, elapsed)
 		}
 
-		// Past the budget the intersection keeps what both sides spell
-		// alike, which is nothing here, and the union keeps every path.
-		got := 0
-		if result.Filesystem != nil {
-			got = len(result.Filesystem.ReadOnlyPaths)
+		// Past the budget the intersection fails and the union keeps every
+		// path.
+		if name == "Intersect" {
+			if !errors.Is(err, ErrBudgetExceeded) {
+				t.Errorf("Intersect = %v, want ErrBudgetExceeded", err)
+			}
+
+			continue
 		}
 
-		want := 0
-		if name == "Union" {
-			want = len(globs.Filesystem.ReadOnlyPaths) + len(names.Filesystem.ReadOnlyPaths)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
 		}
 
-		if got != want {
+		want := len(globs.Filesystem.ReadOnlyPaths) + len(names.Filesystem.ReadOnlyPaths)
+		if got := len(result.Filesystem.ReadOnlyPaths); got != want {
 			t.Errorf("%s kept %d paths, want %d", name, got, want)
 		}
 	}
@@ -335,11 +370,10 @@ func budgetExecutables(paths ...string) *Profile {
 	}
 }
 
-// TestIntersectPastItsBudgetKeepsCommonExecutables covers the fallback for
-// the executable and library lists, which go through the same permission
-// merge the filesystem rules do: past the budget only what both sides list
-// alike survives.
-func TestIntersectPastItsBudgetKeepsCommonExecutables(t *testing.T) {
+// TestIntersectPastItsBudgetFailsForExecutables covers the executable and
+// library lists, which go through the same permission merge the filesystem
+// rules do: past the budget the intersection fails for them too.
+func TestIntersectPastItsBudgetFailsForExecutables(t *testing.T) {
 	t.Parallel()
 
 	literals, globs := budgetShape(2048)
@@ -348,17 +382,30 @@ func TestIntersectPastItsBudgetKeepsCommonExecutables(t *testing.T) {
 	left := budgetExecutables(append(slices.Clone(literals), shared)...)
 	right := budgetExecutables(append(slices.Clone(globs), shared)...)
 
-	result, err := Intersect(left, right)
-	if err != nil {
-		t.Fatalf("Intersect: %v", err)
+	_, err := Intersect(left, right)
+	if !errors.Is(err, ErrBudgetExceeded) {
+		t.Fatalf("Intersect = %v, want ErrBudgetExceeded", err)
 	}
 
-	for name, got := range map[string][]string{
-		"AllowedExecutables": result.Executable.AllowedExecutables,
-		"AllowedLibraries":   result.Executable.AllowedLibraries,
-	} {
-		if !slices.Equal(got, []string{shared}) {
-			t.Errorf("%s = %q, want only %q", name, got, shared)
-		}
+	exceeded := false
+	strategy := intersectStrategy{matchers: newMatcherCache(), exceeded: &exceeded}
+
+	got := strategy.mergePaths(
+		left.Executable.AllowedExecutables,
+		right.Executable.AllowedExecutables,
+	)
+	if !exceeded || !slices.Equal(got, []string{shared}) {
+		t.Errorf("mergePaths past the budget = %q, exceeded %t, want only %q",
+			got, exceeded, shared)
+	}
+
+	// Once a list ran past the budget the merge fails, so the lists after
+	// it are not matched at all.
+	if got := strategy.mergePaths([]string{shared}, []string{shared}); got != nil {
+		t.Errorf("mergePaths after the budget ran out = %q, want nothing matched", got)
+	}
+
+	if !errors.Is(strategy.budgetErr(), ErrBudgetExceeded) {
+		t.Errorf("budgetErr = %v, want ErrBudgetExceeded", strategy.budgetErr())
 	}
 }

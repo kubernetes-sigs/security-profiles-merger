@@ -181,57 +181,6 @@ func TestIntersectArtifactSizedContestedProfile(t *testing.T) {
 	}
 }
 
-// TestUnionSyscallsOverBudgetKeepsFilters covers bare syscall lists, which
-// have no default to fall back from: collapsing them would turn filtered
-// entries into one that decides every call of the syscall, including calls
-// neither input decides. The union must keep the filters instead.
-func TestUnionSyscallsOverBudgetKeepsFilters(t *testing.T) {
-	t.Parallel()
-
-	const entries = 600
-
-	left := make([]specs.LinuxSyscall, 0, entries)
-
-	for idx := range entries {
-		left = append(left, specs.LinuxSyscall{
-			Names:    []string{"ioctl"},
-			Action:   specs.ActErrno,
-			ErrnoRet: nil,
-			Args: []specs.LinuxSeccompArg{{
-				Index: 1, Value: uint64(idx), Op: specs.OpEqualTo, ValueTwo: 0,
-			}},
-		})
-	}
-
-	right := []specs.LinuxSyscall{{
-		Names:    []string{"ioctl"},
-		Action:   specs.ActErrno,
-		ErrnoRet: nil,
-		Args: []specs.LinuxSeccompArg{{
-			Index: 1, Value: entries, Op: specs.OpEqualTo, ValueTwo: 0,
-		}},
-	}}
-
-	result := seccomp.UnionSyscalls(left, right)
-
-	// A call no input filter matches must not be decided by the result.
-	unmatched := []uint64{0, 2 * entries}
-
-	for _, entry := range result {
-		if entryMatches(entry, unmatched) {
-			t.Fatalf("result entry %s decides a call no input decides",
-				seccomp.FormatProfile(&specs.LinuxSeccomp{
-					DefaultAction: specs.ActAllow,
-					Syscalls:      []specs.LinuxSyscall{entry},
-				}))
-		}
-	}
-
-	if len(result) != entries+1 {
-		t.Errorf("result has %d entries, want the %d filtered inputs", len(result), entries+1)
-	}
-}
-
 // ioctlEqualities returns count allow entries for ioctl, each matching one
 // value of argument 1.
 func ioctlEqualities(count int) []specs.LinuxSyscall {
@@ -316,13 +265,11 @@ func TestUnionBudgetCountsOneSidedClauses(t *testing.T) {
 	}
 }
 
-// TestIntersectSyscallsOverBudgetDropsSyscall covers the intersection of
-// bare syscall lists past the clause budget. Without a profile default there
-// is no unconditional rule to collapse to, and the caller's default is
-// assumed to be at least as restrictive as every action in the lists, so the
-// syscall is left to that default by dropping it. Dropping never permits
-// more than either list, which is the guarantee IntersectSyscalls makes.
-func TestIntersectSyscallsOverBudgetDropsSyscall(t *testing.T) {
+// TestIntersectListsOverBudgetDropsSyscall covers an intersection past the
+// clause budget under a default more restrictive than every action: the
+// syscall collapses to its most restrictive action, which is the default, so
+// it is left to the default and dropped from the result.
+func TestIntersectListsOverBudgetDropsSyscall(t *testing.T) {
 	t.Parallel()
 
 	// The budget bounds the product of the two sides' filtered clauses, so
@@ -332,20 +279,20 @@ func TestIntersectSyscallsOverBudgetDropsSyscall(t *testing.T) {
 		underBudget = 4
 	)
 
-	if got := seccomp.IntersectSyscalls(
+	if got := intersectLists(t,
 		ioctlEqualities(overBudget), ioctlEqualities(overBudget),
 	); len(got) != 0 {
-		t.Errorf("IntersectSyscalls over budget returned %d entries, want none", len(got))
+		t.Errorf("Intersect of the lists over budget returned %d entries, want none", len(got))
 	}
 
 	// The same shape under the budget keeps every filter, so the drop above
 	// is the budget's doing rather than the merge failing to intersect.
-	got := seccomp.IntersectSyscalls(
+	got := intersectLists(t,
 		ioctlEqualities(underBudget), ioctlEqualities(underBudget),
 	)
 	if len(got) != underBudget {
 		t.Errorf(
-			"IntersectSyscalls under budget returned %d entries, want %d",
+			"Intersect of the lists under budget returned %d entries, want %d",
 			len(got), underBudget,
 		)
 	}
@@ -573,7 +520,7 @@ func TestValidateArtifactRejectsMultiNameExpansion(t *testing.T) {
 		t.Errorf("validation took %s, want well under %s", elapsed, generousBudget)
 	}
 
-	for _, want := range []error{seccomp.ErrTooManyNames, seccomp.ErrTooManyProfileClauses} {
+	for _, want := range []error{seccomp.ErrTooManyNamesPerEntry, seccomp.ErrTooManyRules} {
 		if !errors.Is(err, want) {
 			t.Errorf("expected %v, got: %v", want, err)
 		}

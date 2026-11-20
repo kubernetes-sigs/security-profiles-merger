@@ -19,6 +19,7 @@ package apparmor_test
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
 )
@@ -148,8 +149,8 @@ func ExampleDiff() {
 	}
 
 	fmt.Println("Equal:", diff.Equal)
-	fmt.Println("Removed:", diff.Capabilities.Removed)
-	fmt.Println("Added:", diff.Capabilities.Added)
+	fmt.Println("Removed:", diff.Capabilities.AllowedCapabilities.Removed)
+	fmt.Println("Added:", diff.Capabilities.AllowedCapabilities.Added)
 
 	// Output:
 	// Equal: false
@@ -272,4 +273,87 @@ func ExampleValidateArtifact() {
 	// <nil>
 	// true
 	// true
+}
+
+// The flow of a runtime: decode the artifact strictly, validate it as an
+// artifact, intersect it with the baseline, and render the result for
+// apparmor_parser, lower-casing the capability names the merge returns
+// upper-cased.
+func Example() {
+	allow := true
+	baseline := &apparmor.Profile{
+		Executable: &apparmor.ExecutableRules{
+			AllowedExecutables: []string{"/usr/bin/*"},
+			AllowedLibraries:   nil,
+		},
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths: []string{
+				"/etc/**",
+			},
+			WriteOnlyPaths: nil,
+			ReadWritePaths: []string{"/tmp/**"},
+		},
+		Network: &apparmor.NetworkRules{
+			AllowRaw: nil, Protocols: &apparmor.AllowedProtocols{AllowTCP: &allow, AllowUDP: nil},
+		},
+		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{"chown", "setuid"}},
+	}
+
+	data := []byte(`{
+		"executable": {"allowedExecutables": ["/usr/bin/app"]},
+		"filesystem": {"readOnlyPaths": ["/etc/app.conf"], "readWritePaths": ["/tmp/app"]},
+		"network": {"allowedProtocols": {"allowTcp": true, "allowUdp": true}},
+		"capability": {"allowedCapabilities": ["CHOWN", "NET_ADMIN"]}
+	}`)
+
+	var artifact apparmor.Profile
+
+	err := apparmor.UnmarshalStrict(data, &artifact)
+	if err == nil {
+		err = apparmor.ValidateArtifact(&artifact)
+	}
+
+	if err != nil {
+		fmt.Println("reject:", err)
+
+		return
+	}
+
+	effective, err := apparmor.Intersect(baseline, &artifact)
+	if err != nil {
+		fmt.Println("reject:", err)
+
+		return
+	}
+
+	fmt.Println(apparmor.FormatProfile(effective))
+
+	for _, name := range effective.Capabilities.AllowedCapabilities {
+		fmt.Printf("capability %s,\n", strings.ToLower(name))
+	}
+
+	// Output:
+	// Profile{exec:/usr/bin/app r:/etc/app.conf rw:/tmp/app net:!raw,tcp,!udp caps:CHOWN}
+	// capability chown,
+}
+
+func ExampleProfile_Clone() {
+	profile := &apparmor.Profile{
+		Executable: nil,
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths:  []string{"/etc"},
+			WriteOnlyPaths: nil,
+			ReadWritePaths: nil,
+		},
+		Network:      nil,
+		Capabilities: nil,
+	}
+
+	clone := profile.Clone()
+	clone.Filesystem.ReadOnlyPaths[0] = "/srv"
+
+	fmt.Println(profile.Filesystem.ReadOnlyPaths, clone.Filesystem.ReadOnlyPaths)
+
+	// Output:
+	// [/etc] [/srv]
 }

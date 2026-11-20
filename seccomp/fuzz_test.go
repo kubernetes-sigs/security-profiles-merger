@@ -82,11 +82,11 @@ func flagsFromMask(mask uint8) []specs.LinuxSeccompFlag {
 //
 // The shape is fixed, unlike in the safety generator, which draws operators,
 // wide values and repeated indices. This target asserts that folding is
-// commutative and that the bare syscall-list functions answer as the profile
-// merge does, and neither holds for a filter the merge cannot read exactly:
-// both then answer in the safe direction of their strategy, which is what
-// the safety targets assert, but they need not answer alike. Drawing those
-// shapes here would assert a property the package does not claim.
+// commutative, which does not hold for a filter the merge cannot read
+// exactly: every grouping then answers in the safe direction of its
+// strategy, which is what the safety targets assert, but they need not
+// answer alike. Drawing those shapes here would assert a property the
+// package does not claim.
 func fuzzArgs(value uint64) []specs.LinuxSeccompArg {
 	return []specs.LinuxSeccompArg{
 		{Index: 0, Value: value, ValueTwo: 0, Op: specs.OpEqualTo},
@@ -920,102 +920,6 @@ func FuzzValidateArtifact(f *testing.F) {
 		err = seccomp.Validate(merged)
 		if err != nil {
 			t.Fatalf("Intersect of an accepted artifact yields an invalid profile: %v", err)
-		}
-	})
-}
-
-// FuzzSyscallListsMatchProfileMerge ties the bare syscall-list functions to
-// the profile merge. They carry no default of their own and assume the
-// caller loads them with one that is at least as restrictive as every action
-// in them, so under such a default they must decide every call the way the
-// profile merge decides it.
-//
-// The two do not produce identical entries: without a default the bare
-// functions cannot tell that an entry repeats it, so they emit entries the
-// profile merge elides. Running the bare result through a single-profile
-// merge, which normalizes against the default, removes exactly that
-// difference.
-func FuzzSyscallListsMatchProfileMerge(f *testing.F) {
-	f.Add(
-		uint8(4), uint8(8), uint8(8),
-		"read", "write",
-		false, false, uint64(0), uint64(0),
-		uint32(0), uint8(0),
-		uint16(0), uint16(0), uint16(0),
-	)
-	f.Add(
-		uint8(4), uint8(8), uint8(3),
-		"read", "open",
-		true, true, uint64(1), uint64(2),
-		uint32(0), uint8(0),
-		uint16(0), uint16(0), uint16(0),
-	)
-
-	f.Fuzz(func(
-		t *testing.T,
-		defIdx, act1Idx, act2Idx uint8,
-		name1, name2 string,
-		hasArgs1, hasArgs2 bool,
-		argVal1, argVal2 uint64,
-		archMask uint32, flagMask uint8,
-		defErrno, errno1, errno2 uint16,
-	) {
-		left := fuzzProfile(
-			defIdx, act1Idx, act2Idx, name1, name2, hasArgs1, hasArgs2,
-			argVal1, argVal2, archMask, flagMask, defErrno, errno1, errno2,
-		)
-		right := fuzzProfile(
-			act2Idx, defIdx, act1Idx, name2, name1, hasArgs2, hasArgs1,
-			argVal2, argVal1, archMask, flagMask, errno2, defErrno, errno1,
-		)
-
-		// SCMP_ACT_KILL_PROCESS is the most restrictive action, so it
-		// satisfies the assumption the bare-list functions make.
-		// The listener keeps SCMP_ACT_NOTIFY entries in the profile merge:
-		// without one, Validate rejects the profiles, which the bare-list
-		// functions do not model.
-		withDefault := func(syscalls []specs.LinuxSyscall) *specs.LinuxSeccomp {
-			return &specs.LinuxSeccomp{
-				DefaultAction: specs.ActKillProcess,
-				ListenerPath:  fuzzListener,
-				Syscalls:      syscalls,
-			}
-		}
-
-		leftProfile := withDefault(left.Syscalls)
-		rightProfile := withDefault(right.Syscalls)
-
-		if seccomp.Validate(leftProfile) != nil || seccomp.Validate(rightProfile) != nil {
-			return
-		}
-
-		for _, direction := range []struct {
-			name    string
-			profile func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error)
-			bare    func(left, right []specs.LinuxSyscall) []specs.LinuxSyscall
-		}{
-			{"Intersect", seccomp.Intersect, seccomp.IntersectSyscalls},
-			{"Union", seccomp.Union, seccomp.UnionSyscalls},
-		} {
-			merged, err := direction.profile(leftProfile, rightProfile)
-			if err != nil {
-				t.Fatalf("%s: %v", direction.name, err)
-			}
-
-			bare, err := direction.profile(
-				withDefault(direction.bare(left.Syscalls, right.Syscalls)),
-			)
-			if err != nil {
-				t.Fatalf("%s of the bare result: %v", direction.name, err)
-			}
-
-			want := seccomp.FormatProfile(merged)
-			if got := seccomp.FormatProfile(bare); got != want {
-				t.Errorf(
-					"%sSyscalls under the default = %s, %s of the same entries = %s",
-					direction.name, got, direction.name, want,
-				)
-			}
 		}
 	})
 }

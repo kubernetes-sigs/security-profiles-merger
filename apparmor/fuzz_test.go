@@ -669,16 +669,43 @@ func assertDiffSymmetry(
 ) {
 	t.Helper()
 
-	assertStringDiffSwapped(t, "Executables", fwd.Executables, rev.Executables)
-	assertStringDiffSwapped(t, "Libraries", fwd.Libraries, rev.Libraries)
-	assertStringDiffSwapped(t, "Capabilities", fwd.Capabilities, rev.Capabilities)
+	if (fwd.Executable == nil) != (rev.Executable == nil) {
+		t.Error("Executable: nil mismatch")
+	} else if fwd.Executable != nil {
+		assertStringDiffSwapped(t, "AllowedExecutables",
+			fwd.Executable.AllowedExecutables, rev.Executable.AllowedExecutables)
+		assertStringDiffSwapped(t, "AllowedLibraries",
+			fwd.Executable.AllowedLibraries, rev.Executable.AllowedLibraries)
+	}
+
+	if (fwd.Capabilities == nil) != (rev.Capabilities == nil) {
+		t.Error("Capabilities: nil mismatch")
+	} else if fwd.Capabilities != nil {
+		assertStringDiffSwapped(t, "AllowedCapabilities",
+			fwd.Capabilities.AllowedCapabilities, rev.Capabilities.AllowedCapabilities)
+	}
 
 	if (fwd.Filesystem == nil) != (rev.Filesystem == nil) {
 		t.Error("Filesystem: nil mismatch")
 	} else if fwd.Filesystem != nil {
-		assertStringDiffSwapped(t, "ReadOnly", fwd.Filesystem.ReadOnly, rev.Filesystem.ReadOnly)
-		assertStringDiffSwapped(t, "WriteOnly", fwd.Filesystem.WriteOnly, rev.Filesystem.WriteOnly)
-		assertStringDiffSwapped(t, "ReadWrite", fwd.Filesystem.ReadWrite, rev.Filesystem.ReadWrite)
+		assertStringDiffSwapped(
+			t,
+			"ReadOnly",
+			fwd.Filesystem.ReadOnlyPaths,
+			rev.Filesystem.ReadOnlyPaths,
+		)
+		assertStringDiffSwapped(
+			t,
+			"WriteOnly",
+			fwd.Filesystem.WriteOnlyPaths,
+			rev.Filesystem.WriteOnlyPaths,
+		)
+		assertStringDiffSwapped(
+			t,
+			"ReadWrite",
+			fwd.Filesystem.ReadWritePaths,
+			rev.Filesystem.ReadWritePaths,
+		)
 	}
 }
 

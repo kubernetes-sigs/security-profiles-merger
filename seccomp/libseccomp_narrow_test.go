@@ -102,7 +102,7 @@ func TestIntersectReadsRulesUnconditionalOn32Bit(t *testing.T) {
 			"intersection": {baseline, artifact},
 			"normal form":  {baseline},
 		} {
-			result, err := seccomp.IntersectForArch(testCase.native, inputs...)
+			result, err := forNode(testCase.native).Intersect(inputs...)
 			if err != nil {
 				t.Fatalf("%s: %s: %v", testCase.name, merge, err)
 			}

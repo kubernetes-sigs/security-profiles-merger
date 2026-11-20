@@ -24,7 +24,9 @@ import (
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
-// ProfileDiff describes the differences between two AppArmor profiles.
+// ProfileDiff describes the differences between two AppArmor profiles. Its
+// fields and their JSON names follow those of Profile, so a diff names a
+// list the way a profile does.
 type ProfileDiff struct {
 	// Equal is true when the two profiles are equivalent after
 	// normalization: paths normalized, capability names upper-cased,
@@ -32,11 +34,8 @@ type ProfileDiff struct {
 	// sections they stand for (see Diff).
 	Equal bool `json:"equal"`
 
-	// Executables is set when the allowed executables differ.
-	Executables *SliceDiff[string] `json:"executables,omitempty"`
-
-	// Libraries is set when the allowed libraries differ.
-	Libraries *SliceDiff[string] `json:"libraries,omitempty"`
+	// Executable is set when the allowed executables or libraries differ.
+	Executable *ExecutableDiff `json:"executable,omitempty"`
 
 	// Filesystem is set when the filesystem rules differ.
 	Filesystem *FilesystemDiff `json:"filesystem,omitempty"`
@@ -45,21 +44,18 @@ type ProfileDiff struct {
 	Network *NetworkDiff `json:"network,omitempty"`
 
 	// Capabilities is set when the capabilities differ.
-	Capabilities *SliceDiff[string] `json:"capabilities,omitempty"`
+	Capabilities *CapabilityDiff `json:"capability,omitempty"`
 }
 
 // IsEqual reports whether the two compared profiles are equivalent after
-// normalization, as Equal does. It has a value receiver, as the IsEqual of
-// the seccomp and landlock diffs does, so that ProfileDiff satisfies
-// spm.Diff by value as well as by pointer; called through a nil
-// *ProfileDiff it panics, like any value method.
+// normalization, as Equal does.
+//
+// IsEqual and String have value receivers, so a ProfileDiff and a pointer to
+// one both implement fmt.Stringer. Diff returns a non-nil diff whenever its
+// error is nil; called through a nil pointer, either method panics.
 func (d ProfileDiff) IsEqual() bool { return d.Equal }
 
 // String returns what FormatDiff returns for the diff.
-//
-// It has a value receiver, as IsEqual has, so calling it on a nil
-// *ProfileDiff panics, and fmt prints such a pointer as <nil> rather than
-// as FormatDiff(nil) renders it.
 func (d ProfileDiff) String() string { return FormatDiff(&d) }
 
 // SliceDiff represents added and removed items in a set-like slice. It is
@@ -68,30 +64,55 @@ func (d ProfileDiff) String() string { return FormatDiff(&d) }
 // item type.
 type SliceDiff[T comparable] = spm.SliceDiff[T]
 
-// StringSliceDiff represents added and removed items in a string slice.
-//
-// Deprecated: Use SliceDiff[string], the name the other packages use for the
-// same type.
-type StringSliceDiff = SliceDiff[string]
+// ExecutableDiff describes differences in the executable rules. A path only
+// one side holds is reported in that side's spelling.
+type ExecutableDiff struct {
+	// AllowedExecutables is set when the allowed executables differ.
+	AllowedExecutables *SliceDiff[string] `json:"allowedExecutables,omitempty"`
+	// AllowedLibraries is set when the allowed libraries differ.
+	AllowedLibraries *SliceDiff[string] `json:"allowedLibraries,omitempty"`
+}
 
-// FilesystemDiff describes differences in filesystem rules.
+// FilesystemDiff describes differences in filesystem rules, per category.
+// A path only one side holds is reported in that side's spelling.
 type FilesystemDiff struct {
-	ReadOnly  *SliceDiff[string] `json:"readOnly,omitempty"`
-	WriteOnly *SliceDiff[string] `json:"writeOnly,omitempty"`
-	ReadWrite *SliceDiff[string] `json:"readWrite,omitempty"`
+	// ReadOnlyPaths is set when the read-only paths differ.
+	ReadOnlyPaths *SliceDiff[string] `json:"readOnlyPaths,omitempty"`
+	// WriteOnlyPaths is set when the write-only paths differ.
+	WriteOnlyPaths *SliceDiff[string] `json:"writeOnlyPaths,omitempty"`
+	// ReadWritePaths is set when the read-write paths differ.
+	ReadWritePaths *SliceDiff[string] `json:"readWritePaths,omitempty"`
 }
 
 // NetworkDiff describes differences in network rules.
 type NetworkDiff struct {
+	// AllowRaw is set when the raw socket permission differs.
 	AllowRaw *BoolPtrDiff `json:"allowRaw,omitempty"`
+	// Protocols is set when the TCP or UDP permission differs.
+	Protocols *AllowedProtocolsDiff `json:"allowedProtocols,omitempty"`
+}
+
+// AllowedProtocolsDiff describes differences in the permitted protocols.
+type AllowedProtocolsDiff struct {
+	// AllowTCP is set when the TCP permission differs.
 	AllowTCP *BoolPtrDiff `json:"allowTcp,omitempty"`
+	// AllowUDP is set when the UDP permission differs.
 	AllowUDP *BoolPtrDiff `json:"allowUdp,omitempty"`
+}
+
+// CapabilityDiff describes differences in the capability rules.
+type CapabilityDiff struct {
+	// AllowedCapabilities is set when the allowed capabilities differ. The
+	// names are upper-cased, as the merge returns them.
+	AllowedCapabilities *SliceDiff[string] `json:"allowedCapabilities,omitempty"`
 }
 
 // BoolPtrDiff represents a change in an optional boolean value. Diff sets
 // both sides, since it compares an unset boolean as false.
 type BoolPtrDiff struct {
-	Left  *bool `json:"left"`
+	// Left is the value of the left profile, false where it sets none.
+	Left *bool `json:"left"`
+	// Right is the value of the right profile, false where it sets none.
 	Right *bool `json:"right"`
 }
 
@@ -126,8 +147,7 @@ func Diff(left, right *Profile) (*ProfileDiff, error) {
 
 	diff := &ProfileDiff{
 		Equal:        true,
-		Executables:  nil,
-		Libraries:    nil,
+		Executable:   nil,
 		Filesystem:   nil,
 		Network:      nil,
 		Capabilities: nil,
@@ -148,15 +168,11 @@ func diffExecutables(diff *ProfileDiff, left, right *Profile) {
 	execDiff := diffPaths(
 		left.Executable.AllowedExecutables, right.Executable.AllowedExecutables,
 	)
-	if execDiff != nil {
-		diff.Equal = false
-		diff.Executables = execDiff
-	}
-
 	libDiff := diffPaths(left.Executable.AllowedLibraries, right.Executable.AllowedLibraries)
-	if libDiff != nil {
+
+	if execDiff != nil || libDiff != nil {
 		diff.Equal = false
-		diff.Libraries = libDiff
+		diff.Executable = &ExecutableDiff{AllowedExecutables: execDiff, AllowedLibraries: libDiff}
 	}
 }
 
@@ -168,23 +184,27 @@ func diffFilesystem(diff *ProfileDiff, left, right *Profile) {
 	if roDiff != nil || woDiff != nil || rwDiff != nil {
 		diff.Equal = false
 		diff.Filesystem = &FilesystemDiff{
-			ReadOnly:  roDiff,
-			WriteOnly: woDiff,
-			ReadWrite: rwDiff,
+			ReadOnlyPaths:  roDiff,
+			WriteOnlyPaths: woDiff,
+			ReadWritePaths: rwDiff,
 		}
 	}
 }
 
 func diffNetwork(diff *ProfileDiff, left, right *Profile) {
-	networkDiff := NetworkDiff{
-		AllowRaw: diffBool(left.Network.AllowRaw, right.Network.AllowRaw),
-		AllowTCP: diffBool(left.Network.Protocols.AllowTCP, right.Network.Protocols.AllowTCP),
-		AllowUDP: diffBool(left.Network.Protocols.AllowUDP, right.Network.Protocols.AllowUDP),
+	rawDiff := diffBool(left.Network.AllowRaw, right.Network.AllowRaw)
+	tcpDiff := diffBool(left.Network.Protocols.AllowTCP, right.Network.Protocols.AllowTCP)
+	udpDiff := diffBool(left.Network.Protocols.AllowUDP, right.Network.Protocols.AllowUDP)
+
+	if rawDiff == nil && tcpDiff == nil && udpDiff == nil {
+		return
 	}
 
-	if networkDiff.AllowRaw != nil || networkDiff.AllowTCP != nil || networkDiff.AllowUDP != nil {
-		diff.Equal = false
-		diff.Network = &networkDiff
+	diff.Equal = false
+	diff.Network = &NetworkDiff{AllowRaw: rawDiff, Protocols: nil}
+
+	if tcpDiff != nil || udpDiff != nil {
+		diff.Network.Protocols = &AllowedProtocolsDiff{AllowTCP: tcpDiff, AllowUDP: udpDiff}
 	}
 }
 
@@ -199,12 +219,12 @@ func diffBool(left, right *bool) *BoolPtrDiff {
 }
 
 func diffCapabilities(diff *ProfileDiff, left, right *Profile) {
-	capDiff := diffStringSlice(
+	capDiff := merge.NewSliceDiff(
 		left.Capabilities.AllowedCapabilities, right.Capabilities.AllowedCapabilities,
 	)
 	if capDiff != nil {
 		diff.Equal = false
-		diff.Capabilities = capDiff
+		diff.Capabilities = &CapabilityDiff{AllowedCapabilities: capDiff}
 	}
 }
 
@@ -270,15 +290,6 @@ func ruleKey(path string) pathKey {
 	return matcherKey(path, analyzePattern(path, false))
 }
 
-func diffStringSlice(left, right []string) *SliceDiff[string] {
-	added, removed := merge.DiffSlice(left, right)
-	if len(added) == 0 && len(removed) == 0 {
-		return nil
-	}
-
-	return &SliceDiff[string]{Added: added, Removed: removed}
-}
-
 // FormatDiff returns a human-readable representation of an AppArmor
 // profile diff, quoted and bounded as FormatProfile is, so that a runtime
 // can log the diff of an artifact it was handed.
@@ -297,13 +308,15 @@ func FormatDiff(diff *ProfileDiff) string {
 
 	parts := merge.NewJoiner(&out, " ")
 
-	writeSliceDiff(&out, &parts, "exec", diff.Executables)
-	writeSliceDiff(&out, &parts, "lib", diff.Libraries)
+	if diff.Executable != nil {
+		merge.WriteSliceDiff(&out, &parts, "exec", diff.Executable.AllowedExecutables)
+		merge.WriteSliceDiff(&out, &parts, "lib", diff.Executable.AllowedLibraries)
+	}
 
 	if diff.Filesystem != nil {
-		writeSliceDiff(&out, &parts, "r", diff.Filesystem.ReadOnly)
-		writeSliceDiff(&out, &parts, "w", diff.Filesystem.WriteOnly)
-		writeSliceDiff(&out, &parts, "rw", diff.Filesystem.ReadWrite)
+		merge.WriteSliceDiff(&out, &parts, "r", diff.Filesystem.ReadOnlyPaths)
+		merge.WriteSliceDiff(&out, &parts, "w", diff.Filesystem.WriteOnlyPaths)
+		merge.WriteSliceDiff(&out, &parts, "rw", diff.Filesystem.ReadWritePaths)
 	}
 
 	if diff.Network != nil {
@@ -311,27 +324,13 @@ func FormatDiff(diff *ProfileDiff) string {
 		writeNetworkDiff(&out, diff.Network)
 	}
 
-	writeSliceDiff(&out, &parts, "caps", diff.Capabilities)
+	if diff.Capabilities != nil {
+		merge.WriteSliceDiff(&out, &parts, "caps", diff.Capabilities.AllowedCapabilities)
+	}
 
 	out.WriteString("}")
 
 	return out.String()
-}
-
-// writeSliceDiff writes a slice diff as a part of the diff, unless it is
-// nil.
-func writeSliceDiff(
-	out *merge.Builder,
-	parts *merge.Joiner,
-	prefix string,
-	sliceDiff *SliceDiff[string],
-) {
-	if sliceDiff == nil {
-		return
-	}
-
-	parts.Next()
-	merge.WriteSliceDiff(out, prefix, *sliceDiff)
 }
 
 func writeNetworkDiff(out *merge.Builder, networkDiff *NetworkDiff) {
@@ -339,13 +338,18 @@ func writeNetworkDiff(out *merge.Builder, networkDiff *NetworkDiff) {
 
 	parts := merge.NewJoiner(out, ",")
 
+	var tcpDiff, udpDiff *BoolPtrDiff
+	if networkDiff.Protocols != nil {
+		tcpDiff, udpDiff = networkDiff.Protocols.AllowTCP, networkDiff.Protocols.AllowUDP
+	}
+
 	for _, field := range [...]struct {
 		name string
 		diff *BoolPtrDiff
 	}{
 		{name: "raw", diff: networkDiff.AllowRaw},
-		{name: "tcp", diff: networkDiff.AllowTCP},
-		{name: "udp", diff: networkDiff.AllowUDP},
+		{name: "tcp", diff: tcpDiff},
+		{name: "udp", diff: udpDiff},
 	} {
 		if field.diff == nil {
 			continue

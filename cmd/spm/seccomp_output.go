@@ -17,61 +17,50 @@ limitations under the License.
 package main
 
 import (
+	"encoding/json"
+
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+
+	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
 
-// seccompOutput is a seccomp profile as it is written: specs.LinuxSeccomp
-// field for field, except that a flag list that is set but empty is written
-// as "flags": [] where specs.LinuxSeccomp leaves the member out. A runtime
-// sets SECCOMP_FILTER_FLAG_SPEC_ALLOW for a profile without the member and
-// no flag for an empty list, so leaving it out would turn on what the
-// profile turns off.
-type seccompOutput struct {
-	DefaultAction    specs.LinuxSeccompAction  `json:"defaultAction"`
-	DefaultErrnoRet  *uint                     `json:"defaultErrnoRet,omitempty"`
-	Architectures    []specs.Arch              `json:"architectures,omitempty"`
-	Flags            *[]specs.LinuxSeccompFlag `json:"flags,omitempty"`
-	ListenerPath     string                    `json:"listenerPath,omitempty"`
-	ListenerMetadata string                    `json:"listenerMetadata,omitempty"`
-	Syscalls         []specs.LinuxSyscall      `json:"syscalls,omitempty"`
-}
-
-func newSeccompOutput(profile *specs.LinuxSeccomp) *seccompOutput {
-	if profile == nil {
-		return nil
-	}
-
-	written := &seccompOutput{
-		DefaultAction:    profile.DefaultAction,
-		DefaultErrnoRet:  profile.DefaultErrnoRet,
-		Architectures:    profile.Architectures,
-		Flags:            nil,
-		ListenerPath:     profile.ListenerPath,
-		ListenerMetadata: profile.ListenerMetadata,
-		Syscalls:         profile.Syscalls,
-	}
-
-	if profile.Flags != nil {
-		written.Flags = &profile.Flags
-	}
-
-	return written
-}
-
-// jsonValue returns the value encodeJSON writes for a result: the result
-// itself, or its seccompOutput form for a seccomp profile or a list of them.
-func jsonValue(value any) any {
+// seccompOutput returns the value encodeJSON encodes: for a seccomp profile,
+// or a list of them, what seccomp.Marshal writes, as raw JSON, which keeps
+// an empty flag list apart from an absent one; any other value as it is. A
+// nil profile is written as null.
+func seccompOutput(value any) (any, error) {
 	switch typed := value.(type) {
 	case *specs.LinuxSeccomp:
-		return newSeccompOutput(typed)
+		return marshalSeccomp(typed)
 	case []*specs.LinuxSeccomp:
-		written := make([]*seccompOutput, len(typed))
+		list := make([]json.RawMessage, len(typed))
+
 		for idx, profile := range typed {
-			written[idx] = newSeccompOutput(profile)
+			data, err := marshalSeccomp(profile)
+			if err != nil {
+				return nil, err
+			}
+
+			list[idx] = data
 		}
 
-		return written
+		return list, nil
 	default:
-		return value
+		return value, nil
 	}
+}
+
+// marshalSeccomp returns a seccomp profile as seccomp.Marshal writes it,
+// and null for a nil one.
+func marshalSeccomp(profile *specs.LinuxSeccomp) (json.RawMessage, error) {
+	if profile == nil {
+		return json.RawMessage("null"), nil
+	}
+
+	data, err := seccomp.Marshal(profile)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // encodeJSON wraps it
+	}
+
+	return data, nil
 }

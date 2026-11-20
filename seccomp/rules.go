@@ -102,7 +102,7 @@ type syscallRules struct {
 // forEachClause expands syscall entries into clauses the way a runtime loads
 // them and calls visit once per entry index, syscall name, and clause.
 // Multi-name entries contribute one clause per name, and entries equal to
-// def are skipped when def is non-nil, as runtimes skip them. Names for which
+// def are skipped, as runtimes skip them. Names for which
 // skip reports true are not visited at all, so a caller that has already
 // settled a syscall pays nothing for its remaining names. A nil skip visits
 // every name.
@@ -114,12 +114,9 @@ func forEachClause(
 	for idx := range syscalls {
 		entry := &syscalls[idx]
 
-		clauses := entryClauses(entry)
-		if def != nil {
-			clauses = slices.DeleteFunc(clauses, func(next clause) bool {
-				return next.sameResult(*def)
-			})
-		}
+		clauses := slices.DeleteFunc(entryClauses(entry), func(next clause) bool {
+			return next.sameResult(*def)
+		})
 
 		for _, name := range entry.Names {
 			if skip != nil && skip(name) {
@@ -142,7 +139,7 @@ func forEachClause(
 // memory per clause (see summarizeRules).
 //
 // No profile a runtime should accept comes near the bound. ValidateArtifact
-// rejects an artifact loading more than MaxArtifactClauses rules, which is a
+// rejects an artifact loading more than MaxArtifactRules rules, which is a
 // quarter of it, so an artifact is always read exactly.
 const maxLoadedClauses = 1 << 16
 
@@ -209,7 +206,7 @@ func summarizedNames(syscalls []specs.LinuxSyscall, def *clause) map[string]bool
 // entry equals the profile default, one per condition when it repeats an
 // argument index, and one otherwise.
 func entryClauseCount(entry *specs.LinuxSyscall, def *clause) uint64 {
-	if def != nil && baseClause(entry).sameResult(*def) {
+	if baseClause(entry).sameResult(*def) {
 		return 0
 	}
 
@@ -360,7 +357,7 @@ func summarizeRules(
 		var entrySummary *clauseSummary
 
 		for _, next := range entryClauses(entry) {
-			if def != nil && next.sameResult(*def) {
+			if next.sameResult(*def) {
 				continue
 			}
 
@@ -462,8 +459,6 @@ func (r *syscallRules) add(next clause) {
 
 // fallback returns the clause applied when no conditional clause matches:
 // the unconditional clause if present, otherwise the given profile default.
-// A nil default (bare syscall lists) yields nil when no unconditional clause
-// exists.
 func (r *syscallRules) fallback(def *clause) *clause {
 	if r != nil && r.unconditional != nil {
 		return r.unconditional
@@ -488,7 +483,7 @@ func (r *syscallRules) conditionals() []clause {
 // syscall collapses to one unconditional clause on the safe side of the
 // merge direction (see collapse), which is what the merge does anyway
 // wherever the exact result is not expressible. It admits an artifact at
-// MaxArtifactClausesPerSyscall against a baseline with a dozen filtered
+// MaxArtifactRulesPerSyscall against a baseline with a dozen filtered
 // entries for the same syscall.
 const maxPairwiseClauses = 4096
 
@@ -535,14 +530,6 @@ type ruleMerger struct {
 	native specs.Arch
 }
 
-func intersectRules() ruleMerger {
-	return intersectRulesFor(runningArchitecture())
-}
-
-func unionRules() ruleMerger {
-	return unionRulesFor(runningArchitecture())
-}
-
 // intersectRulesFor and unionRulesFor return the merger of a node whose
 // native architecture is the given one.
 func intersectRulesFor(native specs.Arch) ruleMerger {
@@ -572,18 +559,11 @@ func (m ruleMerger) pickClause(left, right clause) clause {
 // one of those actions, so the collapsed clause is at least as restrictive
 // as any of them for intersection and at least as permissive for union.
 //
-// def is the profile default, or nil for bare syscall lists. It returns nil
-// when the default decides every call instead: when the collapsed clause
-// equals def, and for the intersection of bare lists, whose unknown default
-// is assumed to be at least as restrictive as every action in them (see
-// IntersectSyscalls).
+// def is the profile default. It returns nil when the default decides every
+// call instead, which is when the collapsed clause equals def.
 func (m ruleMerger) collapse(def *clause, conditional []clause) *clause {
-	if def == nil && m.intersect {
-		return nil
-	}
-
 	collapsed := m.collapseAll(def, conditional)
-	if def != nil && collapsed != nil && collapsed.sameResult(*def) {
+	if collapsed.sameResult(*def) {
 		return nil
 	}
 
@@ -673,7 +653,7 @@ func (m ruleMerger) settleNarrowFirst(current *syscallRules, def *clause) bool {
 	}
 
 	picked := m.pickClause(*current.unconditional, *first)
-	if def != nil && picked.sameResult(*def) {
+	if picked.sameResult(*def) {
 		return false
 	}
 
@@ -794,9 +774,8 @@ func singleEquality(current clause) bool {
 // falls back to the more restrictive and union to the less restrictive
 // surrounding action.
 //
-// leftDef and rightDef are the profile defaults, or nil for bare syscall
-// lists. The returned fallback is the unconditional clause of the result, or
-// nil when only the caller's default applies. The conditional clauses are
+// leftDef and rightDef are the profile defaults. The returned fallback is
+// the unconditional clause of the result. The conditional clauses are
 // not yet collapsed: callers run finishRules with the effective fallback,
 // which is the merged default where the fallback is elided.
 func (m ruleMerger) mergeRules(
@@ -810,16 +789,7 @@ func (m ruleMerger) mergeRules(
 	leftConds := left.conditionals()
 	rightConds := right.conditionals()
 
-	// A union of bare lists without a fallback compares no clauses (see
-	// adjustClauses) and runs no pairwise pass, so its work stays linear and
-	// it needs no budget.
-	if (fallback != nil || m.intersect) && m.exceedsClauseBudget(leftConds, rightConds) {
-		if fallback == nil {
-			// Only bare lists lack a fallback, and intersection leaves
-			// their calls to the caller's default.
-			return nil, nil
-		}
-
+	if m.exceedsClauseBudget(leftConds, rightConds) {
 		return m.collapseAll(fallback, leftConds, rightConds), nil
 	}
 
@@ -876,39 +846,21 @@ func (m ruleMerger) exceedsClauseBudget(left, right []clause) bool {
 // direction's preference. For intersection the result is at least as
 // restrictive as the exact merge everywhere, since no input applies an
 // action more restrictive than the one picked here; for union it is at
-// least as permissive, for the same reason, provided a fallback exists or
-// the caller's default is at least as restrictive as every clause.
+// least as permissive, for the same reason. The fallback is the syscall's
+// unconditional clause or its profile's default, so it is never nil.
 func (m ruleMerger) collapseAll(fallback *clause, sides ...[]clause) *clause {
-	var collapsed *clause
-
-	combine := func(next clause) {
-		if collapsed == nil {
-			picked := next
-			picked.errnoRet = merge.ClonePtr(next.errnoRet)
-			collapsed = &picked
-
-			return
-		}
-
-		picked := m.pickClause(*collapsed, next)
-		collapsed = &picked
-	}
-
-	if fallback != nil {
-		combine(*fallback)
-	}
+	collapsed := *fallback
+	collapsed.errnoRet = merge.ClonePtr(fallback.errnoRet)
 
 	for _, side := range sides {
 		for _, current := range side {
-			combine(current)
+			collapsed = m.pickClause(collapsed, current)
 		}
 	}
 
-	if collapsed != nil {
-		collapsed.args = nil
-	}
+	collapsed.args = nil
 
-	return collapsed
+	return &collapsed
 }
 
 // resolveMixed makes a merged rule set expressible: an unconditional entry
@@ -1060,21 +1012,12 @@ func clauseKeys(clauses []clause) []string {
 	return keys
 }
 
-// mergeFallback combines the fallback clauses of both sides. Intersection
-// needs both to be present; union takes whichever exists.
+// mergeFallback combines the fallback clauses of both sides, each the
+// unconditional clause of a syscall or the default of its profile.
 func (m ruleMerger) mergeFallback(left, right *clause) *clause {
-	switch {
-	case left != nil && right != nil:
-		picked := m.pickClause(*left, *right)
+	picked := m.pickClause(*left, *right)
 
-		return &picked
-	case m.intersect:
-		return nil
-	case left != nil:
-		return left
-	default:
-		return right
-	}
+	return &picked
 }
 
 // adjustClauses returns one clause per entry of clauses, with the action
@@ -1089,32 +1032,16 @@ func (m ruleMerger) mergeFallback(left, right *clause) *clause {
 // working model applies the least restrictive matching clause. Union does
 // not need that: every other-side clause is emitted on its own and raises
 // the result wherever it matches.
-//
-// When the other side has no fallback (bare lists) and no clause subsuming
-// the clause, part of the region is unconstrained on that side and left to
-// the caller's default there. Intersection then drops the clause, since that
-// default is assumed to be the most restrictive action (see
-// IntersectSyscalls), and the pairwise conjunctions of mergeRules keep what
-// both sides constrain. Union keeps the clause unchanged without looking at
-// the other side at all, so a union of bare lists stays linear.
 func (m ruleMerger) adjustClauses(
 	clauses, others []clause, otherFallback *clause,
 ) []clause {
-	if !m.intersect && otherFallback == nil {
-		return slices.Clone(clauses)
-	}
-
 	result := make([]clause, 0, len(clauses))
 
 	for _, current := range clauses {
 		adjusted, subsumed := m.adjustAgainstOthers(current, others)
 
-		if otherFallback != nil && !subsumed {
+		if !subsumed {
 			adjusted = m.pickClause(adjusted, *otherFallback)
-		}
-
-		if m.intersect && otherFallback == nil && !subsumed {
-			continue
 		}
 
 		adjusted.args = current.args
@@ -1176,7 +1103,7 @@ func conjoinClauseArgs(
 func (m ruleMerger) collapseClauses(clauses []clause, fallback *clause) []clause {
 	byArgs, order := groupByArgs(clauses)
 
-	if fallback != nil && !m.intersect {
+	if !m.intersect {
 		raiseOverlapsOfRedundant(byArgs, func(current clause) bool {
 			return current.sameResult(*fallback)
 		}, *fallback)
@@ -1186,7 +1113,7 @@ func (m ruleMerger) collapseClauses(clauses []clause, fallback *clause) []clause
 
 	for _, key := range order {
 		current := byArgs[key]
-		if fallback != nil && current.sameResult(*fallback) {
+		if current.sameResult(*fallback) {
 			continue
 		}
 
@@ -1367,7 +1294,7 @@ func appendRules(
 	result []specs.LinuxSyscall, name string,
 	def, fallback *clause, conditional []clause,
 ) []specs.LinuxSyscall {
-	if fallback != nil && (def == nil || !fallback.sameResult(*def)) {
+	if fallback != nil && !fallback.sameResult(*def) {
 		result = append(result, clauseToSyscall(name, *fallback))
 	}
 
@@ -1391,7 +1318,7 @@ func (m ruleMerger) finishRules(
 	mergedDefault, fallback *clause, conditional []clause,
 ) (*clause, []clause) {
 	switch {
-	case fallback == nil || fallback.sameResult(*mergedDefault):
+	case fallback.sameResult(*mergedDefault):
 		fallback = nil
 		conditional = m.collapseClauses(conditional, mergedDefault)
 	case actionsEquivalent(fallback.action, mergedDefault.action):
@@ -1412,49 +1339,10 @@ func (m ruleMerger) finishRules(
 	return m.settleOutput(mergedDefault, fallback, conditional)
 }
 
-// mergeBareSyscalls merges two syscall lists that carry no profile default.
-// Names present on one side only are dropped for intersection and kept for
-// union.
-func (m ruleMerger) mergeBareSyscalls(left, right []specs.LinuxSyscall) []specs.LinuxSyscall {
-	leftRules := collectRules(left, nil)
-	rightRules := collectRules(right, nil)
-
-	m.settleInputs(leftRules, nil)
-	m.settleInputs(rightRules, nil)
-
-	// Intersection only visits names both sides carry, and the loop below
-	// skips the ones the right side lacks, so the left names suffice there.
-	var names []string
-	if m.intersect {
-		names = slices.Sorted(maps.Keys(leftRules))
-	} else {
-		names = mergedNames(leftRules, rightRules)
-	}
-
-	var result []specs.LinuxSyscall
-
-	for _, name := range names {
-		leftRule, inLeft := leftRules[name]
-		rightRule, inRight := rightRules[name]
-
-		if m.intersect && (!inLeft || !inRight) {
-			continue
-		}
-
-		fallback, conditional := m.mergeRules(leftRule, rightRule, nil, nil)
-		fallback, conditional = m.resolveMixed(fallback, m.collapseClauses(conditional, fallback))
-		fallback, conditional = m.settleOutput(nil, fallback, conditional)
-
-		result = appendRules(result, name, nil, fallback, conditional)
-	}
-
-	return result
-}
-
-// settledSyscalls returns the entries of one profile or bare list the way a
+// settledSyscalls returns the entries of one profile the way a
 // merge in direction m reads them (see settleInputs), in the form a merge
 // result takes: one name per entry, conditional clauses sorted. def is the
-// profile default, or nil for bare lists; entries equal to it are elided.
+// profile default; entries equal to it are elided.
 // With a nil merger the syscalls are not settled, which is the form Diff
 // compares.
 func settledSyscalls(

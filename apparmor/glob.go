@@ -68,10 +68,11 @@ const (
 	// a few thousand paths under one directory take minutes, and nothing
 	// stops a profile from being larger still.
 	//
-	// Past the bound the merge falls back to a result that needs no
-	// matching, conservative for an intersection and equivalent for a union
-	// (see addVerbatimGlobs and unionVerbatim). The bound admits two
-	// profiles of MaxArtifactPaths paths each.
+	// Past the bound a union falls back to a result that needs no matching
+	// and permits the same (see unionVerbatim), and an intersection fails
+	// with ErrBudgetExceeded when the result may lose access, which is when
+	// neither input is kept whole. The bound admits two profiles of
+	// MaxArtifactPaths paths each.
 	maxMergePathPairs = 1 << 20
 	// maxMergePathWork bounds the same matching by the work each comparison
 	// costs, not only by the number of comparisons. One comparison runs a
@@ -165,8 +166,9 @@ type globMatcher struct {
 // compile: one past its call's compile budget, or, in principle, one the
 // regexp package refused. It matches no name and no other pattern, but
 // unlike a pattern that matches nothing to AppArmor it loads, so an
-// intersection keeps it where every input lists it word for word: the
-// result then grants it only with the permissions every input grants it.
+// intersection keeps it where every input lists it word for word, and fails
+// with ErrBudgetExceeded when the result may lose access, which is when
+// neither input is kept whole (see intersectPerms).
 func (matcher *globMatcher) verbatimOnly() bool {
 	return matcher.compilable && matcher.expr == nil
 }
@@ -474,11 +476,12 @@ func storeSharedMatcher(path string, analyzed *globMatcher) *globMatcher {
 // against it. Past maxCallCompileBytes a pattern is analyzed but not
 // compiled, and the call treats it as matching no name and no other
 // pattern, even when the shared cache holds it compiled: the call's result
-// must not depend on what earlier calls left there. An intersection still
-// keeps such a pattern where every input lists it word for word (see
-// globMatcher.verbatimOnly), and a union keeps it as it keeps every
-// pattern. A merge analyzes every
-// path of one input before it reads the next, and all of them before it
+// must not depend on what earlier calls left there. Where an input holds
+// such a pattern, an intersection fails with ErrBudgetExceeded when the
+// result may lose access, which is when neither input is kept whole (see
+// intersectPerms), and a union keeps it as it keeps every pattern. A merge
+// analyzes every path of one input before it reads the next, and all of
+// them before it
 // merges anything (see foldProfiles), so which patterns are compiled
 // depends on the inputs and their order alone.
 //

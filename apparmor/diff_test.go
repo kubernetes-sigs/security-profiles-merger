@@ -62,7 +62,8 @@ func TestDiffNil(t *testing.T) {
 }
 
 // TestProfileDiffString pins that a diff prints as FormatDiff renders it,
-// through a pointer and a value alike, and that a nil diff prints too.
+// through a pointer and a value alike, and that fmt prints a nil pointer as
+// it prints any.
 func TestProfileDiffString(t *testing.T) {
 	t.Parallel()
 
@@ -155,12 +156,14 @@ func TestDiffCapabilities(t *testing.T) {
 		t.Fatal("expected Capabilities diff")
 	}
 
-	if len(diff.Capabilities.Removed) != 1 || diff.Capabilities.Removed[0] != capSysTime {
-		t.Errorf("removed = %v, want [SYS_TIME]", diff.Capabilities.Removed)
+	if len(diff.Capabilities.AllowedCapabilities.Removed) != 1 ||
+		diff.Capabilities.AllowedCapabilities.Removed[0] != capSysTime {
+		t.Errorf("removed = %v, want [SYS_TIME]", diff.Capabilities.AllowedCapabilities.Removed)
 	}
 
-	if len(diff.Capabilities.Added) != 1 || diff.Capabilities.Added[0] != capChown {
-		t.Errorf("added = %v, want [CHOWN]", diff.Capabilities.Added)
+	if len(diff.Capabilities.AllowedCapabilities.Added) != 1 ||
+		diff.Capabilities.AllowedCapabilities.Added[0] != capChown {
+		t.Errorf("added = %v, want [CHOWN]", diff.Capabilities.AllowedCapabilities.Added)
 	}
 }
 
@@ -197,32 +200,32 @@ func TestDiffFilesystem(t *testing.T) {
 		t.Fatal("expected Filesystem diff")
 	}
 
-	if diff.Filesystem.ReadOnly == nil {
+	if diff.Filesystem.ReadOnlyPaths == nil {
 		t.Fatal("expected ReadOnly diff")
 	}
 
-	if got := diff.Filesystem.ReadOnly.Removed; !slices.Equal(got, []string{pathVarLog}) {
+	if got := diff.Filesystem.ReadOnlyPaths.Removed; !slices.Equal(got, []string{pathVarLog}) {
 		t.Errorf("ReadOnly removed = %v, want [%s]", got, pathVarLog)
 	}
 
-	if got := diff.Filesystem.ReadOnly.Added; len(got) != 0 {
+	if got := diff.Filesystem.ReadOnlyPaths.Added; len(got) != 0 {
 		t.Errorf("ReadOnly added = %v, want none", got)
 	}
 
-	if diff.Filesystem.WriteOnly == nil {
+	if diff.Filesystem.WriteOnlyPaths == nil {
 		t.Fatal("expected WriteOnly diff")
 	}
 
-	if got := diff.Filesystem.WriteOnly.Added; !slices.Equal(got, []string{pathTmp}) {
+	if got := diff.Filesystem.WriteOnlyPaths.Added; !slices.Equal(got, []string{pathTmp}) {
 		t.Errorf("WriteOnly added = %v, want [%s]", got, pathTmp)
 	}
 
-	if got := diff.Filesystem.WriteOnly.Removed; len(got) != 0 {
+	if got := diff.Filesystem.WriteOnlyPaths.Removed; len(got) != 0 {
 		t.Errorf("WriteOnly removed = %v, want none", got)
 	}
 
-	if diff.Filesystem.ReadWrite != nil {
-		t.Errorf("ReadWrite = %v, want nil", diff.Filesystem.ReadWrite)
+	if diff.Filesystem.ReadWritePaths != nil {
+		t.Errorf("ReadWrite = %v, want nil", diff.Filesystem.ReadWritePaths)
 	}
 }
 
@@ -270,11 +273,11 @@ func TestDiffNetwork(t *testing.T) {
 		t.Error("expected AllowRaw diff")
 	}
 
-	if diff.Network.AllowTCP != nil {
+	if diff.Network.Protocols.AllowTCP != nil {
 		t.Error("AllowTCP should be nil (unchanged)")
 	}
 
-	if diff.Network.AllowUDP == nil {
+	if diff.Network.Protocols.AllowUDP == nil {
 		t.Error("expected AllowUDP diff")
 	}
 }
@@ -306,27 +309,30 @@ func TestDiffExecutables(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if diff.Executables == nil {
+	if diff.Executable.AllowedExecutables == nil {
 		t.Fatal("expected Executables diff")
 	}
 
-	if got := diff.Executables.Removed; !slices.Equal(got, []string{pathBinPython}) {
+	if got := diff.Executable.AllowedExecutables.Removed; !slices.Equal(
+		got,
+		[]string{pathBinPython},
+	) {
 		t.Errorf("removed executables = %v, want [%s]", got, pathBinPython)
 	}
 
-	if got := diff.Executables.Added; len(got) != 0 {
+	if got := diff.Executable.AllowedExecutables.Added; len(got) != 0 {
 		t.Errorf("added executables = %v, want none", got)
 	}
 
-	if diff.Libraries == nil {
+	if diff.Executable.AllowedLibraries == nil {
 		t.Fatal("expected Libraries diff")
 	}
 
-	if got := diff.Libraries.Added; !slices.Equal(got, []string{pathLibM}) {
+	if got := diff.Executable.AllowedLibraries.Added; !slices.Equal(got, []string{pathLibM}) {
 		t.Errorf("added libraries = %v, want [%s]", got, pathLibM)
 	}
 
-	if got := diff.Libraries.Removed; len(got) != 0 {
+	if got := diff.Executable.AllowedLibraries.Removed; len(got) != 0 {
 		t.Errorf("removed libraries = %v, want none", got)
 	}
 }
@@ -498,20 +504,20 @@ func TestDiffFilesystemReadWrite(t *testing.T) {
 		t.Fatal("expected Filesystem diff")
 	}
 
-	if diff.Filesystem.ReadWrite == nil {
+	if diff.Filesystem.ReadWritePaths == nil {
 		t.Fatal("expected ReadWrite diff")
 	}
 
-	if len(diff.Filesystem.ReadWrite.Removed) != 1 ||
-		diff.Filesystem.ReadWrite.Removed[0] != pathVarLog {
+	if len(diff.Filesystem.ReadWritePaths.Removed) != 1 ||
+		diff.Filesystem.ReadWritePaths.Removed[0] != pathVarLog {
 		t.Errorf("ReadWrite removed = %v, want [%s]",
-			diff.Filesystem.ReadWrite.Removed, pathVarLog)
+			diff.Filesystem.ReadWritePaths.Removed, pathVarLog)
 	}
 
-	if len(diff.Filesystem.ReadWrite.Added) != 1 ||
-		diff.Filesystem.ReadWrite.Added[0] != pathTmp {
+	if len(diff.Filesystem.ReadWritePaths.Added) != 1 ||
+		diff.Filesystem.ReadWritePaths.Added[0] != pathTmp {
 		t.Errorf("ReadWrite added = %v, want [%s]",
-			diff.Filesystem.ReadWrite.Added, pathTmp)
+			diff.Filesystem.ReadWritePaths.Added, pathTmp)
 	}
 
 	got := apparmor.FormatDiff(diff)
@@ -847,14 +853,12 @@ func TestFormatDiffNilBoolPtr(t *testing.T) {
 	trueVal := true
 
 	got := apparmor.FormatDiff(&apparmor.ProfileDiff{
-		Equal:       false,
-		Executables: nil,
-		Libraries:   nil,
-		Filesystem:  nil,
+		Equal:      false,
+		Executable: nil,
+		Filesystem: nil,
 		Network: &apparmor.NetworkDiff{
-			AllowRaw: &apparmor.BoolPtrDiff{Left: nil, Right: &trueVal},
-			AllowTCP: nil,
-			AllowUDP: nil,
+			AllowRaw:  &apparmor.BoolPtrDiff{Left: nil, Right: &trueVal},
+			Protocols: nil,
 		},
 		Capabilities: nil,
 	})
@@ -989,7 +993,7 @@ func TestDiffReportsRealConstraintOnly(t *testing.T) {
 	}
 
 	if diff.Capabilities == nil ||
-		!slices.Contains(diff.Capabilities.Removed, capChown) {
+		!slices.Contains(diff.Capabilities.AllowedCapabilities.Removed, capChown) {
 		t.Errorf("expected %s to be removed, got %s",
 			capChown, apparmor.FormatDiff(diff))
 	}
@@ -1057,7 +1061,7 @@ func TestDiffNetworkBooleanOneSided(t *testing.T) {
 			}
 
 			if diff.Network == nil || diff.Network.AllowRaw == nil ||
-				diff.Network.AllowTCP == nil {
+				diff.Network.Protocols.AllowTCP == nil {
 				t.Errorf("Diff = %s, want both booleans reported",
 					apparmor.FormatDiff(diff))
 			}
@@ -1202,7 +1206,7 @@ func TestDiffComparesRulesNotSpellings(t *testing.T) {
 	want := &apparmor.SliceDiff[string]{
 		Added: []string{"/etc/shadow"}, Removed: []string{`/etc/\x70asswd`},
 	}
-	if diff.Equal || !reflect.DeepEqual(diff.Executables, want) {
+	if diff.Equal || !reflect.DeepEqual(diff.Executable.AllowedExecutables, want) {
 		t.Errorf("Diff = %s, want %v", apparmor.FormatDiff(diff), want)
 	}
 }

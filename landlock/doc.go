@@ -25,12 +25,12 @@ limitations under the License.
 // recorded profiles. [Diff] compares two profiles in the same terms.
 //
 // A kernel rejects a ruleset carrying an access right its ABI does not know,
-// so [RequiredABIVersion] reports the version a profile needs and
-// [ValidateForABI] checks it against the version a node reports. Hierarchy
-// resolution is textual, while the kernel binds a rule to the file its path
-// resolves to, so a rule of an [Intersect] result can grant an input's
-// access on a deeper path another input chose; [LoweredRulePaths] reports
-// which rules of a result carry such a grant.
+// so [RequiredABIVersion] reports the version a profile needs and the
+// validators of [Options] check it against the version a node reports.
+// Hierarchy resolution is textual, while the kernel binds a rule to the
+// file its path resolves to, so a rule of an [Intersect] result can grant an
+// input's access on a deeper path another input chose; [LoweredRulePaths]
+// reports which rules of a result carry such a grant.
 //
 // [UnmarshalStrict] decodes a profile and refuses what encoding/json accepts
 // silently: members no field reads, members that name a field only ignoring
@@ -44,8 +44,8 @@ limitations under the License.
 // paths. [ValidateArtifact] adds the size limit and what a kernel could not
 // load, and [ValidateStrict] adds duplicate rules and rights, which no other
 // validator reports, so each rejects everything the one before it rejects.
-// [ValidateForABI] runs Validate and checks the rights against an ABI
-// version; it is orthogonal to the other two.
+// The methods of [Options] run the validator of the same name and check
+// the rights against an ABI version as well.
 //
 // Validate is what the merge runs on its inputs. Duplicate rules and rights
 // pass Validate anyway, since the kernel and the merge fold them, so a
@@ -194,7 +194,7 @@ limitations under the License.
 // semantics on every host. The validators reject an empty path or one that
 // cleans to "." ([ErrEmptyPath]), a path longer than [MaxPathLen]
 // ([ErrPathTooLong]), checked before the path is scanned, a NUL byte
-// ([ErrInvalidPath]) and a ".." component ([ErrParentPath]): the kernel
+// ([ErrNulInPath]) and a ".." component ([ErrParentPath]): the kernel
 // opens rule paths and resolves ".." against the file system, so behind a
 // symlink "/srv/data/../public" need not be "/srv/public". Diff cleans paths
 // the same way and keeps ".." components as written.
@@ -251,10 +251,11 @@ limitations under the License.
 // Landlock gained access rights over several kernel releases, and a kernel
 // rejects a ruleset carrying a right its ABI does not know.
 // [RequiredABIVersion] returns the lowest version a profile can be loaded
-// on, and [ValidateForABI] asks the same question the other way round,
-// reporting every right a given version does not support with
+// on, and the validators of [Options] ask the same question the other way
+// round, reporting every right a given version does not support with
 // [ErrUnsupportedABIRight]. The version each right needs is documented on
-// the right itself.
+// the right itself, and [FSAccessRights], [NetAccessRights] and
+// [ScopeRights] list every right this package knows with its version.
 //
 // An Intersect result can require up to the highest ABI version any input
 // needs, since it unions the handled sets and invents no right. Union can
@@ -264,17 +265,41 @@ limitations under the License.
 // always deny moving or linking a file into another directory, which
 // matches the default denial.
 //
-// [DowngradeToABI] returns a profile without the rights a version does not
-// support, for a node that enforces what its kernel can rather than
+// [Options.Downgrade] returns a profile without the rights a version does
+// not support, for a node that enforces what its kernel can rather than
 // nothing. The result is another policy: the kernel no longer restricts a
 // right dropped from a handled set, and a kernel at [ABIV1] denies the moves
 // and links a refer grant allowed.
 //
 // A node may report an ABI version newer than this package knows rights
-// for. Versions are cumulative, so ValidateForABI treats such a version as
+// for. Versions are cumulative, so Options treats such a version as
 // [LatestABIVersion] rather than rejecting it, and a profile is never
 // refused because the node's kernel is newer than the package. A version
-// below ABIV1 names no kernel and is reported with [ErrUnknownABIVersion].
+// below ABIV1, 0 included, names no kernel and is reported with
+// [ErrUnknownABIVersion].
+//
+// # Cost bounds
+//
+// Both merges look up every ancestor of every rule path among the rules, and
+// settling refer does so once per input over the rule paths of every input,
+// since a move an input allows can run between any two directories where
+// the rights of that input or of the result change. So they take time in
+// the number of inputs times the number of rules of all inputs times the
+// depth of their paths, each lookup costing up to the length of the path,
+// and memory in proportion to the size of the inputs. [MaxPathLen], which
+// every validator applies, bounds the depth and the length of one path.
+//
+// The rest is bounded by a budget. [Intersect] and [Union] validate their
+// inputs, then count the number of inputs times the ancestors of all their
+// rule paths, cleaned as the merge cleans them (a network rule counting
+// one), and refuse more than 2^25 with [ErrBudgetExceeded] before they merge
+// anything. The cost grows with the square of the number of inputs: the
+// budget admits three inputs of [MaxArtifactRules] rules on the deepest
+// paths MaxPathLen allows, and about 300 recordings of 50 rules on paths of
+// five components, but not 500 of them. A caller combining more recordings
+// than that leaves duplicates out first, which changes no union. Validate
+// counts no rules, so [ValidateArtifact] is still what keeps one artifact
+// small.
 //
 // # Concurrency
 //

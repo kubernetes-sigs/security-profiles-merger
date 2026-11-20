@@ -167,13 +167,13 @@ func TestValidateRejectsNulByte(t *testing.T) {
 	}})
 
 	err := landlock.Validate(profile)
-	if !errors.Is(err, landlock.ErrInvalidPath) {
-		t.Errorf("Validate = %v, want ErrInvalidPath", err)
+	if !errors.Is(err, landlock.ErrNulInPath) {
+		t.Errorf("Validate = %v, want ErrNulInPath", err)
 	}
 
 	err = landlock.ValidateStrict(profile)
-	if !errors.Is(err, landlock.ErrInvalidPath) {
-		t.Errorf("ValidateStrict = %v, want ErrInvalidPath", err)
+	if !errors.Is(err, landlock.ErrNulInPath) {
+		t.Errorf("ValidateStrict = %v, want ErrNulInPath", err)
 	}
 }
 
@@ -250,7 +250,7 @@ func TestUnionKeepsReferGrant(t *testing.T) {
 	// Without a grant, refer stays implicit and the result keeps ABI v1.
 	result := assertMergeFormat(t, "Union", landlock.Union,
 		"Profile{fs:read_file /a(read_file)}", left, fsProfile(readRefer))
-	if abi := landlock.RequiredABIVersion(result); abi != landlock.ABIV1 {
+	if abi := requiredABI(t, result); abi != landlock.ABIV1 {
 		t.Errorf("RequiredABIVersion = %d, want %d", abi, landlock.ABIV1)
 	}
 
@@ -727,15 +727,91 @@ func TestValidateArtifactAndStrictDiffer(t *testing.T) {
 	}
 }
 
-func TestValidateForABIRejectsUnknownVersions(t *testing.T) {
+func TestOptionsRejectUnknownVersions(t *testing.T) {
 	t.Parallel()
 
 	profile := fsProfile(fsRights{landlock.FSAccessReadFile})
 
 	for _, abi := range []landlock.ABIVersion{-1, 0} {
-		err := landlock.ValidateForABI(profile, abi)
-		if !errors.Is(err, landlock.ErrUnknownABIVersion) {
-			t.Errorf("ValidateForABI(v%d) = %v, want ErrUnknownABIVersion", abi, err)
+		for name, validate := range map[string]func(landlock.Options, *landlock.Profile) error{
+			"Validate":         landlock.Options.Validate,
+			"ValidateArtifact": landlock.Options.ValidateArtifact,
+			"ValidateStrict":   landlock.Options.ValidateStrict,
+		} {
+			err := validate(landlock.Options{ABI: abi}, profile)
+			if !errors.Is(err, landlock.ErrUnknownABIVersion) {
+				t.Errorf("Options{v%d}.%s() = %v, want ErrUnknownABIVersion", abi, name, err)
+			}
+		}
+	}
+
+	_, err := landlock.Options{ABI: 0}.Downgrade(profile)
+	if !errors.Is(err, landlock.ErrUnknownABIVersion) {
+		t.Errorf("Options{v0}.Downgrade() = %v, want ErrUnknownABIVersion", err)
+	}
+}
+
+// TestOptionsAddTheABICheckToEveryLevel checks that a named version adds
+// its check to every level, in one report with the level's own failures,
+// and that a profile past MaxArtifactRules is reported on its own, as the
+// plain validators report it.
+func TestOptionsAddTheABICheckToEveryLevel(t *testing.T) {
+	t.Parallel()
+
+	udp := &landlock.Profile{
+		HandledAccessFS:  nil,
+		HandledAccessNet: []landlock.NetAccessRight{landlock.NetAccessBindUDP},
+		Scoped:           nil,
+		PathRules:        nil,
+		NetRules:         nil,
+	}
+
+	for name, validate := range map[string]func(landlock.Options, *landlock.Profile) error{
+		"Validate":         landlock.Options.Validate,
+		"ValidateArtifact": landlock.Options.ValidateArtifact,
+		"ValidateStrict":   landlock.Options.ValidateStrict,
+	} {
+		err := validate(landlock.Options{ABI: landlock.LatestABIVersion}, udp)
+		if err != nil {
+			t.Errorf("Options{latest}.%s = %v, want nil", name, err)
+		}
+
+		err = validate(landlock.Options{ABI: landlock.ABIV4}, udp)
+		if !errors.Is(err, landlock.ErrUnsupportedABIRight) {
+			t.Errorf("Options{v4}.%s = %v, want ErrUnsupportedABIRight", name, err)
+		}
+	}
+
+	err := landlock.Options{ABI: landlock.ABIV4}.ValidateStrict(&landlock.Profile{
+		HandledAccessFS: nil,
+		HandledAccessNet: []landlock.NetAccessRight{
+			landlock.NetAccessBindUDP, landlock.NetAccessBindUDP,
+		},
+		Scoped:    nil,
+		PathRules: nil,
+		NetRules:  nil,
+	})
+	if !errors.Is(err, landlock.ErrDuplicateRight) ||
+		!errors.Is(err, landlock.ErrUnsupportedABIRight) {
+		t.Errorf("Options{v4}.ValidateStrict = %v, want both failures", err)
+	}
+
+	large := &landlock.Profile{
+		HandledAccessFS:  nil,
+		HandledAccessNet: []landlock.NetAccessRight{landlock.NetAccessBindUDP},
+		Scoped:           nil,
+		PathRules:        nil,
+		NetRules:         make([]landlock.NetRule, landlock.MaxArtifactRules+1),
+	}
+
+	for name, validate := range map[string]func(landlock.Options, *landlock.Profile) error{
+		"ValidateArtifact": landlock.Options.ValidateArtifact,
+		"ValidateStrict":   landlock.Options.ValidateStrict,
+	} {
+		err := validate(landlock.Options{ABI: landlock.ABIV4}, large)
+		if !errors.Is(err, landlock.ErrTooManyRules) ||
+			errors.Is(err, landlock.ErrUnsupportedABIRight) {
+			t.Errorf("Options{v4}.%s past the limit = %v, want ErrTooManyRules alone", name, err)
 		}
 	}
 }
@@ -743,13 +819,13 @@ func TestValidateForABIRejectsUnknownVersions(t *testing.T) {
 // A node may report an ABI version newer than this library knows rights
 // for. Landlock versions are cumulative, so such a kernel supports every
 // right here and validation must not fail for it.
-func TestValidateForABIClampsNewerVersions(t *testing.T) {
+func TestOptionsValidateClampsNewerVersions(t *testing.T) {
 	t.Parallel()
 
 	all := &landlock.Profile{
-		HandledAccessFS:  landlock.KnownFSRights(),
-		HandledAccessNet: landlock.KnownNetRights(),
-		Scoped:           landlock.KnownScopeRights(),
+		HandledAccessFS:  knownRights(landlock.FSAccessRights()),
+		HandledAccessNet: knownRights(landlock.NetAccessRights()),
+		Scoped:           knownRights(landlock.ScopeRights()),
 		PathRules:        nil,
 		NetRules:         nil,
 	}
@@ -757,22 +833,22 @@ func TestValidateForABIClampsNewerVersions(t *testing.T) {
 	for _, abi := range []landlock.ABIVersion{
 		landlock.LatestABIVersion, landlock.LatestABIVersion + 1, 99,
 	} {
-		err := landlock.ValidateForABI(all, abi)
+		err := landlock.Options{ABI: abi}.Validate(all)
 		if err != nil {
-			t.Errorf("ValidateForABI(v%d) = %v, want nil", abi, err)
+			t.Errorf("Options{v%d}.Validate() = %v, want nil", abi, err)
 		}
 	}
 
 	// Clamping reports no ABI problem, but the other checks still run.
 	unknown := fsProfile(fsRights{"bogus_right"})
 
-	err := landlock.ValidateForABI(unknown, 99)
+	err := landlock.Options{ABI: 99}.Validate(unknown)
 	if !errors.Is(err, landlock.ErrUnknownRight) {
-		t.Errorf("ValidateForABI(v99, unknown right) = %v, want ErrUnknownRight", err)
+		t.Errorf("Options{v99}.Validate(unknown right) = %v, want ErrUnknownRight", err)
 	}
 
 	if errors.Is(err, landlock.ErrUnknownABIVersion) {
-		t.Errorf("ValidateForABI(v99) reported the version: %v", err)
+		t.Errorf("Options{v99}.Validate() reported the version: %v", err)
 	}
 }
 

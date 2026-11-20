@@ -108,7 +108,7 @@ type profileKind struct {
 }
 
 // kindOps holds the package functions of one profile type.
-type kindOps[T any, D spm.Diff] struct {
+type kindOps[T any, D any] struct {
 	intersect        func(...*T) (*T, error)
 	union            func(...*T) (*T, error)
 	validate         func(*T) error
@@ -117,57 +117,49 @@ type kindOps[T any, D spm.Diff] struct {
 	format           func(*T) string
 	diff             func(*T, *T) (*D, error)
 	formatDiff       func(*D) string
-	// forArch holds the variants that take the native architecture, and is
-	// nil for a profile type that has no architectures.
-	forArch *archOps[T, D]
-}
-
-// archOps holds the package functions of a profile type that run as a node
-// with the given native architecture would, rather than as the one this
-// program runs on. Validate has no such variant, since what it checks does
-// not depend on the architecture.
-type archOps[T any, D spm.Diff] struct {
-	intersect        func(specs.Arch, ...*T) (*T, error)
-	union            func(specs.Arch, ...*T) (*T, error)
-	validateStrict   func(specs.Arch, *T) error
-	validateArtifact func(specs.Arch, *T) error
-	diff             func(specs.Arch, *T, *T) (*D, error)
+	equal            func(*D) bool
+	// forArch returns the functions as a node with the given native
+	// architecture runs them, rather than the one this program runs on, and
+	// is nil for a profile type that has no architectures. Validate has no
+	// such variant, since what it checks does not depend on the
+	// architecture.
+	forArch func(native specs.Arch) kindOps[T, D]
 }
 
 // atArch returns the functions to run for the architecture --arch names.
 // It reports false, after saying why, when --arch was named for a profile
 // type that has no architectures: a run that names one for a profile type
 // that cannot have one asked for something the answer would silently
-// ignore. Without an explicit architecture the functions are those of the
-// profile type, which settle for the architecture this program runs on.
+// ignore. A profile type without architectures keeps its functions.
 func (ops kindOps[T, D]) atArch(arch archOption, stderr io.Writer) (kindOps[T, D], bool) {
 	if rejectArch(arch, ops.forArch != nil, stderr) {
 		return ops, false
 	}
 
-	if !arch.explicit {
+	if ops.forArch == nil {
 		return ops, true
 	}
 
-	native, forArch := arch.value, ops.forArch
+	return ops.forArch(arch.value), true
+}
 
-	ops.intersect = func(profiles ...*T) (*T, error) {
-		return forArch.intersect(native, profiles...)
+// seccompOps returns the functions of the seccomp package for the node the
+// options name.
+func seccompOps(opts seccomp.Options) kindOps[specs.LinuxSeccomp, seccomp.ProfileDiff] {
+	return kindOps[specs.LinuxSeccomp, seccomp.ProfileDiff]{
+		intersect:        opts.Intersect,
+		union:            opts.Union,
+		validate:         seccomp.Validate,
+		validateStrict:   opts.ValidateStrict,
+		validateArtifact: opts.ValidateArtifact,
+		format:           seccomp.FormatProfile,
+		diff:             opts.Diff,
+		formatDiff:       seccomp.FormatDiff,
+		equal:            (*seccomp.ProfileDiff).IsEqual,
+		forArch: func(native specs.Arch) kindOps[specs.LinuxSeccomp, seccomp.ProfileDiff] {
+			return seccompOps(seccomp.Options{Arch: native})
+		},
 	}
-	ops.union = func(profiles ...*T) (*T, error) {
-		return forArch.union(native, profiles...)
-	}
-	ops.validateStrict = func(profile *T) error {
-		return forArch.validateStrict(native, profile)
-	}
-	ops.validateArtifact = func(profile *T) error {
-		return forArch.validateArtifact(native, profile)
-	}
-	ops.diff = func(left, right *T) (*D, error) {
-		return forArch.diff(native, left, right)
-	}
-
-	return ops, true
 }
 
 // diffCommand compares two profiles.
@@ -179,7 +171,7 @@ func (ops kindOps[T, D]) diffCommand(
 		return exitUsage
 	}
 
-	return diffProfiles(inputs, format, ops.diff, ops.formatDiff, stdout, stderr)
+	return diffProfiles(inputs, format, ops.diff, ops.formatDiff, ops.equal, stdout, stderr)
 }
 
 // mergeCommand checks every input under its own mode and merges them.
@@ -253,7 +245,7 @@ func (ops kindOps[T, D]) checker(mode validateMode) func(*T) error {
 	return ops.validate
 }
 
-func newKind[T any, D spm.Diff](ops kindOps[T, D]) profileKind {
+func newKind[T any, D any](ops kindOps[T, D]) profileKind {
 	return profileKind{
 		merge:    ops.mergeCommand,
 		diff:     ops.diffCommand,
@@ -265,23 +257,7 @@ func newKind[T any, D spm.Diff](ops kindOps[T, D]) profileKind {
 func kindByName(name string) (profileKind, bool) {
 	switch name {
 	case typeSeccomp:
-		return newKind(kindOps[specs.LinuxSeccomp, seccomp.ProfileDiff]{
-			intersect:        seccomp.Intersect,
-			union:            seccomp.Union,
-			validate:         seccomp.Validate,
-			validateStrict:   seccomp.ValidateStrict,
-			validateArtifact: seccomp.ValidateArtifact,
-			format:           seccomp.FormatProfile,
-			diff:             seccomp.Diff,
-			formatDiff:       seccomp.FormatDiff,
-			forArch: &archOps[specs.LinuxSeccomp, seccomp.ProfileDiff]{
-				intersect:        seccomp.IntersectForArch,
-				union:            seccomp.UnionForArch,
-				validateStrict:   seccomp.ValidateStrictForArch,
-				validateArtifact: seccomp.ValidateArtifactForArch,
-				diff:             seccomp.DiffForArch,
-			},
-		}), true
+		return newKind(seccompOps(seccomp.Options{Arch: seccomp.NativeHost})), true
 	case typeAppArmor:
 		return newKind(kindOps[apparmor.Profile, apparmor.ProfileDiff]{
 			intersect:        apparmor.Intersect,
@@ -292,6 +268,7 @@ func kindByName(name string) (profileKind, bool) {
 			format:           apparmor.FormatProfile,
 			diff:             apparmor.Diff,
 			formatDiff:       apparmor.FormatDiff,
+			equal:            (*apparmor.ProfileDiff).IsEqual,
 			forArch:          nil,
 		}), true
 	case typeLandlock:
@@ -304,6 +281,7 @@ func kindByName(name string) (profileKind, bool) {
 			format:           landlock.FormatProfile,
 			diff:             landlock.Diff,
 			formatDiff:       landlock.FormatDiff,
+			equal:            (*landlock.ProfileDiff).IsEqual,
 			forArch:          nil,
 		}), true
 	default:

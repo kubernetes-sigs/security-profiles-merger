@@ -128,16 +128,43 @@ several goroutines at once.
 
 ## API stability
 
-The module is pre-1.0, so the API may still change. Until v1.0.0:
+The module follows semantic versioning. Until v1.0.0, breaking changes are
+confined to minor releases (`v0.X.0`) and called out in the release notes,
+and patch releases never break callers. A change to merge results, or one
+that rejects input an earlier release accepted, also makes the release a
+minor one, even when it corrects a semantic that was wrong about what a
+runtime loads. From v1.0.0 on:
 
-- Breaking changes are confined to minor version bumps (`v0.X.0`) and called
-  out in the release notes; patch releases (`v0.X.Y`) never break callers.
-- A change to merge results, or one that rejects input an earlier release
-  accepted, also makes the release a minor one, even when it corrects a
-  semantic that was wrong about what a runtime loads. Such changes are called
-  out in the release notes too.
-- The shape of the merge semantics themselves, that `Intersect` never permits
-  more than any input and `Union` never permits less, is not going to change.
+- **The Go API** (exported names, signatures, the JSON shape of `Profile`
+  types) changes incompatibly only in a major release.
+- **The merge invariant**, that `Intersect` never permits more than any input
+  and `Union` never permits less, judged by how the runtime loads the
+  profile, never changes.
+- **Merge results** may change in a minor release when a change corrects the
+  model of what a runtime loads, including a security fix that makes a
+  result stricter, and when a merge becomes more precise. A patch release
+  changes a result only for a security fix.
+- **Validators** may reject more input in a minor release, and in a patch
+  release for a security fix: a profile a runtime cannot load, or one that
+  lets a scanner and a runtime read two different profiles. They never
+  accept what an earlier release rejected for a security reason.
+- **Limits and budgets.** The `MaxArtifact*` values and the internal merge
+  budgets may change in a minor release, raised or lowered. `MaxPathLen`
+  follows the kernel and does not change.
+- **Error text** may change in any release. Dispatch on the sentinels with
+  `errors.Is` and on `InputError` with `errors.As`, which only a major
+  release removes or renames; a release may add sentinels, and an error may
+  match additional ones.
+- **Diff JSON** keeps its field names and shape within a major release, and
+  a minor release may add fields. `FormatProfile`, `FormatDiff` and the
+  `String` methods are for people and may change in any release.
+- **`landlock.LatestABIVersion`** rises in a minor release when the package
+  learns the rights of a newer Landlock ABI, which adds rights `Validate`
+  accepts and constants for them.
+- **Dependencies.** A minor release may raise the required runtime-spec
+  version, which can add fields `seccomp.Validate` then reads instead of
+  rejecting (`ErrUnsupportedSpecField`), or the minimum Go version, which
+  follows the Go releases the Go team supports.
 
 ## Usage
 
@@ -184,13 +211,15 @@ if err != nil {
 ```
 
 `effective` permits only what every input permits, judged by what runc and
-crun load through libseccomp. Architectures need no preparation: as in runc
-and crun, every profile covers the native architecture plus the ones it
-lists, and the merge intersects the lists, so an artifact that lists none
-narrows the result to the native architecture. `Intersect` drops a 32-bit or
-multiplexing architecture the result only lists, and the native architecture
-is that of the running program, so run the merge on the node that loads the
-result.
+crun load through libseccomp. As in runc and crun, every profile covers the
+native architecture plus the ones it lists, and the result depends on the
+native architecture, so run the merge on the node that loads the result or
+name its architecture with `seccomp.Options`; see
+[What the models leave out](docs/integration.md#what-the-models-leave-out).
+Write the result with `seccomp.Marshal`, which keeps an empty flag list that
+`json.Marshal` would drop; a runtime embedding it in a whole `specs.Spec`
+has to as well (see
+[Extra steps after Intersect](docs/integration.md#extra-steps-after-intersect)).
 
 ### Security Profiles Operator: combine recorded profiles (union)
 
@@ -225,7 +254,8 @@ if err != nil {
 log.Print(apparmor.FormatProfile(aaEffective))
 
 // Capability names come back upper-cased ("CHOWN"), while apparmor_parser
-// accepts only lower-case ones, so lower-case them when rendering rules.
+// accepts only lower-case ones, so lower-case them when rendering rules; see
+// the rendering checklist of docs/integration.md for the rest.
 var rules strings.Builder
 if aaEffective.Capabilities != nil {
     for _, name := range aaEffective.Capabilities.AllowedCapabilities {
@@ -256,7 +286,7 @@ if err != nil {
 // A kernel rejects a right its ABI does not know, so check the result
 // against the ABI version of the node that applies it, which
 // landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION) returns.
-if err := landlock.ValidateForABI(llEffective, nodeABI); err != nil {
+if err := (landlock.Options{ABI: nodeABI}).Validate(llEffective); err != nil {
     return err
 }
 

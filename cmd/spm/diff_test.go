@@ -625,28 +625,27 @@ func TestDiffArchErrors(t *testing.T) {
 	}
 }
 
-// TestParseArch covers the values --arch takes, including the one that
-// tells a native comparison from an explicit one.
+// TestParseArch covers the values --arch takes and the Arch of
+// seccomp.Options each maps to.
 func TestParseArch(t *testing.T) {
 	t.Parallel()
 
 	for _, testCase := range []struct {
-		value        string
-		wantArch     specs.Arch
-		wantExplicit bool
-		wantErr      bool
+		value    string
+		wantArch specs.Arch
+		wantErr  bool
 	}{
-		{archNative, "", false, false},
-		{archNone, "", true, false},
-		{string(specs.ArchX86_64), specs.ArchX86_64, true, false},
-		{string(specs.ArchLOONGARCH64), specs.ArchLOONGARCH64, true, false},
-		{"", "", false, true},
-		{"x86_64", "", false, true},
-		{testBogus, "", false, true},
+		{archNative, seccomp.NativeHost, false},
+		{archNone, "", false},
+		{string(specs.ArchX86_64), specs.ArchX86_64, false},
+		{string(specs.ArchLOONGARCH64), specs.ArchLOONGARCH64, false},
+		{"", "", true},
+		{"x86_64", "", true},
+		{testBogus, "", true},
 		// Spelled like an architecture but naming none: implied by neither
 		// profile, so accepting it would silently compare as --arch none
 		// does rather than as the node the caller named.
-		{archPrefix + "ARM64", "", false, true},
+		{archPrefix + "ARM64", "", true},
 	} {
 		got, err := parseArch(testCase.value, true)
 
@@ -664,12 +663,8 @@ func TestParseArch(t *testing.T) {
 			continue
 		}
 
-		if got.value != testCase.wantArch || got.explicit != testCase.wantExplicit {
-			t.Errorf(
-				"%q = {%q, %t}, want {%q, %t}",
-				testCase.value, got.value, got.explicit,
-				testCase.wantArch, testCase.wantExplicit,
-			)
+		if got.value != testCase.wantArch {
+			t.Errorf("%q = %q, want %q", testCase.value, got.value, testCase.wantArch)
 		}
 	}
 }
