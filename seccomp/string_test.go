@@ -243,15 +243,19 @@ func TestFormatProfileWithSyscallErrnoRet(t *testing.T) {
 	}
 }
 
+// TestFormatProfileListenerMetadataWithoutPath checks that listenerMetadata
+// is printed without a listenerPath, where Diff reports it and
+// ValidateArtifact rejects it, so that the profile does not print as one
+// without it.
 func TestFormatProfileListenerMetadataWithoutPath(t *testing.T) {
 	t.Parallel()
 
 	profile := &specs.LinuxSeccomp{
 		DefaultAction:    specs.ActErrno,
-		ListenerMetadata: "should-be-suppressed",
+		ListenerMetadata: "x",
 	}
 
-	const want = "Profile{default:SCMP_ACT_ERRNO}"
+	const want = "Profile{default:SCMP_ACT_ERRNO listenerMeta:x}"
 
 	if got := seccomp.FormatProfile(profile); got != want {
 		t.Errorf("FormatProfile() = %q, want %q", got, want)

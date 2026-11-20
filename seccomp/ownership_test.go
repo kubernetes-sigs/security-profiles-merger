@@ -93,8 +93,11 @@ func TestResultsShareNoMemoryWithInputs(t *testing.T) {
 
 		return name + "(" + strings.Join(parts, ", ") + ")"
 	}
+	// The profiles list little-endian architectures, which Intersect refuses
+	// for a big-endian node, so the plain Intersect runs as a little-endian
+	// node there.
 	merges := map[string]func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error){
-		"Intersect":                     seccomp.Intersect,
+		"Intersect":                     littleEndianNode().Intersect,
 		"Union":                         seccomp.Union,
 		"Intersect for an unknown node": seccomp.Options{Arch: ""}.Intersect,
 		"Union for an unknown node":     seccomp.Options{Arch: ""}.Union,

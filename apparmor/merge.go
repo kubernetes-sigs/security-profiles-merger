@@ -490,16 +490,16 @@ func (op intersectStrategy) intersect(left, right map[string]fsPermission) map[s
 // section denies everything it covers and the intersection must not permit
 // more than that input does.
 //
-// It also drops the glob patterns that match nothing, as a pairwise
-// intersection does, so that intersecting a single profile gives what
-// intersecting it with itself gives. A pattern past the call's compile
-// budget is kept, as a pairwise intersection keeps it where both sides list
-// it.
+// It also drops the glob patterns that match nothing and the relative
+// literals, which name no file, so that no glob of the other side matches
+// one and intersecting a single profile gives what intersecting it with
+// itself gives. A pattern past the call's compile budget is kept, as a
+// pairwise intersection keeps it where both sides list it.
 func (op intersectStrategy) prepare(profile *Profile) {
 	populateEmpty(profile)
 
 	for _, paths := range pathLists(profile) {
-		*paths = dropUnusableGlobs(*paths, op.matchers)
+		*paths = dropUnusablePaths(*paths, op.matchers)
 	}
 }
 

@@ -589,6 +589,33 @@ func TestDiffSyscallArgs(t *testing.T) {
 	}
 }
 
+// TestDiffOperatorSpellingTwoConditions covers an operator holding the
+// separators of the key rules are told apart by: Diff validates nothing,
+// and "SCMP_CMP_EQ:1:0;1:SCMP_CMP_EQ" against 2, spelled bare, reads as the
+// key of a0 == 1 && a1 == 2, so the second rule of the right profile was
+// dropped as a duplicate of the first and the profiles compared equal.
+func TestDiffOperatorSpellingTwoConditions(t *testing.T) {
+	t.Parallel()
+
+	both := filtered(syscallRead, specs.ActAllow,
+		arg(0, specs.OpEqualTo, 1), arg(1, specs.OpEqualTo, 2))
+	crafted := filtered(syscallRead, specs.ActAllow,
+		arg(0, "SCMP_CMP_EQ:1:0;1:SCMP_CMP_EQ", 2))
+
+	left := profileOf(specs.ActErrno, both)
+	right := profileOf(specs.ActErrno, both, crafted)
+
+	diff, err := seccomp.Options{Arch: specs.ArchX86_64}.Diff(left, right)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if diff.Equal || diff.Syscalls == nil || len(diff.Syscalls.Changed) != 1 ||
+		len(diff.Syscalls.Changed[0].Right) != 2 {
+		t.Errorf("Diff = %s, want read changed to two rules", diff)
+	}
+}
+
 func TestDiffSyscallArgsSameIndexDifferentValue(t *testing.T) {
 	t.Parallel()
 
@@ -1398,21 +1425,25 @@ func TestMergeWithNeutralProfileIsIdentity(t *testing.T) {
 		},
 	}
 
+	// On a node of the byte order of the architectures listed, which
+	// Intersect would drop elsewhere.
+	node := littleEndianNode()
+
 	for idx, profile := range profiles {
-		intersected, err := seccomp.Intersect(profile,
+		intersected, err := node.Intersect(profile,
 			neutralProfile(profile, specs.ActAllow, false))
 		if err != nil {
 			t.Fatalf("profile %d: intersect: %v", idx, err)
 		}
 
-		united, err := seccomp.Union(profile,
+		united, err := node.Union(profile,
 			neutralProfile(profile, specs.ActKillProcess, true))
 		if err != nil {
 			t.Fatalf("profile %d: union: %v", idx, err)
 		}
 
 		for _, merged := range []*specs.LinuxSeccomp{intersected, united} {
-			diff, err := seccomp.Diff(profile, merged)
+			diff, err := node.Diff(profile, merged)
 			if err != nil {
 				t.Fatalf("profile %d: diff: %v", idx, err)
 			}

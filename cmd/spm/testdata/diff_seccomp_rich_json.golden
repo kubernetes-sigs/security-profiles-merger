@@ -6,7 +6,7 @@
   },
   "architectures": {
     "added": [
-      "SCMP_ARCH_S390X"
+      "SCMP_ARCH_RISCV64"
     ],
     "removed": [
       "SCMP_ARCH_AARCH64",

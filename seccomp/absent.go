@@ -274,6 +274,11 @@ type absentSettler struct {
 	m      ruleMerger
 	result *specs.LinuxSeccomp
 	blocks map[specs.Arch]*blockTally
+	// asWritten keeps the rules that apply to no call of the filter, which
+	// a merge drops: a runtime loading a profile as written keeps them too,
+	// under a number libseccomp makes up, and they are what can lose the
+	// rules of a block. The validators judge a profile that way.
+	asWritten bool
 	// tallied and steps count the blocks tallied and the steps taken, so
 	// that a test can check that the work does not grow with their
 	// product.
@@ -282,7 +287,12 @@ type absentSettler struct {
 
 func newAbsentSettler(m ruleMerger, result *specs.LinuxSeccomp) *absentSettler {
 	return &absentSettler{
-		m: m, result: result, blocks: make(map[specs.Arch]*blockTally), tallied: 0, steps: 0,
+		m:         m,
+		result:    result,
+		blocks:    make(map[specs.Arch]*blockTally),
+		asWritten: false,
+		tallied:   0,
+		steps:     0,
 	}
 }
 
@@ -519,11 +529,13 @@ func (s *absentSettler) settle() error {
 			return nil
 		}
 
-		gone := s.m.appliesNowhere(offending, covered)
-		if len(gone) > 0 {
-			s.dropRules(gone)
+		if !s.asWritten {
+			gone := s.m.appliesNowhere(offending, covered)
+			if len(gone) > 0 {
+				s.dropRules(gone)
 
-			continue
+				continue
+			}
 		}
 
 		listed := s.result.Architectures

@@ -272,8 +272,11 @@ limitations under the License.
 // every alternation and class: "/a/*/../b" is reported, while "/{a,b/./c}"
 // is not, as its "/a" alternative can match. A path that does not start
 // with "/" is reported with [ErrRelativePath], since file rules must use
-// absolute paths, and a pattern that does not start with one matches
-// nothing.
+// absolute paths, and the merges and [Diff] read it as naming no file,
+// whether it is a pattern or not: it matches nothing and is not the
+// absolute path its escapes may decode to, so `\x2fetc/passwd` and
+// `\/etc/passwd`, which the parser rejects as relative, are not
+// "/etc/passwd", and an intersection drops them.
 //
 // # Filesystem merge
 //

@@ -1593,6 +1593,25 @@ func TestMergeEscapedSlashRuns(t *testing.T) {
 			right: []string{"/etc/passwd"},
 			union: []string{`/\x2fetc/passwd`, "/etc/passwd"}, both: nil,
 		},
+		// A path whose text does not start with "/" is relative to the
+		// parser, which rejects it, even where its escapes decode to an
+		// absolute name: it names no file, as a relative pattern matches
+		// none.
+		{
+			name: "hex escape as the leading slash", left: []string{`\x2fetc/passwd`},
+			right: []string{"/etc/passwd"},
+			union: []string{"/etc/passwd", `\x2fetc/passwd`}, both: nil,
+		},
+		{
+			name: "escaped leading slash", left: []string{`\/etc/passwd`},
+			right: []string{"/etc/passwd"},
+			union: []string{"/etc/passwd", `\/etc/passwd`}, both: nil,
+		},
+		{
+			name: "escaped leading slash under a glob", left: []string{`\/etc/passwd`},
+			right: []string{"/etc/*"},
+			union: []string{"/etc/*", `\/etc/passwd`}, both: nil,
+		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()

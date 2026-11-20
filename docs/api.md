@@ -60,6 +60,10 @@ known, read as possibly any architecture Go runs on, which is not what the
 plain functions assume (`seccomp.NativeHost` is); name the node's
 architecture whenever it is known
 ([Options](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#Options)).
+The exception is the byte order: for an unknown node `Intersect` accepts
+architectures of either byte order, which it refuses for a known node, and
+the stricter validators report only a list mixing the two
+(`ErrMixedByteOrder`).
 `landlock.Options` names a kernel ABI version instead: its validators add
 that version's check to each level, and `Downgrade` drops the rights the
 version does not know. It has no zero value to use, since 0 names no
@@ -224,16 +228,18 @@ returns a non-nil diff whenever its error is nil.
 | `ErrUnknownArch`, `ErrUnknownFlag` | `Validate` and up; `ErrUnknownArch` also every `Options` method, for `Options.Arch`, without an `InputError` | An architecture or flag this package does not know |
 | `ErrUnsupportedSpecField` | `Validate` and up, `Marshal` | A field of the runtime-spec types this package does not read, which a program built against a newer runtime-spec can set and the merge would drop |
 | `ErrNotifyUnsupported` | `Validate` and up | `SCMP_ACT_NOTIFY` as the default action or on `write`, which runc refuses. `ValidateStrict` also returns it, as a portability rule, for `SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV` without an entry that notifies and for `SECCOMP_FILTER_FLAG_TSYNC` next to a `listenerPath`, which crun refuses; the merges accept both and drop the flag from a result that cannot load it |
+| `ErrInvalidUTF8Listener` | `Validate` and up | A `listenerPath` or `listenerMetadata` that is not valid UTF-8, which JSON carries to the runtime as U+FFFD, naming another socket |
 | `ErrNotifyWithoutListener` | `Validate` and up; `Intersect`, `Union` on their result | `SCMP_ACT_NOTIFY` without a `listenerPath`, which runc refuses |
 | `ErrLostRules` | `Union`; `Intersect` where it cannot drop an architecture; `ValidateArtifact`, `ValidateStrict` | The result, or for the validators the profile as a runtime loads it unmerged, would hold rules libseccomp loses on a covered architecture, testing a syscall the architecture lacks first ([Architectures](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Architectures)) |
 | `ErrConflictingListener` | `Intersect`, `Union` | Two inputs name listeners the merge cannot reconcile; see [seccomp: the listener](integration.md#seccomp-the-listener). Wrapped in an `InputError` naming the later input |
 | `ErrDuplicateArch`, `ErrDuplicateFlag` | `ValidateArtifact`, `ValidateStrict` | An architecture or flag listed twice |
-| `ErrErrnoOutOfRange` | `ValidateArtifact`, `ValidateStrict` | An errno above 4095 on `SCMP_ACT_ERRNO` or `SCMP_ACT_TRACE` |
+| `ErrErrnoOutOfRange` | `ValidateArtifact`, `ValidateStrict` | An errno of 4095 or above on `SCMP_ACT_ERRNO`, or a trace message above 65535 on `SCMP_ACT_TRACE`, which libseccomp refuses |
 | `ErrUnusedErrnoRet` | `ValidateArtifact`, `ValidateStrict` | An errno on any other action, which crun refuses |
 | `ErrNotifyNotAllowed` | `ValidateArtifact`, `ValidateStrict` | `SCMP_ACT_NOTIFY`, which needs a listener only the node provides |
 | `ErrListenerNotAllowed` | `ValidateArtifact`, `ValidateStrict` | `listenerPath`, `listenerMetadata` or `SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV` |
-| `ErrInvalidSyscallName` | `Validate` and up for a NUL byte; `ValidateArtifact`, `ValidateStrict` for any other control character | A name holding a NUL byte, where libseccomp's C API ends it, or another control character |
+| `ErrInvalidSyscallName` | `Validate` and up for a NUL byte; `ValidateArtifact`, `ValidateStrict` for any other control character and for invalid UTF-8 | A name holding a NUL byte, where libseccomp's C API ends it, another control character, or a byte that is not valid UTF-8 |
 | `ErrValueTooWide` | `ValidateArtifact`, `ValidateStrict` | A value or mask above 32 bits where the filter covers a 32-bit architecture |
+| `ErrMixedByteOrder` | `ValidateArtifact`, `ValidateStrict`; `Intersect` for a known node, in an `InputError` naming the input | An architecture whose byte order differs from the node's (or, for an unknown node, a list holding both byte orders), which libseccomp refuses with `EDOM` |
 | `ErrConflictingEntries` | `ValidateArtifact`, `ValidateStrict` | Rules of one syscall with different results that a runtime refuses or evaluates in its own order ([Conflicting rules](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Conflicting_rules)) |
 | `ErrTooManyEntriesPerSyscall`, `ErrTooManyRulesPerSyscall`, `ErrTooManyNamesPerEntry`, `ErrTooManyRules`, `ErrTooManyProfileEntries` | `ValidateArtifact`, `ValidateStrict` | A profile past one of the [limits](#limits) |
 | `ErrDuplicateSyscallName` | `ValidateStrict` | A name in several entries, or twice in one |

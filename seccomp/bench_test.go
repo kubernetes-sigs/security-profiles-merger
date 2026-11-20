@@ -343,7 +343,7 @@ func TestIntersectArtifactSizeLimit(t *testing.T) {
 	baseline := buildProfile(400)
 	artifact := buildArtifactSizedProfile(t)
 
-	result, err := seccomp.Intersect(baseline, artifact)
+	result, err := littleEndianNode().Intersect(baseline, artifact)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -361,7 +361,7 @@ func BenchmarkIntersectArtifactSizeLimit(b *testing.B) {
 	b.ResetTimer()
 
 	for range b.N {
-		result, err := seccomp.Intersect(baseline, artifact)
+		result, err := littleEndianNode().Intersect(baseline, artifact)
 		if err != nil {
 			b.Fatal(err)
 		}

@@ -51,3 +51,8 @@ func LosesRules(profile *specs.LinuxSeccomp, native specs.Arch) bool {
 
 	return arch != ""
 }
+
+// BigEndian reports whether the architecture is big-endian, so that a fuzz
+// test can keep the architectures of a profile to the byte order of the
+// node it validates for (see ErrMixedByteOrder).
+func BigEndian(arch specs.Arch) bool { return byteOrders[arch] == bigEndian }

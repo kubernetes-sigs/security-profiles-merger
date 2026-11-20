@@ -860,13 +860,19 @@ func validateLoadable(report *merge.Collector, profile *Profile) {
 
 // validateLoadablePath reports a rule path the kernel would refuse or that
 // would come out of the merge as another path: a relative path, one ending
-// in a slash, and one JSON cannot carry. An empty path is left to Validate.
+// in a slash, and one JSON cannot carry. An empty path and one longer than
+// MaxPathLen are left to Validate, which reports them without scanning
+// them (see ErrPathTooLong).
 func validateLoadablePath(report *merge.Collector, idx int, path string) {
+	if path == "" || len(path) > MaxPathLen {
+		return
+	}
+
 	for _, problem := range [...]struct {
 		failed   bool
 		sentinel error
 	}{
-		{path != "" && !strings.HasPrefix(path, "/"), ErrRelativePath},
+		{!strings.HasPrefix(path, "/"), ErrRelativePath},
 		{hasTrailingSlash(path), ErrTrailingSlash},
 		{!utf8.ValidString(path), ErrInvalidUTF8Path},
 	} {

@@ -387,7 +387,8 @@ func TestIntersectArchitectures(t *testing.T) {
 		Architectures: []specs.Arch{specs.ArchX86_64, specs.ArchAARCH64},
 	}
 
-	result, err := seccomp.Intersect(left, right)
+	// On a node of the byte order of the architectures listed.
+	result, err := littleEndianNode().Intersect(left, right)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1394,7 +1395,8 @@ func TestIntersectArchitecturesOneEmpty(t *testing.T) {
 	// Runtimes always cover the native architecture and add the listed
 	// ones, so an empty list is "native only" and the intersection with it
 	// is empty: it must not admit the extra architectures of the other side.
-	result, err := seccomp.Intersect(left, right)
+	// On a node of the byte order of the architectures listed.
+	result, err := littleEndianNode().Intersect(left, right)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2903,12 +2905,15 @@ func TestMergeResultPassesValidation(t *testing.T) {
 		},
 	}
 
+	// On a node of the byte order of the architectures listed.
+	node := littleEndianNode()
+
 	for _, testCase := range []struct {
 		name  string
 		merge func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error)
 	}{
-		{"intersect", seccomp.Intersect},
-		{"union", seccomp.Union},
+		{"intersect", node.Intersect},
+		{"union", node.Union},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
@@ -2923,7 +2928,7 @@ func TestMergeResultPassesValidation(t *testing.T) {
 				t.Errorf("Validate(merged) = %v, want nil", err)
 			}
 
-			err = seccomp.ValidateStrict(result)
+			err = node.ValidateStrict(result)
 			if err != nil {
 				t.Errorf("ValidateStrict(merged) = %v, want nil", err)
 			}
@@ -3112,7 +3117,8 @@ func TestIntersectArchitecturesDisjoint(t *testing.T) {
 
 	// Both filters cover the native architecture, so the intersection is
 	// valid and covers native only.
-	result, err := seccomp.Intersect(left, right)
+	// On a node of the byte order of the architectures listed.
+	result, err := littleEndianNode().Intersect(left, right)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

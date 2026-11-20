@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
@@ -37,10 +38,16 @@ const (
 	// notification listener, since the listener answers a request by writing
 	// to it.
 	notifyWriteSyscall = "write"
-	// maxErrno is the largest errno the kernel can return (MAX_ERRNO). runc
-	// narrows errnoRet to int16, so larger values wrap into a different
-	// errno than the profile author wrote.
-	maxErrno = 4095
+	// maxErrno is the largest errno libseccomp accepts for SCMP_ACT_ERRNO,
+	// one below the kernel's MAX_ERRNO (4095): libseccomp refuses 4095 as
+	// a rule's errno and as the default's, so a runtime fails to load the
+	// profile. runc narrows errnoRet to int16, so larger values would wrap
+	// into a different errno than the profile author wrote.
+	maxErrno = 4094
+	// maxTraceMsg is the largest value SCMP_ACT_TRACE carries. It is no
+	// errno but a message for the tracer, the 16 bits of SECCOMP_RET_DATA,
+	// which libseccomp accepts whole.
+	maxTraceMsg = 65535
 )
 
 var (
@@ -54,7 +61,8 @@ var (
 	ErrEmptySyscallName = errors.New("empty syscall name")
 	// ErrInvalidSyscallName is returned when a syscall name holds a NUL
 	// byte, and by ValidateArtifact and ValidateStrict when it holds any
-	// other control character. A runtime resolves a name through
+	// other control character or is not valid UTF-8, which UnmarshalStrict
+	// refuses in a document as well. A runtime resolves a name through
 	// libseccomp's C API, where a NUL ends it: "re\x00ad" is added as "read"
 	// there while this package keeps the two apart, so a merge would settle
 	// "read" without the rule the runtime loads for it.
@@ -85,6 +93,13 @@ var (
 	// when a profile uses SCMP_ACT_NOTIFY, which needs a listener that an
 	// artifact cannot provide.
 	ErrNotifyNotAllowed = errors.New("SCMP_ACT_NOTIFY is not allowed")
+	// ErrInvalidUTF8Listener is returned by Validate when listenerPath or
+	// listenerMetadata is not valid UTF-8. A profile travels to the runtime
+	// as JSON, which cannot carry such a value: encoding/json writes U+FFFD
+	// in place of each invalid byte, so the runtime would hand its
+	// notifications to another socket, or other metadata, than the profile
+	// names, and UnmarshalStrict refuses the document.
+	ErrInvalidUTF8Listener = errors.New("listener setting is not valid UTF-8")
 	// ErrListenerNotAllowed is returned by ValidateArtifact and
 	// ValidateStrict when a profile sets listenerPath, listenerMetadata or
 	// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, which belong to a node-local
@@ -94,9 +109,12 @@ var (
 	// ValidateStrict when one syscall name appears in more than
 	// MaxArtifactEntriesPerSyscall entries.
 	ErrTooManyEntriesPerSyscall = errors.New("too many entries for syscall")
-	// ErrErrnoOutOfRange is returned when errnoRet or defaultErrnoRet
-	// exceeds the largest errno the kernel can return, on an action that
-	// returns it (SCMP_ACT_ERRNO or SCMP_ACT_TRACE).
+	// ErrErrnoOutOfRange is returned by ValidateArtifact and ValidateStrict
+	// when errnoRet or defaultErrnoRet holds a value libseccomp refuses for
+	// its action: 4095 or above on SCMP_ACT_ERRNO, where 4095 is the
+	// kernel's MAX_ERRNO and libseccomp takes only values below it, and
+	// above 65535 on SCMP_ACT_TRACE, whose value is a 16-bit message for
+	// the tracer rather than an errno.
 	ErrErrnoOutOfRange = errors.New("errno out of range")
 	// ErrUnusedValueTwo is returned by ValidateStrict when an argument
 	// condition sets valueTwo with an operator other than
@@ -146,6 +164,15 @@ var (
 	// call. valueTwo counts only where libseccomp reads it, within the mask
 	// of a SCMP_CMP_MASKED_EQ.
 	ErrValueTooWide = errors.New("argument value above 32 bits on a 32-bit architecture")
+	// ErrMixedByteOrder is returned by ValidateArtifact and ValidateStrict
+	// when the profile lists an architecture whose byte order differs from
+	// that of the native architecture, as s390x does from x86_64, and by
+	// Intersect, in an InputError, for an input that does. libseccomp keeps
+	// one byte order per filter and refuses such an architecture with EDOM,
+	// so a runtime fails to load the profile. Where the native architecture
+	// is not known, a list holding architectures of both byte orders is
+	// reported, since it loads on no node, and the merges accept it.
+	ErrMixedByteOrder = errors.New("architecture of another byte order")
 	// ErrNotifyUnsupported is returned by Validate when SCMP_ACT_NOTIFY
 	// appears where runc refuses it outright: as the default action, or on
 	// the write syscall. libseccomp accepts both, so this is a runtime
@@ -228,8 +255,10 @@ const MaxArtifactRulesPerSyscall = 256
 // listenerPath it needs, which is what a runtime needs to load the profile
 // at all. It also rejects a syscall name holding a NUL byte
 // (ErrInvalidSyscallName), which a runtime loads as another name than the
-// merges read, and a field of the runtime-spec types this package does not
-// read (ErrUnsupportedSpecField), which a merge would drop. It is what
+// merges read, a listenerPath or listenerMetadata that is not valid UTF-8
+// (ErrInvalidUTF8Listener), which JSON carries to the runtime as another
+// value, and a field of the runtime-spec types this package does not read
+// (ErrUnsupportedSpecField), which a merge would drop. It is what
 // Intersect and Union run on every input, so callers that want to report
 // all problems up front can call it themselves.
 //
@@ -262,6 +291,7 @@ func Validate(profile *specs.LinuxSeccomp) error {
 	}
 
 	validateArchitecturesAndFlags(&errs, profile)
+	validateListenerEncoding(&errs, profile)
 	reportUnreadProfileFields(&errs, profile)
 
 	notifies := false
@@ -324,6 +354,24 @@ func validateListenerFlags(profile *specs.LinuxSeccomp) error {
 	}
 
 	return errs.Err()
+}
+
+// validateListenerEncoding reports a listenerPath or listenerMetadata that
+// is not valid UTF-8 (see ErrInvalidUTF8Listener).
+func validateListenerEncoding(errs *merge.Collector, profile *specs.LinuxSeccomp) {
+	for _, field := range []struct{ name, value string }{
+		{"listenerPath", profile.ListenerPath},
+		{"listenerMetadata", profile.ListenerMetadata},
+	} {
+		if !utf8.ValidString(field.value) {
+			errs.Report(func() error {
+				return fmt.Errorf(
+					"%s: %s: %w",
+					field.name, merge.QuoteBounded(field.value), ErrInvalidUTF8Listener,
+				)
+			})
+		}
+	}
 }
 
 // validateArchitecturesAndFlags reports the architectures and flags this
@@ -489,14 +537,19 @@ func strictChecks(native specs.Arch) []profileCheck {
 //
 //   - duplicate architectures and flags (ErrDuplicateArch,
 //     ErrDuplicateFlag);
-//   - errno values above 4095 on SCMP_ACT_ERRNO and SCMP_ACT_TRACE
+//   - errno values of 4095 or above on SCMP_ACT_ERRNO and trace messages
+//     above 65535 on SCMP_ACT_TRACE, which libseccomp refuses
 //     (ErrErrnoOutOfRange), and errnoRet or defaultErrnoRet on any other
 //     action (ErrUnusedErrnoRet), which runc ignores but crun refuses;
 //   - SCMP_ACT_NOTIFY (ErrNotifyNotAllowed) and the listener settings
 //     listenerPath, listenerMetadata and
 //     SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (ErrListenerNotAllowed), which
 //     belong to the node-local listener;
-//   - syscall names holding a control character (ErrInvalidSyscallName);
+//   - syscall names holding a control character or not valid UTF-8
+//     (ErrInvalidSyscallName);
+//   - an architecture whose byte order differs from that of the native
+//     architecture of the running program, which libseccomp does not
+//     combine with it in one filter (ErrMixedByteOrder);
 //   - a condition against a value or mask above 32 bits when the filter
 //     covers a 32-bit architecture, one the profile lists or the native
 //     architecture of the running program (ErrValueTooWide);
@@ -530,9 +583,9 @@ func strictChecks(native specs.Arch) []profileCheck {
 // sections of the package documentation.
 //
 // What it reports depends on the native architecture of the running program
-// (ErrValueTooWide, and the conflicts on a multiplexer), so run it on the
-// node that loads the result, or name that node's architecture with
-// Options.ValidateArtifact.
+// (ErrValueTooWide, ErrMixedByteOrder, ErrLostRules and the conflicts on a
+// multiplexer), so run it on the node that loads the result, or name that
+// node's architecture with Options.ValidateArtifact.
 func ValidateArtifact(profile *specs.LinuxSeccomp) error {
 	return Options{Arch: NativeHost}.ValidateArtifact(profile)
 }
@@ -549,7 +602,65 @@ func artifactChecks(native specs.Arch) []profileCheck {
 		validateEntryCount,
 		validateUnusedErrnoRet,
 		func(profile *specs.LinuxSeccomp) error { return validateValueWidth(profile, native) },
+		func(profile *specs.LinuxSeccomp) error { return validateByteOrder(profile, native) },
 	}
+}
+
+// validateByteOrder reports the listed architectures whose byte order
+// differs from that of native, each once, at its first position, or where
+// native is not known, a list holding architectures of both byte orders,
+// once for the list, naming those of each (see ErrMixedByteOrder). Validate
+// reports the architectures this package does not know, whose byte order
+// it cannot tell.
+func validateByteOrder(profile *specs.LinuxSeccomp, native specs.Arch) error {
+	var errs merge.Collector
+
+	listed := make(map[byteOrder][]specs.Arch)
+	seen := make(map[specs.Arch]bool)
+
+	for idx, arch := range profile.Architectures {
+		order := byteOrders[arch]
+		if order == 0 || seen[arch] {
+			continue
+		}
+
+		seen[arch] = true
+		listed[order] = append(listed[order], arch)
+
+		if native != "" && order != byteOrders[native] {
+			errs.Report(func() error {
+				return fmt.Errorf(
+					"architectures[%d]: %s: %w (%s, native %s is %s)",
+					idx, merge.QuoteBounded(string(arch)), ErrMixedByteOrder,
+					order, native, byteOrders[native],
+				)
+			})
+		}
+	}
+
+	if native == "" && len(listed[bigEndian]) > 0 && len(listed[littleEndian]) > 0 {
+		errs.Report(func() error {
+			return fmt.Errorf(
+				"architectures: %w (%s %s next to %s %s)",
+				ErrMixedByteOrder,
+				bigEndian, quoteArchs(listed[bigEndian]),
+				littleEndian, quoteArchs(listed[littleEndian]),
+			)
+		})
+	}
+
+	return errs.Err()
+}
+
+// quoteArchs renders architectures as a comma-separated list of quoted
+// names. There are no more of them than this package knows.
+func quoteArchs(archs []specs.Arch) string {
+	quoted := make([]string, len(archs))
+	for idx, arch := range archs {
+		quoted[idx] = merge.QuoteBounded(string(arch))
+	}
+
+	return strings.Join(quoted, ", ")
 }
 
 // validateValueWidth reports conditions against a value above 32 bits when
@@ -637,13 +748,14 @@ func validateErrnoRange(profile *specs.LinuxSeccomp) error {
 	var errs merge.Collector
 
 	ret := profile.DefaultErrnoRet
-	if ret != nil && errnoSignificant(profile.DefaultAction) && *ret > maxErrno {
+	if limit, ok := errnoLimit(profile.DefaultAction); ok && ret != nil && *ret > limit {
 		errs.Report(func() error {
 			return fmt.Errorf(
-				"defaultErrnoRet: %d: %w (max %d)",
+				"defaultErrnoRet: %d: %w (max %d for %s)",
 				*ret,
 				ErrErrnoOutOfRange,
-				maxErrno,
+				limit,
+				profile.DefaultAction,
 			)
 		})
 	}
@@ -652,20 +764,37 @@ func validateErrnoRange(profile *specs.LinuxSeccomp) error {
 		entry := &profile.Syscalls[idx]
 
 		ret := entry.ErrnoRet
-		if ret != nil && errnoSignificant(entry.Action) && *ret > maxErrno {
+		if limit, ok := errnoLimit(entry.Action); ok && ret != nil && *ret > limit {
 			errs.Report(func() error {
 				return fmt.Errorf(
-					"syscalls[%d].errnoRet: %d: %w (max %d)",
+					"syscalls[%d].errnoRet: %d: %w (max %d for %s)",
 					idx,
 					*ret,
 					ErrErrnoOutOfRange,
-					maxErrno,
+					limit,
+					entry.Action,
 				)
 			})
 		}
 	}
 
 	return errs.Err()
+}
+
+// errnoLimit returns the largest errnoRet libseccomp accepts for action,
+// and whether the action reads errnoRet at all (see errnoSignificant): an
+// errno below MAX_ERRNO for SCMP_ACT_ERRNO, and a 16-bit message for
+// SCMP_ACT_TRACE.
+func errnoLimit(action specs.LinuxSeccompAction) (uint, bool) {
+	if !errnoSignificant(action) {
+		return 0, false
+	}
+
+	if action == specs.ActTrace {
+		return maxTraceMsg, true
+	}
+
+	return maxErrno, true
 }
 
 func validateUnusedValueTwo(profile *specs.LinuxSeccomp) error {
@@ -1017,8 +1146,9 @@ func syscallRuleCheck(native specs.Arch) profileCheck {
 // collectRules): an entry equal to the default adds none, and one that
 // repeats an argument index adds a rule per condition, each of which
 // libseccomp costs on its own. It costs a pass over those rules per covered
-// architecture. A rule that applies to no call of the filter is dropped
-// first, as the merges drop it, since it decides nothing.
+// architecture. A rule that applies to no call of the filter is kept, where
+// the merges drop it: a runtime loading the profile keeps it under a number
+// libseccomp makes up, and it is such a rule that the block tests first.
 //
 // A merge can still produce the shape from inputs that pass, since it
 // drops rules equal to the default and collapses others to unconditional
@@ -1036,7 +1166,10 @@ func validateLostRules(profile *specs.LinuxSeccomp, native specs.Arch) error {
 		Syscalls:         syscallsOfRules(collectRules(profile.Syscalls, def), def),
 	}
 
-	err := unionRulesFor(native).settleAbsentSyscalls(loaded)
+	settler := newAbsentSettler(unionRulesFor(native), loaded)
+	settler.asWritten = true
+
+	err := settler.settle()
 	if err != nil {
 		return fmt.Errorf("syscalls: %w", err)
 	}
@@ -1299,11 +1432,13 @@ func (c *ruleChecker) checkMultiplexed(syscalls []specs.LinuxSyscall, def *claus
 
 // validateSyscallNameSpelling reports a syscall name holding a control
 // character, which no syscall name holds and which forges a line wherever
-// the profile is rendered. A name holding a NUL is left to Validate, which
-// reports it for every profile.
+// the profile is rendered, or one that is not valid UTF-8, which no syscall
+// name is either and which JSON cannot carry: written out, it reads as
+// another name. A name holding a NUL is left to Validate, which reports it
+// for every profile.
 func validateSyscallNameSpelling(profile *specs.LinuxSeccomp) error {
 	return validateSyscallNames(profile.Syscalls, func(name string) bool {
-		return hasControlByte(name) && !hasNUL(name)
+		return (hasControlByte(name) || !utf8.ValidString(name)) && !hasNUL(name)
 	})
 }
 
@@ -1590,21 +1725,11 @@ func isKnownOperator(op specs.LinuxSeccompOperator) bool {
 	}
 }
 
+// isKnownArch reports whether this package knows the architecture: whether
+// it is one of syscallArchitectures, which are the ones the runtime-spec
+// names.
 func isKnownArch(arch specs.Arch) bool {
-	switch arch {
-	case specs.ArchX86, specs.ArchX86_64, specs.ArchX32,
-		specs.ArchARM, specs.ArchAARCH64,
-		specs.ArchMIPS, specs.ArchMIPS64, specs.ArchMIPS64N32,
-		specs.ArchMIPSEL, specs.ArchMIPSEL64, specs.ArchMIPSEL64N32,
-		specs.ArchPPC, specs.ArchPPC64, specs.ArchPPC64LE,
-		specs.ArchS390, specs.ArchS390X,
-		specs.ArchPARISC, specs.ArchPARISC64,
-		specs.ArchRISCV64, specs.ArchLOONGARCH64,
-		specs.ArchM68K, specs.ArchSH, specs.ArchSHEB:
-		return true
-	default:
-		return false
-	}
+	return archBit(arch) != 0
 }
 
 func isKnownFlag(flag specs.LinuxSeccompFlag) bool {

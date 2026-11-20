@@ -74,8 +74,9 @@ var (
 	// section of the package documentation). ValidateArtifact and
 	// ValidateStrict return it for a profile whose filter has that shape as
 	// written, so that a runtime loading the profile itself loses rules. The
-	// merges settle the shapes of the rules first, which can remove it, so
-	// they may accept such a profile.
+	// merges settle the shapes of the rules first and drop rules on a
+	// syscall no covered architecture has, which can remove it, so they may
+	// accept such a profile.
 	ErrLostRules = errors.New("libseccomp would lose the rules of an architecture")
 )
 
@@ -112,8 +113,14 @@ type InputError = spm.InputError
 // SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, which the kernel refuses there
 // (see Listener).
 // 32-bit and multiplexing architectures may be dropped from the list, as
-// may one whose rules libseccomp would lose to a syscall it lacks, and
-// the result depends on the native architecture of the running program, so
+// may one whose rules libseccomp would lose to a syscall it lacks; the
+// calls of a dropped architecture get libseccomp's SCMP_ACT_KILL, which
+// kills the thread where an input may kill the process (see Intersection).
+// An input listing an architecture of another byte order than the native
+// architecture, which libseccomp cannot load next to it, is refused as an
+// InputError wrapping ErrMixedByteOrder, rather than its architecture
+// dropped, which would make a result load where the input does not. The
+// result depends on the native architecture of the running program, so
 // run Intersect on the node that loads its result, or name that node's
 // architecture with Options.Intersect (see Architectures).
 // SECCOMP_FILTER_FLAG_SPEC_ALLOW survives only if every input sets it and
@@ -161,7 +168,10 @@ func Intersect(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 // where a 32-bit or multiplexing architecture would need settling, the
 // affected syscalls collapse to their least restrictive action instead, and
 // a result in which libseccomp would lose the rules of an architecture is
-// refused with ErrLostRules (see Architectures). Single profiles, output
+// refused with ErrLostRules (see Architectures). It keeps one of another
+// byte order than the native architecture too, which Intersect refuses, so
+// the result fails to load as the input listing it does. Single profiles,
+// output
 // order and which validators the result passes are as for Intersect.
 //
 // This implements the merge the Security Profiles Operator uses to combine
@@ -177,7 +187,7 @@ func foldProfiles(
 	profiles []*specs.LinuxSeccomp, rules ruleMerger,
 ) (*specs.LinuxSeccomp, error) {
 	err := merge.CheckInputs(profiles, func(_ int, profile *specs.LinuxSeccomp) error {
-		return Validate(profile)
+		return rules.checkInput(profile)
 	})
 	if err != nil {
 		return nil, err
@@ -225,6 +235,24 @@ func foldProfiles(
 	slices.Sort(result.Flags)
 
 	return result, nil
+}
+
+// checkInput runs Validate on an input, and for intersection on a node
+// whose native architecture is known, refuses an architecture of another
+// byte order than the node's (ErrMixedByteOrder). libseccomp keeps one byte
+// order per filter, so the input fails to load on the node, and dropping the
+// architecture would give a result that loads where no input does, under
+// rules written for another architecture. Union, which never drops an
+// architecture an input covers, keeps it in its result, which then fails to
+// load as the input does. Where the native architecture is not known, no
+// byte order is foreign.
+func (m ruleMerger) checkInput(profile *specs.LinuxSeccomp) error {
+	err := Validate(profile)
+	if err != nil || !m.intersect || m.native == "" {
+		return err
+	}
+
+	return validateByteOrder(profile, m.native)
 }
 
 // normalizeProfile returns the profile in the form a merge result takes,
@@ -398,9 +426,20 @@ func loadsWideValue(profile *specs.LinuxSeccomp) bool {
 
 // withoutAny returns the architectures not in the set.
 func withoutAny(archs []specs.Arch, set map[specs.Arch]bool) []specs.Arch {
-	return slices.DeleteFunc(slices.Clone(archs), func(arch specs.Arch) bool {
+	return nilIfEmpty(slices.DeleteFunc(slices.Clone(archs), func(arch specs.Arch) bool {
 		return set[arch]
-	})
+	}))
+}
+
+// nilIfEmpty returns nil for a list that dropping left empty, so that a
+// result covering only the native architecture spells it as a merge of two
+// lists without a common architecture does.
+func nilIfEmpty(archs []specs.Arch) []specs.Arch {
+	if len(archs) == 0 {
+		return nil
+	}
+
+	return archs
 }
 
 // checkListeners refuses inputs whose listeners a merge cannot reconcile

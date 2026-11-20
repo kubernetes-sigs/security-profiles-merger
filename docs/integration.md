@@ -196,6 +196,12 @@ the merge taking anything away.
    step 5 does not show it; the `Architectures` field of
    `Diff(baseline, effective)` does, so log it (see the code block), and
    tell artifact authors to list the architectures their profile is for.
+   Those must share the node's byte order: libseccomp refuses s390x in a
+   filter for an x86_64 node, `ValidateArtifact` reports such an
+   architecture (`ErrMixedByteOrder`), and so does `Intersect`, which
+   refuses the input listing it rather than drop it. `Validate` does not
+   look at the byte order, but `Intersect` of the baseline alone, which the
+   config-load check runs, refuses a baseline listing one.
 4. **Load the result of the merge, never the artifact.** An accepted artifact
    may still hold rules a runtime evaluates in an order of its own; the merge
    reads those conservatively and never emits them.
@@ -410,7 +416,8 @@ what it is given at face value.
   rule on a syscall no covered architecture has; otherwise `Intersect`
   drops an architecture, and `Union`, which cannot drop one, refuses with
   `ErrLostRules`. `ValidateArtifact` reports an input that has the form as
-  written. An allowlist is not affected. See
+  written, even where the merges, which drop rules on syscalls no covered
+  architecture has, accept it. An allowlist is not affected. See
   [Architectures](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Architectures).
 - **seccomp: libseccomp releases.** The merges are sound for a node linking
   libseccomp 2.5.4 or newer; 2.5.2 evaluates some rule sets differently and

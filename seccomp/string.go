@@ -57,11 +57,14 @@ func FormatProfile(profile *specs.LinuxSeccomp) string {
 	if profile.ListenerPath != "" {
 		out.WriteString(" listener:")
 		out.WriteText(profile.ListenerPath)
+	}
 
-		if profile.ListenerMetadata != "" {
-			out.WriteString(" listenerMeta:")
-			out.WriteText(profile.ListenerMetadata)
-		}
+	// Printed without a listenerPath too: Diff reports it, ValidateArtifact
+	// rejects it and Intersect refuses a later input setting it, so two
+	// profiles differing only there must not print alike.
+	if profile.ListenerMetadata != "" {
+		out.WriteString(" listenerMeta:")
+		out.WriteText(profile.ListenerMetadata)
 	}
 
 	for idx := range profile.Syscalls {
