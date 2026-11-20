@@ -368,24 +368,22 @@ func TestStarComponentRule(t *testing.T) {
 // of unbalanced brackets and braces, which an untrusted profile controls. A
 // quadratic scan of these patterns takes seconds.
 // TestUnbalancedPatternsScanInLinearTime bounds the wall time of analyzing
-// huge patterns. Coverage counters slow the scanning loops several times
-// over, so the bound is only checked without coverage, and the test runs
-// before the parallel ones so that they do not share its wall time.
+// huge patterns, where the bounds are turned on (see testutil.WallClockEnv).
+// The test runs before the parallel ones so that they do not share its wall
+// time.
 func TestUnbalancedPatternsScanInLinearTime(t *testing.T) {
 	const size = 1 << 20
 
 	for _, char := range []string{"{", "[", "}", "]", `\`, "{a,", "[a", "*", "/*"} {
 		pattern := "/" + strings.Repeat(char, size/len(char))
 
-		start := time.Now()
+		bound := testutil.StartWallClock(t, 2*time.Second)
 
 		IsGlobPattern(pattern)
 		analyzePattern(pattern, false)
 		dotComponentIn(pattern, newMatcherCache().matcher(pattern))
 
-		if elapsed := time.Since(start); testutil.CheckWallClock() && elapsed > 2*time.Second {
-			t.Errorf("analyzing %d bytes of %q took %v", size, char, elapsed)
-		}
+		bound.Checkf("analyzing %d bytes of %q", size, char)
 	}
 }
 

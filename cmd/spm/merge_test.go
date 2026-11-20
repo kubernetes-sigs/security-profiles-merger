@@ -206,10 +206,7 @@ func TestMergeSeccompInvalidStrategy(t *testing.T) {
 
 	data := rawInputs(seccompJSON(t, testSyscallRead))
 
-	code := mergeProfiles(testInvocation(data),
-		defaultMergeRequest(data, testBogus,
-			seccomp.Intersect, seccomp.Union, seccomp.FormatProfile),
-	)
+	code := mergeKind(t, typeSeccomp, data, testBogus)
 
 	if code != exitUsage {
 		t.Fatalf("exit code = %d, want %d", code, exitUsage)
@@ -219,10 +216,7 @@ func TestMergeSeccompInvalidStrategy(t *testing.T) {
 func TestMergeSeccompNoProfiles(t *testing.T) {
 	t.Parallel()
 
-	code := mergeProfiles(testInvocation(nil),
-		defaultMergeRequest(nil, strategyIntersect,
-			seccomp.Intersect, seccomp.Union, seccomp.FormatProfile),
-	)
+	code := mergeKind(t, typeSeccomp, nil, strategyIntersect)
 
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
@@ -234,10 +228,7 @@ func TestMergeAppArmorInvalidStrategy(t *testing.T) {
 
 	data := rawInputs(apparmorJSON(t, "NET_ADMIN"))
 
-	code := mergeProfiles(testInvocation(data),
-		defaultMergeRequest(data, testBogus,
-			apparmor.Intersect, apparmor.Union, (*apparmor.Profile).String),
-	)
+	code := mergeKind(t, typeAppArmor, data, testBogus)
 
 	if code != exitUsage {
 		t.Fatalf("exit code = %d, want %d", code, exitUsage)
@@ -247,10 +238,7 @@ func TestMergeAppArmorInvalidStrategy(t *testing.T) {
 func TestMergeAppArmorNoProfiles(t *testing.T) {
 	t.Parallel()
 
-	code := mergeProfiles(testInvocation(nil),
-		defaultMergeRequest(nil, strategyIntersect,
-			apparmor.Intersect, apparmor.Union, (*apparmor.Profile).String),
-	)
+	code := mergeKind(t, typeAppArmor, nil, strategyIntersect)
 
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
@@ -262,10 +250,7 @@ func TestMergeLandlockInvalidStrategy(t *testing.T) {
 
 	data := rawInputs(landlockJSON(t, "read_file"))
 
-	code := mergeProfiles(testInvocation(data),
-		defaultMergeRequest(data, testBogus,
-			landlock.Intersect, landlock.Union, (*landlock.Profile).String),
-	)
+	code := mergeKind(t, typeLandlock, data, testBogus)
 
 	if code != exitUsage {
 		t.Fatalf("exit code = %d, want %d", code, exitUsage)
@@ -275,10 +260,7 @@ func TestMergeLandlockInvalidStrategy(t *testing.T) {
 func TestMergeLandlockNoProfiles(t *testing.T) {
 	t.Parallel()
 
-	code := mergeProfiles(testInvocation(nil),
-		defaultMergeRequest(nil, strategyUnion,
-			landlock.Intersect, landlock.Union, (*landlock.Profile).String),
-	)
+	code := mergeKind(t, typeLandlock, nil, strategyUnion)
 
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
@@ -1072,27 +1054,18 @@ func TestReadInputsBoundsTotalSize(t *testing.T) {
 	}
 }
 
-// defaultMergeRequest builds the request runMerge makes without --validate:
-// lenient decoding and no extra check per input, since the merge functions
-// validate their own inputs.
-func defaultMergeRequest[T any](
-	inputs []profileInput, strategy string,
-	intersect, union func(...*T) (*T, error),
-	formatFn func(*T) string,
-) mergeRequest[T] {
-	checks := make([]func(*T) error, len(inputs))
-	for idx := range checks {
-		checks[idx] = func(*T) error { return nil }
+// mergeKind runs the merge command of the named profile type on inputs
+// as runMerge does without --validate: lenient decoding and no extra check
+// per input, since the merge functions validate their own inputs.
+func mergeKind(t *testing.T, profileType string, inputs []profileInput, strategy string) int {
+	t.Helper()
+
+	inv := testInvocation(inputs)
+	if !inv.useKind(profileType) {
+		t.Fatalf("no profile kind %q", profileType)
 	}
 
-	return mergeRequest[T]{
-		strategy:  strategy,
-		checks:    checks,
-		strict:    make([]bool, len(inputs)),
-		intersect: intersect,
-		union:     union,
-		formatFn:  formatFn,
-	}
+	return inv.kind.mergeCommand(inv, strategy, make([]validateMode, len(inputs)))
 }
 
 // TestMergeValidateModes covers --validate, which lets one run express the

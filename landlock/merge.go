@@ -352,19 +352,11 @@ func sortProfile(profile *Profile) {
 // emptyToNil replaces empty slices with nil, so a merge result looks the same
 // whatever number of inputs produced it.
 func emptyToNil(profile *Profile) {
-	profile.HandledAccessFS = nilIfEmpty(profile.HandledAccessFS)
-	profile.HandledAccessNet = nilIfEmpty(profile.HandledAccessNet)
-	profile.Scoped = nilIfEmpty(profile.Scoped)
-	profile.PathRules = nilIfEmpty(profile.PathRules)
-	profile.NetRules = nilIfEmpty(profile.NetRules)
-}
-
-func nilIfEmpty[T any](items []T) []T {
-	if len(items) == 0 {
-		return nil
-	}
-
-	return items
+	profile.HandledAccessFS = merge.NilIfEmpty(profile.HandledAccessFS)
+	profile.HandledAccessNet = merge.NilIfEmpty(profile.HandledAccessNet)
+	profile.Scoped = merge.NilIfEmpty(profile.Scoped)
+	profile.PathRules = merge.NilIfEmpty(profile.PathRules)
+	profile.NetRules = merge.NilIfEmpty(profile.NetRules)
 }
 
 // effectiveHandledFS returns the filesystem rights a ruleset denies unless a
@@ -811,7 +803,7 @@ func LoweredRulePaths(result *Profile, inputs ...*Profile) ([]string, error) {
 
 	slices.Sort(lowered)
 
-	return nilIfEmpty(slices.Compact(lowered)), nil
+	return merge.NilIfEmpty(slices.Compact(lowered)), nil
 }
 
 // loweredAt reports whether the input grants one of the rights only on a

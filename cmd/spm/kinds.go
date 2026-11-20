@@ -175,14 +175,9 @@ func (ops kindOps[T, D]) checkAlone(inv *invocation, idx int) {
 	}
 
 	check := ops.checker(mode)
-
 	if checks.strategy != "" && mode == modeDefault {
-		mergeFn := ops.union
-		if checks.strategy == strategyIntersect {
-			mergeFn = ops.intersect
-		}
-
-		check = mergeInputCheck(ops.inputCheck, mergeFn)
+		mergeFn, _ := ops.mergeFn(checks.strategy)
+		check = ops.mergeInputCheck(mergeFn)
 	}
 
 	err = check(profile)
@@ -252,11 +247,19 @@ func seccompOps(opts seccomp.Options) kindOps[specs.LinuxSeccomp, seccomp.Profil
 	}
 }
 
-// diffCommand compares two profiles.
-func (ops kindOps[T, D]) diffCommand(inv *invocation) int {
-	ops = ops.atArch(inv)
-
-	return diffProfiles(inv, ops.diff, ops.formatDiff, ops.equal)
+// mergeFn returns the merge function of the strategy, and whether the
+// strategy is known. An unknown one gets union only so that mergeFn never
+// returns nil: checkAlone cannot reach that case, since the flags are
+// checked to name a known strategy before any input is read.
+func (ops kindOps[T, D]) mergeFn(strategy string) (func(...*T) (*T, error), bool) {
+	switch strategy {
+	case strategyIntersect:
+		return ops.intersect, true
+	case strategyUnion:
+		return ops.union, true
+	default:
+		return ops.union, false
+	}
 }
 
 // mergeCommand checks every input under its own mode and merges them.
@@ -264,6 +267,14 @@ func (ops kindOps[T, D]) mergeCommand(
 	inv *invocation, strategy string, modes []validateMode,
 ) int {
 	ops = ops.atArch(inv)
+
+	mergeFn, known := ops.mergeFn(strategy)
+	if !known {
+		// runMerge checks the strategy before reading any input.
+		_, _ = fmt.Fprintf(inv.stderr, "error: unknown strategy %q\n", strategy)
+
+		return exitUsage
+	}
 
 	checks := make([]func(*T) error, len(modes))
 	strict := make([]bool, len(modes))
@@ -280,22 +291,7 @@ func (ops kindOps[T, D]) mergeCommand(
 		strict[idx] = mode.strictDecode()
 	}
 
-	return mergeProfiles(inv, mergeRequest[T]{
-		strategy:   strategy,
-		checks:     checks,
-		strict:     strict,
-		inputCheck: ops.inputCheck,
-		intersect:  ops.intersect,
-		union:      ops.union,
-		formatFn:   ops.format,
-	})
-}
-
-// validateCommand checks every input under one mode.
-func (ops kindOps[T, D]) validateCommand(inv *invocation, mode validateMode) int {
-	ops = ops.atArch(inv)
-
-	return validateProfiles(inv, ops.checker(mode), mode.strictDecode(), ops.format)
+	return ops.mergeProfiles(inv, mergeFn, checks, strict)
 }
 
 // checker returns the validation function for a mode.

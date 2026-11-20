@@ -424,22 +424,13 @@ func loadsWideValue(profile *specs.LinuxSeccomp) bool {
 	return false
 }
 
-// withoutAny returns the architectures not in the set.
+// withoutAny returns the architectures not in the set, or nil where none
+// remain, so that a result covering only the native architecture spells it
+// as a merge of two lists without a common architecture does.
 func withoutAny(archs []specs.Arch, set map[specs.Arch]bool) []specs.Arch {
-	return nilIfEmpty(slices.DeleteFunc(slices.Clone(archs), func(arch specs.Arch) bool {
+	return merge.NilIfEmpty(slices.DeleteFunc(slices.Clone(archs), func(arch specs.Arch) bool {
 		return set[arch]
 	}))
-}
-
-// nilIfEmpty returns nil for a list that dropping left empty, so that a
-// result covering only the native architecture spells it as a merge of two
-// lists without a common architecture does.
-func nilIfEmpty(archs []specs.Arch) []specs.Arch {
-	if len(archs) == 0 {
-		return nil
-	}
-
-	return archs
 }
 
 // checkListeners refuses inputs whose listeners a merge cannot reconcile

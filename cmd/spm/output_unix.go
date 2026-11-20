@@ -47,7 +47,7 @@ const ownerReadWrite = 0o600
 
 // chmodOutput sets the mode of a new output file exactly, since the mode it
 // was created with is narrowed by the umask.
-func chmodOutput(file *os.File) error {
+func chmodOutput(file tempFile) error {
 	err := file.Chmod(ownerReadWrite)
 	if err != nil {
 		return fmt.Errorf("chmod: %w", err)

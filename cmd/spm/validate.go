@@ -215,18 +215,21 @@ func checkModeFlags(opts *validateOptions, archNamed bool, stderr io.Writer) int
 	return 0
 }
 
-// validateProfiles decodes and checks every profile that the report holds
-// no failure for, and writes them when none failed, the ones the report
-// holds included. strict makes the JSON ambiguities unmarshalAll looks for,
-// such as members the profile type does not know, errors rather than
-// warnings.
-func validateProfiles[T any](
-	inv *invocation, check func(*T) error, strict bool, formatFn func(*T) string,
-) int {
-	inputs, report := inv.inputs, inv.report
-	profiles := unmarshalAll[T](inputs, slices.Repeat([]bool{strict}, len(inputs)), report)
+// validateCommand decodes and checks under one mode every profile that the
+// report holds no failure for, and writes them when none failed, the ones
+// the report holds included. A mode that decodes strictly makes the JSON
+// ambiguities unmarshalAll looks for, such as members the profile type does
+// not know, errors rather than warnings.
+func (ops kindOps[T, D]) validateCommand(inv *invocation, mode validateMode) int {
+	ops = ops.atArch(inv)
+	check := ops.checker(mode)
 
-	checkInputs(profiles, check, report)
+	inputs, report := inv.inputs, inv.report
+	profiles := unmarshalAll[T](
+		inputs, slices.Repeat([]bool{mode.strictDecode()}, len(inputs)), report,
+	)
+
+	checkInputs(profiles, report, func(_ int, profile *T) error { return check(profile) })
 
 	if inv.halted() {
 		return inv.stop(1)
@@ -234,7 +237,7 @@ func validateProfiles[T any](
 
 	report.flush(inv.stderr)
 
-	return writeValidated(inv, profiles, formatAll(profiles, formatFn))
+	return writeValidated(inv, profiles, formatAll(profiles, ops.format))
 }
 
 // asArray reports whether validate writes the profiles of the inputs as an
@@ -286,15 +289,17 @@ func formatAll[T any](profiles []*T, formatFn func(*T) string) []string {
 	return result
 }
 
-// checkInputs runs check on every profile that decoded, recording each
-// failure in report, so that one run names every problem.
-func checkInputs[T any](profiles []*T, check func(*T) error, report *inputReport) {
+// checkInputs runs check on every profile that decoded, in input order,
+// recording each failure in report, so that one run names every problem.
+// check is given the index of the profile, and returns nil for one it does
+// not check.
+func checkInputs[T any](profiles []*T, report *inputReport, check func(idx int, profile *T) error) {
 	for idx, profile := range profiles {
 		if profile == nil {
 			continue
 		}
 
-		err := check(profile)
+		err := check(idx, profile)
 		if err != nil {
 			report.fail(idx, err)
 		}

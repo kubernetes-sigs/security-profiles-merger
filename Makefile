@@ -4,6 +4,13 @@ RACE ?= -race
 
 GOLANGCI_LINT_VERSION = 2.15.0
 
+# go.mod's go line, the oldest Go the library supports, which every CI job
+# that sets go-version-file to go.mod tests. A bump that raised it, such as
+# one a dependency update brings along, would move those jobs to the new
+# floor without anything failing, so verify-go-floor pins it here and
+# dependencies.yaml keeps this copy in step with go.mod.
+GO_FLOOR = 1.24
+
 # The other tools are pinned in their own module, hack/tools/go.mod, which
 # Dependabot keeps current and go.sum vouches for. A tool needs both a tool
 # directive there and an import in hack/tools/tools.go: the directive alone
@@ -91,6 +98,14 @@ fuzz: ## Run all fuzz tests (use FUZZTIME to adjust, default 30s)
 		done; \
 	done
 
+# The algorithmic bounds in the suite assert their wall-clock limits only
+# with SPM_WALL_CLOCK=1 and without coverage or the race detector (see
+# testutil.WallClockEnv). -p 1 runs one package at a time, so that no two
+# time each other.
+.PHONY: test-wall-clock
+test-wall-clock: ## Run the tests with their wall-clock bounds, one package at a time
+	SPM_WALL_CLOCK=1 $(GO) test -count=1 -p 1 ./...
+
 # -p 1 runs one package at a time, so that no two measure each other.
 .PHONY: bench
 bench: ## Run benchmarks
@@ -120,10 +135,12 @@ verify-coverage: test ## Verify test coverage meets threshold
 #
 # What it cannot reproduce is what needs another machine or a tool this
 # Makefile does not install: the typos scan, the release snapshot build,
-# the macOS and Windows runs, the cross-architecture tests and vet, the fuzz
-# matrix, the test run on the Go the release is built with, the API report,
-# and the libseccomp differential tests. test-libseccomp, fuzz and
-# api-report run those locally.
+# the macOS and Windows runs, the 386 and arm64 tests, the s390x, ppc64le
+# and arm tests under qemu, the NetBSD and FreeBSD vet, the fuzz matrix,
+# the run with the wall-clock bounds on the Go the release is built with,
+# the API report, the libseccomp tests against each pinned release and the
+# check of the apparmor port against apparmor_parser. test-wall-clock,
+# test-libseccomp, fuzz and api-report run some of those locally.
 #
 # verify-tidy and verify-golden rewrite files in place and then check that
 # nothing changed, which is why verify is not part of the default target.
@@ -131,7 +148,7 @@ verify-coverage: test ## Verify test coverage meets threshold
 # under make -j, go test could read a go.mod or a golden file halfway
 # through its rewrite. verify therefore runs its steps one after another in
 # a make of its own, whatever -j the outer make was given.
-VERIFY_STEPS := verify-coverage lint verify-tidy verify-mdtoc verify-golden verify-syscalls verify-dependencies govulncheck lint-actions
+VERIFY_STEPS := verify-coverage lint vet-arch build verify-go-floor verify-tidy verify-mdtoc verify-golden verify-syscalls verify-dependencies govulncheck lint-actions
 
 .PHONY: verify
 verify: ## Run the verifications CI runs (rewrites go.mod and the goldens in place)
@@ -222,10 +239,27 @@ verify-golden: ## Verify the CLI golden files are what the code produces
 	fi
 
 .PHONY: verify-tidy
-verify-tidy: ## Verify go.mod and hack/tools/go.mod are tidy
-	$(GO) mod tidy
-	cd hack/tools && $(GO) mod tidy
+verify-tidy: tidy ## Verify go.mod and hack/tools/go.mod are tidy
 	git diff --exit-code go.mod go.sum hack/tools/go.mod hack/tools/go.sum
+
+.PHONY: verify-go-floor
+verify-go-floor: ## Verify go.mod's go line is the supported floor, GO_FLOOR
+	@line=$$(grep -E '^go ' go.mod); \
+	if [ "$${line}" != "go $(GO_FLOOR)" ]; then \
+		echo "go.mod has \"$${line}\", want \"go $(GO_FLOOR)\" (see GO_FLOOR)"; exit 1; \
+	fi
+
+# The seccomp merges read the native architecture, so some code is only
+# compiled for some of them, and go test runs only a few vet checks. These
+# are the Linux architectures the tests run on besides amd64.
+VET_ARCHES = 386 arm arm64 s390x ppc64le
+
+.PHONY: vet-arch
+vet-arch: ## Run go vet for every Linux architecture the tests run on besides amd64
+	@set -e; for goarch in $(VET_ARCHES); do \
+		echo "GOOS=linux GOARCH=$$goarch CGO_ENABLED=0 $(GO) vet ./..."; \
+		GOOS=linux GOARCH=$$goarch CGO_ENABLED=0 $(GO) vet ./...; \
+	done
 
 .PHONY: govulncheck
 govulncheck: ## Run govulncheck

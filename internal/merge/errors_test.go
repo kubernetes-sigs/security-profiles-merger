@@ -330,6 +330,30 @@ func TestCollectorBuildsOnlyWhatItKeeps(t *testing.T) {
 	}
 }
 
+// TestCollectorReportfMatchesReport checks that Reportf keeps and counts
+// failures as Report does, and wraps what %w names.
+func TestCollectorReportfMatchesReport(t *testing.T) {
+	t.Parallel()
+
+	const total = merge.MaxJoinedErrors + 17
+
+	var viaReport, viaReportf merge.Collector
+
+	for idx := range total {
+		viaReport.Report(func() error { return fmt.Errorf("%w %d", errProblem, idx) })
+		viaReportf.Reportf("%w %d", errProblem, idx)
+	}
+
+	want, got := viaReport.Err(), viaReportf.Err()
+	if got.Error() != want.Error() {
+		t.Errorf("Reportf report = %q, want %q", got, want)
+	}
+
+	if !errors.Is(got, errProblem) || !errors.Is(got, spm.ErrMoreProblems) {
+		t.Errorf("Reportf report = %q, want it to match the failure and the omission", got)
+	}
+}
+
 func TestCollectorEmptyAndSingle(t *testing.T) {
 	t.Parallel()
 

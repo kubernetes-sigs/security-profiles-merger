@@ -445,8 +445,7 @@ func TestIntersectArtifactAtClauseBoundKeepsFilters(t *testing.T) {
 }
 
 // TestIntersectAtPairwiseBudgetIsFast bounds the wall time of merges at the
-// pairwise budget. Coverage counters slow the merge loops several times over,
-// so the bound is only checked without coverage.
+// pairwise budget, where the bounds are turned on (see testutil.WallClockEnv).
 //
 //nolint:paralleltest // a wall-clock bound, so it runs before the parallel tests
 func TestIntersectAtPairwiseBudgetIsFast(t *testing.T) {
@@ -470,7 +469,7 @@ func TestIntersectAtPairwiseBudgetIsFast(t *testing.T) {
 		}
 	}
 
-	start := time.Now()
+	bound := testutil.StartWallClock(t, generousBudget)
 
 	for _, merge := range []func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error){
 		seccomp.Intersect, seccomp.Union,
@@ -481,9 +480,7 @@ func TestIntersectAtPairwiseBudgetIsFast(t *testing.T) {
 		}
 	}
 
-	if elapsed := time.Since(start); testutil.CheckWallClock() && elapsed > generousBudget {
-		t.Errorf("merges took %s, want well under %s", elapsed, generousBudget)
-	}
+	bound.Checkf("merges")
 }
 
 func TestValidateArtifactRulesLibseccompRefuses(t *testing.T) {
@@ -633,7 +630,7 @@ func TestValidateArtifactStaysFastOnHugeEntries(t *testing.T) {
 		repeated.Args = append(repeated.Args, arg(uint(idx%6), specs.OpEqualTo, uint64(idx)))
 	}
 
-	start := time.Now()
+	bound := testutil.StartWallClock(t, generousBudget)
 
 	err := seccomp.ValidateArtifact(profileOf(specs.ActErrno, outOfRange))
 	if !errors.Is(err, seccomp.ErrArgIndexOutOfRange) {
@@ -647,9 +644,5 @@ func TestValidateArtifactStaysFastOnHugeEntries(t *testing.T) {
 		t.Errorf("expected ErrTooManyRules, got: %v", err)
 	}
 
-	// Coverage counters slow these loops several times over, so the bound
-	// is only checked without coverage.
-	if elapsed := time.Since(start); testutil.CheckWallClock() && elapsed > generousBudget {
-		t.Errorf("validation took %s, want well under %s", elapsed, generousBudget)
-	}
+	bound.Checkf("validation")
 }

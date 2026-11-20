@@ -84,17 +84,13 @@ func TestHasRepeatedIndexIsLinear(t *testing.T) {
 	}
 
 	args := indexArgs(indices...)
-	start := time.Now()
+	bound := testutil.StartWallClock(t, generousBudget)
 
 	if hasRepeatedIndex(args) {
 		t.Fatal("distinct indices reported as repeated")
 	}
 
-	// Coverage counters slow these loops several times over, so the bound
-	// is only checked without coverage.
-	if elapsed := time.Since(start); testutil.CheckWallClock() && elapsed > generousBudget {
-		t.Errorf("took %s for %d conditions, want well under %s", elapsed, count, generousBudget)
-	}
+	bound.Checkf("checking %d conditions", count)
 }
 
 // clauseOn builds a conditional clause with one condition and the given

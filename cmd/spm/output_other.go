@@ -18,8 +18,6 @@ limitations under the License.
 
 package main
 
-import "os"
-
 // oNoFollow is zero where the platform has no O_NOFOLLOW; --output then
 // behaves as it always has there.
 const oNoFollow = 0
@@ -35,7 +33,7 @@ const refuseSymlinks = false
 
 // chmodOutput does nothing where the permission bits of a file do not carry
 // the meaning ownerReadWrite gives them.
-func chmodOutput(_ *os.File) error {
+func chmodOutput(_ tempFile) error {
 	return nil
 }
 

@@ -172,13 +172,11 @@ func TestDuplicateKeysBoundsPathWork(t *testing.T) {
 
 	document.WriteString(`"last":1}` + strings.Repeat("}", levels))
 
-	start := time.Now()
+	bound := testutil.StartWallClock(t, generousBudget)
 
 	paths, omitted := duplicateKeys([]byte(document.String()))
 
-	if elapsed := time.Since(start); testutil.CheckWallClock() && elapsed > generousBudget {
-		t.Errorf("duplicateKeys took %s, want well under %s", elapsed, generousBudget)
-	}
+	bound.Checkf("duplicateKeys")
 
 	if len(paths) != maxReportedPaths || omitted != maxReportedPaths {
 		t.Fatalf("got %d paths and %d omitted, want %d of each",

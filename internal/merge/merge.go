@@ -71,10 +71,6 @@ func RequireNonNil[T any](profiles ...*T) error {
 // Duplicates within a slice are ignored. Results are sorted, which is why T
 // must be ordered. Returns nil, nil when the sets are equal.
 func DiffSlice[T cmp.Ordered](left, right []T) ([]T, []T) {
-	if len(left) == 0 && len(right) == 0 {
-		return nil, nil
-	}
-
 	leftSet := make(map[T]struct{}, len(left))
 	for _, item := range left {
 		leftSet[item] = struct{}{}
@@ -85,24 +81,46 @@ func DiffSlice[T cmp.Ordered](left, right []T) ([]T, []T) {
 		rightSet[item] = struct{}{}
 	}
 
-	var added, removed []T
+	added, removed, _ := SortedKeyDiff(leftSet, rightSet)
 
-	for item := range leftSet {
-		if _, ok := rightSet[item]; !ok {
-			removed = append(removed, item)
+	return added, removed
+}
+
+// SortedKeyDiff compares the keys of two maps and returns, in this order and
+// each sorted, the keys only right has (added), as DiffSlice does, those
+// only left has (removed) and those both have. A list without keys is nil.
+func SortedKeyDiff[K cmp.Ordered, V any](left, right map[K]V) ([]K, []K, []K) {
+	var added, removed, both []K
+
+	for key := range left {
+		if _, ok := right[key]; ok {
+			both = append(both, key)
+		} else {
+			removed = append(removed, key)
 		}
 	}
 
-	for item := range rightSet {
-		if _, ok := leftSet[item]; !ok {
-			added = append(added, item)
+	for key := range right {
+		if _, ok := left[key]; !ok {
+			added = append(added, key)
 		}
 	}
 
 	slices.Sort(added)
 	slices.Sort(removed)
+	slices.Sort(both)
 
-	return added, removed
+	return added, removed, both
+}
+
+// NilIfEmpty returns nil for an empty slice and the slice itself otherwise,
+// so that a result left without items spells its list as absent.
+func NilIfEmpty[T any](items []T) []T {
+	if len(items) == 0 {
+		return nil
+	}
+
+	return items
 }
 
 // NewSliceDiff compares two slices as sets, as DiffSlice does, and returns

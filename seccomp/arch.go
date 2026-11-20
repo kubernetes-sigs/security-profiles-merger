@@ -123,8 +123,6 @@ func (order byteOrder) String() string {
 // architecture of the other one with EDOM, so a runtime fails to load a
 // profile listing an architecture whose byte order differs from the native
 // architecture's.
-//
-//nolint:gochecknoglobals // immutable lookup table
 var byteOrders = map[specs.Arch]byteOrder{
 	specs.ArchX86:         littleEndian,
 	specs.ArchX86_64:      littleEndian,

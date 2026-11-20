@@ -252,7 +252,7 @@ func decodeError(input *profileInput, err error) error {
 			at = int64(len(bytes.TrimRight(input.data, " \t\r\n")))
 		}
 
-		return &documentError{text: input.position(at) + ": " + syntaxErr.Error(), err: err}
+		return &documentError{text: input.position(at) + ": " + syntaxErr.Error()}
 	case errors.As(err, &typeErr):
 		return typeError(input, typeErr)
 	default:
@@ -265,15 +265,12 @@ func decodeError(input *profileInput, err error) error {
 const unexpectedEnd = "unexpected end of JSON input"
 
 // documentError is a decoder failure described in the terms of the
-// document. errors.As still finds the decoder's own error behind it.
+// document.
 type documentError struct {
 	text string
-	err  error
 }
 
 func (f *documentError) Error() string { return merge.BoundedText(f.text) }
-
-func (f *documentError) Unwrap() error { return f.err }
 
 // typeError describes a value of the wrong type by the JSON path of the
 // member it sits at and the type the member takes, at the position the
@@ -293,30 +290,21 @@ func typeError(input *profileInput, typeErr *json.UnmarshalTypeError) error {
 		text = path + ": " + text
 	}
 
-	return &documentError{text: input.position(start) + ": " + text, err: typeErr}
+	return &documentError{text: input.position(start) + ": " + text}
 }
 
-// describeType names the JSON value a Go type decodes from.
+// describeType names the JSON value a Go type decodes from. The decoder
+// names the type a pointer points to, never the pointer, and the profile
+// types hold no signed integer or floating-point field, so those kinds need
+// no name of their own. A decoder built on encoding/json/v2 may not know the
+// type at all.
 func describeType(typ reflect.Type) string {
 	if typ == nil {
 		return otherValue
 	}
 
-	for typ.Kind() == reflect.Pointer {
-		typ = typ.Elem()
-	}
-
-	zero := reflect.Zero(typ)
-
-	switch {
-	case zero.CanInt():
-		limit := uint64(1) << (typ.Bits() - 1)
-
-		return fmt.Sprintf("an integer from -%d to %d", limit, limit-1)
-	case zero.CanUint():
+	if reflect.Zero(typ).CanUint() {
 		return fmt.Sprintf("an integer from 0 to %d", ^uint64(0)>>(uint64Bits-typ.Bits()))
-	case zero.CanFloat():
-		return "a number"
 	}
 
 	name, known := map[reflect.Kind]string{
