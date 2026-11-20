@@ -29,8 +29,10 @@ What a runtime gets wrong most easily, each explained further down:
 - **Restate the CRI-O seccomp default** before using it as a baseline:
   `seccomp.ValidateBaseline` refuses it as shipped, since the merge cannot
   read its `clone` and `socket` rules exactly
-  ([the runtime flow](#the-runtime-flow)). The Moby and containerd defaults
-  pass as they are.
+  ([the runtime flow](#the-runtime-flow));
+  [crio-amd64-restated.json](../seccomp/testdata/defaults/crio-amd64-restated.json)
+  is the restated profile for amd64. The Moby and containerd defaults pass
+  as they are.
 - **Log the architectures an artifact takes away.** An artifact that lists
   no architectures narrows the result to the native one, so on an amd64
   node a 32-bit process in the container is killed on its first syscall
@@ -113,7 +115,7 @@ if podProfile != nil {
 inputs = append(inputs, artifact)
 effective, err := seccomp.Intersect(inputs...)
 if err != nil {
-    var inputErr *spm.InputError
+    var inputErr *seccomp.InputError
     if errors.As(err, &inputErr) && inputErr.Index == 0 {
         return nodeMisconfigured(err) // the baseline is what failed
     }
@@ -191,36 +193,27 @@ it, since the kernel denies `refer` there anyway, so a baseline listing
      different result, so the set is no safe shape. One clause,
      `ALLOW a0 != AF_VSOCK`, is the restatement: AF_VSOCK then gets the
      default's errno instead of EPERM, and the NETLINK_AUDIT rule is gone.
-     That rule was for compatibility: EINVAL lets libaudit treat audit as
-     absent instead of failing later with EPERM.
-     [containers/common#421](https://github.com/containers/common/pull/421)
-     found that an unconditional `ALLOW` had hidden it for years, so
-     dropping it changes little. The complement pair `ERRNO a0 == AF_VSOCK`
-     plus `ALLOW a0 != AF_VSOCK` is a safe shape on x86_64 and aarch64 but
-     not where `socket` goes through `socketcall`: libseccomp copies both
-     rules to the multiplexer with the same filter and different results and
-     refuses the second, so `ValidateArtifact` reports the pair where the
-     profile covers such an architecture, and `Intersect` drops x86 from the
-     list of an x86_64 node and denies `socket` on ppc64le and s390x.
-     The Moby and containerd defaults state their `socket` rules as one
-     range and single-value equalities on the first argument, all `ALLOW`,
-     which pass as they are.
+     The [defaults README](../seccomp/testdata/defaults/README.md#why-socket-is-restated-this-way)
+     says why dropping that rule changes little and why keeping EPERM for
+     AF_VSOCK with a second clause is no restatement.
 
    `ValidateArtifact` reports one more entry of the CRI-O default, `setns`:
    an unconditional `ALLOW` followed by an unconditional `ERRNO`. libseccomp
    keeps the first unconditional rule of a syscall and so does the merge, so
    the diff is equal and restating it, by keeping only the first entry, is
    optional.
+   [crio-amd64-restated.json](../seccomp/testdata/defaults/crio-amd64-restated.json)
+   is the CRI-O default for amd64 restated this way.
 
    Both validation levels also reject a notification listener (see
    [seccomp: the listener](#seccomp-the-listener)). `ValidateStrict` remains
    useful as a lint for a baseline an administrator writes by hand.
 1. **Decode with `UnmarshalStrict`**, or with `DecodeArtifact`, which runs
    steps 1 and 2. It refuses repeated, unknown and misspelled members,
-   invalid UTF-8, data after the profile and a document
-   that is not an object; [Strict decoding](api.md#strict-decoding) says why
-   each lets a scanner that approved the artifact and the runtime that loads
-   it read two different profiles. Cap the size of the document before
+   missing required members, invalid UTF-8, data after the profile and a
+   document that is not an object; [Strict decoding](api.md#strict-decoding)
+   says why each lets a scanner that approved the artifact and the runtime
+   that loads it read two different profiles. Cap the size of the document before
    decoding it (see [Limits](#limits)).
 2. **Validate with `ValidateArtifact`**, not `Validate`. `Validate` is what
    the merge runs on its inputs: it checks the path length but no count, and
@@ -296,12 +289,11 @@ AppArmor, writing rules for apparmor_parser:
   runs, does not, so a baseline that passes `Validate` can carry one into
   the result. `QuotePath` escapes what the lexer reads as syntax, and
   returns `ErrUnquotablePath` where no spelling keeps the meaning; refuse
-  the result then. A runtime escaping by hand escapes a space, a tab, a
-  newline, a double quote and an exclamation mark, but a comma only where it
-  ends the path or one of those characters or another comma follows it:
-  escaping every comma turns an alternation such as `{a,b}` into a literal
-  comma. After an unescaped comma the lexer reads no backslash escape, so
-  a character there that needs one takes a `\x` escape instead.
+  the result then. Call it rather than escape by hand: a comma stays bare
+  unless it ends the path, since escaping it turns an alternation such as
+  `{a,b}` into a literal comma, and the lexer reads no backslash escape
+  right after a bare comma, so a character there that needs one takes a
+  `\x` escape instead (`/x/{a, b}` becomes `/x/{a,\x20b}`).
 - **Write each list with its own permission.** `AllowedExecutables` and
   `AllowedLibraries` carry no exec transition mode (see
   [Scope](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#hdr-Scope)),
@@ -454,7 +446,7 @@ caused them. Check for an `InputError` first, then for these:
 | `ErrBudgetExceeded` | `apparmor.Intersect`; `landlock.Intersect` and `landlock.Union` | The inputs together are too large to merge precisely. After the baseline check, the artifact brought the size: reject the workload |
 | `seccomp.ErrLostRules` | `seccomp.Union`; `seccomp.Intersect` where it cannot drop an architecture | libseccomp would lose the rules of an architecture in the result. The baseline check at config load catches a baseline that does this alone, so after it the artifact brought the rules: reject the workload |
 | `seccomp.ErrNotifyWithoutListener` | `seccomp.Intersect` and `seccomp.Union`, on their result | A result that would notify without a listener. `Validate` of every input rules it out, so treat it as an internal error and reject the workload. On an input it comes inside an `InputError` |
-| `seccomp.ErrUnknownArch` | Every method that returns an error of a `seccomp.ForArch` naming an architecture the package does not know, matching `spm.ErrInvalidOptions` as well | A misconfigured node or caller, before any profile was read. On an input it comes inside an `InputError`, without `ErrInvalidOptions` |
+| `seccomp.ErrUnknownArch` | Every method that returns an error of a `seccomp.ForArch` naming an architecture the package does not know, matching `spm.ErrInvalidOptions` as well | A misconfigured node or caller, before any profile was read. A profile listing an unknown architecture also fails with it, without `ErrInvalidOptions`: inside an `InputError` from a merge, and in the report of `Validate`, `ValidateArtifact` or `DecodeArtifact` |
 | `spm.ErrInvalidOptions` | Every method that returns an error of the zero `seccomp.Options`, of a `seccomp.ForArch` naming an unknown architecture, or of a `landlock.Options` naming a version below `ABIV1` (`landlock.ErrUnknownABIVersion`); `seccomp.ErrInvalidOptions` and `landlock.ErrInvalidOptions` are this sentinel | A bug in the caller or a misconfigured node, before any profile was read |
 
 A seccomp merge also returns `ErrConflictingListener` inside an
@@ -488,9 +480,10 @@ what it is given at face value.
   `SCMP_ACT_KILL`, or by collapsing the syscall; `Union` collapses it. What
   `ValidateArtifact` accepts and what the merges return therefore depend on
   the native architecture: call them on the node that loads the result, or
-  name that node with `seccomp.ForArch`; `seccomp.ForAnyArch` reads an
-  unknown node as possibly any architecture a runtime can be native on (see
-  [Validation levels](api.md#validation-levels)). See
+  name that node with `seccomp.ForArch`, or use `seccomp.ForAnyArch` for a
+  node whose architecture is not known (see
+  [Options](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#Options)).
+  See
   [Architectures](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Architectures).
 - **seccomp: a libseccomp defect.** libseccomp 2.5.2, 2.5.4, 2.5.5, 2.6.0
   and 2.6.1, sorting syscalls by priority (crun always, runc up to 32
@@ -684,10 +677,22 @@ few properties of the result matter:
   `Intersect`: an errno value follows the earlier input when actions tie.
   The same recordings in the same order always give the same profile, so
   pass them in a fixed order, such as by name.
+- **Name the nodes' architecture.** A seccomp `Union` depends on the
+  native architecture as `Intersect` does, and the operator may run on
+  another architecture than the nodes it merges for. Call
+  `seccomp.ForArch(nodeArch).Union` for the architecture of the nodes the
+  result is for, or `seccomp.ForAnyArch().Union` where it is not known or
+  the result goes to nodes of several architectures.
 - **What can fail.** Two recordings naming different seccomp listeners
   (see [seccomp: the listener](#seccomp-the-listener)), and a result in
   which libseccomp would lose the rules of an architecture (`ErrLostRules`,
-  see [What the models leave out](#what-the-models-leave-out)).
+  see [What the models leave out](#what-the-models-leave-out)). `Union`
+  cannot drop an architecture to avoid that, so the remedy is the
+  caller's: where the architecture the message names is not the nodes'
+  native one, leave it out of the recordings' `architectures` lists.
+  `ForAnyArch` checks every architecture a runtime can be native on, so it
+  refuses more often; use `ForArch` where the nodes' architecture is known.
+  An allowlist, the shape a recording usually has, is never affected.
 - **Landlock bounds the number of recordings.** The cost of a Landlock
   merge grows with the square of the number of inputs, and `Union` refuses
   more than its budget admits with `ErrBudgetExceeded`, about 300 recordings
@@ -765,7 +770,9 @@ held up.
   documented behavior, fuzz targets for `ValidateArtifact` and for the merge
   invariants against an independent evaluator, and seccomp has differential
   tests against libseccomp itself. AppArmor glob matching is fuzzed against
-  a port of the stages apparmor_parser runs a path through.
+  a port of the stages apparmor_parser runs a path through. A small suite
+  applies Landlock results with the kernel and runs seccomp results through
+  runc and crun.
   [CONTRIBUTING.md](../CONTRIBUTING.md#how-the-merge-semantics-are-checked)
   describes each layer.
 

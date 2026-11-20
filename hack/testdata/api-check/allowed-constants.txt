@@ -1,0 +1,14 @@
+# sigs.k8s.io/security-profiles-merger/landlock
+## incompatible changes
+LatestABIVersion: value changed from 11 to 12
+## compatible changes
+ABIV12: added
+
+# sigs.k8s.io/security-profiles-merger/seccomp
+## incompatible changes
+MaxArtifactRules: value changed from 16384 to 32768
+
+# summary
+Inferred base version: v1.2.0
+Cannot suggest a release version.
+Incompatible changes were detected.

@@ -98,6 +98,17 @@ fuzz: ## Run all fuzz tests (use FUZZTIME to adjust, default 30s)
 		done; \
 	done
 
+# internal/runtimetest checks merge results against what the kernel and the
+# runtimes load: Landlock intersections applied as one ruleset against their
+# inputs stacked as layers, and seccomp results run through runc and crun,
+# rootless unless run as root. It needs Linux with Landlock, runc or crun,
+# strace and user namespaces, so it sits behind the runtime tag, out of
+# make test. SPM_RUNTIMETEST_REQUIRE=1 turns a missing piece into a failure
+# rather than a skip, as CI sets it.
+.PHONY: test-runtime
+test-runtime: ## Run merge results through Landlock, runc and crun (Linux; see internal/runtimetest)
+	$(GO) test -count=1 -v -tags runtime ./internal/runtimetest/
+
 # The algorithmic bounds in the suite assert their wall-clock limits only
 # with SPM_WALL_CLOCK=1 and without coverage or the race detector (see
 # testutil.WallClockEnv). -p 1 runs one package at a time, so that no two
@@ -136,7 +147,7 @@ verify-coverage: test ## Verify test coverage meets threshold
 # What it cannot reproduce is what needs another machine or a tool this
 # Makefile does not install: the typos scan, the release snapshot build,
 # the macOS and Windows runs, the 386 and arm64 tests, the s390x, ppc64le
-# and arm tests under qemu, the NetBSD and FreeBSD vet, the fuzz matrix,
+# and arm tests under qemu, the fuzz matrix,
 # the run with the wall-clock bounds on the Go the release is built with,
 # the API report, the libseccomp tests against each pinned release and the
 # check of the apparmor port against apparmor_parser. test-wall-clock,
@@ -148,7 +159,7 @@ verify-coverage: test ## Verify test coverage meets threshold
 # under make -j, go test could read a go.mod or a golden file halfway
 # through its rewrite. verify therefore runs its steps one after another in
 # a make of its own, whatever -j the outer make was given.
-VERIFY_STEPS := verify-coverage lint vet-arch build verify-go-floor verify-tidy verify-mdtoc verify-golden verify-syscalls verify-dependencies govulncheck lint-actions
+VERIFY_STEPS := verify-coverage lint vet-arch build verify-go-floor verify-tidy verify-mdtoc verify-golden verify-syscalls verify-dependencies govulncheck lint-actions test-api-check
 
 .PHONY: verify
 verify: ## Run the verifications CI runs (rewrites go.mod and the goldens in place)
@@ -163,11 +174,25 @@ verify: ## Run the verifications CI runs (rewrites go.mod and the goldens in pla
 # lint job in ci.yml uses the release binary golangci-lint-action installs
 # instead, of the same version, which the action checks against the
 # checksums the release publishes.
+#
+# cmd/spm has files for other hosts, which a run for this one never loads,
+# so the command is also linted for each of LINT_OSES. Only the command,
+# since the libseccomp bridge the config pulls in does not build there.
+# It is installed into build/ rather than run with go run, which would
+# build it for the GOOS it is to lint for.
+LINT_OSES = windows darwin netbsd
+GOLANGCI_LINT_BIN := $(CURDIR)/build/golangci-lint-v$(GOLANGCI_LINT_VERSION)
+
 .PHONY: lint
 lint: ## Run golangci-lint (needs the libseccomp headers; the config lints the cgo bridge too)
-	$(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(GOLANGCI_LINT_VERSION) run
+	GOBIN=$(GOLANGCI_LINT_BIN) $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(GOLANGCI_LINT_VERSION)
+	$(GOLANGCI_LINT_BIN)/golangci-lint run
+	@set -e; for goos in $(LINT_OSES); do \
+		echo "GOOS=$$goos golangci-lint run ./cmd/..."; \
+		GOOS=$$goos $(GOLANGCI_LINT_BIN)/golangci-lint run ./cmd/...; \
+	done
 
-MDOCS := README.md docs/api.md docs/cli.md docs/integration.md
+MDOCS := README.md docs/api.md docs/cli.md docs/integration.md docs/migration.md
 
 # --dryrun fails when a table of contents is stale and writes nothing.
 .PHONY: verify-mdtoc
@@ -254,11 +279,22 @@ verify-go-floor: ## Verify go.mod's go line is the supported floor, GO_FLOOR
 # are the Linux architectures the tests run on besides amd64.
 VET_ARCHES = 386 arm arm64 s390x ppc64le
 
+# The BSDs the build tags of cmd/spm name, which no test runs on. NetBSD
+# compiles cmd/spm/nofollow_netbsd.go, which nothing else builds; the others
+# add no file of their own but keep the Unix files building on every BSD
+# the tags name, which a change aimed at NetBSD could break. go vet
+# type-checks every package, so no separate build is needed.
+VET_OSES = netbsd freebsd openbsd dragonfly
+
 .PHONY: vet-arch
-vet-arch: ## Run go vet for every Linux architecture the tests run on besides amd64
+vet-arch: ## Run go vet for every Linux architecture the tests run on besides amd64, and for the BSDs
 	@set -e; for goarch in $(VET_ARCHES); do \
 		echo "GOOS=linux GOARCH=$$goarch CGO_ENABLED=0 $(GO) vet ./..."; \
 		GOOS=linux GOARCH=$$goarch CGO_ENABLED=0 $(GO) vet ./...; \
+	done
+	@set -e; for goos in $(VET_OSES); do \
+		echo "GOOS=$$goos GOARCH=amd64 CGO_ENABLED=0 $(GO) vet ./..."; \
+		GOOS=$$goos GOARCH=amd64 CGO_ENABLED=0 $(GO) vet ./...; \
 	done
 
 .PHONY: govulncheck
@@ -269,11 +305,20 @@ govulncheck: ## Run govulncheck
 # against the release before it rather than against the tag itself.
 API_BASE ?= $(shell git describe --tags --abbrev=0 HEAD^ 2>/dev/null)
 
-# gorelease refuses a working tree with uncommitted changes.
+# gorelease refuses a working tree with uncommitted changes. From v1.0.0
+# on, an incompatible change against a release of the same major version
+# fails; below v1 the report is advisory (see hack/api-check.sh and
+# RELEASE.md).
+# The decisions of hack/api-check.sh on reports written as gorelease writes
+# them, which needs no release tag and no clean tree.
+.PHONY: test-api-check
+test-api-check: ## Check what hack/api-check.sh decides for the reports in hack/testdata/api-check
+	hack/api-check-test.sh
+
 .PHONY: api-report
-api-report: ## Report API changes since the latest release and the version they suggest (needs a clean tree)
+api-report: ## Report API changes since the latest release and fail on incompatible ones from v1 on (needs a clean tree)
 	@if [ -z "$(API_BASE)" ]; then echo "no release tag to compare against"; exit 1; fi
-	$(TOOL) golang.org/x/exp/cmd/gorelease -base=$(API_BASE)
+	GORELEASE="$(TOOL) golang.org/x/exp/cmd/gorelease" hack/api-check.sh $(API_BASE)
 
 ##@ Maintenance
 

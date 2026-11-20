@@ -97,16 +97,16 @@ func FuzzDetectProfileType(f *testing.F) {
 func checkDetectedFamilies(t *testing.T, raw string) []string {
 	t.Helper()
 
-	families := detectOneProfileType([]byte(raw))
+	families, _ := detectMembers([]byte(raw))
 
 	for _, family := range families {
 		if !knownType(family) {
-			t.Errorf("detectOneProfileType returned the unknown type %q", family)
+			t.Errorf("detectMembers returned the unknown type %q", family)
 		}
 	}
 
-	if !slices.Equal(families, detectOneProfileType([]byte(raw))) {
-		t.Errorf("detectOneProfileType(%q) is not reproducible", raw)
+	if again, _ := detectMembers([]byte(raw)); !slices.Equal(families, again) {
+		t.Errorf("detectMembers(%q) is not reproducible", raw)
 	}
 
 	return families

@@ -87,3 +87,25 @@ dependencies:
     upstream:
       flavour: github
       url: seccomp/libseccomp
+
+  # The runtimes test / runtime runs seccomp results through, as static
+  # release binaries. The job pins each by version and checksum in its env,
+  # so a bump updates the checksum there too, from the release's
+  # runc.sha256sum or CHECKSUMS file.
+  - name: runc
+    version: 1.5.3
+    upstream:
+      flavour: github
+      url: opencontainers/runc
+    refPaths:
+      - path: .github/workflows/ci.yml
+        match: "RUNC_VERSION: "
+
+  - name: crun
+    version: "1.31"
+    upstream:
+      flavour: github
+      url: containers/crun
+    refPaths:
+      - path: .github/workflows/ci.yml
+        match: "CRUN_VERSION: "

@@ -149,7 +149,7 @@ func PathAt(raw []byte, offset int64) (string, int64) {
 // valueStart returns the offset of the first byte from offset on that is
 // none of the whitespace, colon or comma JSON puts between two tokens.
 func valueStart(raw []byte, offset int64) int64 {
-	for offset < int64(len(raw)) && strings.IndexByte(jsonSpace+":,", raw[offset]) >= 0 {
+	for offset < int64(len(raw)) && strings.IndexByte(Space+":,", raw[offset]) >= 0 {
 		offset++
 	}
 

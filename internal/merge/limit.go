@@ -38,16 +38,3 @@ func (l *limitError) Error() string { return l.text }
 func (l *limitError) Is(target error) bool {
 	return target == spm.ErrArtifactTooLarge
 }
-
-// SoleInputError returns the error a merge of one input returned without
-// the InputError naming that input, which says nothing to a caller that
-// passed one profile, or err itself when it is no InputError.
-func SoleInputError(err error) error {
-	//nolint:errorlint // only the InputError the merge itself returned
-	inputErr, ok := err.(*spm.InputError)
-	if ok && inputErr.Index == 0 {
-		return inputErr.Err
-	}
-
-	return err
-}

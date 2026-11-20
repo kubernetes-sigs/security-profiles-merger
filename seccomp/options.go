@@ -23,6 +23,7 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/internal/strictjson"
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
@@ -255,19 +256,7 @@ func (o Options) DecodeArtifact(data []byte) (*specs.LinuxSeccomp, error) {
 		return nil, err
 	}
 
-	var artifact specs.LinuxSeccomp
-
-	err = UnmarshalStrict(data, &artifact)
-	if err != nil {
-		return nil, err
-	}
-
-	err = o.ValidateArtifact(&artifact)
-	if err != nil {
-		return nil, err
-	}
-
-	return &artifact, nil
+	return strictjson.DecodeValidated(data, UnmarshalStrict, o.ValidateArtifact)
 }
 
 // String names the constructor the options come from, as Go source spells

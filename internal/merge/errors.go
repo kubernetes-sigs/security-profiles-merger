@@ -114,7 +114,8 @@ func (b *boundedError) Unwrap() error { return b.err }
 // truncated report matches spm.ErrMoreProblems, so the truncation itself is
 // visible rather than silent.
 type Collector struct {
-	failures limitedError
+	kept    []error
+	omitted int
 }
 
 // Report adds the failure build returns, calling build only when the report
@@ -122,13 +123,9 @@ type Collector struct {
 // without being built, so Report is for a check that has already failed:
 // build must return a non-nil error and have no other effect.
 func (c *Collector) Report(build func() error) {
-	if len(c.failures.kept) < MaxJoinedErrors {
-		c.failures.add(build())
-
-		return
+	if !c.full() {
+		c.Add(build())
 	}
-
-	c.failures.omitted++
 }
 
 // Reportf adds the failure fmt.Errorf builds from format and args, building
@@ -137,14 +134,10 @@ func (c *Collector) Report(build func() error) {
 // check that fails a bounded number of times; one that can fail once per
 // element of its input uses Report, which costs nothing past the limit.
 func (c *Collector) Reportf(format string, args ...any) {
-	if len(c.failures.kept) < MaxJoinedErrors {
+	if !c.full() {
 		//nolint:err113 // the callers' formats wrap their sentinels with %w
-		c.failures.add(fmt.Errorf(format, args...))
-
-		return
+		c.Add(fmt.Errorf(format, args...))
 	}
-
-	c.failures.omitted++
 }
 
 // Add adds err. A report from Collector.Err is flattened into this one
@@ -152,7 +145,24 @@ func (c *Collector) Reportf(format string, args ...any) {
 // reports of their checks, and the bound has to hold for the whole of it,
 // not once per check. A nil err is ignored.
 func (c *Collector) Add(err error) {
-	c.failures.add(err)
+	if err == nil {
+		return
+	}
+
+	//nolint:errorlint // only a report itself is flattened, not one wrapped
+	if nested, ok := err.(*report.ListError); ok {
+		for _, kept := range nested.Kept() {
+			c.Add(kept)
+		}
+
+		c.omitted += nested.Omitted()
+
+		return
+	}
+
+	if !c.full() {
+		c.kept = append(c.kept, err)
+	}
 }
 
 // Err returns the collected report: nil when nothing failed, as
@@ -161,45 +171,25 @@ func (c *Collector) Add(err error) {
 // when it left failures out.
 func (c *Collector) Err() error {
 	switch {
-	case len(c.failures.kept) == 0 && c.failures.omitted == 0:
+	case len(c.kept) == 0 && c.omitted == 0:
 		return nil
-	case len(c.failures.kept) == 1 && c.failures.omitted == 0:
-		return c.failures.kept[0]
+	case len(c.kept) == 1 && c.omitted == 0:
+		return c.kept[0]
 	default:
-		return report.New(c.failures.kept, c.failures.omitted, spm.ErrMoreProblems)
+		return report.New(c.kept, c.omitted, spm.ErrMoreProblems)
 	}
 }
 
-// limitedError gathers what a Collector reports: the failures it kept and
-// how many it left out. Collector.Err returns them as a report.ListError.
-type limitedError struct {
-	kept    []error
-	omitted int
-}
-
-func (l *limitedError) add(err error) {
-	if err == nil {
-		return
+// full reports whether the report has no room for another failure, and
+// then counts that failure as omitted.
+func (c *Collector) full() bool {
+	if len(c.kept) < MaxJoinedErrors {
+		return false
 	}
 
-	//nolint:errorlint // only a report itself is flattened, not one wrapped
-	if nested, ok := err.(*report.ListError); ok {
-		for _, kept := range nested.Kept() {
-			l.add(kept)
-		}
+	c.omitted++
 
-		l.omitted += nested.Omitted()
-
-		return
-	}
-
-	if len(l.kept) < MaxJoinedErrors {
-		l.kept = append(l.kept, err)
-
-		return
-	}
-
-	l.omitted++
+	return true
 }
 
 // ReportDuplicates reports each of count items whose key an earlier item
@@ -252,4 +242,17 @@ func CheckInputs[T any](profiles []*T, check func(idx int, profile *T) error) er
 	}
 
 	return collector.Err()
+}
+
+// SoleInputError returns the error a merge of one input returned without
+// the InputError naming that input, which says nothing to a caller that
+// passed one profile, or err itself when it is no InputError.
+func SoleInputError(err error) error {
+	//nolint:errorlint // only the InputError the merge itself returned
+	inputErr, ok := err.(*spm.InputError)
+	if ok && inputErr.Index == 0 {
+		return inputErr.Err
+	}
+
+	return err
 }

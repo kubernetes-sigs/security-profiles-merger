@@ -1,0 +1,7 @@
+# sigs.k8s.io/security-profiles-merger/seccomp
+## errors in release version:
+seccomp/merge.go:10:2: undefined: foo
+
+# summary
+Inferred base version: v1.2.0
+Suggested version: v1.2.1

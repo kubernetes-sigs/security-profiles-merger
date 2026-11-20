@@ -22,8 +22,8 @@ package main
 // behaves as it always has there.
 const oNoFollow = 0
 
-// oNonBlock is zero where opening a file does not wait for a reader the way
-// opening a FIFO does on Unix.
+// oNonBlock is zero where opening a file, an input or an output, does not
+// wait for the other end the way opening a FIFO does on Unix.
 const oNonBlock = 0
 
 // refuseSymlinks is false where the platform has no O_NOFOLLOW: a symlink at

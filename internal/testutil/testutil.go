@@ -43,16 +43,9 @@ func checkWallClock() bool {
 
 // WallClock is a wall-clock bound that StartWallClock started.
 type WallClock struct {
-	t     reporter
+	t     testing.TB
 	limit time.Duration
 	start time.Time
-}
-
-// reporter is what a WallClock needs of a test: a *testing.T, or in the
-// tests of this package, one that records what it reports.
-type reporter interface {
-	Helper()
-	Errorf(format string, args ...any)
 }
 
 // StartWallClock starts a wall-clock bound of limit on what the test runs

@@ -18,9 +18,10 @@ limitations under the License.
 // packages have in common, so that each names them once rather than three
 // times:
 //
-//   - SliceDiff, the one diff shape all three produce.
+//   - SliceDiff and ValueDiff, the diff shapes the packages share.
 //     seccomp.SliceDiff, apparmor.SliceDiff and landlock.SliceDiff are
-//     alias declarations of it, so a value of one is a value of the
+//     alias declarations of SliceDiff, and seccomp.ValueDiff and
+//     apparmor.ValueDiff of ValueDiff, so a value of one is a value of the
 //     others.
 //   - InputError and the sentinel errors below, which each package
 //     re-exports, so that errors.Is against a sentinel here matches an
@@ -90,10 +91,10 @@ var (
 	// a path is longer than MaxPathLen bytes, which is longer than any
 	// Linux path. It is checked before the path is scanned, so an oversized
 	// path costs no further work; only the count limits of ValidateArtifact
-	// and ValidateStrict run before it. apparmor checks the length of every
-	// path of the profile first, and when one is too long skips the other
-	// checks of Validate; landlock checks each path's length before scanning
-	// that path.
+	// and ValidateStrict, and in landlock the empty-path check, run before
+	// it. apparmor checks the length of every path of the profile first,
+	// and when one is too long skips the other checks of Validate; landlock
+	// checks each path's length before scanning that path.
 	ErrPathTooLong = errors.New("path exceeds " + strconv.Itoa(MaxPathLen) + " bytes")
 	// ErrMoreProblems stands in for the validation failures a report left
 	// out. A profile holds as many failures as it holds rules, and an

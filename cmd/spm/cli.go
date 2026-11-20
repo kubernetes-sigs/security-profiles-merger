@@ -554,7 +554,7 @@ func (w escapingWriter) Write(data []byte) (int, error) {
 // rune sits in a string, where the escape decodes to the same value. data is
 // returned itself when it holds none, and any other byte is kept as it is.
 func escapeInvisible(data []byte) []byte {
-	first := invisibleAt(data)
+	first := bytes.IndexFunc(data, needsEscape)
 	if first < 0 {
 		return data
 	}
@@ -565,7 +565,7 @@ func escapeInvisible(data []byte) []byte {
 		char, size := utf8.DecodeRune(rest)
 
 		switch {
-		case !needsEscape(char, size):
+		case !needsEscape(char):
 			escaped = append(escaped, rest[:size]...)
 		case char > maxBMP:
 			first, second := utf16.EncodeRune(char)
@@ -580,28 +580,14 @@ func escapeInvisible(data []byte) []byte {
 	return escaped
 }
 
-// invisibleAt returns the offset of the first rune of data escapeInvisible
-// escapes, or -1.
-func invisibleAt(data []byte) int {
-	for offset := 0; offset < len(data); {
-		char, size := utf8.DecodeRune(data[offset:])
-		if needsEscape(char, size) {
-			return offset
-		}
-
-		offset += size
-	}
-
-	return -1
-}
-
-// needsEscape reports whether a decoded rune of size bytes is one
-// escapeInvisible escapes: DEL, which encoding/json leaves as it is while it
-// escapes the other ASCII controls, and a multi-byte rune, not a byte that
-// failed to decode, that does not print as itself. A terminal shows nothing
-// for DEL, so "/a\x7fb" would read as "/ab".
-func needsEscape(char rune, size int) bool {
-	return char == asciiDEL || size > 1 && !merge.PrintsAsItself(char)
+// needsEscape reports whether a decoded rune is one escapeInvisible
+// escapes: DEL, which encoding/json leaves as it is while it escapes the
+// other ASCII controls, and a rune past ASCII that does not print as
+// itself. A byte that failed to decode reads as utf8.RuneError, which
+// prints as itself, so it is kept. A terminal shows nothing for DEL, so
+// "/a\x7fb" would read as "/ab".
+func needsEscape(char rune) bool {
+	return char == asciiDEL || char >= utf8.RuneSelf && !merge.PrintsAsItself(char)
 }
 
 // asciiDEL is the one ASCII control encoding/json does not escape.

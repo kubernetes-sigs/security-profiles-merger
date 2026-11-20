@@ -249,7 +249,7 @@ func decodeError(input *profileInput, err error) error {
 
 		at := end - int64(size)
 		if syntaxErr.Offset >= int64(len(input.data)) && syntaxErr.Error() == unexpectedEnd {
-			at = int64(len(bytes.TrimRight(input.data, " \t\r\n")))
+			at = int64(len(bytes.TrimRight(input.data, strictjson.Space)))
 		}
 
 		return &documentError{text: input.position(at) + ": " + syntaxErr.Error()}

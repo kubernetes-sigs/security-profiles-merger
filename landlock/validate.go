@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/internal/strictjson"
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
@@ -730,19 +731,7 @@ func (o Options) DecodeArtifact(data []byte) (*Profile, error) {
 		return nil, err
 	}
 
-	var artifact Profile
-
-	err = UnmarshalStrict(data, &artifact)
-	if err != nil {
-		return nil, err
-	}
-
-	err = o.ValidateArtifact(&artifact)
-	if err != nil {
-		return nil, err
-	}
-
-	return &artifact, nil
+	return strictjson.DecodeValidated(data, UnmarshalStrict, o.ValidateArtifact)
 }
 
 // Downgrade returns a copy of the profile without the access rights the ABI

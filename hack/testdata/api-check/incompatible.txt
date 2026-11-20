@@ -1,0 +1,10 @@
+# sigs.k8s.io/security-profiles-merger/seccomp
+## incompatible changes
+IntersectForArch: removed
+## compatible changes
+ForArch: added
+
+# summary
+Inferred base version: v1.2.0
+Cannot suggest a release version.
+Incompatible changes were detected.

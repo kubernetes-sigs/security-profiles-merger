@@ -66,13 +66,26 @@ jobs:
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.15.0
-      # cmd/spm has files for hosts that are not Unix, which the run above
-      # never loads: a constant only the Unix file used went unnoticed there.
-      # Only the command is linted this way, since the libseccomp bridge the
-      # config pulls in does not build for Windows.
+      # cmd/spm has files for other hosts, which the run above never loads:
+      # a constant only the Unix file used went unnoticed on Windows, and
+      # blocking_darwin.go and nofollow_netbsd.go build nowhere else. Only
+      # the command is linted this way, since the libseccomp bridge the
+      # config pulls in does not build for these hosts.
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         env:
           GOOS: windows
+        with:
+          version: v2.15.0
+          args: ./cmd/...
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        env:
+          GOOS: darwin
+        with:
+          version: v2.15.0
+          args: ./cmd/...
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        env:
+          GOOS: netbsd
         with:
           version: v2.15.0
           args: ./cmd/...
@@ -164,8 +177,9 @@ jobs:
 
   # The rest of the architectures the seccomp merges read differently, and
   # the 32-bit arm, run under qemu user emulation. Emulation slows the suite
-  # several times over, so it runs with -short; the algorithms are bounded
-  # by test / release go and test / linux-386, which run natively.
+  # several times over, which still takes a few minutes; the wall-clock
+  # bounds of the algorithms are asserted by test / release go and
+  # test / linux-386, which run natively.
   test-emulated:
     name: test / linux-${{ matrix.goarch }} (qemu)
     # Pinned rather than ubuntu-latest: the job depends on the image's
@@ -193,23 +207,28 @@ jobs:
       - env:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
-        run: go test -short -count=1 -timeout=30m ./...
+        run: go test -count=1 -timeout=30m ./...
 
-  # The Linux architectures are compiled by test-arch and test-emulated, and
-  # vetted by verify / floor go. NetBSD compiles cmd/spm/nofollow_netbsd.go,
-  # which no other job builds. FreeBSD adds no file of its own; it keeps a
-  # BSD in the set the Unix files are checked on besides macOS, which a
-  # change aimed at NetBSD could break. Nothing is executed, so no emulation
-  # is needed.
-  vet-arch:
-    name: vet / ${{ matrix.goos }}-${{ matrix.goarch }}
+  # Merge results as the kernel and the runtimes load them: Landlock
+  # intersections against their inputs stacked as layers, and seccomp
+  # results through runc and crun, whose flags strace shows (make
+  # test-runtime). The runtimes are the static release binaries of the
+  # versions below, pinned by checksum and tracked in dependencies.yaml,
+  # rather than whatever the runner image or apt carries: the flags a
+  # runtime sets for a profile without "flags" changed between releases.
+  # They run rootless, which needs the unprivileged user namespaces the
+  # runner image restricts through AppArmor, so the job lifts that
+  # restriction. SPM_RUNTIMETEST_REQUIRE makes a missing or too old
+  # runtime, strace or Landlock fail the job rather than skip its tests.
+  test-runtime:
+    name: test / runtime
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        goos: [netbsd, freebsd]
-        goarch: [amd64]
+    timeout-minutes: 10
+    env:
+      RUNC_VERSION: 1.5.3
+      RUNC_SHA256: 50dcc0b257d724fe07f3852c2dda52340223f038227c7572644eec870741223e
+      CRUN_VERSION: "1.31"
+      CRUN_SHA256: 8cacae171bb0e5f9e275adac2eeb2c6ec8c69fdedff7b008eadd8cdd25b0d349
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -217,14 +236,32 @@ jobs:
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
-          cache: false
-      - env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-        run: |
+      # /usr/local/bin comes before the image's /usr/bin on PATH, and the
+      # step checks that the pinned versions are the ones the tests find.
+      - run: |
           set -euo pipefail
-          go build ./...
-          go vet ./...
+          sudo apt-get update
+          sudo apt-get install -y strace
+          curl -sSfL -o runc \
+            "https://github.com/opencontainers/runc/releases/download/v$RUNC_VERSION/runc.amd64"
+          curl -sSfL -o crun \
+            "https://github.com/containers/crun/releases/download/$CRUN_VERSION/crun-$CRUN_VERSION-linux-amd64"
+          printf '%s  runc\n%s  crun\n' "$RUNC_SHA256" "$CRUN_SHA256" | sha256sum --check --strict
+          sudo install -m 0755 runc crun /usr/local/bin/
+          rm runc crun
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          cat /sys/kernel/security/lsm; echo
+          command -v runc crun
+          # A runtime the image puts earlier on PATH must not stand in for
+          # the pinned one.
+          # sed reads all of the output, so no runtime dies of SIGPIPE.
+          test "$(runc --version | sed -n 1p)" = "runc version $RUNC_VERSION"
+          test "$(crun --version | sed -n 1p)" = "crun version $CRUN_VERSION"
+      - env:
+          SPM_RUNTIMETEST_REQUIRE: "1"
+        run: make test-runtime
 
   # The seccomp merge semantics are a claim about how runc and libseccomp load
   # a profile. This job checks that claim against libseccomp itself, which
@@ -287,14 +324,14 @@ jobs:
       # The 386 run builds libseccomp and the test binary for 32 bits on
       # the amd64 runner, which runs them natively. configure and cgo both
       # take the compiler from CC, so -m32 rides on it and configure keeps
-      # its default -g -O2.
+      # its default -g -O2. The next step installs gcc-multilib with the
+      # rest, so that the package lists are fetched once.
       - name: Set up a 32-bit build
         if: matrix.arch == '386'
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y gcc-multilib
           {
+            echo "APT_PACKAGES=gcc-multilib"
             echo "LIBSECCOMP_CONFIGURE=--host=i686-linux-gnu"
             echo "GOARCH=386"
             echo "CC=gcc -m32"
@@ -305,8 +342,9 @@ jobs:
           LIBSECCOMP_SHA256: ${{ matrix.sha256 }}
         run: |
           set -euo pipefail
+          read -ra packages <<<"${APT_PACKAGES:-}"
           sudo apt-get update
-          sudo apt-get install -y gperf
+          sudo apt-get install -y gperf "${packages[@]}"
           curl -sSfL -o libseccomp.tar.gz \
             "https://github.com/seccomp/libseccomp/releases/download/v$LIBSECCOMP_VERSION/libseccomp-$LIBSECCOMP_VERSION.tar.gz"
           # The model is only worth as much as the library it is checked
@@ -570,7 +608,9 @@ jobs:
   # whether it moved: the CLI golden files, and seccomp/syscalls.go from the
   # syscalls.csv of every libseccomp release the guard covers. It also runs
   # the whole of go vet for the Linux architectures the tests run on besides
-  # amd64, where go test runs only a few of its checks.
+  # amd64, where go test runs only a few of its checks, and for the BSDs the
+  # build tags of cmd/spm name, which nothing else builds (see vet-arch in
+  # the Makefile).
   verify-floor:
     name: verify / floor go
     runs-on: ubuntu-latest
@@ -591,16 +631,17 @@ jobs:
         run: make vet-arch
 
   # The module's API against the latest release, as gorelease reports it,
-  # with the version it suggests for the next one. It is a report, not a
-  # gate: a pull request that adds API is expected to show up here, and
-  # whether a change is allowed is for the review and RELEASE.md to decide.
-  # The base is the newest tag before HEAD, so that a tag run compares
-  # against the release before it rather than against itself.
+  # with the version it suggests for the next one. Below v1 it is a report:
+  # hack/api-check.sh exits 0 whatever gorelease says. From v1.0.0 on it is
+  # a gate: an incompatible change against a release of the major version
+  # go.mod's module path names fails, except the constant values RELEASE.md
+  # lets a minor release change. The base is the newest tag before HEAD, so
+  # that a tag run compares against the release before it rather than
+  # against itself.
   api:
     name: api / gorelease
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -610,6 +651,7 @@ jobs:
         with:
           go-version-file: .go-version
           cache-dependency-path: hack/tools/go.sum
+      - run: make test-api-check
       # The report is captured before it goes to the summary, so that the
       # code fence around it closes even when gorelease fails. It is kept
       # outside the checkout, which gorelease refuses to read with an

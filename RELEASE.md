@@ -7,7 +7,10 @@ as follows:
    consumer since the last one. The `release-note` blocks of the merged pull
    requests are the source: they say what a change rejects, returns
    differently or adds, which a commit title does not. The version follows
-   the [API stability](README.md#api-stability) policy.
+   the [API stability](README.md#api-stability) policy (see
+   [Compatibility checks](#compatibility-checks)). A release that breaks
+   callers adds what they have to change to the
+   [migration guide](docs/migration.md).
 1. All [OWNERS](OWNERS) must LGTM this release.
 1. An OWNER runs `git tag -s $VERSION`, where `$VERSION` is a `v`-prefixed
    version such as `v0.4.2` (the release workflow only runs for tags matching
@@ -50,3 +53,40 @@ Releases cover Linux on `amd64`, `arm64`, `ppc64le` and `s390x`, and macOS and
 Windows on `amd64` and `arm64`. Kubernetes ships `ppc64le` and `s390x` and
 `seccomp/arch.go` maps both, so the CLI is built for them; neither exists on
 macOS or Windows. Every binary gets its own SBOM.
+
+## Compatibility checks
+
+What the [API stability](README.md#api-stability) policy promises is
+checked in CI, each part where it can be:
+
+- **The Go API.** The `api / gorelease` job (`make api-report`) compares
+  the exported API with the newest release tag before `HEAD` and suggests
+  the next version. `hack/api-check.sh` decides from that tag and the
+  module path in `go.mod` what an incompatible change does: from v1.0.0 on,
+  an incompatible change against a release of the major version the module
+  path names fails the job, and with it the release gate. Below v1.0.0, on
+  the first branch of a new major version (whose base is a tag of the one
+  before) and against a tag that is no semantic version, the report is
+  advisory. gorelease reports a changed value of a constant as
+  incompatible, but the policy lets the `MaxArtifact*` limits and
+  `landlock.LatestABIVersion` change in a minor release, so the script lets
+  those lines through; they stay constants. It decides from the report
+  rather than from gorelease's exit status, which also fails for those
+  constants and for a base that is not the newest tag of its major
+  version, and it fails where gorelease reports errors or diagnostics,
+  which leave the comparison incomplete. `make test-api-check` checks
+  these decisions on the reports in `hack/testdata/api-check`.
+- **The JSON shapes**, which a Go API comparison cannot see: the profile
+  documents are pinned by `TestJSONGoldenDocument` (apparmor),
+  `TestGoldenProfileJSON` and the right tables of `landlock/golden_test.go`
+  (landlock), and `TestMarshalKeepsEmptyFlagList` (seccomp, whose profile
+  type is the runtime-spec's); the diff JSON of each package by the
+  `diff_*_json` goldens of `cmd/spm`.
+- **The command.** Its output, messages and exit codes are pinned by the
+  goldens of `cmd/spm/testdata` (see
+  [Golden files](CONTRIBUTING.md#golden-files)).
+
+A change to a golden file or a JSON fixture is a change to the contract,
+unless it only changes messages or human-readable output, which any
+release may change: the review decides whether it is an addition a minor
+release may make or a break that needs a major one.
