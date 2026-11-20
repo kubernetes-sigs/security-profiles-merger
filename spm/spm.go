@@ -120,7 +120,7 @@ var (
 	ErrBudgetExceeded = errors.New("merge budget exceeded")
 	// ErrInexactBaseline is returned by seccomp.ValidateBaseline and
 	// apparmor.ValidateBaseline for a baseline that Validate accepts but
-	// whose intersection with itself differs from it: the merge does not
+	// whose intersection alone differs from it: the merge does not
 	// read every rule of it, so every merge with that baseline takes those
 	// rules away, whatever the artifact says. The message names what the
 	// merge settles. A runtime treats it as a misconfigured node.

@@ -327,15 +327,48 @@ limitations under the License.
 // depends neither on the order of the two profiles nor on the order of the
 // paths within them.
 //
-// More than two profiles are folded from left to right, and with patterns
-// involved the result depends on that order: a pattern survives only where
-// the other side spells it alike or expands over it, so two patterns that
-// cover one literal without covering each other cancel out when they are
-// folded first, taking the literal with them. Intersect(a, b, c) may
-// therefore permit more or less than Intersect(a, Intersect(b, c)). Every
-// grouping is safe: whatever the order, the result permits only what every
-// input permits, and the difference is which of the permitted paths survive
-// as rules.
+// More than two profiles are folded from left to right. A pattern survives a
+// step only where the other side spells it alike or expands over it, so two
+// patterns that cover one literal without covering each other cancel out
+// when they are folded first, and take the literal with them. A step also
+// matches a literal only against the patterns of the other side, not against
+// those of the profile that lists it. An intersection of two or more
+// profiles therefore ends with a pass over the literal paths: the result
+// grants every literal path an input lists, in the list it is listed in, the
+// permissions every input grants it there, an input granting what it lists
+// for the path itself joined with what its patterns that match the path
+// grant. The pass adds to the literal only what the patterns the result
+// keeps do not grant it already. Intersecting "/data/*.txt",
+// "/data/report.*" and "/data/report.txt" keeps "/data/report.txt" in every
+// order, and intersecting {r: "/data/x.txt", w: "/data/*.txt"} with
+// {w: "/data/x.*"} keeps "/data/x.txt" write-only. A profile intersected
+// with itself gives what Intersect of it alone gives. Where an input's own
+// pattern grants a literal it lists more than the literal spells and the
+// result does not keep that pattern, the literal is listed with the more:
+// {r: "/data/x", rw: "/data/*"} intersected with {rw: "/data/{x,y}"} lists
+// "/data/x" read-write.
+//
+// Within the compile and pass budgets, what the result permits on every
+// literal path an input lists does not depend on the order of the inputs;
+// whether it permits that through the literal or through a pattern it
+// keeps, and which patterns it keeps, may. Every order is safe: the result
+// permits only what every input permits. Nesting the calls is not the
+// same: Intersect(a, Intersect(b, c)) loses a literal only a lists where
+// the patterns of b and c cancel out, as the inner call keeps neither
+// pattern and has no input that lists the literal.
+//
+// Both budgets can make what the result permits on the literal paths depend
+// on the order (see Cost bounds). The pass is bounded, and past its budget
+// the literal paths are those the fold kept. The compile budget is spent in
+// input order, so where the patterns of the inputs listed first fill it, a
+// pattern of a later input is left uncompiled and matches only its own
+// spelling: a literal it covers is then kept in some orders and not in
+// others, and some orders may fail with [ErrBudgetExceeded] instead.
+//
+// A union of profiles whose every path is a literal is taken in one pass
+// rather than folded, which returns what the fold returns at a cost linear
+// in the size of the inputs apart from sorting the result; a union holding
+// a pattern is folded.
 //
 // # Nil and empty sections
 //
@@ -394,7 +427,13 @@ limitations under the License.
 // The budgets apply to each list a merge matches: the executables, the
 // libraries, and the filesystem rules taken together. A merge of two
 // profiles therefore costs up to three times what one list at its budget
-// costs.
+// costs. The pass an intersection of two or more profiles ends with
+// matches every literal path an input lists against the patterns of every
+// input, and is charged to budgets of the same size, each list to its own,
+// for the lookups it makes as well as the comparisons, so an intersection
+// of two profiles costs up to six times what one list at its budget costs.
+// Past them the pass leaves the list as the fold returned it, which permits
+// no more than the inputs do, so the pass never makes Intersect fail.
 //
 // Before anything is matched, every pattern is compiled into a program,
 // which costs time and memory in proportion to the pattern's length. One
