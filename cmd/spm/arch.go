@@ -32,8 +32,9 @@ const (
 	// archNative implies the architecture this program runs on, which is
 	// what the commands have always done.
 	archNative = "native"
-	// archNone implies none, so that only the architectures a profile
-	// lists count: the zero seccomp.Options.
+	// archNone names no architecture, the zero seccomp.Options: a diff
+	// implies none on either side, and a merge and the artifact and strict
+	// checks take the node to be any architecture Go runs on.
 	archNone = "none"
 	// archPrefix is what a seccomp architecture name starts with.
 	archPrefix = "SCMP_ARCH_"

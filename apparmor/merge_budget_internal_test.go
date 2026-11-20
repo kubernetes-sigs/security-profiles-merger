@@ -409,3 +409,173 @@ func TestIntersectPastItsBudgetFailsForExecutables(t *testing.T) {
 		t.Errorf("budgetErr = %v, want ErrBudgetExceeded", strategy.budgetErr())
 	}
 }
+
+// TestPairBudgetCountsWhatTheIndexLetsThrough covers a baseline of
+// patterns rooted in a hundred directories against long literals spread
+// over them, which costs a few comparisons per literal and which the
+// product of the two sides' sizes puts past the work budget: counted that
+// way the intersection kept none of the literals, counted as matching goes
+// it keeps all of them.
+func TestPairBudgetCountsWhatTheIndexLetsThrough(t *testing.T) {
+	t.Parallel()
+
+	const (
+		dirs     = 100
+		literals = 890
+		nameLen  = 200
+	)
+
+	globs := make([]string, 0, dirs)
+	for dir := range dirs {
+		globs = append(globs, fmt.Sprintf("/usr/lib/d%d/**", dir))
+	}
+
+	names := make([]string, 0, literals)
+	for idx := range literals {
+		names = append(names,
+			fmt.Sprintf("/usr/lib/d%d/%s%d", idx%dirs, strings.Repeat("x", nameLen), idx))
+	}
+
+	matchers := newMatcherCache()
+	baseline := buildFsSide(readPerms(globs), matchers)
+	artifact := buildFsSide(readPerms(names), matchers)
+
+	if !exceedsPairBudget(baseline.size(), artifact.size()) {
+		t.Fatal("the shape stays inside the budget by its totals; it tests nothing")
+	}
+
+	// Each literal looks at the two prefix lengths the baseline files its
+	// patterns under and compares with the one pattern of its directory.
+	budget := newMatchBudget(&baseline, &artifact)
+	if !matchFsLiterals(artifact.literals, &baseline, map[string]fsPermission{}, budget) {
+		t.Error("patterns rooted in different directories exceed the budget")
+	}
+
+	if budget.pairs > 3*literals {
+		t.Errorf("matching charged %d comparisons, want at most %d", budget.pairs, 3*literals)
+	}
+
+	result, err := Intersect(budgetProfile(globs...), budgetProfile(names...))
+	if err != nil {
+		t.Fatalf("Intersect: %v", err)
+	}
+
+	if got := len(result.Filesystem.ReadOnlyPaths); got != literals {
+		t.Errorf("Intersect kept %d paths, want every one of the %d literals", got, literals)
+	}
+}
+
+// TestPairBudgetBoundsPatternsSharingAPrefix covers what the budget is for:
+// the counts of TestPairBudgetCountsWhatTheIndexLetsThrough under one
+// directory land in one bucket and cost the product, and matching them
+// stops just past the budget, which bounds input built against it.
+func TestPairBudgetBoundsPatternsSharingAPrefix(t *testing.T) {
+	t.Parallel()
+
+	const (
+		dirs     = 100
+		literals = 890
+		nameLen  = 200
+	)
+
+	matchers := newMatcherCache()
+
+	shared := make([]string, 0, literals)
+	for idx := range literals {
+		shared = append(shared, fmt.Sprintf("/usr/lib/d0/%s%d", strings.Repeat("x", nameLen), idx))
+	}
+
+	sharedGlobs := make([]string, 0, dirs)
+	for idx := range dirs {
+		sharedGlobs = append(sharedGlobs, fmt.Sprintf("/usr/lib/d0/*%d", idx))
+	}
+
+	sharedBaseline := buildFsSide(readPerms(sharedGlobs), matchers)
+	sharedArtifact := buildFsSide(readPerms(shared), matchers)
+
+	budget := newMatchBudget(&sharedBaseline, &sharedArtifact)
+	matched := map[string]fsPermission{}
+
+	if matchFsLiterals(sharedArtifact.literals, &sharedBaseline, matched, budget) {
+		t.Fatal("patterns sharing one prefix stay inside the budget")
+	}
+
+	// Matching stops at the charge that crosses a budget, which is one
+	// bucket at most.
+	bucketBytes := pathCount(sharedBaseline.globBytes)
+	if budget.pairs > maxMergePathPairs+dirs+1 ||
+		budget.work > maxMergePathWork+pathCount(len(shared[0]))*bucketBytes {
+		t.Errorf("matching charged %d comparisons and %d work past the budgets of %d and %d",
+			budget.pairs, budget.work, maxMergePathPairs, maxMergePathWork)
+	}
+
+	// Past the budget the intersection may lose access, which it reports.
+	_, err := Intersect(budgetProfile(sharedGlobs...), budgetProfile(shared...))
+	if !errors.Is(err, ErrBudgetExceeded) {
+		t.Errorf("Intersect past the budget = %v, want ErrBudgetExceeded", err)
+	}
+}
+
+// TestPairBudgetChargesEachStrategyItsOwnComparisons covers what each merge
+// is charged: a union compares only literals with the other side's
+// patterns, so patterns against patterns, which only an intersection
+// compares, cost a union nothing, however many there are.
+func TestPairBudgetChargesEachStrategyItsOwnComparisons(t *testing.T) {
+	t.Parallel()
+
+	const globs = 1100
+
+	left := make([]string, 0, 1+globs)
+	left = append(left, "/a/lib.so")
+
+	right := make([]string, 0, 1+globs)
+	right = append(right, "/a/**")
+
+	for idx := range globs {
+		left = append(left, fmt.Sprintf("/a/x%d*", idx))
+		right = append(right, fmt.Sprintf("/a/y%d*", idx))
+	}
+
+	matchers := newMatcherCache()
+	leftSide := buildFsSide(readPerms(left), matchers)
+	rightSide := buildFsSide(readPerms(right), matchers)
+
+	if !exceedsPairBudget(leftSide.size(), rightSide.size()) {
+		t.Fatal("the shape stays inside the budget by its totals; it tests nothing")
+	}
+
+	union := newMatchBudget(&leftSide, &rightSide)
+	merged := map[string]fsPermission{}
+
+	if !addUnionLiterals(leftSide.literals, readPerms(right), &rightSide, merged, union) ||
+		!addUnionLiterals(rightSide.literals, readPerms(left), &leftSide, merged, union) {
+		t.Fatal("the union exceeds the budget")
+	}
+
+	// The one literal looks at one prefix length and compares with every
+	// pattern of the right side filed under it.
+	if union.pairs > globs+2 {
+		t.Errorf("the union was charged %d comparisons, want at most %d", union.pairs, globs+2)
+	}
+
+	intersection := newMatchBudget(&leftSide, &rightSide)
+	if !matchFsGlobs(&leftSide, &rightSide, map[string]fsPermission{}, intersection) {
+		t.Fatal("the intersection of the patterns exceeds the budget")
+	}
+
+	if intersection.pairs < globs {
+		t.Errorf("comparing the patterns was charged %d comparisons, want at least %d",
+			intersection.pairs, globs)
+	}
+
+	// The union drops the literal the right side's "/a/**" covers, as the
+	// exact union does.
+	result, err := Union(budgetProfile(left...), budgetProfile(right...))
+	if err != nil {
+		t.Fatalf("Union: %v", err)
+	}
+
+	if slices.Contains(result.Filesystem.ReadOnlyPaths, "/a/lib.so") {
+		t.Errorf("Union kept /a/lib.so, which /a/** covers")
+	}
+}

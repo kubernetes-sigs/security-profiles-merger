@@ -359,15 +359,25 @@ func TestUnmarshalStrictRefusesWhatIsNotAnObject(t *testing.T) {
 	}
 }
 
-// TestUnmarshalStrictReportsDataBehindNull checks that null, which decodes
-// without error, is refused for what follows it, as an object would be.
-func TestUnmarshalStrictReportsDataBehindNull(t *testing.T) {
+// TestUnmarshalStrictReportsNullBeforeDataBehindIt checks that null, which
+// decodes without error, is refused as not an object before what follows it
+// is looked at, as every other value that is not an object is.
+func TestUnmarshalStrictReportsNullBeforeDataBehindIt(t *testing.T) {
 	t.Parallel()
+
+	for _, doc := range []string{"null x", "null {}", "null]", "[] x"} {
+		var profile landlock.Profile
+
+		err := landlock.UnmarshalStrict([]byte(doc), &profile)
+		if !errors.Is(err, spm.ErrNotAnObject) {
+			t.Errorf("UnmarshalStrict(%q) = %v, want ErrNotAnObject", doc, err)
+		}
+	}
 
 	var profile landlock.Profile
 
-	err := landlock.UnmarshalStrict([]byte("null x"), &profile)
+	err := landlock.UnmarshalStrict([]byte("{} x"), &profile)
 	if !errors.Is(err, spm.ErrUnexpectedData) {
-		t.Errorf("UnmarshalStrict(%q) = %v, want ErrUnexpectedData", "null x", err)
+		t.Errorf("UnmarshalStrict(%q) = %v, want ErrUnexpectedData", "{} x", err)
 	}
 }

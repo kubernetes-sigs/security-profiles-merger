@@ -102,8 +102,10 @@ var (
 	// ErrDuplicateKey is returned by UnmarshalStrict of every package when
 	// a member occurs more than once in one JSON object, compared the way
 	// encoding/json matches a member to a field, which ignores case.
-	// encoding/json keeps the last of them silently while other parsers
-	// keep the first, so such a profile means different things to different
+	// encoding/json decodes each occurrence into what the one before it
+	// filled, so a later scalar or array replaces the earlier one while a
+	// later object merges into it, and other parsers keep the first or the
+	// last occurrence, so such a profile means different things to different
 	// readers.
 	ErrDuplicateKey = errors.New("duplicate key")
 	// ErrUnknownField is returned by UnmarshalStrict of every package when
@@ -120,8 +122,10 @@ var (
 	ErrMisspelledField = errors.New("misspelled field")
 	// ErrMissingField is returned by UnmarshalStrict when the document
 	// leaves out, or sets to null, a member that has no value standing for
-	// its absence. encoding/json decodes the zero value then, which for the
-	// port of a Landlock network rule is a port of its own: 0, the one a
+	// its absence: the index or op of a seccomp argument condition,
+	// the path of a Landlock path rule, or the port of a Landlock network
+	// rule. encoding/json decodes the zero value then, which is a value of
+	// its own: a seccomp condition on argument 0, or port 0, the one a
 	// socket binds to for an ephemeral port.
 	ErrMissingField = errors.New("missing field")
 	// ErrInvalidUTF8 is returned by UnmarshalStrict of every package when

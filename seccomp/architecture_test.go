@@ -613,34 +613,117 @@ func TestOptionsRejectUnknownArchitecture(t *testing.T) {
 	}
 }
 
-// TestZeroOptionsImplyNoArchitecture checks that the zero Options, a node of
-// unknown architecture, imply no native architecture: a value above 32 bits
-// passes unless the profile lists a 32-bit architecture, and a merge
-// settles by the listed architectures alone.
-func TestZeroOptionsImplyNoArchitecture(t *testing.T) {
-	t.Parallel()
-
-	wideOnly := profileOf(specs.ActErrno,
+// wideOnly allows personality(0x100000001), which a 32-bit node reads as
+// personality(1).
+func wideOnly() *specs.LinuxSeccomp {
+	return profileOf(specs.ActErrno,
 		filtered("personality", specs.ActAllow, arg(0, specs.OpEqualTo, 1<<32|1)),
 	)
+}
 
-	var unknown seccomp.Options
+// TestZeroOptionsValidateForAnyArchitecture checks that the zero Options, a
+// node of unknown architecture, validate as for any architecture a Go
+// program runs on, 32-bit and multiplexing ones included, so that what they
+// accept loads as written on whichever node loads it.
+func TestZeroOptionsValidateForAnyArchitecture(t *testing.T) {
+	t.Parallel()
 
-	x86 := seccomp.Options{Arch: specs.ArchX86}
+	// On socketcall(2) both rules lose the condition on the family and
+	// match every socket(2) with different results, which libseccomp
+	// refuses where the architecture multiplexes, as x86 does.
+	multiplexed := profileOf(specs.ActErrno,
+		filtered("socket", specs.ActAllow, arg(0, specs.OpEqualTo, 2)),
+		filtered("socket", specs.ActKill, arg(0, specs.OpEqualTo, 10)),
+	)
 
 	for name, validate := range map[string]func(seccomp.Options, *specs.LinuxSeccomp) error{
 		"ValidateArtifact": seccomp.Options.ValidateArtifact,
 		"ValidateStrict":   seccomp.Options.ValidateStrict,
 	} {
-		err := validate(unknown, wideOnly)
-		if err != nil {
-			t.Errorf("%s(unknown) = %v, want nil: no architecture is 32-bit", name, err)
+		for _, opts := range []seccomp.Options{forNode(""), forNode(specs.ArchX86)} {
+			err := validate(opts, wideOnly())
+			if !errors.Is(err, seccomp.ErrValueTooWide) {
+				t.Errorf("%s(%q) = %v, want ErrValueTooWide", name, opts.Arch, err)
+			}
+
+			err = validate(opts, multiplexed)
+			if !errors.Is(err, seccomp.ErrConflictingEntries) {
+				t.Errorf("%s(%q) of multiplexed rules = %v, want ErrConflictingEntries",
+					name, opts.Arch, err)
+			}
 		}
 
-		err = validate(x86, wideOnly)
-		if !errors.Is(err, seccomp.ErrValueTooWide) {
-			t.Errorf("%s(x86) = %v, want ErrValueTooWide", name, err)
+		x8664 := forNode(specs.ArchX86_64)
+
+		err := validate(x8664, wideOnly())
+		if err != nil {
+			t.Errorf("%s(x86_64) = %v, want nil", name, err)
 		}
+
+		// ValidateStrict also reports socket named in two entries, so the
+		// profile passes on x86_64 only for ValidateArtifact.
+		err = validate(x8664, multiplexed)
+		if name == "ValidateArtifact" && err != nil {
+			t.Errorf("%s(x86_64) of multiplexed rules = %v, want nil", name, err)
+		}
+
+		if errors.Is(err, seccomp.ErrConflictingEntries) {
+			t.Errorf("%s(x86_64) of multiplexed rules = %v, want no ErrConflictingEntries",
+				name, err)
+		}
+	}
+
+	// NativeHost names no architecture a profile may list.
+	err := seccomp.Validate(on(profileOf(specs.ActErrno), seccomp.NativeHost))
+	if !errors.Is(err, seccomp.ErrUnknownArch) {
+		t.Errorf("Validate of a profile listing NativeHost = %v, want ErrUnknownArch", err)
+	}
+}
+
+// TestZeroOptionsMergeForAnyArchitecture checks that the zero Options merge
+// as for any architecture a Go program runs on, 32-bit and multiplexing ones
+// included, so that what they build is safe on whichever node loads it.
+func TestZeroOptionsMergeForAnyArchitecture(t *testing.T) {
+	t.Parallel()
+
+	// One allows read(0x100000005), which a 32-bit node reads as read(5),
+	// and the other denies read(5): kept, the allow would permit on such a
+	// node what the other denies.
+	allowWide := profileOf(specs.ActErrno,
+		filtered("read", specs.ActAllow, arg(0, specs.OpEqualTo, 1<<32|5)),
+	)
+	denyNarrow := profileOf(specs.ActAllow,
+		filtered("read", specs.ActErrno, arg(0, specs.OpEqualTo, 5)),
+	)
+
+	result, err := forNode("").Intersect(allowWide, denyNarrow)
+	if err != nil {
+		t.Fatalf("Options{}.Intersect: %v", err)
+	}
+
+	if slices.ContainsFunc(result.Syscalls, func(entry specs.LinuxSyscall) bool {
+		return entry.Action == specs.ActAllow
+	}) {
+		t.Errorf("Options{}.Intersect = %s, want no allow", seccomp.FormatProfile(result))
+	}
+
+	// socket(2) is multiplexed through socketcall(2) on x86, where the
+	// condition on its first argument is lost and an unconditional
+	// socketcall rule hides it, so a node of unknown architecture settles
+	// it as an x86 one does.
+	pairs := [][]*specs.LinuxSeccomp{
+		{wideOnly(), wideOnly()},
+		{
+			profileOf(specs.ActAllow, filtered("socket", specs.ActErrno)),
+			profileOf(specs.ActErrno,
+				filtered("socketcall", specs.ActAllow), filtered("socket", specs.ActAllow)),
+		},
+		{
+			profileOf(specs.ActErrno,
+				filtered("socket", specs.ActAllow, arg(0, specs.OpEqualTo, 2))),
+			profileOf(specs.ActAllow,
+				filtered("socket", specs.ActErrno, arg(0, specs.OpEqualTo, 3))),
+		},
 	}
 
 	for name, mergeFor := range map[string]func(
@@ -649,21 +732,34 @@ func TestZeroOptionsImplyNoArchitecture(t *testing.T) {
 		"Intersect": seccomp.Options.Intersect,
 		"Union":     seccomp.Options.Union,
 	} {
-		result, err := mergeFor(unknown, wideOnly, wideOnly)
-		if err != nil {
-			t.Fatalf("%s(unknown): %v", name, err)
-		}
-
-		if len(result.Syscalls) != 1 || len(result.Syscalls[0].Args) != 1 {
-			t.Errorf("%s(unknown) = %s, want the condition kept: no architecture is 32-bit",
-				name, seccomp.FormatProfile(result))
+		for _, inputs := range pairs {
+			requireSameMerge(t, name, mergeFor, forNode(""), forNode(specs.ArchX86), inputs)
 		}
 	}
+}
 
-	// NativeHost names no architecture a profile may list.
-	err := seccomp.Validate(on(profileOf(specs.ActErrno), seccomp.NativeHost))
-	if !errors.Is(err, seccomp.ErrUnknownArch) {
-		t.Errorf("Validate of a profile listing NativeHost = %v, want ErrUnknownArch", err)
+// requireSameMerge fails unless mergeFor gives the same result for the two
+// options.
+func requireSameMerge(
+	t *testing.T, name string,
+	mergeFor func(seccomp.Options, ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error),
+	opts, like seccomp.Options, inputs []*specs.LinuxSeccomp,
+) {
+	t.Helper()
+
+	got, err := mergeFor(opts, inputs...)
+	if err != nil {
+		t.Fatalf("%s(%q): %v", name, opts.Arch, err)
+	}
+
+	want, err := mergeFor(like, inputs...)
+	if err != nil {
+		t.Fatalf("%s(%q): %v", name, like.Arch, err)
+	}
+
+	if seccomp.FormatProfile(got) != seccomp.FormatProfile(want) {
+		t.Errorf("%s(%q) = %s, want %s as for %s", name, opts.Arch,
+			seccomp.FormatProfile(got), seccomp.FormatProfile(want), like.Arch)
 	}
 }
 

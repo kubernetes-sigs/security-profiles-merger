@@ -344,7 +344,14 @@ limitations under the License.
 // path counts. One comparison in turn costs up to the length of the pattern
 // times the length of the name, so the work summed over every pair is up to
 // the product of the bytes the two sides hold. Both merges bound the number
-// of pairs (the pair budget) and that work (the work budget). Past either
+// of pairs (the pair budget) and that work (the work budget), counting as
+// they match the comparisons the prefix index lets through, its lookups
+// included, and each merge only the comparisons it makes: a union compares
+// literals with patterns, not patterns with each other. Patterns rooted in
+// many directories, such as a baseline of "/usr/lib/<name>/**" patterns
+// against an artifact of long library paths, cost far less than the product
+// of the two sides, while patterns sharing one prefix cost all of it, and
+// matching stops once it is past a budget. Past either
 // budget the exact intersection is out of reach, and the paths both sides
 // spell alike, which is all an intersection could keep without matching,
 // may deny more than the inputs do, so [Intersect] fails with
@@ -360,9 +367,10 @@ limitations under the License.
 //
 // [MaxArtifactPaths] keeps two artifacts inside the pair budget, and keeps
 // an artifact whose paths are a few dozen bytes long inside the work budget
-// against a baseline of a few kilobytes of paths. Two artifacts of that size
-// intersected with each other, or a profile of long paths, may exceed the
-// work budget and fail.
+// against a baseline of a few kilobytes of paths, however they share their
+// prefixes. Two artifacts of that size intersected with each other, or a
+// profile of long paths, may exceed the work budget and fail where their
+// paths share their prefixes.
 //
 // The budgets apply to each list a merge matches: the executables, the
 // libraries, and the filesystem rules taken together. A merge of two

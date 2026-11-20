@@ -71,7 +71,11 @@ var (
 	// affected architecture is native and the syscall applies there too, or
 	// where the native architecture is not known and the affected one is the
 	// last listed (see the Architectures section of the package
-	// documentation).
+	// documentation). ValidateArtifact and ValidateStrict return it for a
+	// profile whose filter has that shape as written, so that a runtime
+	// loading the profile itself loses rules. The merges settle the shapes
+	// of the rules first, which can remove it, so they may accept such a
+	// profile.
 	ErrLostRules = errors.New("libseccomp would lose the rules of an architecture")
 )
 
@@ -102,7 +106,9 @@ type InputError = spm.InputError
 // first input: a later input naming another listener, or any listener where
 // the first names none, is refused with ErrConflictingListener. A result
 // that would notify without a listener is refused with
-// ErrNotifyWithoutListener (see Listener).
+// ErrNotifyWithoutListener, and one in which no entry notifies drops
+// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, which the kernel refuses there
+// (see Listener).
 // 32-bit and multiplexing architectures may be dropped from the list, as
 // may one whose rules libseccomp would lose to a syscall it lacks, and
 // the result depends on the native architecture of the running program, so
@@ -191,7 +197,7 @@ func foldProfiles(
 
 	err = rules.settleAbsentSyscalls(result)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("merge: %w", err)
 	}
 
 	err = resolveListener(result)
@@ -199,7 +205,9 @@ func foldProfiles(
 		return nil, err
 	}
 
-	result.Flags = flagsForListener(result.Flags, result.ListenerPath)
+	result.Flags = flagsForListener(
+		result.Flags, result.ListenerPath, notifiesAny(result.Syscalls),
+	)
 
 	result.Syscalls = regroupSyscalls(result.Syscalls)
 
@@ -233,7 +241,7 @@ func normalizeProfile(profile *specs.LinuxSeccomp, rules ruleMerger) *specs.Linu
 	}
 
 	rules.settleWithArchitectures(normalized, def, func(rules ruleMerger) []specs.LinuxSyscall {
-		return settledSyscalls(&rules, profile.Syscalls, def)
+		return settledSyscalls(rules, profile.Syscalls, def)
 	}, profile)
 
 	return normalized
@@ -278,7 +286,7 @@ func mergeTwo(
 
 	if coversAny(merged.Architectures, narrowArchitectures, rules.native) &&
 		(loadsWideValue(left) || loadsWideValue(right)) {
-		if rules.intersect && !narrowArchitectures[rules.native] {
+		if rules.intersect && !mayBeNative(narrowArchitectures, rules.native) {
 			merged.Architectures = withoutAny(merged.Architectures, narrowArchitectures)
 		} else {
 			rules.narrow = true
@@ -345,7 +353,7 @@ func (m ruleMerger) settleArchitectures(
 	}
 
 	settled, unsafe := m.settleMultiplexed(result.Syscalls, def, read)
-	if unsafe && m.intersect && !multiplexingArchitectures[m.native] {
+	if unsafe && m.intersect && !mayBeNative(multiplexingArchitectures, m.native) {
 		result.Architectures = withoutAny(result.Architectures, multiplexingArchitectures)
 
 		return
@@ -507,8 +515,7 @@ func resolveListener(profile *specs.LinuxSeccomp) error {
 		return nil
 	}
 
-	notifies := func(entry specs.LinuxSyscall) bool { return entry.Action == specs.ActNotify }
-	if !slices.ContainsFunc(profile.Syscalls, notifies) {
+	if !notifiesAny(profile.Syscalls) {
 		return nil
 	}
 

@@ -37,7 +37,8 @@ const jsonSpace = " \t\r\n"
 // (spm.ErrDuplicateKey), a member the target type has no field for
 // (spm.ErrUnknownField), a member that names a field only ignoring case
 // (spm.ErrMisspelledField), a required member left out or null
-// (spm.ErrMissingField), and anything but whitespace behind the document
+// (spm.ErrMissingField), required by its tag or by required, and anything
+// but whitespace behind the document
 // (spm.ErrUnexpectedData). A document that is not a JSON object is refused
 // too (spm.ErrNotAnObject): encoding/json decodes null into a struct as
 // nothing at all, which would make it an empty profile.
@@ -50,7 +51,7 @@ const jsonSpace = " \t\r\n"
 // fails one check is not one whose other findings can be trusted. target is
 // only written once every check has passed, so a caller that goes on after
 // an error does not hold what the document said.
-func Unmarshal[T any](data []byte, target *T) error {
+func Unmarshal[T any](data []byte, target *T, required *Required) error {
 	err := InvalidUTF8(data)
 	if err != nil {
 		return err
@@ -76,6 +77,14 @@ func Unmarshal[T any](data []byte, target *T) error {
 		return fmt.Errorf("decode profile: %w", merge.BoundedError(err))
 	}
 
+	// A value that decoded but is not an object, which only null does, is
+	// reported before what follows it, so that spm.ErrNotAnObject matches
+	// "null x" as it matches "[] x".
+	err = RequireObject(data)
+	if err != nil {
+		return fmt.Errorf("decode profile: %w", err)
+	}
+
 	// Decode stops at the end of the first value, so anything behind it
 	// would otherwise be ignored.
 	_, err = decoder.Token()
@@ -83,15 +92,10 @@ func Unmarshal[T any](data []byte, target *T) error {
 		return spm.ErrUnexpectedData
 	}
 
-	err = RequireObject(data)
-	if err != nil {
-		return fmt.Errorf("decode profile: %w", err)
-	}
-
 	// The findings come in the order of their kinds, and only the first is
 	// reported, so the walks behind the others never run for a document
 	// that is refused anyway. Invalid UTF-8 was ruled out before decoding.
-	for finding := range findings(data, &decoded, hint, false) {
+	for finding := range findings(data, &decoded, hint, required, false) {
 		return finding.Err
 	}
 
@@ -185,25 +189,35 @@ type Finding struct {
 // repeated members, unknown members, misspelled members, missing members
 // and invalid UTF-8. Unmarshal reports the first of them, except that it
 // rules out invalid UTF-8 before decoding. hint is what Decode returned for
-// the document. Each kind is only looked for once the caller asks for the
-// next finding, so a caller that stops at the first one does not pay for
-// the walks behind it.
-func Findings[T any](data []byte, decoded *T, hint Hint) iter.Seq[Finding] {
-	return findings(data, decoded, hint, true)
+// the document, and required marks fields as Unmarshal takes it. Each kind
+// is only looked for once the caller asks for the next finding, so a caller
+// that stops at the first one does not pay for the walks behind it, except
+// that repeated and missing members are found in one read of the document.
+func Findings[T any](
+	data []byte, decoded *T, hint Hint, required *Required,
+) iter.Seq[Finding] {
+	return findings(data, decoded, hint, required, true)
 }
 
 // findings is Findings, leaving out invalid UTF-8 unless withUTF8 is set,
 // for a caller that has checked it already and need not scan the document
 // a second time.
-func findings[T any](data []byte, decoded *T, hint Hint, withUTF8 bool) iter.Seq[Finding] {
+func findings[T any](
+	data []byte, decoded *T, hint Hint, required *Required, withUTF8 bool,
+) iter.Seq[Finding] {
 	last := findInvalidUTF8
 	if !withUTF8 {
 		last--
 	}
 
 	return func(yield func(Finding) bool) {
+		// The repeated members are looked for first, by reading the
+		// document's tokens, and the missing ones are found in the same
+		// read, which spares a second read of the whole document.
+		scan := scanDocument(data, missingTarget(decoded, required), required)
+
 		for kind := findDuplicate; kind <= last; kind++ {
-			err := find(kind, data, decoded, hint)
+			err := find[T](kind, data, hint, scan)
 			if err != nil && !yield(Finding{Kind: kind.sentinel(), Err: err}) {
 				return
 			}
@@ -242,7 +256,9 @@ func (kind findingKind) sentinel() error {
 
 // find looks for the findings of one kind in a document that decoded into
 // decoded, and returns them as one error, or nil when there are none.
-func find[T any](kind findingKind, data []byte, decoded *T, hint Hint) error {
+// scan holds the repeated and the missing members, which one read of the
+// document finds.
+func find[T any](kind findingKind, data []byte, hint Hint, scan *documentScan) error {
 	var (
 		paths   []string
 		omitted int
@@ -250,13 +266,13 @@ func find[T any](kind findingKind, data []byte, decoded *T, hint Hint) error {
 
 	switch kind {
 	case findDuplicate:
-		paths, omitted = DuplicateKeys(data)
+		paths, omitted = scan.duplicates.result()
 	case findUnknown:
 		paths, omitted = UnknownFieldsFound[T](data, hint)
 	case findMisspelled:
 		paths, omitted = MisspelledFieldsOf[T](data)
 	case findMissing:
-		paths, omitted = MissingFieldsOf(data, decoded)
+		paths, omitted = scan.missing.result()
 	case findInvalidUTF8:
 		return InvalidUTF8(data)
 	}

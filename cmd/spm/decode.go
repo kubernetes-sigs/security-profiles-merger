@@ -22,18 +22,24 @@ import (
 	"io"
 	"slices"
 
+	specs "github.com/opencontainers/runtime-spec/specs-go"
+
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/internal/seccompjson"
 	"sigs.k8s.io/security-profiles-merger/internal/strictjson"
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 // decodePolicy selects which ambiguities in a profile's JSON are errors
-// rather than warnings.
+// rather than warnings. A member repeated within one object is an error
+// under every policy: encoding/json merges the repeated member into the
+// earlier one, an object field by field, so that
+// {"network":{"allowRaw":true},"network":{"allowedProtocols":{"allowTcp":true}}}
+// decodes as a profile allowing both, which neither reading of the document
+// grants, and other parsers keep the first or the last member instead.
 type decodePolicy struct {
 	// rejectUnknown rejects members the profile type has no field for.
 	rejectUnknown bool
-	// rejectDuplicates rejects members repeated within one object.
-	rejectDuplicates bool
 	// rejectMisspelled rejects members that name a field only ignoring
 	// case.
 	rejectMisspelled bool
@@ -44,12 +50,11 @@ type decodePolicy struct {
 	rejectMissing bool
 }
 
-// lenientDecode returns the policy that warns about every ambiguity and
-// rejects none, repeated once per input.
+// lenientDecode returns the policy that warns about every ambiguity but a
+// repeated member, which every policy rejects, repeated once per input.
 func lenientDecode(inputs int) []decodePolicy {
 	return slices.Repeat([]decodePolicy{{
 		rejectUnknown:     false,
-		rejectDuplicates:  false,
 		rejectMisspelled:  false,
 		rejectInvalidUTF8: false,
 		rejectMissing:     false,
@@ -58,18 +63,26 @@ func lenientDecode(inputs int) []decodePolicy {
 
 // unmarshalAll decodes every raw profile under its own policy, given one per
 // input. A member the profile type has no field for, such as a misspelled
-// key, silently drops the rule it was meant to carry; a member repeated
-// within one object is read differently by different parsers, and so is one
-// whose name matches a field only ignoring case; and a byte that is not
+// key, silently drops the rule it was meant to carry; a member whose name
+// matches a field only ignoring case is read differently by different
+// parsers; and a byte that is not
 // valid UTF-8 is replaced with U+FFFD, which makes profiles that differ in
 // their bytes decode to the same rules; and a required member left out
 // decodes as a value of its own, such as port 0 for a Landlock network rule.
 // Each is an error when that input's policy rejects it and a warning on
-// stderr otherwise.
+// stderr otherwise. A member repeated within one object is always an error
+// (see decodePolicy).
 func unmarshalAll[T any](
 	inputs []profileInput, policies []decodePolicy, stderr io.Writer,
 ) ([]*T, error) {
 	profiles := make([]*T, len(inputs))
+
+	// The seccomp package's required members are passed for a seccomp
+	// profile only, as seccomp.UnmarshalStrict passes them.
+	var required *strictjson.Required
+	if _, seccompProfile := any(new(T)).(*specs.LinuxSeccomp); seccompProfile {
+		required = seccompjson.Required
+	}
 
 	for idx, input := range inputs {
 		policy := policies[idx]
@@ -87,7 +100,7 @@ func unmarshalAll[T any](
 			return nil, fmt.Errorf("parsing %s: %w", merge.SafeName(input.name), err)
 		}
 
-		for finding := range strictjson.Findings(input.data, profile, hint) {
+		for finding := range strictjson.Findings(input.data, profile, hint, required) {
 			if policy.rejects(finding.Kind) {
 				return nil, fmt.Errorf("parsing %s: %w", merge.SafeName(input.name), finding.Err)
 			}
@@ -106,7 +119,7 @@ func unmarshalAll[T any](
 func (policy decodePolicy) rejects(kind error) bool {
 	switch {
 	case errors.Is(kind, spm.ErrDuplicateKey):
-		return policy.rejectDuplicates
+		return true
 	case errors.Is(kind, spm.ErrUnknownField):
 		return policy.rejectUnknown
 	case errors.Is(kind, spm.ErrMisspelledField):

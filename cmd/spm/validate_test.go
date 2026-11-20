@@ -737,8 +737,44 @@ func TestValidateLandlockNetRuleNeedsPort(t *testing.T) {
 	}
 }
 
+// TestValidateSeccompArgNeedsItsMembers covers a seccomp condition without
+// its index, which decodes as a condition on argument 0: the command refuses
+// and warns about it as seccomp.UnmarshalStrict does. A condition without
+// its value, as the Security Profiles Operator writes a0 == 0, passes.
+func TestValidateSeccompArgNeedsItsMembers(t *testing.T) {
+	t.Parallel()
+
+	missing := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[`+
+		`{"names":["read"],"action":"SCMP_ACT_ALLOW","args":[{"value":5,"op":"SCMP_CMP_EQ"}]}]}`)
+
+	const member = `"syscalls[0].args[0].index"`
+
+	withoutValue := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[`+
+		`{"names":["read"],"action":"SCMP_ACT_ALLOW","args":[{"index":0,"op":"SCMP_CMP_EQ"}]}]}`)
+
+	code, _, stderr := runCapture(t,
+		[]string{cmdValidate, flagType, typeSeccomp, "--artifact", withoutValue}, nil)
+	if code != 0 || strings.Contains(stderr, "warning: ") {
+		t.Errorf("without a value: exit code = %d, stderr = %q, want 0 and no warning",
+			code, stderr)
+	}
+
+	code, _, stderr = runCapture(t,
+		[]string{cmdValidate, flagType, typeSeccomp, "--artifact", missing}, nil)
+	if code != 1 || !strings.Contains(stderr, "error: ") || !strings.Contains(stderr, member) {
+		t.Errorf("--artifact: exit code = %d, stderr = %q, want 1 and an error naming %s",
+			code, stderr, member)
+	}
+
+	code, _, stderr = runCapture(t, []string{cmdValidate, flagType, typeSeccomp, missing}, nil)
+	if code != 0 || !strings.Contains(stderr, "warning: ") || !strings.Contains(stderr, member) {
+		t.Errorf("default mode: exit code = %d, stderr = %q, want 0 and a warning naming %s",
+			code, stderr, member)
+	}
+}
+
 // TestValidateLandlockRepeatedPort covers a port repeated with a null, which
-// decodes as the port named first: the document is warned about for the
+// decodes as the port named first: the document is refused for the
 // repetition, and not for a port it did name.
 func TestValidateLandlockRepeatedPort(t *testing.T) {
 	t.Parallel()
@@ -747,9 +783,9 @@ func TestValidateLandlockRepeatedPort(t *testing.T) {
 		`{"handledAccessNet":["bind_tcp"],"netRules":[{"port":80,"port":null}]}`)
 
 	code, _, stderr := runCapture(t, []string{cmdValidate, flagType, typeLandlock, repeated}, nil)
-	if code != 0 || !strings.Contains(stderr, landlock.ErrDuplicateKey.Error()) ||
+	if code != 1 || !strings.Contains(stderr, landlock.ErrDuplicateKey.Error()) ||
 		strings.Contains(stderr, landlock.ErrMissingField.Error()) {
-		t.Errorf("exit code = %d, stderr = %q, want 0 and the duplicate alone", code, stderr)
+		t.Errorf("exit code = %d, stderr = %q, want 1 and the duplicate alone", code, stderr)
 	}
 }
 
@@ -767,7 +803,9 @@ func TestArchForMergeAndValidate(t *testing.T) {
 		want int
 	}{
 		{[]string{cmdValidate, "--artifact", flagArch, "SCMP_ARCH_X86_64", wide}, 0},
-		{[]string{cmdValidate, "--artifact", flagArch, archNone, wide}, 0},
+		// none takes the node to be any architecture, a 32-bit one
+		// included.
+		{[]string{cmdValidate, "--artifact", flagArch, archNone, wide}, 1},
 		{[]string{cmdValidate, "--artifact", flagArch, "SCMP_ARCH_X86", wide}, 1},
 		{[]string{cmdValidate, flagStrict, flagArch, "SCMP_ARCH_S390", wide}, 1},
 		// The default checks do not depend on the architecture, so naming

@@ -105,7 +105,10 @@ also rejects `SCMP_ACT_NOTIFY` and the listener settings. `artifact` refuses
 what `UnmarshalStrict` refuses, a member the profile type has no field for
 included. The check the flow runs once at config load, that the merge reads
 every rule of the baseline, is a merge of the baseline alone followed by a
-diff, which exits `0` when the two are equal:
+diff, which exits `0` when the two are equal. It applies to a seccomp or
+AppArmor baseline; a Landlock merge of one profile drops rights a rule on an
+ancestor already grants, so a Landlock baseline is checked with
+`spm validate` instead (see [the runtime flow](integration.md#the-runtime-flow)):
 
 ```sh
 spm merge --strategy intersect baseline.json > settled.json &&
@@ -126,11 +129,15 @@ spm merge --type seccomp --strategy intersect --validate default,artifact \
   --arch SCMP_ARCH_AARCH64 baseline.json artifact.json
 ```
 
-`--arch none` implies no architecture, so that only the listed ones count.
-The flag takes the values `diff --arch` takes and sets the `Arch` of the
-`seccomp.Options` the merge and the checks run with: `seccomp.NativeHost`
-for `native`, the empty `Arch` for `none`, and the name otherwise. It is a
-usage error for an AppArmor or Landlock merge.
+`--arch none` names no architecture, for a node whose architecture is not
+known. The merge and the `artifact` and `strict` checks then take the node to
+be any architecture Go runs on, 32-bit and multiplexing ones included, so the
+result is safe on every node but keeps fewer rules than one settled for a
+known 64-bit node, and a value above 32 bits fails the checks whatever the
+profile lists. The flag takes the values `diff --arch` takes and sets the
+`Arch` of the `seccomp.Options` the merge and the checks run with:
+`seccomp.NativeHost` for `native`, the empty `Arch` for `none`, and the name
+otherwise. It is a usage error for an AppArmor or Landlock merge.
 
 Profiles can also be read from stdin, as a single profile or a JSON array of
 profiles, and `-` reads stdin alongside file arguments:
@@ -195,10 +202,10 @@ library, and handle what `encoding/json` accepts silently as follows. The
 | Check | default | `--artifact` | `--strict` |
 |-------|---------|--------------|------------|
 | Library validator | `Validate` | `ValidateArtifact` | `ValidateStrict` |
-| Member repeated within one object | warn | reject | reject |
+| Member repeated within one object | reject | reject | reject |
 | Member spelled only in another case | warn | reject | reject |
 | Byte that is not valid UTF-8 | warn | reject | reject |
-| Landlock network rule without a `port` | warn | reject | reject |
+| Required member left out: a seccomp condition's `index` or `op`, a Landlock rule's `path` or `port` | warn | reject | reject |
 | Member the profile type has no field for | warn | reject | reject |
 | Data after the profile, or a document that is not an object | reject | reject | reject |
 
@@ -211,7 +218,9 @@ fails a runtime that decodes the artifact with the library.
 profiles, as `merge --arch` does. It matters to `--artifact` and `--strict`,
 which refuse an argument value above 32 bits where the node covers a 32-bit
 architecture: without it, the same profile passes `spm validate --artifact`
-on an x86-64 machine and fails on an x86 one. The default checks do not
+on an x86-64 machine and fails on an x86 one. With `--arch none` they take
+the node to be any architecture Go runs on and refuse such a value
+everywhere. The default checks do not
 depend on the architecture, so `--arch` without one of the two flags is a
 usage error rather than a flag that does nothing.
 
@@ -220,9 +229,13 @@ spm validate --type seccomp --artifact --arch SCMP_ARCH_X86 artifact.json
 ```
 
 [Strict decoding](api.md#strict-decoding) says why each member check of the
-table lets two readers of one profile read different rules. `spm diff` has
-no strictness flag, so it warns about all of these and still prints its
-verdict.
+table lets two readers of one profile read different rules; a repeated
+member is refused in every mode, since `encoding/json` merges a repeated
+object into the earlier one and can read a profile allowing more than
+either occurrence. A seccomp condition may leave out its `value` and
+`valueTwo`, as the Security Profiles Operator does for 0. `spm diff` has no
+strictness flag, so it warns about all of these but a repeated member and
+still prints its verdict.
 
 Every error and warning names the input it came from: a file by its path as
 written, stdin by `stdin`, and one element of a JSON array on stdin by
@@ -309,15 +322,19 @@ cat profiles.json | spm diff --type landlock
 ```
 
 Exits 0 if the profiles are equal, 1 if they differ, and 2 on any error,
-since `1` is taken. `--no-detect-note` suppresses the note about an
+since `1` is taken. The profiles are not validated, as the library's `Diff`
+validates nothing: two copies of an invalid profile print `"equal": true`
+and exit 0, so run [`spm validate`](#validate-profiles) on them first where
+that matters. `--no-detect-note` suppresses the note about an
 auto-detected profile type, and `--output` writes the diff to a file instead
 of stdout under the same rules as `merge --output`.
 
 A node covers its own seccomp architecture whether or not a profile lists it,
 so `spm diff` implies one on both sides. By default (`--arch native`) that is
 the architecture `spm` itself runs on, which means the same two profiles can
-compare equal on one machine and differ on another. `--arch none` gives a
-comparison that does not depend on where it runs, and `--arch
+compare equal on one machine and differ on another. `--arch none` implies no
+architecture and gives a comparison of the lists as written, which does not
+depend on where it runs, and `--arch
 SCMP_ARCH_X86_64`, or any other `SCMP_ARCH_*` name, one for the node the
 profiles are destined for:
 

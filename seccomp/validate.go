@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -147,7 +148,15 @@ var (
 	// ErrNotifyUnsupported is returned by Validate when SCMP_ACT_NOTIFY
 	// appears where runc refuses it outright: as the default action, or on
 	// the write syscall. libseccomp accepts both, so this is a runtime
-	// constraint rather than a kernel one.
+	// constraint rather than a kernel one. ValidateStrict also returns it,
+	// as a portability rule, for the listener flags some runtime cannot
+	// load: SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV in a profile in which no
+	// entry notifies, where runc passes the flag without creating the
+	// listener the kernel requires for it, and SECCOMP_FILTER_FLAG_TSYNC
+	// next to a listenerPath, where crun creates the listener and the
+	// kernel refuses the flag next to it. Validate and the merges accept
+	// both, and the merges drop either flag from a result where it cannot
+	// load.
 	ErrNotifyUnsupported = errors.New("SCMP_ACT_NOTIFY is not supported here")
 )
 
@@ -321,13 +330,52 @@ func validateNotifySupport(profile *specs.LinuxSeccomp) error {
 	return errs.Err()
 }
 
+// validateListenerFlags reports the flags a runtime may refuse next to the
+// listener settings, which ValidateStrict checks as a portability rule:
+// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV where no entry notifies, since runc
+// creates the listener only for a filter that notifies but passes the flag
+// regardless and the kernel refuses it without the listener, and
+// SECCOMP_FILTER_FLAG_TSYNC next to a listenerPath, since crun creates the
+// listener for a listenerPath and the kernel refuses TSYNC next to it. runc
+// loads the latter, so Validate, and with it the merges, accept both; the
+// merges drop either flag from a result where it cannot load (see
+// flagsForListener).
+func validateListenerFlags(profile *specs.LinuxSeccomp) error {
+	var errs merge.Collector
+
+	notifies := slices.ContainsFunc(profile.Syscalls, func(entry specs.LinuxSyscall) bool {
+		return entry.Action == specs.ActNotify
+	})
+
+	if !notifies && slices.Contains(profile.Flags, specs.LinuxSeccompFlagWaitKillableRecv) {
+		errs.Report(func() error {
+			return fmt.Errorf(
+				"flag %s: %w (no entry applies SCMP_ACT_NOTIFY)",
+				specs.LinuxSeccompFlagWaitKillableRecv, ErrNotifyUnsupported,
+			)
+		})
+	}
+
+	if profile.ListenerPath != "" && slices.Contains(profile.Flags, flagTsync) {
+		errs.Report(func() error {
+			return fmt.Errorf("flag %s: %w (with a listenerPath)", flagTsync, ErrNotifyUnsupported)
+		})
+	}
+
+	return errs.Err()
+}
+
 // ValidateStrict is the strictest of the three: it rejects everything
 // ValidateArtifact rejects and, on top of that, duplicate syscall names,
 // reported once per name that several entries use and once per entry that
 // repeats a name within itself (ErrDuplicateSyscallName), and valueTwo set
-// on an operator that ignores it (ErrUnusedValueTwo). A profile that passes
-// here therefore passes ValidateArtifact and Validate, the same lattice the
-// apparmor and landlock packages use.
+// on an operator that ignores it (ErrUnusedValueTwo). As a portability
+// rule it also names the listener flags some runtime refuses
+// (ErrNotifyUnsupported): SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV in a
+// profile in which no entry notifies, and SECCOMP_FILTER_FLAG_TSYNC next to
+// a listenerPath, which crun refuses although runc loads it. A profile that
+// passes here therefore passes ValidateArtifact and Validate, the same
+// lattice the apparmor and landlock packages use.
 //
 // The OCI runtime-spec allows the same syscall to appear in several entries
 // (for example with different argument filters), and Validate permits it.
@@ -350,7 +398,8 @@ func ValidateStrict(profile *specs.LinuxSeccomp) error {
 // a node with the given native architecture: those of ValidateArtifact and
 // its own.
 func strictChecks(native specs.Arch) []profileCheck {
-	return append(artifactChecks(native), validateDuplicateNames, validateUnusedValueTwo)
+	return append(artifactChecks(native),
+		validateDuplicateNames, validateUnusedValueTwo, validateListenerFlags)
 }
 
 // ValidateArtifact checks an artifact, a profile from an untrusted source
@@ -381,10 +430,14 @@ func strictChecks(native specs.Arch) []profileCheck {
 //     ErrTooManyRulesPerSyscall);
 //   - rules of one syscall with different results where the filter of one
 //     is equal to or wider than the other's, or where the conditional rules
-//     do not form a safe shape (ErrConflictingEntries).
+//     do not form a safe shape (ErrConflictingEntries);
+//   - a filter in which libseccomp loses the rules of a covered
+//     architecture (ErrLostRules) when a runtime loads the profile as
+//     written. The merges settle the shapes of the rules first, which can
+//     remove that, so Intersect and Union may accept such a profile.
 //
-// The per-syscall rule count and the conflict checks run only when Validate
-// passes.
+// The per-syscall rule count, the conflict checks and the lost-rules check
+// run only when Validate passes.
 //
 // It allows duplicate syscall names, which the OCI runtime-spec permits and
 // the merges handle, and ignores valueTwo where runtimes ignore it. Failures
@@ -577,40 +630,203 @@ func validateDuplicateNames(profile *specs.LinuxSeccomp) error {
 	return validateDuplicateSyscallNames(profile.Syscalls)
 }
 
-// resultSet summarizes the results of the rules recorded under one key.
-type resultSet struct {
-	first clause
-	mixed bool
-}
-
-// conflicts reports whether a recorded rule yields a different result than
-// next. A nil set records nothing.
-func (r *resultSet) conflicts(next clause) bool {
-	return r != nil && (r.mixed || !r.first.sameResult(next))
-}
-
-func recordResult(sets map[string]*resultSet, key string, next clause) {
-	current, ok := sets[key]
-	if !ok {
-		sets[key] = &resultSet{first: next, mixed: false}
-
-		return
-	}
-
-	current.mixed = current.mixed || !current.first.sameResult(next)
-}
-
 // conflictTracker remembers the rules seen for one syscall name, keyed by
 // their filter and by every filter strictly wider than theirs.
+//
+// A rule has up to 63 such filters, so the maps hold far more keys than
+// there are rules, and a key is kept small: each condition is numbered once
+// per syscall (see filterKey), and each result once (see resultSet), so a
+// map slot takes 16 bytes rather than a string per filter.
 type conflictTracker struct {
-	exact    map[string]*resultSet
-	narrower map[string]*resultSet
+	conditions map[condition]uint16
+	results    []clause
+	exact      map[filterKey]resultSet
+	narrower   map[filterKey]resultSet
+}
+
+// condition is one condition of a filter without its argument index, which
+// its position in a filterKey names.
+type condition struct {
+	value    uint64
+	valueTwo uint64
+	op       uint8
+}
+
+// argSlots is how many argument indices a condition can test.
+const argSlots = maxSyscallArgIndex + 1
+
+// filterKey is a rule's filter as a map key: the number of the condition on
+// each argument index, or zero where the index carries none. A rule of a
+// profile that passes Validate has at most one condition per index, so
+// every filter of one has a key, and the key of a subset of its conditions
+// is its own with the other indices cleared, which costs neither an
+// allocation nor a sort. Two filters of one syscall have the same key
+// exactly when sortedArgsKey spells them alike.
+type filterKey [argSlots]uint16
+
+// subset returns the key of the conditions on the indices in mask.
+func (k filterKey) subset(mask uint8) filterKey {
+	for idx := range argSlots {
+		if mask&(1<<idx) == 0 {
+			k[idx] = 0
+		}
+	}
+
+	return k
+}
+
+// mask returns the indices the key carries a condition on.
+func (k filterKey) mask() uint8 {
+	var mask uint8
+
+	for idx := range argSlots {
+		if k[idx] != 0 {
+			mask |= 1 << idx
+		}
+	}
+
+	return mask
+}
+
+// resultSet summarizes the results of the rules recorded under one key: the
+// number of the result of the first (see conflictTracker.resultOf), and
+// whether a later one differs.
+type resultSet struct {
+	result uint16
+	mixed  bool
 }
 
 func newConflictTracker() *conflictTracker {
 	return &conflictTracker{
-		exact:    make(map[string]*resultSet),
-		narrower: make(map[string]*resultSet),
+		conditions: make(map[condition]uint16),
+		results:    nil,
+		exact:      make(map[filterKey]resultSet),
+		narrower:   make(map[filterKey]resultSet),
+	}
+}
+
+// keyOf returns the key of a rule's filter, numbering its conditions, or
+// false where the rule has a condition on an index past maxSyscallArgIndex,
+// two on one index or an unknown operator, which no rule of a profile
+// passing Validate has, or where the syscall has more distinct conditions
+// than a key can number, which MaxArtifactRulesPerSyscall rules of six
+// conditions each do not come near.
+func (t *conflictTracker) keyOf(args []specs.LinuxSeccompArg) (filterKey, bool) {
+	var key filterKey
+
+	for _, arg := range args {
+		op := operatorCode(arg.Op)
+		if arg.Index > maxSyscallArgIndex || key[arg.Index] != 0 || op == opUnknown {
+			return key, false
+		}
+
+		cond := condition{value: arg.Value, valueTwo: arg.ValueTwo, op: op}
+
+		number, ok := t.conditions[cond]
+		if !ok {
+			if len(t.conditions) >= math.MaxUint16 {
+				return key, false
+			}
+
+			//nolint:gosec // bounded by math.MaxUint16 just above
+			number = uint16(len(t.conditions) + 1)
+			t.conditions[cond] = number
+		}
+
+		key[arg.Index] = number
+	}
+
+	return key, true
+}
+
+// resultOf returns the number of the result a rule yields, the same for
+// every rule with the same result (see clause.sameResult). A syscall has no
+// more distinct results than rules, which MaxArtifactRulesPerSyscall
+// bounds, so the scan is short and the number fits.
+func (t *conflictTracker) resultOf(next clause) uint16 {
+	var number uint16
+
+	for ; int(number) < len(t.results); number++ {
+		if t.results[number].sameResult(next) {
+			return number
+		}
+	}
+
+	t.results = append(t.results, clause{action: next.action, errnoRet: next.errnoRet, args: nil})
+
+	return number
+}
+
+// conflictsIn reports whether a rule recorded under key yields a result
+// other than the numbered one.
+func conflictsIn(sets map[filterKey]resultSet, key filterKey, result uint16) bool {
+	current, ok := sets[key]
+
+	return ok && (current.mixed || current.result != result)
+}
+
+func recordResult(sets map[filterKey]resultSet, key filterKey, result uint16) {
+	current, ok := sets[key]
+	if !ok {
+		sets[key] = resultSet{result: result, mixed: false}
+
+		return
+	}
+
+	if !current.mixed && current.result != result {
+		sets[key] = resultSet{result: current.result, mixed: true}
+	}
+}
+
+// forEachProperSubmask calls visit with every proper subset of mask, the
+// empty one included.
+func forEachProperSubmask(mask uint8, visit func(submask uint8)) {
+	if mask == 0 {
+		return
+	}
+
+	for sub := mask; ; {
+		sub = (sub - 1) & mask
+		visit(sub)
+
+		if sub == 0 {
+			return
+		}
+	}
+}
+
+// The numbers operatorCode gives the operators, zero for an unknown one.
+const (
+	opUnknown uint8 = iota
+	opNotEqual
+	opLessThan
+	opLessEqual
+	opEqualTo
+	opGreaterEqual
+	opGreaterThan
+	opMaskedEqual
+)
+
+// operatorCode numbers the known operators from one, and returns zero for
+// any other.
+func operatorCode(op specs.LinuxSeccompOperator) uint8 {
+	switch op {
+	case specs.OpNotEqual:
+		return opNotEqual
+	case specs.OpLessThan:
+		return opLessThan
+	case specs.OpLessEqual:
+		return opLessEqual
+	case specs.OpEqualTo:
+		return opEqualTo
+	case specs.OpGreaterEqual:
+		return opGreaterEqual
+	case specs.OpGreaterThan:
+		return opGreaterThan
+	case specs.OpMaskedEqual:
+		return opMaskedEqual
+	default:
+		return opUnknown
 	}
 }
 
@@ -620,45 +836,26 @@ func newConflictTracker() *conflictTracker {
 // of the other's. A rule of a profile that passes Validate has at most one
 // condition per argument index, so it has at most 63 such subsets.
 func (t *conflictTracker) record(next clause) bool {
-	key := sortedArgsKey(next.args)
-	conflict := t.exact[key].conflicts(next) || t.narrower[key].conflicts(next)
+	key, ok := t.keyOf(next.args)
+	if !ok {
+		// Unreachable for a profile that passes Validate, which is the only
+		// one the conflict checks run on.
+		return false
+	}
 
-	forEachProperSubset(next.args, func(subset []specs.LinuxSeccompArg) {
-		subsetKey := sortedArgsKey(subset)
-		conflict = conflict || t.exact[subsetKey].conflicts(next)
+	result := t.resultOf(next)
+	conflict := conflictsIn(t.exact, key, result) || conflictsIn(t.narrower, key, result)
 
-		recordResult(t.narrower, subsetKey, next)
+	forEachProperSubmask(key.mask(), func(submask uint8) {
+		subsetKey := key.subset(submask)
+		conflict = conflict || conflictsIn(t.exact, subsetKey, result)
+
+		recordResult(t.narrower, subsetKey, result)
 	})
 
-	recordResult(t.exact, key, next)
+	recordResult(t.exact, key, result)
 
 	return conflict
-}
-
-// forEachProperSubset calls visit with every proper subset of args, keeping
-// their order. The slice passed to visit is reused between calls.
-func forEachProperSubset(
-	args []specs.LinuxSeccompArg, visit func(subset []specs.LinuxSeccompArg),
-) {
-	count := len(args)
-	if count > maxSyscallArgIndex+1 {
-		// Unreachable for a profile that passes Validate.
-		return
-	}
-
-	subset := make([]specs.LinuxSeccompArg, 0, count)
-
-	for mask := range (1 << count) - 1 {
-		subset = subset[:0]
-
-		for idx := range count {
-			if mask&(1<<idx) != 0 {
-				subset = append(subset, args[idx])
-			}
-		}
-
-		visit(subset)
-	}
 }
 
 // truncatedClause returns the rule libseccomp adds for a 32-bit
@@ -684,8 +881,14 @@ func truncatedClause(current clause) clause {
 // syscallRuleState is what validateSyscallRules tracks for one syscall.
 type syscallRuleState struct {
 	// trackers find conflicts among the rules as written and as libseccomp
-	// adds them for a 32-bit architecture.
+	// adds them for a 32-bit architecture. They are dropped once the last
+	// rule of the syscall is recorded, or once it is reported, so that
+	// their maps, which hold up to 63 subsets per rule, are held for one
+	// syscall at a time where the entries of a profile come syscall by
+	// syscall, rather than for the whole profile.
 	trackers [2]*conflictTracker
+	// recorded counts the rules recorded so far.
+	recorded uint64
 	// conditional holds the conditional rules.
 	conditional []clause
 	// first is the first rule, and mixedAt the index of the first entry
@@ -699,8 +902,47 @@ type syscallRuleState struct {
 // rules are checked.
 func syscallRuleCheck(native specs.Arch) profileCheck {
 	return func(profile *specs.LinuxSeccomp) error {
-		return validateSyscallRules(profile, native)
+		return merge.JoinLimited(
+			validateSyscallRules(profile, native), validateLostRules(profile, native),
+		)
 	}
+}
+
+// validateLostRules reports a profile whose filter, loaded as written,
+// holds rules libseccomp loses on a covered architecture (see
+// ErrLostRules), which a runtime loading the profile itself would lose.
+// The merges settle the shapes of the rules first, collapsing rules outside
+// the safe shapes, which can remove the shape, so they may accept a profile
+// this refuses. It runs the check the merges run on their result
+// on the rules the profile loads, read as a runtime adds them (see
+// collectRules): an entry equal to the default adds none, and one that
+// repeats an argument index adds a rule per condition, each of which
+// libseccomp costs on its own. It costs a pass over those rules per covered
+// architecture. A rule that applies to no call of the filter is dropped
+// first, as the merges drop it, since it decides nothing.
+//
+// A merge can still produce the shape from inputs that pass, since it
+// drops rules equal to the default and collapses others to unconditional
+// ones; that is what the merges check their result for.
+func validateLostRules(profile *specs.LinuxSeccomp, native specs.Arch) error {
+	def := defaultClause(profile)
+
+	loaded := &specs.LinuxSeccomp{
+		DefaultAction:    profile.DefaultAction,
+		DefaultErrnoRet:  nil,
+		Architectures:    merge.DeduplicateSlice(profile.Architectures),
+		Flags:            nil,
+		ListenerPath:     "",
+		ListenerMetadata: "",
+		Syscalls:         syscallsOfRules(collectRules(profile.Syscalls, def), def),
+	}
+
+	err := unionRulesFor(native).settleAbsentSyscalls(loaded)
+	if err != nil {
+		return fmt.Errorf("syscall entries: %w", err)
+	}
+
+	return nil
 }
 
 // validateSyscallRules checks the rules each syscall loads: their count
@@ -850,11 +1092,17 @@ func (c *ruleChecker) record(idx int, name string, next clause) {
 	state, ok := c.states[name]
 	if !ok {
 		state = &syscallRuleState{
-			trackers:    [2]*conflictTracker{newConflictTracker(), newConflictTracker()},
+			trackers:    [2]*conflictTracker{newConflictTracker(), nil},
+			recorded:    0,
 			conditional: nil,
 			first:       next,
 			mixedAt:     -1,
 		}
+
+		if c.truncate {
+			state.trackers[1] = newConflictTracker()
+		}
+
 		c.states[name] = state
 	}
 
@@ -866,14 +1114,35 @@ func (c *ruleChecker) record(idx int, name string, next clause) {
 		state.conditional = append(state.conditional, next)
 	}
 
-	conflict := state.trackers[0].record(next)
-	if c.truncate {
-		conflict = state.trackers[1].record(truncatedClause(next)) || conflict
-	}
-
+	conflict := state.track(next, c.counts[name])
 	if conflict {
 		c.conflict(idx, name)
 	}
+}
+
+// track records next in the trackers of the syscall, which loads total
+// rules, and reports whether it conflicts with a rule before it. No further
+// rule of the syscall is recorded after its last one, nor after it is
+// reported, which skip stops, so the trackers are dropped then.
+func (s *syscallRuleState) track(next clause, total uint64) bool {
+	if s.trackers[0] == nil {
+		// Unreachable: clauseCounts counts the rules forEachClause visits,
+		// so none comes after the last.
+		return false
+	}
+
+	s.recorded++
+
+	conflict := s.trackers[0].record(next)
+	if s.trackers[1] != nil {
+		conflict = s.trackers[1].record(truncatedClause(next)) || conflict
+	}
+
+	if conflict || s.recorded >= total {
+		s.trackers = [2]*conflictTracker{nil, nil}
+	}
+
+	return conflict
 }
 
 // checkShapes reports syscalls whose rules yield different results without

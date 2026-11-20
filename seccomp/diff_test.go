@@ -1640,3 +1640,238 @@ func TestDiffComparesSummarizedSyscallsByRules(t *testing.T) {
 		t.Fatalf("Diff of the same rules = %s, want equal", seccomp.FormatDiff(diff))
 	}
 }
+
+// TestDiffComparesAddOrderOfSiblings covers rules libseccomp keeps in the
+// order they were added: conditions on one argument against one value with
+// a different operator of one class or a different mask. The same rules
+// added in the other order decide a call differently, as seccomp_export_pfc
+// of libseccomp 2.6.1 shows, so the two profiles are not equal.
+func TestDiffComparesAddOrderOfSiblings(t *testing.T) {
+	t.Parallel()
+
+	const wideMask = 1<<32 | 2
+
+	for name, entries := range map[string][]specs.LinuxSyscall{
+		// read(1, 0) is LOG one way and KILL the other.
+		"wide masks": {
+			filtered("read", specs.ActLog,
+				arg(1, specs.OpNotEqual, wideMask), masked(0, wideMask, 0)),
+			filtered("read", specs.ActKill, masked(0, 1, 1)),
+		},
+		// read(0x11) is LOG one way and KILL the other.
+		"masked next to an equality": {
+			filtered("read", specs.ActLog, masked(0, 0xF0, 0x10)),
+			filtered("read", specs.ActKill, arg(0, specs.OpEqualTo, 0x11)),
+		},
+		// read(3) is KILL one way and LOG the other.
+		"less than next to less or equal": {
+			filtered("read", specs.ActKill, arg(0, specs.OpLessThan, 5)),
+			filtered("read", specs.ActLog, arg(0, specs.OpLessEqual, 5)),
+		},
+		// read(6) and read(1<<32) are KILL one way and LOG the other.
+		"greater than next to greater or equal": {
+			filtered("read", specs.ActKill, arg(0, specs.OpGreaterThan, 5)),
+			filtered("read", specs.ActLog, arg(0, specs.OpGreaterEqual, 5)),
+		},
+	} {
+		reversed := slices.Clone(entries)
+		slices.Reverse(reversed)
+
+		diff, err := seccomp.Diff(profileOf(specs.ActErrno, entries...),
+			profileOf(specs.ActErrno, reversed...))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+
+		if diff.Equal {
+			t.Errorf("%s: Diff of the entries reordered is equal, want a change", name)
+		}
+
+		if diffLists(t, entries, reversed) == nil {
+			t.Errorf("%s: diff of the lists reordered = nil, want a change", name)
+		}
+
+		// The same order is equal.
+		diff, err = seccomp.Diff(profileOf(specs.ActErrno, entries...),
+			profileOf(specs.ActErrno, slices.Clone(entries)...))
+		if err != nil || !diff.Equal {
+			t.Errorf("%s: Diff of the same entries = %v, %v, want equal", name, diff, err)
+		}
+	}
+
+	// libseccomp compiles these alike in either order: one class against
+	// different values, different classes, and an inequality, which it
+	// compiles as an equality, against another value.
+	for name, entries := range map[string][]specs.LinuxSyscall{
+		"one class, different values": {
+			filtered("read", specs.ActKill, arg(0, specs.OpLessThan, 5)),
+			filtered("read", specs.ActLog, arg(0, specs.OpLessEqual, 7)),
+		},
+		"different classes": {
+			filtered("read", specs.ActKill, arg(0, specs.OpLessThan, 5)),
+			filtered("read", specs.ActLog, arg(0, specs.OpGreaterEqual, 3)),
+		},
+		"below and above one value": {
+			filtered("read", specs.ActKill, arg(0, specs.OpLessThan, 5)),
+			filtered("read", specs.ActLog, arg(0, specs.OpGreaterThan, 5)),
+		},
+		"equality next to an inequality": {
+			filtered("read", specs.ActKill, arg(0, specs.OpEqualTo, 3)),
+			filtered("read", specs.ActLog, arg(0, specs.OpNotEqual, 5), arg(1, specs.OpEqualTo, 1)),
+		},
+	} {
+		reversed := slices.Clone(entries)
+		slices.Reverse(reversed)
+
+		diff, err := seccomp.Diff(profileOf(specs.ActErrno, entries...),
+			profileOf(specs.ActErrno, reversed...))
+		if err != nil || !diff.Equal {
+			t.Errorf("%s: Diff of the entries reordered = %s, %v, want equal",
+				name, seccomp.FormatDiff(diff), err)
+		}
+	}
+}
+
+// TestDiffReportsWideDefaultErrnoAsWritten covers a default errno wider
+// than the 16 bits a runtime loads. Diff compares it as loaded, but
+// reports the value the profile spells rather than its lower bits, which
+// for 99999 would be 34463, a number the profile never names.
+func TestDiffReportsWideDefaultErrnoAsWritten(t *testing.T) {
+	t.Parallel()
+
+	wide, other, aliased := uint(99999), uint(2), uint(99999&0xffff)
+
+	diff, err := seccomp.Diff(
+		&specs.LinuxSeccomp{DefaultAction: specs.ActErrno, DefaultErrnoRet: &wide},
+		&specs.LinuxSeccomp{DefaultAction: specs.ActErrno, DefaultErrnoRet: &other},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if diff.DefaultErrnoRet == nil || diff.DefaultErrnoRet.Left == nil ||
+		*diff.DefaultErrnoRet.Left != wide {
+		t.Fatalf("Diff = %s, want the left errno reported as %d", seccomp.FormatDiff(diff), wide)
+	}
+
+	if !strings.Contains(seccomp.FormatDiff(diff), "99999") {
+		t.Errorf("FormatDiff = %s, want it to name 99999", seccomp.FormatDiff(diff))
+	}
+
+	// A runtime loads the two alike, so they compare equal.
+	diff, err = seccomp.Diff(
+		&specs.LinuxSeccomp{DefaultAction: specs.ActErrno, DefaultErrnoRet: &wide},
+		&specs.LinuxSeccomp{DefaultAction: specs.ActErrno, DefaultErrnoRet: &aliased},
+	)
+	if err != nil || !diff.Equal {
+		t.Errorf("Diff(99999, %d) = %s, %v, want equal", aliased, seccomp.FormatDiff(diff), err)
+	}
+}
+
+// TestDiffComparesAddOrderWithinSiblingGroups covers a syscall whose order
+// matters for one pair of rules only: moving an unrelated rule between them
+// leaves the pair in its order, which libseccomp builds the same, so the
+// profiles are equal. Where the pair itself is reordered, the diff lists
+// each side's rules in the order a runtime adds them, which is all that
+// tells the two sides apart.
+func TestDiffComparesAddOrderWithinSiblingGroups(t *testing.T) {
+	t.Parallel()
+
+	below := filtered("read", specs.ActKill, arg(0, specs.OpLessThan, 5))
+	atMost := filtered("read", specs.ActLog, arg(0, specs.OpLessEqual, 5))
+	other := filtered("read", specs.ActAllow, arg(1, specs.OpEqualTo, 7))
+
+	diff, err := seccomp.Diff(profileOf(specs.ActErrno, below, atMost, other),
+		profileOf(specs.ActErrno, below, other, atMost))
+	if err != nil || !diff.Equal {
+		t.Errorf("Diff with an unrelated rule moved = %s, %v, want equal",
+			seccomp.FormatDiff(diff), err)
+	}
+
+	diff, err = seccomp.Diff(profileOf(specs.ActErrno, below, atMost, other),
+		profileOf(specs.ActErrno, atMost, other, below))
+	if err != nil || diff.Equal || diff.Syscalls == nil || len(diff.Syscalls.Changed) != 1 {
+		t.Fatalf("Diff with the pair reordered = %s, %v, want read changed",
+			seccomp.FormatDiff(diff), err)
+	}
+
+	actions := func(details []seccomp.SyscallDetail) []specs.LinuxSeccompAction {
+		listed := make([]specs.LinuxSeccompAction, 0, len(details))
+		for _, detail := range details {
+			listed = append(listed, detail.Action)
+		}
+
+		return listed
+	}
+
+	change := diff.Syscalls.Changed[0]
+
+	wantLeft := []specs.LinuxSeccompAction{specs.ActKill, specs.ActLog, specs.ActAllow}
+	wantRight := []specs.LinuxSeccompAction{specs.ActLog, specs.ActAllow, specs.ActKill}
+
+	gotLeft, gotRight := actions(change.Left), actions(change.Right)
+	if !slices.Equal(gotLeft, wantLeft) || !slices.Equal(gotRight, wantRight) {
+		t.Errorf("Diff lists %v and %v, want each side's rules in add order", gotLeft, gotRight)
+	}
+}
+
+// TestDiffOrderIgnoresRulesOfOneNodeAndResult covers rules that fill one
+// node of an order-sensitive group with one result: the first of them puts
+// the node in its place, so swapping them changes nothing libseccomp
+// builds, and the profiles are equal.
+func TestDiffOrderIgnoresRulesOfOneNodeAndResult(t *testing.T) {
+	t.Parallel()
+
+	below := arg(0, specs.OpLessThan, 5)
+	first := filtered("read", specs.ActKill, below, arg(1, specs.OpEqualTo, 1))
+	second := filtered("read", specs.ActKill, below, arg(1, specs.OpEqualTo, 2))
+	atMost := filtered("read", specs.ActLog, arg(0, specs.OpLessEqual, 5))
+
+	diff, err := seccomp.Diff(profileOf(specs.ActErrno, first, second, atMost),
+		profileOf(specs.ActErrno, second, first, atMost))
+	if err != nil || !diff.Equal {
+		t.Errorf("Diff of two KILL rules on a0 < 5 swapped = %s, %v, want equal",
+			seccomp.FormatDiff(diff), err)
+	}
+
+	// Moving the LOG rule ahead of both reorders the group.
+	diff, err = seccomp.Diff(profileOf(specs.ActErrno, first, second, atMost),
+		profileOf(specs.ActErrno, atMost, second, first))
+	if err != nil || diff.Equal {
+		t.Errorf("Diff with the LOG rule moved first = %s, %v, want a change",
+			seccomp.FormatDiff(diff), err)
+	}
+}
+
+// TestDiffOrderReadsTheLoadedRules covers a side whose conditional rules
+// sit next to an unconditional one, which hides them: Diff reads that side
+// as its unconditional rule, both where it compares the rules and where it
+// reports the other side's order, so the report for one side does not
+// depend on the other.
+func TestDiffOrderReadsTheLoadedRules(t *testing.T) {
+	t.Parallel()
+
+	below := filtered("read", specs.ActKill, arg(0, specs.OpLessThan, 5))
+	atMost := filtered("read", specs.ActLog, arg(0, specs.OpLessEqual, 5))
+	hiding := filtered("read", specs.ActAllow)
+
+	diff, err := seccomp.Diff(profileOf(specs.ActErrno, atMost, below, hiding),
+		profileOf(specs.ActErrno, below, atMost))
+	if err != nil || diff.Syscalls == nil || len(diff.Syscalls.Changed) != 1 {
+		t.Fatalf("Diff = %s, %v, want read changed", seccomp.FormatDiff(diff), err)
+	}
+
+	change := diff.Syscalls.Changed[0]
+	if len(change.Left) != 1 || change.Left[0].Action != specs.ActAllow ||
+		len(change.Left[0].Args) != 0 {
+		t.Errorf("left = %v, want the unconditional rule alone", change.Left)
+	}
+
+	alone, err := seccomp.Diff(profileOf(specs.ActErrno, hiding),
+		profileOf(specs.ActErrno, below, atMost))
+	if err != nil || alone.Syscalls == nil ||
+		seccomp.FormatDiff(alone) != seccomp.FormatDiff(diff) {
+		t.Errorf("Diff = %s, want %s as for the unconditional rule alone",
+			seccomp.FormatDiff(diff), seccomp.FormatDiff(alone))
+	}
+}

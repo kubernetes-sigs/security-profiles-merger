@@ -136,14 +136,33 @@ func TestWriteTextsStopsAtTheBound(t *testing.T) {
 		t.Errorf("WriteTexts() = %q, want %q", got, want)
 	}
 
+	// Empty values are written quoted, two bytes each, between one-byte
+	// separators. Every write is all or nothing, so the output ends with the
+	// last write that fits, whichever it is, and the marker right after it.
 	merge.WriteTexts(&out, make([]string, merge.MaxFormattedBytes), ",")
 
-	if got := out.String(); !strings.HasSuffix(got, ","+merge.TruncationMarker) ||
-		len(got) != merge.MaxFormattedBytes {
+	room := merge.MaxFormattedBytes - len(merge.TruncationMarker)
+	want := quoted + "," + quoted
+
+	for idx := 0; ; idx++ {
+		piece := `""`
+		if idx%2 == 1 {
+			piece = ","
+		}
+
+		if len(want)+len(piece) > room {
+			break
+		}
+
+		want += piece
+	}
+
+	want += merge.TruncationMarker
+
+	if got := out.String(); got != want {
 		t.Errorf(
-			"WriteTexts() past the bound is %d bytes ending in %q",
-			len(got),
-			got[len(got)-40:],
+			"WriteTexts() past the bound is %d bytes ending in %q, want %d bytes ending in %q",
+			len(got), got[len(got)-40:], len(want), want[len(want)-40:],
 		)
 	}
 }

@@ -874,6 +874,11 @@ var lexerPath = regexp.MustCompile(`^(?:[^ \t\r\n"!,]|,[^ \t\r\n"!,]|\\[ \t"!,])
 // spells it, and written out raw it reaches whoever reads the rendered
 // profile or a log of it.
 func hasUnquotableChar(path string) bool {
+	// An empty path is reported as ErrEmptyPath; it holds no character.
+	if path == "" {
+		return false
+	}
+
 	return splitsLexerToken(path) || hasUnprintable(path) || hasUnescapedChar(path)
 }
 

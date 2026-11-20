@@ -47,12 +47,15 @@ var (
 // or unknown member drops the rule it was meant to carry: a member such as
 // "Filesystem" or "readonlyPaths" names a field only ignoring case, so
 // encoding/json fills the field from it while a reader comparing names
-// exactly drops it. A repeated member is read as its last occurrence here
-// and as its first elsewhere, so a scanner and the runtime can read one
-// document as two profiles. A byte that is not valid UTF-8 is replaced with
-// U+FFFD, so names that differ only there decode alike and merge into one
-// rule. Use this instead of json.Unmarshal to decode an artifact, and
-// validate the result with ValidateArtifact afterwards.
+// exactly drops it. A repeated member is decoded by json.Unmarshal into
+// what its earlier occurrence filled, so a later scalar or array replaces
+// the earlier one while a later object merges into it, keeping the members
+// of both; other parsers keep the first or the last occurrence, so a scanner
+// and the runtime can read one document as two profiles, and the merged
+// reading can allow more than either. A byte that is not valid UTF-8 is
+// replaced with U+FFFD, so names that differ only there decode alike and
+// merge into one rule. Use this instead of json.Unmarshal to decode an
+// artifact, and validate the result with ValidateArtifact afterwards.
 //
 // Unlike json.Unmarshal, the document is decoded into a fresh Profile that
 // replaces *profile only once every check has passed: a member the document
@@ -63,5 +66,5 @@ func UnmarshalStrict(data []byte, profile *Profile) error {
 		return ErrNilProfile
 	}
 
-	return strictjson.Unmarshal(data, profile)
+	return strictjson.Unmarshal(data, profile, nil)
 }

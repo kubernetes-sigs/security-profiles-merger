@@ -112,10 +112,24 @@ func runningArchitecture() specs.Arch {
 
 // coversAny reports whether a filter loaded from a profile listing archs
 // covers an architecture of the given set: one it lists, or native, which
-// runtimes always add. The merge and ValidateArtifact run where the runtime
-// loading their result runs, so they pass the native architecture of the
-// running program.
+// runtimes always add (see mayBeNative). The merge and ValidateArtifact run
+// where the runtime loading their result runs, so they pass the native
+// architecture of the running program.
 func coversAny(archs []specs.Arch, set map[specs.Arch]bool, native specs.Arch) bool {
-	return set[native] ||
+	return mayBeNative(set, native) ||
 		slices.ContainsFunc(archs, func(arch specs.Arch) bool { return set[arch] })
+}
+
+// mayBeNative reports whether the architecture a runtime adds to the filter
+// may be one of the set: native itself, or, where native is empty and so
+// not known, any architecture a Go program runs on (see possibleNatives).
+// Those include 32-bit and multiplexing ones, so a result settled for an
+// unknown native architecture is settled for both, which keeps it safe on
+// whichever node loads it.
+func mayBeNative(set map[specs.Arch]bool, native specs.Arch) bool {
+	if native == "" {
+		return slices.ContainsFunc(possibleNatives, func(arch specs.Arch) bool { return set[arch] })
+	}
+
+	return set[native]
 }

@@ -3573,20 +3573,25 @@ func TestIntersectOfANotifyingProfileIsAClone(t *testing.T) {
 func TestListenerFlagFollowsTheListener(t *testing.T) {
 	t.Parallel()
 
+	// A profile setting the flag notifies, as Validate requires, and so
+	// names a listener.
 	withFlag := func(listener string) *specs.LinuxSeccomp {
 		return &specs.LinuxSeccomp{
 			DefaultAction: specs.ActErrno,
 			ListenerPath:  listener,
 			Flags:         []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagWaitKillableRecv},
+			Syscalls: []specs.LinuxSyscall{
+				{Names: []string{"ioctl"}, Action: specs.ActNotify},
+			},
 		}
 	}
 
-	// The left profile carries the flag but no listener, the right one the
-	// listener, so the flag does not survive.
-	result, err := seccomp.Union(withFlag(""), &specs.LinuxSeccomp{
+	// Both profiles name the listener, which the merge takes from the
+	// first, so the flag of the second does not survive.
+	result, err := seccomp.Union(&specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
 		ListenerPath:  listenerSock,
-	})
+	}, withFlag(listenerSock))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

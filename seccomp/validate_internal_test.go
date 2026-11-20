@@ -22,20 +22,21 @@ import (
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 )
 
-// TestForEachProperSubsetEnumeratesSubsets pins the enumeration the artifact
-// conflict tracker files a rule under, and the guard that stops it from
-// enumerating 2^n subsets of a rule with more conditions than a profile
-// passing Validate can carry.
-func TestForEachProperSubsetEnumeratesSubsets(t *testing.T) {
+// TestFilterKeyEnumeratesSubsets pins the enumeration the artifact conflict
+// tracker files a rule under, and the guard that keeps a rule with more
+// conditions than a profile passing Validate can carry from being filed.
+func TestFilterKeyEnumeratesSubsets(t *testing.T) {
 	t.Parallel()
 
 	args := func(count int) []specs.LinuxSeccompArg {
 		result := make([]specs.LinuxSeccompArg, 0, count)
 		for idx := range count {
 			result = append(result, specs.LinuxSeccompArg{
-				Index: uint(idx), Value: 0, ValueTwo: 0, Op: specs.OpEqualTo,
+				Index: uint(idx), Value: uint64(idx), ValueTwo: 0, Op: specs.OpEqualTo,
 			})
 		}
 
@@ -51,24 +52,54 @@ func TestForEachProperSubsetEnumeratesSubsets(t *testing.T) {
 		{name: "one condition", count: 1, want: 1},
 		{name: "three conditions", count: 3, want: 7},
 		{name: "every valid argument index", count: maxSyscallArgIndex + 1, want: 63},
-		// Validate limits indices to 0-5, so an entry without a repeated
-		// index has at most six conditions. A longer one is skipped rather
-		// than enumerated.
-		{name: "more conditions than Validate allows", count: maxSyscallArgIndex + 2, want: 0},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
-			seen := 0
+			tracker := newConflictTracker()
 
-			forEachProperSubset(args(testCase.count), func([]specs.LinuxSeccompArg) {
-				seen++
+			key, ok := tracker.keyOf(args(testCase.count))
+			if !ok {
+				t.Fatal("keyOf refused a valid filter")
+			}
+
+			seen := make(map[filterKey]bool)
+
+			forEachProperSubmask(key.mask(), func(submask uint8) {
+				subset := key.subset(submask)
+
+				// The key of a subset is the key of the subset's conditions.
+				var conditions []specs.LinuxSeccompArg
+
+				for _, arg := range args(testCase.count) {
+					if submask&(1<<arg.Index) != 0 {
+						conditions = append(conditions, arg)
+					}
+				}
+
+				if want, _ := tracker.keyOf(conditions); subset != want {
+					t.Errorf("subset %b = %+v, want %+v", submask, subset, want)
+				}
+
+				seen[subset] = true
 			})
 
-			if seen != testCase.want {
-				t.Errorf("forEachProperSubset visited %d subsets, want %d", seen, testCase.want)
+			if len(seen) != testCase.want {
+				t.Errorf("visited %d distinct subsets, want %d", len(seen), testCase.want)
 			}
 		})
+	}
+
+	// Validate limits indices to 0-5 and an entry repeating one is loaded as
+	// one rule per condition, so no rule has a key past these.
+	for name, invalid := range map[string][]specs.LinuxSeccompArg{
+		"index past 5":   {{Index: maxSyscallArgIndex + 1, Op: specs.OpEqualTo}},
+		"repeated index": {{Index: 1, Op: specs.OpEqualTo}, {Index: 1, Op: specs.OpNotEqual}},
+		"unknown op":     {{Index: 0, Op: "SCMP_CMP_BOGUS"}},
+	} {
+		if _, ok := newConflictTracker().keyOf(invalid); ok {
+			t.Errorf("keyOf(%s) = ok, want refused", name)
+		}
 	}
 }
 
@@ -159,9 +190,16 @@ func failingProfile(count int) *specs.LinuxSeccomp {
 // more here, while the slack allowed covers the maps a check sizes by its
 // input, such as the one finding duplicate architectures.
 //
+// The race detector and coverage counters add a few dozen allocations of
+// their own that vary from run to run, more than that slack, so the counts
+// are compared only in an uninstrumented run, which CI makes in the bounds
+// job.
+//
 //nolint:paralleltest // AllocsPerRun refuses to run in a parallel test
 func TestValidatorsDoNotBuildFailuresPastTheLimit(t *testing.T) {
 	const count = 100
+
+	compareAllocs := testutil.UninstrumentedRun()
 
 	small, large := failingProfile(count), failingProfile(10*count)
 
@@ -185,6 +223,10 @@ func TestValidatorsDoNotBuildFailuresPastTheLimit(t *testing.T) {
 		err := testCase.check(large)
 		if err == nil || !strings.HasSuffix(err.Error(), ErrMoreProblems.Error()) {
 			t.Fatalf("%s: err = %v, want a report that left failures out", testCase.name, err)
+		}
+
+		if !compareAllocs {
+			continue
 		}
 
 		smallAllocs := testing.AllocsPerRun(10, func() { _ = testCase.check(small) })

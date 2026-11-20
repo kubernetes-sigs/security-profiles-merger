@@ -38,9 +38,14 @@ const NativeHost specs.Arch = "host"
 // the package documentation), so what these functions return depends on it.
 //
 // The zero value is deliberately not the node this program runs on: it
-// says that the native architecture of the node is not known, and then
-// only the architectures a profile lists count. Name the node's
-// architecture whenever it is known. NativeHost names the running
+// says that the native architecture of the node is not known, which the
+// merges and validators read as possibly any architecture a Go program runs
+// on, 32-bit and multiplexing ones included. That is the safe choice for an
+// unknown node: a result is settled, and a check runs, as for every one of
+// them, so it loads safely wherever it runs, at the cost of rules a node of
+// a known 64-bit architecture would keep. Diff, which settles nothing,
+// implies no architecture then and compares the lists as written. Name the
+// node's architecture whenever it is known. NativeHost names the running
 // program's architecture, which is what the plain functions assume, and an
 // architecture this package knows names another node, as in a control plane
 // merging for a node of another architecture.
@@ -49,8 +54,8 @@ const NativeHost specs.Arch = "host"
 // architecture.
 type Options struct {
 	// Arch is the native architecture of the node: the empty Arch for one
-	// that is not known, so that no architecture is implied beyond the ones
-	// a profile lists; NativeHost for that of the running program; or an
+	// that is not known, read as possibly any architecture a Go program runs
+	// on; NativeHost for that of the running program; or an
 	// architecture this package knows. Any other value is reported with
 	// ErrUnknownArch by every method before it looks at a profile.
 	Arch specs.Arch
@@ -117,7 +122,8 @@ func (o Options) ValidateStrict(profile *specs.LinuxSeccomp) error {
 }
 
 // native returns the architecture the merge and the checks imply, the empty
-// Arch for none, or the error for an Arch this package does not know.
+// Arch for one not known (see mayBeNative), or the error for an Arch this
+// package does not know.
 func (o Options) native() (specs.Arch, error) {
 	if o.Arch == "" {
 		return "", nil

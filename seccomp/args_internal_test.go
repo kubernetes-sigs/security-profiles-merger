@@ -388,3 +388,103 @@ func TestConjoinArgsKeepsTheStrongerCondition(t *testing.T) {
 		t.Error("an equality should not cover an inequality")
 	}
 }
+
+// argsCoverByPairs is argsCover reading every pair of conditions, which is
+// what it computed before walking the filters side by side.
+func argsCoverByPairs(wide, narrow []specs.LinuxSeccompArg) bool {
+	for _, loose := range wide {
+		if !slices.ContainsFunc(narrow, func(strict specs.LinuxSeccompArg) bool {
+			return strict.Index == loose.Index && condImplies(strict, loose)
+		}) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// argsDisjointByPairs is argsDisjoint reading every pair of conditions.
+func argsDisjointByPairs(left, right []specs.LinuxSeccompArg) bool {
+	for _, leftArg := range left {
+		for _, rightArg := range right {
+			if leftArg.Index == rightArg.Index && condsDisjoint(leftArg, rightArg) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// condOn returns a condition on the argument at index.
+func condOn(index uint, op specs.LinuxSeccompOperator, value uint64) specs.LinuxSeccompArg {
+	return specs.LinuxSeccompArg{Index: index, Value: value, ValueTwo: 0, Op: op}
+}
+
+// TestArgsCoverAndDisjointCompareByIndex pins argsCover and argsDisjoint
+// against reading every pair of conditions, on filters with several
+// conditions on one index as an unvalidated list holds them and on filters
+// out of order.
+func TestArgsCoverAndDisjointCompareByIndex(t *testing.T) {
+	t.Parallel()
+
+	filters := [][]specs.LinuxSeccompArg{
+		nil,
+		{condOn(0, specs.OpEqualTo, 2)},
+		{condOn(0, specs.OpNotEqual, 40)},
+		{condOn(0, specs.OpEqualTo, 2), condOn(1, specs.OpLessThan, 9)},
+		{condOn(1, specs.OpLessThan, 9), condOn(0, specs.OpEqualTo, 2)},
+		{condOn(1, specs.OpLessThan, 9), condOn(3, specs.OpGreaterEqual, 1)},
+		{
+			condOn(0, specs.OpEqualTo, 2), condOn(0, specs.OpEqualTo, 3),
+			condOn(2, specs.OpEqualTo, 7),
+		},
+		{
+			condOn(0, specs.OpNotEqual, 3), condOn(0, specs.OpNotEqual, 4),
+			condOn(2, specs.OpLessEqual, 7),
+		},
+		{condOn(2, specs.OpGreaterThan, 7), condOn(5, specs.OpMaskedEqual, 1)},
+	}
+
+	for _, left := range filters {
+		for _, right := range filters {
+			covers, coversByPairs := argsCover(left, right), argsCoverByPairs(left, right)
+			if covers != coversByPairs {
+				t.Errorf("argsCover(%v, %v) = %t, want %t", left, right, covers, coversByPairs)
+			}
+
+			disjoint, disjointByPairs := argsDisjoint(left, right), argsDisjointByPairs(left, right)
+			if disjoint != disjointByPairs {
+				t.Errorf("argsDisjoint(%v, %v) = %t, want %t",
+					left, right, disjoint, disjointByPairs)
+			}
+		}
+	}
+}
+
+// TestArgsCoverAndDisjointStayLinear covers filters with more conditions
+// than a clause of a profile can carry, which an unvalidated list holds:
+// walked side by side, two filters of a hundred thousand conditions each
+// compare in one pass, where reading every pair takes ten billion
+// comparisons.
+func TestArgsCoverAndDisjointStayLinear(t *testing.T) {
+	t.Parallel()
+
+	const conditions = 100000
+
+	long := make([]specs.LinuxSeccompArg, conditions)
+	for idx := range long {
+		long[idx] = condOn(uint(idx), specs.OpEqualTo, uint64(idx))
+	}
+
+	shifted := slices.Clone(long)
+	shifted[conditions-1].Value++
+
+	if !argsCover(long, long) || argsDisjoint(long, long) {
+		t.Error("a long filter does not cover itself, or is disjoint from itself")
+	}
+
+	if argsCover(shifted, long) || argsCover(long, shifted) || !argsDisjoint(long, shifted) {
+		t.Error("long filters differing in their last condition compare wrongly")
+	}
+}

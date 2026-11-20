@@ -37,6 +37,9 @@ A file argument of - reads stdin beside the other file.
 Flags must precede file arguments, and -- ends them.
 Exit code 0 means equal, 1 means different, 2 means error.
 
+The profiles are not validated: two copies of an invalid profile compare
+equal. Run spm validate on them first where that matters.
+
 --arch selects the seccomp architecture implied on both sides, which a node
 covers whether or not a profile lists it. It defaults to the architecture
 this program runs on, so the same two profiles can compare differently on

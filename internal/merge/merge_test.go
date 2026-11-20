@@ -692,7 +692,7 @@ func TestSafeText(t *testing.T) {
 	t.Parallel()
 
 	for value, want := range map[string]string{
-		"":              "",
+		"":              `""`,
 		"read":          "read",
 		"/etc/tty[0-9]": "/etc/tty[0-9]",
 		"stdin[1]":      "stdin[1]",

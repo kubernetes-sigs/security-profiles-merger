@@ -214,6 +214,32 @@ func TestValidateEmptyPathInReadOnly(t *testing.T) {
 	}
 }
 
+// TestValidateArtifactEmptyPathOnce covers an empty path, which is reported
+// as empty and not also as holding a character that must be escaped.
+func TestValidateArtifactEmptyPathOnce(t *testing.T) {
+	t.Parallel()
+
+	profile := &apparmor.Profile{
+		Executable: nil,
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths:  []string{""},
+			WriteOnlyPaths: nil,
+			ReadWritePaths: nil,
+		},
+		Network:      nil,
+		Capabilities: nil,
+	}
+
+	err := apparmor.ValidateArtifact(profile)
+	if !errors.Is(err, apparmor.ErrEmptyPath) {
+		t.Errorf("ValidateArtifact = %v, want ErrEmptyPath", err)
+	}
+
+	if errors.Is(err, apparmor.ErrUnquotablePath) {
+		t.Errorf("ValidateArtifact = %v, want no ErrUnquotablePath", err)
+	}
+}
+
 func TestValidateEmptyPathInExecutables(t *testing.T) {
 	t.Parallel()
 

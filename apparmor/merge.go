@@ -609,21 +609,24 @@ func intersectPerms(
 	// through a prefix index rather than a pairwise scan, so a profile with
 	// many paths does not turn the merge quadratic. Patterns sharing one
 	// prefix land in one bucket, though, which the index cannot split, so
-	// the work is bounded as well: past the budget only the patterns both
-	// sides list alike are kept, next to the literals both sides list, which
-	// permits no more than matching them would, and Intersect reports it.
+	// the work is bounded as well (see matchBudget): past the budget only
+	// the patterns both sides list alike are kept, next to the literals both
+	// sides list, which permits no more than matching them would, and
+	// Intersect reports it. What matching found until then is dropped, so
+	// the result does not depend on where it stopped.
 	leftSide := buildFsSide(leftPerms, matchers)
 	rightSide := buildFsSide(rightPerms, matchers)
 
-	if exceedsPairBudget(leftSide.size(), rightSide.size()) {
+	matched, within := matchFsSides(&leftSide, &rightSide)
+	if !within {
 		addVerbatimGlobs(&leftSide, &rightSide, merged)
 
 		return merged, losesAccess(merged, leftPerms, rightPerms)
 	}
 
-	matchFsLiterals(leftSide.literals, &rightSide, merged)
-	matchFsLiterals(rightSide.literals, &leftSide, merged)
-	matchFsGlobs(&leftSide, &rightSide, merged)
+	for path, perm := range matched {
+		addFsMatch(merged, path, perm)
+	}
 
 	// A pattern past the call's compile budget matches only its own
 	// spelling, so whatever it would have matched on the other side is
@@ -631,6 +634,20 @@ func intersectPerms(
 	uncompiled := len(leftSide.verbatim) > 0 || len(rightSide.verbatim) > 0
 
 	return merged, uncompiled && losesAccess(merged, leftPerms, rightPerms)
+}
+
+// matchFsSides matches the literals and globs of each side against the
+// other (see matchFsLiterals and matchFsGlobs) and returns what they share,
+// or false where matching stopped past the budget (see matchBudget).
+func matchFsSides(left, right *fsSide) (map[string]fsPermission, bool) {
+	budget := newMatchBudget(left, right)
+	matched := make(map[string]fsPermission)
+
+	within := matchFsLiterals(left.literals, right, matched, budget) &&
+		matchFsLiterals(right.literals, left, matched, budget) &&
+		matchFsGlobs(left, right, matched, budget)
+
+	return matched, within
 }
 
 // losesAccess reports whether a result cut short by a budget may hold less
@@ -672,38 +689,54 @@ func addFsMatch(merged map[string]fsPermission, key string, perm fsPermission) {
 }
 
 // matchFsLiterals intersects every literal path with the globs of the other
-// side that match it, keyed by the literal, which is the narrower path.
+// side that match it, keyed by the literal, which is the narrower path. It
+// reports false where it stopped past the budget.
 func matchFsLiterals(
-	literals []fsPathEntry, other *fsSide, merged map[string]fsPermission,
-) {
+	literals []fsPathEntry, other *fsSide, merged map[string]fsPermission, budget *matchBudget,
+) bool {
 	for _, literal := range literals {
-		other.byPrefix.candidates(literal.matcher.literal, func(pattern string) bool {
+		match := func(pattern string) bool {
 			entry := other.globs[pattern]
 			if entry.matcher.matchesMapped(literal.mapped) {
 				addFsMatch(merged, literal.path, literal.perm.intersect(entry.perm))
 			}
 
 			return false
-		})
+		}
+
+		if !other.byPrefix.candidates(literal.matcher.literal, budget, match) {
+			return false
+		}
 	}
+
+	return true
 }
 
 // matchFsGlobs intersects globs present on both sides, and globs one side
 // covers with the "**" expansion of a containing prefix. The narrower of the
-// two patterns keys the result, as it is the one both sides permit.
-func matchFsGlobs(left, right *fsSide, merged map[string]fsPermission) {
+// two patterns keys the result, as it is the one both sides permit. It
+// reports false where it stopped past the budget.
+func matchFsGlobs(
+	left, right *fsSide, merged map[string]fsPermission, budget *matchBudget,
+) bool {
 	addVerbatimGlobs(left, right, merged)
 
 	for _, entry := range left.globs {
-		narrowFsGlob(entry, right, merged)
+		if !narrowFsGlob(entry, right, merged, budget) {
+			return false
+		}
 	}
 
 	// Both narrowing directions run for every glob, including one present on
 	// both sides: the loop above records what the right side expands over,
 	// which says nothing about what the left side expands over.
 	for _, entry := range right.globs {
-		narrowFsGlob(entry, left, merged)
+		if !narrowFsGlob(entry, left, merged, budget) {
+			return false
+		}
 	}
+
+	return true
 }
 
 // addVerbatimGlobs intersects the patterns both sides list alike, which
@@ -726,9 +759,12 @@ func addVerbatimGlobs(left, right *fsSide, merged map[string]fsPermission) {
 
 // narrowFsGlob intersects a glob with every "<prefix>**" pattern of the
 // other side that expands over it (see globMatcher.expandedBy), keyed by the
-// glob, which is the narrower of the two.
-func narrowFsGlob(entry fsPathEntry, other *fsSide, merged map[string]fsPermission) {
-	other.starStar.candidates(entry.matcher.prefix, func(pattern string) bool {
+// glob, which is the narrower of the two. It reports false where it stopped
+// past the budget.
+func narrowFsGlob(
+	entry fsPathEntry, other *fsSide, merged map[string]fsPermission, budget *matchBudget,
+) bool {
+	return other.starStar.candidates(entry.matcher.prefix, budget, func(pattern string) bool {
 		base := other.globs[pattern]
 		if entry.matcher.expandedBy(base.matcher) {
 			addFsMatch(merged, entry.path, entry.perm.intersect(base.perm))
@@ -813,12 +849,14 @@ func unionPerms(
 	leftSide := buildFsSide(left, matchers)
 	rightSide := buildFsSide(right, matchers)
 
-	if exceedsPairBudget(leftSide.size(), rightSide.size()) {
+	// A union compares literals with the other side's patterns only, and
+	// is charged for no more (see matchBudget).
+	budget := newMatchBudget(&leftSide, &rightSide)
+
+	if !addUnionLiterals(leftSide.literals, right, &rightSide, merged, budget) ||
+		!addUnionLiterals(rightSide.literals, left, &leftSide, merged, budget) {
 		return unionVerbatim(left, right)
 	}
-
-	addUnionLiterals(leftSide.literals, right, &rightSide, merged)
-	addUnionLiterals(rightSide.literals, left, &leftSide, merged)
 
 	for _, perms := range []map[string]fsPermission{left, right} {
 		for path, perm := range perms {
@@ -850,16 +888,22 @@ func unionVerbatim(left, right map[string]fsPermission) map[string]fsPermission 
 }
 
 // addUnionLiterals records the literals of one profile as unionPerms
-// describes, given the other profile's paths and globs.
+// describes, given the other profile's paths and globs. It reports false
+// where it stopped past the budget, and the caller then drops what it
+// recorded.
 func addUnionLiterals(
 	literals []fsPathEntry, otherPerms map[string]fsPermission, other *fsSide,
-	merged map[string]fsPermission,
-) {
+	merged map[string]fsPermission, budget *matchBudget,
+) bool {
 	for _, literal := range literals {
 		perm := literal.perm
 
 		if _, listed := otherPerms[literal.path]; !listed {
-			granted := other.grants(literal)
+			granted, within := other.grants(literal, budget)
+			if !within {
+				return false
+			}
+
 			if granted.union(perm) == granted {
 				continue
 			}
@@ -869,6 +913,8 @@ func addUnionLiterals(
 
 		merged[literal.path] = merged[literal.path].union(perm)
 	}
+
+	return true
 }
 
 // fsPermission tracks read/write permissions for a single path.

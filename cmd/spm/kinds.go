@@ -74,8 +74,7 @@ func modeByName(name string) (validateMode, bool) {
 // decodePolicy returns the JSON ambiguities the mode rejects.
 func (mode validateMode) decodePolicy() decodePolicy {
 	return decodePolicy{
-		rejectUnknown:    mode == modeStrict || mode == modeArtifact,
-		rejectDuplicates: mode == modeStrict || mode == modeArtifact,
+		rejectUnknown: mode == modeStrict || mode == modeArtifact,
 		// A member whose name matches a field only ignoring case is read
 		// here and dropped by a runtime that compares names exactly.
 		rejectMisspelled: mode == modeStrict || mode == modeArtifact,
