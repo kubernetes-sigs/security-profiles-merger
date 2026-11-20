@@ -17,6 +17,7 @@ limitations under the License.
 package landlock_test
 
 import (
+	"errors"
 	"slices"
 	"testing"
 
@@ -57,7 +58,7 @@ func TestIntersectLowersAncestorGrant(t *testing.T) {
 	}
 
 	want := []string{"/data/link"}
-	if got := landlock.LoweredRulePaths(result, baseline, artifact); !slices.Equal(got, want) {
+	if got := loweredPaths(t, result, baseline, artifact); !slices.Equal(got, want) {
 		t.Errorf("LoweredRulePaths = %v, want %v", got, want)
 	}
 }
@@ -82,7 +83,7 @@ func TestIntersectLowersRefer(t *testing.T) {
 	assertMergeFormat(t, "Intersect", landlock.Intersect, want, right, left)
 
 	lowered := []string{"/data/x"}
-	if got := landlock.LoweredRulePaths(result, left, right); !slices.Equal(got, lowered) {
+	if got := loweredPaths(t, result, left, right); !slices.Equal(got, lowered) {
 		t.Errorf("LoweredRulePaths = %v, want %v", got, lowered)
 	}
 }
@@ -154,11 +155,6 @@ func TestLoweredRulePaths(t *testing.T) {
 			inputs: nil,
 			want:   nil,
 		},
-		"a nil input is skipped": {
-			result: fsProfile(read, landlock.PathRule{Path: "/data/link", AccessFS: read}),
-			inputs: []*landlock.Profile{nil},
-			want:   nil,
-		},
 		"a grant of a right the input does not handle": {
 			// The merge drops the write grant of the first input, which does
 			// not handle write and so permits it everywhere already: the
@@ -216,15 +212,62 @@ func TestLoweredRulePaths(t *testing.T) {
 	}
 
 	for name, test := range tests {
-		got := landlock.LoweredRulePaths(test.result, test.inputs...)
+		got := loweredPaths(t, test.result, test.inputs...)
 		if !slices.Equal(got, test.want) {
 			t.Errorf("%s: LoweredRulePaths = %v, want %v", name, got, test.want)
 		}
 	}
 
-	if got := landlock.LoweredRulePaths(nil, fsProfile(read)); got != nil {
-		t.Errorf("LoweredRulePaths(nil) = %v, want nil", got)
+	// A nil or invalid result or input is reported, an input by its index
+	// among the inputs, as a merge reports it.
+	_, err := landlock.LoweredRulePaths(nil, fsProfile(read))
+	if !errors.Is(err, landlock.ErrNilProfile) {
+		t.Errorf("LoweredRulePaths(nil) = %v, want ErrNilProfile", err)
 	}
+
+	_, err = landlock.LoweredRulePaths(fsProfile(read), nil)
+	if !errors.Is(err, landlock.ErrNilProfile) {
+		t.Errorf("LoweredRulePaths(result, nil) = %v, want ErrNilProfile", err)
+	}
+
+	_, err = landlock.LoweredRulePaths(
+		fsProfile(read),
+		fsProfile(read),
+		fsProfile(fsRights{"bogus"}),
+	)
+
+	var inputErr *landlock.InputError
+	if !errors.As(err, &inputErr) || inputErr.Index != 1 ||
+		!errors.Is(err, landlock.ErrUnknownRight) {
+		t.Errorf(
+			"LoweredRulePaths(unknown right in input 1) = %v, want an InputError for input 1",
+			err,
+		)
+	}
+}
+
+// loweredPaths returns LoweredRulePaths, failing the test on an error.
+func loweredPaths(t *testing.T, result *landlock.Profile, inputs ...*landlock.Profile) []string {
+	t.Helper()
+
+	paths, err := landlock.LoweredRulePaths(result, inputs...)
+	if err != nil {
+		t.Fatalf("LoweredRulePaths: %v", err)
+	}
+
+	return paths
+}
+
+// requiredABI returns RequiredABIVersion, failing the test on an error.
+func requiredABI(t *testing.T, profile *landlock.Profile) landlock.ABIVersion {
+	t.Helper()
+
+	abi, err := landlock.RequiredABIVersion(profile)
+	if err != nil {
+		t.Fatalf("RequiredABIVersion: %v", err)
+	}
+
+	return abi
 }
 
 // TestLoweredRulePathsOnMergeResults checks the answer against real merge
@@ -242,7 +285,7 @@ func TestLoweredRulePathsOnMergeResults(t *testing.T) {
 		t.Fatalf("Intersect: %v", err)
 	}
 
-	if got := landlock.LoweredRulePaths(result, same, same); got != nil {
+	if got := loweredPaths(t, result, same, same); got != nil {
 		t.Errorf("LoweredRulePaths of an intersection of equal profiles = %v, want nil", got)
 	}
 
@@ -255,7 +298,7 @@ func TestLoweredRulePathsOnMergeResults(t *testing.T) {
 	}
 
 	want := []string{"/var/run"}
-	if got := landlock.LoweredRulePaths(united, root, nested); !slices.Equal(got, want) {
+	if got := loweredPaths(t, united, root, nested); !slices.Equal(got, want) {
 		t.Errorf("LoweredRulePaths of a union = %v, want %v", got, want)
 	}
 }

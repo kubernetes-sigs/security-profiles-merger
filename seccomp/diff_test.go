@@ -65,11 +65,16 @@ func TestDiffNamesTheNilSide(t *testing.T) {
 		{left: profile, right: nil, want: 1},
 		{left: nil, right: nil, want: 0},
 	} {
-		diff, err := seccomp.DiffForArch("", testCase.left, testCase.right)
+		diff, err := seccomp.Options{
+			Arch: "",
+		}.Diff(
+			testCase.left,
+			testCase.right,
+		)
 
 		var inputErr *seccomp.InputError
 		if !errors.As(err, &inputErr) || inputErr.Index != testCase.want {
-			t.Errorf("DiffForArch = %v, %v, want an InputError for profile %d",
+			t.Errorf("Options.Diff = %v, %v, want an InputError for profile %d",
 				diff, err, testCase.want)
 		}
 	}
@@ -88,7 +93,7 @@ func TestProfileDiffString(t *testing.T) {
 	}
 
 	// Printed as fmt sees a value of unknown type, both as a pointer and as
-	// a value.
+	// a value, since String has a value receiver.
 	byPointer, byValue := any(diff), any(*diff)
 
 	want := seccomp.FormatDiff(diff)
@@ -212,7 +217,7 @@ func TestDiffArchitecturesNativeImplied(t *testing.T) {
 	}
 }
 
-func TestDiffSyscalls(t *testing.T) {
+func TestDiffLists(t *testing.T) {
 	t.Parallel()
 
 	left := &specs.LinuxSeccomp{
@@ -1211,16 +1216,16 @@ func TestDiffDefaultActionKillEquivalence(t *testing.T) {
 	}
 }
 
-func TestDiffSyscallsNil(t *testing.T) {
+func TestDiffListsNil(t *testing.T) {
 	t.Parallel()
 
-	result := seccomp.DiffSyscalls(nil, nil)
+	result := diffLists(t, nil, nil)
 	if result != nil {
 		t.Errorf("expected nil for empty-vs-empty diff, got %v", result)
 	}
 }
 
-func TestDiffSyscallsEqual(t *testing.T) {
+func TestDiffListsEqual(t *testing.T) {
 	t.Parallel()
 
 	list := []specs.LinuxSyscall{{
@@ -1228,13 +1233,13 @@ func TestDiffSyscallsEqual(t *testing.T) {
 		Action: specs.ActAllow,
 	}}
 
-	result := seccomp.DiffSyscalls(list, list)
+	result := diffLists(t, list, list)
 	if result != nil {
 		t.Errorf("expected nil for equal syscall lists, got %v", result)
 	}
 }
 
-func TestDiffSyscallsDiffers(t *testing.T) {
+func TestDiffListsDiffers(t *testing.T) {
 	t.Parallel()
 
 	left := []specs.LinuxSyscall{{
@@ -1247,7 +1252,7 @@ func TestDiffSyscallsDiffers(t *testing.T) {
 		Action: specs.ActAllow,
 	}}
 
-	result := seccomp.DiffSyscalls(left, right)
+	result := diffLists(t, left, right)
 	if result == nil {
 		t.Fatal("expected non-nil diff for different syscall lists")
 	}
@@ -1261,7 +1266,7 @@ func TestDiffSyscallsDiffers(t *testing.T) {
 	}
 }
 
-func TestDiffSyscallsChanged(t *testing.T) {
+func TestDiffListsChanged(t *testing.T) {
 	t.Parallel()
 
 	left := []specs.LinuxSyscall{{
@@ -1274,7 +1279,7 @@ func TestDiffSyscallsChanged(t *testing.T) {
 		Action: specs.ActErrno,
 	}}
 
-	result := seccomp.DiffSyscalls(left, right)
+	result := diffLists(t, left, right)
 	if result == nil {
 		t.Fatal("expected non-nil diff for changed action")
 	}
@@ -1288,11 +1293,11 @@ func TestDiffSyscallsChanged(t *testing.T) {
 	}
 }
 
-// TestDiffForArchIsHostIndependent covers the reason DiffForArch exists:
+// TestOptionsDiffIsHostIndependent covers the reason Options.Diff exists:
 // Diff implies the architecture of the running program, so the same pair of
 // profiles compares differently depending on where the comparison runs.
 // Naming the target architecture removes that dependence.
-func TestDiffForArchIsHostIndependent(t *testing.T) {
+func TestOptionsDiffIsHostIndependent(t *testing.T) {
 	t.Parallel()
 
 	listed := &specs.LinuxSeccomp{
@@ -1301,7 +1306,7 @@ func TestDiffForArchIsHostIndependent(t *testing.T) {
 	}
 	unlisted := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
 
-	onTarget, err := seccomp.DiffForArch(specs.ArchAARCH64, listed, unlisted)
+	onTarget, err := seccomp.Options{Arch: specs.ArchAARCH64}.Diff(listed, unlisted)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1311,7 +1316,7 @@ func TestDiffForArchIsHostIndependent(t *testing.T) {
 			seccomp.FormatDiff(onTarget))
 	}
 
-	elsewhere, err := seccomp.DiffForArch(specs.ArchX86_64, listed, unlisted)
+	elsewhere, err := seccomp.Options{Arch: specs.ArchX86_64}.Diff(listed, unlisted)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1320,7 +1325,7 @@ func TestDiffForArchIsHostIndependent(t *testing.T) {
 		t.Error("a node running x86_64 loses aarch64, want a difference")
 	}
 
-	none, err := seccomp.DiffForArch("", listed, unlisted)
+	none, err := seccomp.Options{Arch: ""}.Diff(listed, unlisted)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1330,10 +1335,10 @@ func TestDiffForArchIsHostIndependent(t *testing.T) {
 	}
 }
 
-func TestDiffForArchNilProfile(t *testing.T) {
+func TestOptionsDiffNilProfile(t *testing.T) {
 	t.Parallel()
 
-	_, err := seccomp.DiffForArch(specs.ArchX86_64, nil, &specs.LinuxSeccomp{})
+	_, err := seccomp.Options{Arch: specs.ArchX86_64}.Diff(nil, &specs.LinuxSeccomp{})
 	if !errors.Is(err, seccomp.ErrNilProfile) {
 		t.Errorf("expected ErrNilProfile, got: %v", err)
 	}
@@ -1458,12 +1463,12 @@ func TestDiffKeepsUnknownActionsApart(t *testing.T) {
 	}
 }
 
-// TestDiffSyscallsIgnoresEntryOrder pins what makes a diff independent of
+// TestDiffListsIgnoresEntryOrder pins what makes a diff independent of
 // the order entries are written in: the entries of one syscall are sorted
 // before being compared, by action, then errno, then argument filter. Each
 // case below differs in exactly one of those keys, so each exercises a
 // different tie-break.
-func TestDiffSyscallsIgnoresEntryOrder(t *testing.T) {
+func TestDiffListsIgnoresEntryOrder(t *testing.T) {
 	t.Parallel()
 
 	eperm, enosys := uint(1), uint(38)
@@ -1522,14 +1527,14 @@ func TestDiffSyscallsIgnoresEntryOrder(t *testing.T) {
 			reversed := slices.Clone(testCase.entries)
 			slices.Reverse(reversed)
 
-			if got := seccomp.DiffSyscalls(testCase.entries, reversed); got != nil {
-				t.Errorf("DiffSyscalls of the same entries reordered = %+v, want nil", got)
+			if got := diffLists(t, testCase.entries, reversed); got != nil {
+				t.Errorf("Diff of the lists of the same entries reordered = %+v, want nil", got)
 			}
 
 			// The entries really are distinct, so the nil above is the sort
 			// doing its job rather than the two lists collapsing to one.
-			if got := seccomp.DiffSyscalls(testCase.entries[:1], testCase.entries); got == nil {
-				t.Error("DiffSyscalls of one entry against two reports no difference")
+			if got := diffLists(t, testCase.entries[:1], testCase.entries); got == nil {
+				t.Error("Diff of the lists of one entry against two reports no difference")
 			}
 		})
 	}
@@ -1618,8 +1623,8 @@ func TestDiffComparesSummarizedSyscallsByRules(t *testing.T) {
 		t.Fatalf("Diff of different rules = %s, want read changed", seccomp.FormatDiff(diff))
 	}
 
-	if seccomp.DiffSyscalls(left.Syscalls, right.Syscalls) == nil {
-		t.Fatal("DiffSyscalls of different rules reports them equal")
+	if diffLists(t, left.Syscalls, right.Syscalls) == nil {
+		t.Fatal("Diff of the lists of different rules reports them equal")
 	}
 
 	// The same rules compare equal, including where an entry repeats one.

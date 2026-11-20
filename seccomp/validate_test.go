@@ -933,8 +933,8 @@ func TestValidateArtifactEntryCount(t *testing.T) {
 	over := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno, Syscalls: entries}
 
 	err := seccomp.ValidateArtifact(over)
-	if !errors.Is(err, seccomp.ErrTooManyEntries) {
-		t.Fatalf("expected ErrTooManyEntries, got: %v", err)
+	if !errors.Is(err, seccomp.ErrTooManyEntriesPerSyscall) {
+		t.Fatalf("expected ErrTooManyEntriesPerSyscall, got: %v", err)
 	}
 
 	if !strings.Contains(err.Error(), syscallWrite) {
@@ -1507,13 +1507,13 @@ func TestValidateArtifactBoundsProfileSize(t *testing.T) {
 			{Names: names, Action: specs.ActAllow},
 		},
 	})
-	if !errors.Is(err, seccomp.ErrTooManyNames) {
-		t.Errorf("expected ErrTooManyNames, got: %v", err)
+	if !errors.Is(err, seccomp.ErrTooManyNamesPerEntry) {
+		t.Errorf("expected ErrTooManyNamesPerEntry, got: %v", err)
 	}
 
 	// Entries within every per-syscall bound, spread over enough syscall
 	// names to load more rules than the profile may.
-	entries := seccomp.MaxArtifactClauses/seccomp.MaxArtifactNamesPerEntry + 1
+	entries := seccomp.MaxArtifactRules/seccomp.MaxArtifactNamesPerEntry + 1
 	syscalls := make([]specs.LinuxSyscall, 0, entries)
 
 	for idx := range entries {
@@ -1532,8 +1532,8 @@ func TestValidateArtifactBoundsProfileSize(t *testing.T) {
 		DefaultAction: specs.ActErrno,
 		Syscalls:      syscalls,
 	})
-	if !errors.Is(err, seccomp.ErrTooManyProfileClauses) {
-		t.Errorf("expected ErrTooManyProfileClauses, got: %v", err)
+	if !errors.Is(err, seccomp.ErrTooManyRules) {
+		t.Errorf("expected ErrTooManyRules, got: %v", err)
 	}
 }
 

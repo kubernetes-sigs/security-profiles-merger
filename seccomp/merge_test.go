@@ -2147,10 +2147,10 @@ func assertReorderedArgsAllowed(
 	assertSameIndexAlternatives(t, result, len(leftArgs))
 }
 
-func TestUnionSyscallsDifferent(t *testing.T) {
+func TestUnionListsDifferent(t *testing.T) {
 	t.Parallel()
 
-	result := seccomp.UnionSyscalls(
+	result := unionLists(t,
 		[]specs.LinuxSyscall{{Names: []string{syscallRead}, Action: specs.ActAllow}},
 		[]specs.LinuxSyscall{{Names: []string{syscallWrite}, Action: specs.ActAllow}},
 	)
@@ -2161,10 +2161,10 @@ func TestUnionSyscallsDifferent(t *testing.T) {
 	})
 }
 
-func TestUnionSyscallsLessRestrictive(t *testing.T) {
+func TestUnionListsLessRestrictive(t *testing.T) {
 	t.Parallel()
 
-	result := seccomp.UnionSyscalls(
+	result := unionLists(t,
 		[]specs.LinuxSyscall{{Names: []string{syscallRead}, Action: specs.ActErrno}},
 		[]specs.LinuxSyscall{{Names: []string{syscallRead}, Action: specs.ActAllow}},
 	)
@@ -2174,24 +2174,10 @@ func TestUnionSyscallsLessRestrictive(t *testing.T) {
 	})
 }
 
-func TestUnionSyscallsPreservesKillProcess(t *testing.T) {
+func TestUnionListsEmptyRight(t *testing.T) {
 	t.Parallel()
 
-	result := seccomp.UnionSyscalls(
-		[]specs.LinuxSyscall{{Names: []string{syscallRead}, Action: specs.ActKillProcess}},
-		[]specs.LinuxSyscall{{Names: []string{syscallWrite}, Action: specs.ActAllow}},
-	)
-
-	assertSyscallsResult(t, result, map[string]specs.LinuxSeccompAction{
-		syscallRead:  specs.ActKillProcess,
-		syscallWrite: specs.ActAllow,
-	})
-}
-
-func TestUnionSyscallsEmptyRight(t *testing.T) {
-	t.Parallel()
-
-	result := seccomp.UnionSyscalls(
+	result := unionLists(t,
 		[]specs.LinuxSyscall{
 			{Names: []string{syscallRead, syscallWrite}, Action: specs.ActAllow},
 		},
@@ -2204,10 +2190,10 @@ func TestUnionSyscallsEmptyRight(t *testing.T) {
 	})
 }
 
-func TestUnionSyscallsNormalizesMultiName(t *testing.T) {
+func TestUnionListsNormalizesMultiName(t *testing.T) {
 	t.Parallel()
 
-	result := seccomp.UnionSyscalls(
+	result := unionLists(t,
 		[]specs.LinuxSyscall{
 			{Names: []string{syscallRead, syscallWrite, syscallOpen}, Action: specs.ActAllow},
 		},
@@ -2221,10 +2207,10 @@ func TestUnionSyscallsNormalizesMultiName(t *testing.T) {
 	})
 }
 
-func TestUnionSyscallsPreservesErrnoRet(t *testing.T) {
+func TestUnionListsPreservesErrnoRet(t *testing.T) {
 	t.Parallel()
 
-	result := seccomp.UnionSyscalls(
+	result := unionLists(t,
 		[]specs.LinuxSyscall{
 			{Names: []string{syscallRead}, Action: specs.ActErrno, ErrnoRet: uintPtr(13)},
 		},
@@ -2251,10 +2237,10 @@ func TestUnionSyscallsPreservesErrnoRet(t *testing.T) {
 	}
 }
 
-func TestUnionSyscallsSorted(t *testing.T) {
+func TestUnionListsSorted(t *testing.T) {
 	t.Parallel()
 
-	result := seccomp.UnionSyscalls(
+	result := unionLists(t,
 		[]specs.LinuxSyscall{{Names: []string{syscallWrite}, Action: specs.ActAllow}},
 		[]specs.LinuxSyscall{{Names: []string{syscallRead}, Action: specs.ActAllow}},
 	)
@@ -2302,10 +2288,10 @@ func assertSyscallsResult(
 	}
 }
 
-func TestIntersectSyscallsCommon(t *testing.T) {
+func TestIntersectListsCommon(t *testing.T) {
 	t.Parallel()
 
-	result := seccomp.IntersectSyscalls(
+	result := intersectLists(t,
 		[]specs.LinuxSyscall{{Names: []string{syscallRead}, Action: specs.ActAllow}},
 		[]specs.LinuxSyscall{{Names: []string{syscallRead}, Action: specs.ActAllow}},
 	)
@@ -2315,10 +2301,10 @@ func TestIntersectSyscallsCommon(t *testing.T) {
 	})
 }
 
-func TestIntersectSyscallsMoreRestrictive(t *testing.T) {
+func TestIntersectListsMoreRestrictive(t *testing.T) {
 	t.Parallel()
 
-	result := seccomp.IntersectSyscalls(
+	result := intersectLists(t,
 		[]specs.LinuxSyscall{{Names: []string{syscallRead}, Action: specs.ActAllow}},
 		[]specs.LinuxSyscall{{Names: []string{syscallRead}, Action: specs.ActErrno}},
 	)
@@ -2328,10 +2314,10 @@ func TestIntersectSyscallsMoreRestrictive(t *testing.T) {
 	})
 }
 
-func TestIntersectSyscallsDropsUnmatched(t *testing.T) {
+func TestIntersectListsDropsUnmatched(t *testing.T) {
 	t.Parallel()
 
-	result := seccomp.IntersectSyscalls(
+	result := intersectLists(t,
 		[]specs.LinuxSyscall{{Names: []string{syscallRead}, Action: specs.ActAllow}},
 		[]specs.LinuxSyscall{{Names: []string{syscallWrite}, Action: specs.ActAllow}},
 	)
@@ -2341,10 +2327,10 @@ func TestIntersectSyscallsDropsUnmatched(t *testing.T) {
 	}
 }
 
-func TestIntersectSyscallsNormalizesMultiName(t *testing.T) {
+func TestIntersectListsNormalizesMultiName(t *testing.T) {
 	t.Parallel()
 
-	result := seccomp.IntersectSyscalls(
+	result := intersectLists(t,
 		[]specs.LinuxSyscall{
 			{Names: []string{syscallRead, syscallWrite}, Action: specs.ActAllow},
 		},
@@ -2356,10 +2342,10 @@ func TestIntersectSyscallsNormalizesMultiName(t *testing.T) {
 	})
 }
 
-func TestIntersectSyscallsSorted(t *testing.T) {
+func TestIntersectListsSorted(t *testing.T) {
 	t.Parallel()
 
-	result := seccomp.IntersectSyscalls(
+	result := intersectLists(t,
 		[]specs.LinuxSyscall{
 			{Names: []string{syscallWrite}, Action: specs.ActAllow},
 			{Names: []string{syscallRead}, Action: specs.ActAllow},
@@ -2379,10 +2365,10 @@ func TestIntersectSyscallsSorted(t *testing.T) {
 	}
 }
 
-func TestIntersectSyscallsEmptyInput(t *testing.T) {
+func TestIntersectListsEmptyInput(t *testing.T) {
 	t.Parallel()
 
-	result := seccomp.IntersectSyscalls(
+	result := intersectLists(t,
 		[]specs.LinuxSyscall{{Names: []string{syscallRead}, Action: specs.ActAllow}},
 		nil,
 	)
@@ -2590,14 +2576,14 @@ func seccompEqualModuloErrnoRet(
 	return true
 }
 
-func TestUnionSyscallsWithSameArgs(t *testing.T) {
+func TestUnionListsWithSameArgs(t *testing.T) {
 	t.Parallel()
 
 	args := []specs.LinuxSeccompArg{{
 		Index: 0, Value: 1, Op: specs.OpEqualTo,
 	}}
 
-	result := seccomp.UnionSyscalls(
+	result := unionLists(t,
 		[]specs.LinuxSyscall{{Names: []string{syscallRead}, Action: specs.ActAllow, Args: args}},
 		[]specs.LinuxSyscall{{Names: []string{syscallRead}, Action: specs.ActAllow, Args: args}},
 	)
@@ -2611,14 +2597,14 @@ func TestUnionSyscallsWithSameArgs(t *testing.T) {
 	}
 }
 
-func TestUnionSyscallsDropsArgsWhenOneSideHasNone(t *testing.T) {
+func TestUnionListsDropsArgsWhenOneSideHasNone(t *testing.T) {
 	t.Parallel()
 
 	args := []specs.LinuxSeccompArg{{
 		Index: 0, Value: 1, Op: specs.OpEqualTo,
 	}}
 
-	result := seccomp.UnionSyscalls(
+	result := unionLists(t,
 		[]specs.LinuxSyscall{{Names: []string{syscallRead}, Action: specs.ActAllow, Args: args}},
 		[]specs.LinuxSyscall{{Names: []string{syscallRead}, Action: specs.ActAllow}},
 	)
@@ -2632,14 +2618,14 @@ func TestUnionSyscallsDropsArgsWhenOneSideHasNone(t *testing.T) {
 	}
 }
 
-func TestIntersectSyscallsWithSameArgs(t *testing.T) {
+func TestIntersectListsWithSameArgs(t *testing.T) {
 	t.Parallel()
 
 	args := []specs.LinuxSeccompArg{{
 		Index: 0, Value: 1, Op: specs.OpEqualTo,
 	}}
 
-	result := seccomp.IntersectSyscalls(
+	result := intersectLists(t,
 		[]specs.LinuxSyscall{{Names: []string{syscallRead}, Action: specs.ActAllow, Args: args}},
 		[]specs.LinuxSyscall{{Names: []string{syscallRead}, Action: specs.ActAllow, Args: args}},
 	)
@@ -2653,10 +2639,10 @@ func TestIntersectSyscallsWithSameArgs(t *testing.T) {
 	}
 }
 
-func TestIntersectSyscallsDisjointArgsDropped(t *testing.T) {
+func TestIntersectListsDisjointArgsDropped(t *testing.T) {
 	t.Parallel()
 
-	result := seccomp.IntersectSyscalls(
+	result := intersectLists(t,
 		[]specs.LinuxSyscall{{
 			Names:  []string{syscallRead},
 			Action: specs.ActAllow,
@@ -2674,14 +2660,14 @@ func TestIntersectSyscallsDisjointArgsDropped(t *testing.T) {
 	}
 }
 
-func TestIntersectSyscallsPreservesArgsFromOneSide(t *testing.T) {
+func TestIntersectListsPreservesArgsFromOneSide(t *testing.T) {
 	t.Parallel()
 
 	args := []specs.LinuxSeccompArg{{
 		Index: 0, Value: 1, Op: specs.OpEqualTo,
 	}}
 
-	result := seccomp.IntersectSyscalls(
+	result := intersectLists(t,
 		[]specs.LinuxSyscall{{Names: []string{syscallRead}, Action: specs.ActAllow, Args: args}},
 		[]specs.LinuxSyscall{{Names: []string{syscallRead}, Action: specs.ActAllow}},
 	)
@@ -2755,10 +2741,10 @@ func TestUnionElidesMatchingDefaultErrnoRet(t *testing.T) {
 	}
 }
 
-func TestUnionSyscallsKeepsArgsWhenDifferent(t *testing.T) {
+func TestUnionListsKeepsArgsWhenDifferent(t *testing.T) {
 	t.Parallel()
 
-	result := seccomp.UnionSyscalls(
+	result := unionLists(t,
 		[]specs.LinuxSyscall{{
 			Names:  []string{syscallRead},
 			Action: specs.ActAllow,
@@ -2782,7 +2768,7 @@ func TestUnionSyscallsKeepsArgsWhenDifferent(t *testing.T) {
 	}
 }
 
-func TestUnionSyscallsPreservesArgsReorderedByIndex(t *testing.T) {
+func TestUnionListsPreservesArgsReorderedByIndex(t *testing.T) {
 	t.Parallel()
 
 	args := []specs.LinuxSeccompArg{
@@ -2794,7 +2780,7 @@ func TestUnionSyscallsPreservesArgsReorderedByIndex(t *testing.T) {
 		{Index: 0, Value: 1, Op: specs.OpEqualTo},
 	}
 
-	result := seccomp.UnionSyscalls(
+	result := unionLists(t,
 		[]specs.LinuxSyscall{{
 			Names:  []string{syscallRead},
 			Action: specs.ActAllow,
@@ -3284,20 +3270,20 @@ func assertDeterministic(
 	}
 }
 
-func TestBareSyscallMergesSpellErrnoLikeProfiles(t *testing.T) {
+func TestListMergesSpellErrnoLikeProfiles(t *testing.T) {
 	t.Parallel()
 
-	// The bare-slice functions apply the same errno rules as Intersect and
-	// Union: EPERM is spelled as unset and errnoRet on actions that ignore
-	// it is dropped.
+	// Lists merged under a default that returns no errno get the errno
+	// rules of every merge: EPERM is spelled as unset and errnoRet on
+	// actions that ignore it is dropped.
 	entries := []specs.LinuxSyscall{
 		{Names: []string{syscallRead}, Action: specs.ActErrno, ErrnoRet: uintPtr(1)},
 		{Names: []string{syscallWrite}, Action: specs.ActLog, ErrnoRet: uintPtr(13)},
 	}
 
 	for _, result := range [][]specs.LinuxSyscall{
-		seccomp.UnionSyscalls(entries, nil),
-		seccomp.IntersectSyscalls(entries, entries),
+		unionLists(t, entries, nil),
+		intersectLists(t, entries, entries),
 	} {
 		if len(result) != 2 {
 			t.Fatalf("expected 2 entries, got %d", len(result))

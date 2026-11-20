@@ -131,17 +131,17 @@ func TestGoldenKnownRights(t *testing.T) {
 	t.Parallel()
 
 	wantFS := slices.Sorted(maps.Keys(goldenFSRights))
-	if got := landlock.KnownFSRights(); !slices.Equal(got, wantFS) {
+	if got := knownRights(landlock.FSAccessRights()); !slices.Equal(got, wantFS) {
 		t.Errorf("KnownFSRights() = %v, want %v", got, wantFS)
 	}
 
 	wantNet := slices.Sorted(maps.Keys(goldenNetRights))
-	if got := landlock.KnownNetRights(); !slices.Equal(got, wantNet) {
+	if got := knownRights(landlock.NetAccessRights()); !slices.Equal(got, wantNet) {
 		t.Errorf("KnownNetRights() = %v, want %v", got, wantNet)
 	}
 
 	wantScope := slices.Sorted(maps.Keys(goldenScopeRights))
-	if got := landlock.KnownScopeRights(); !slices.Equal(got, wantScope) {
+	if got := knownRights(landlock.ScopeRights()); !slices.Equal(got, wantScope) {
 		t.Errorf("KnownScopeRights() = %v, want %v", got, wantScope)
 	}
 }
@@ -155,7 +155,7 @@ func TestGoldenABIVersions(t *testing.T) {
 
 	for right, want := range goldenFSRights {
 		profile := fsProfile([]landlock.FSAccessRight{right})
-		if got := landlock.RequiredABIVersion(profile); got != want {
+		if got := requiredABI(t, profile); got != want {
 			t.Errorf("RequiredABIVersion(%q) = v%d, want v%d", right, got, want)
 		}
 
@@ -164,7 +164,7 @@ func TestGoldenABIVersions(t *testing.T) {
 
 	for right, want := range goldenNetRights {
 		profile := netProfile([]landlock.NetAccessRight{right})
-		if got := landlock.RequiredABIVersion(profile); got != want {
+		if got := requiredABI(t, profile); got != want {
 			t.Errorf("RequiredABIVersion(%q) = v%d, want v%d", right, got, want)
 		}
 
@@ -179,7 +179,7 @@ func TestGoldenABIVersions(t *testing.T) {
 			PathRules:        nil,
 			NetRules:         nil,
 		}
-		if got := landlock.RequiredABIVersion(profile); got != want {
+		if got := requiredABI(t, profile); got != want {
 			t.Errorf("RequiredABIVersion(%q) = v%d, want v%d", right, got, want)
 		}
 
@@ -191,25 +191,25 @@ func TestGoldenABIVersions(t *testing.T) {
 	}
 }
 
-// assertABIBoundary checks that ValidateForABI accepts the profile from the
+// assertABIBoundary checks that Options.Validate accepts the profile from the
 // right's own version on and reports it on the version below.
 func assertABIBoundary(
 	t *testing.T, right string, profile *landlock.Profile, needed landlock.ABIVersion,
 ) {
 	t.Helper()
 
-	err := landlock.ValidateForABI(profile, needed)
+	err := landlock.Options{ABI: needed}.Validate(profile)
 	if err != nil {
-		t.Errorf("ValidateForABI(%q, v%d) = %v, want nil", right, needed, err)
+		t.Errorf("Options{v%d}.Validate(%q) = %v, want nil", needed, right, err)
 	}
 
 	if needed == landlock.ABIV1 {
 		return
 	}
 
-	err = landlock.ValidateForABI(profile, needed-1)
+	err = landlock.Options{ABI: needed - 1}.Validate(profile)
 	if err == nil {
-		t.Errorf("ValidateForABI(%q, v%d) = nil, want an error", right, needed-1)
+		t.Errorf("Options{v%d}.Validate(%q) = nil, want an error", needed-1, right)
 	}
 }
 

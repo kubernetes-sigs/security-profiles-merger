@@ -67,8 +67,8 @@ func TestValidationAllocatesOnlyWhatItReports(t *testing.T) {
 			"Validate":         landlock.Validate,
 			"ValidateArtifact": landlock.ValidateArtifact,
 			"ValidateStrict":   landlock.ValidateStrict,
-			"ValidateForABI": func(profile *landlock.Profile) error {
-				return landlock.ValidateForABI(profile, landlock.ABIV1)
+			"Options.Validate": func(profile *landlock.Profile) error {
+				return landlock.Options{ABI: landlock.ABIV1}.Validate(profile)
 			},
 		} {
 			err := validate(profile)

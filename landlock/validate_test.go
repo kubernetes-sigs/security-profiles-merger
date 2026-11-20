@@ -764,11 +764,6 @@ func TestRequiredABIVersion(t *testing.T) {
 		want    landlock.ABIVersion
 	}{
 		{
-			name:    "nil profile",
-			profile: nil,
-			want:    landlock.ABIV1,
-		},
-		{
 			name: "only version 1 rights",
 			profile: &landlock.Profile{
 				HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessReadFile},
@@ -846,31 +841,116 @@ func TestRequiredABIVersion(t *testing.T) {
 			},
 			want: landlock.ABIV10,
 		},
-		{
-			name: "unknown rights are left to Validate",
-			profile: &landlock.Profile{
-				HandledAccessFS:  []landlock.FSAccessRight{"not_a_right"},
-				HandledAccessNet: nil,
-				Scoped:           nil,
-				PathRules:        nil,
-				NetRules:         nil,
-			},
-			want: landlock.ABIV1,
-		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := landlock.RequiredABIVersion(test.profile); got != test.want {
+			if got := requiredABI(t, test.profile); got != test.want {
 				t.Errorf("RequiredABIVersion() = %d, want %d", got, test.want)
 			}
 		})
 	}
 }
 
-func TestValidateForABI(t *testing.T) {
+// TestRequiredABIVersionValidates covers what RequiredABIVersion refuses: a
+// nil profile, and a right this package does not know, which it cannot
+// read a version from.
+func TestRequiredABIVersionValidates(t *testing.T) {
+	t.Parallel()
+
+	_, err := landlock.RequiredABIVersion(nil)
+	if !errors.Is(err, landlock.ErrNilProfile) {
+		t.Errorf("RequiredABIVersion(nil) = %v, want ErrNilProfile", err)
+	}
+
+	_, err = landlock.RequiredABIVersion(&landlock.Profile{
+		HandledAccessFS:  []landlock.FSAccessRight{"not_a_right"},
+		HandledAccessNet: nil,
+		Scoped:           nil,
+		PathRules:        nil,
+		NetRules:         nil,
+	})
+	if !errors.Is(err, landlock.ErrUnknownRight) {
+		t.Errorf("RequiredABIVersion(unknown right) = %v, want ErrUnknownRight", err)
+	}
+}
+
+// TestABIVersionString pins the names versions print as.
+func TestABIVersionString(t *testing.T) {
+	t.Parallel()
+
+	for abi, want := range map[landlock.ABIVersion]string{
+		landlock.ABIV1:                "ABIV1",
+		landlock.LatestABIVersion:     "ABIV11",
+		landlock.LatestABIVersion + 1: "ABIV12",
+		0:                             "ABIVersion(0)",
+		-1:                            "ABIVersion(-1)",
+	} {
+		if got := abi.String(); got != want {
+			t.Errorf("ABIVersion(%d).String() = %q, want %q", int(abi), got, want)
+		}
+	}
+}
+
+// TestFSAccessRightsMatchOptions checks that every listed filesystem right
+// is one Validate knows, with the version Options asks for, and that the
+// list is a copy.
+func TestFSAccessRightsMatchOptions(t *testing.T) {
+	t.Parallel()
+
+	listed := landlock.FSAccessRights()
+	if !maps.Equal(listed, goldenFSRights) {
+		t.Errorf("FSAccessRights() = %v, want %v", listed, goldenFSRights)
+	}
+
+	for right, abi := range listed {
+		profile := &landlock.Profile{
+			HandledAccessFS:  []landlock.FSAccessRight{right},
+			HandledAccessNet: nil,
+			Scoped:           nil,
+			PathRules:        nil,
+			NetRules:         nil,
+		}
+
+		err := landlock.Options{ABI: abi}.Validate(profile)
+		if err != nil {
+			t.Errorf("%s at %s: %v", right, abi, err)
+		}
+
+		if abi == landlock.ABIV1 {
+			continue
+		}
+
+		err = landlock.Options{ABI: abi - 1}.Validate(profile)
+		if !errors.Is(err, landlock.ErrUnsupportedABIRight) {
+			t.Errorf("%s at %s: %v, want ErrUnsupportedABIRight", right, abi-1, err)
+		}
+	}
+
+	delete(listed, landlock.FSAccessRefer)
+
+	if _, ok := landlock.FSAccessRights()[landlock.FSAccessRefer]; !ok {
+		t.Error("changing the returned map changed the next one")
+	}
+}
+
+// TestNetAndScopeRightsAreListed checks the other two listings against the
+// golden tables, which spell every right and version out.
+func TestNetAndScopeRightsAreListed(t *testing.T) {
+	t.Parallel()
+
+	if got := landlock.NetAccessRights(); !maps.Equal(got, goldenNetRights) {
+		t.Errorf("NetAccessRights() = %v, want %v", got, goldenNetRights)
+	}
+
+	if got := landlock.ScopeRights(); !maps.Equal(got, goldenScopeRights) {
+		t.Errorf("ScopeRights() = %v, want %v", got, goldenScopeRights)
+	}
+}
+
+func TestOptionsValidate(t *testing.T) {
 	t.Parallel()
 
 	profile := &landlock.Profile{
@@ -888,7 +968,7 @@ func TestValidateForABI(t *testing.T) {
 		NetRules: nil,
 	}
 
-	err := landlock.ValidateForABI(profile, landlock.ABIV2)
+	err := landlock.Options{ABI: landlock.ABIV2}.Validate(profile)
 	if !errors.Is(err, landlock.ErrUnsupportedABIRight) {
 		t.Errorf("expected ErrUnsupportedABIRight on v2, got: %v", err)
 	}
@@ -897,22 +977,22 @@ func TestValidateForABI(t *testing.T) {
 		t.Errorf("error should name the right: %v", err)
 	}
 
-	err = landlock.ValidateForABI(profile, landlock.ABIV3)
+	err = landlock.Options{ABI: landlock.ABIV3}.Validate(profile)
 	if err != nil {
 		t.Errorf("unexpected error on v3: %v", err)
 	}
 
-	err = landlock.ValidateForABI(profile, landlock.LatestABIVersion)
+	err = landlock.Options{ABI: landlock.LatestABIVersion}.Validate(profile)
 	if err != nil {
 		t.Errorf("unexpected error on the latest version: %v", err)
 	}
 }
 
-// TestDowngradeToABI covers the copy a node on an older kernel loads: it
+// TestOptionsDowngrade covers the copy a node on an older kernel loads: it
 // drops exactly the rights the version does not know, from the handled
 // sets, the scoped set and the rules, and drops the rules that leaves
 // empty.
-func TestDowngradeToABI(t *testing.T) {
+func TestOptionsDowngrade(t *testing.T) {
 	t.Parallel()
 
 	profile := &landlock.Profile{
@@ -955,7 +1035,7 @@ func TestDowngradeToABI(t *testing.T) {
 		{landlock.LatestABIVersion, before},
 		{landlock.LatestABIVersion + 1, before},
 	} {
-		downgraded, err := landlock.DowngradeToABI(profile, testCase.abi)
+		downgraded, err := landlock.Options{ABI: testCase.abi}.Downgrade(profile)
 		if err != nil {
 			t.Fatalf("v%d: unexpected error: %v", testCase.abi, err)
 		}
@@ -964,31 +1044,31 @@ func TestDowngradeToABI(t *testing.T) {
 			t.Errorf("v%d: got %s, want %s", testCase.abi, got, testCase.want)
 		}
 
-		err = landlock.ValidateForABI(downgraded, testCase.abi)
+		err = landlock.Options{ABI: testCase.abi}.Validate(downgraded)
 		if err != nil {
 			t.Errorf("v%d: the copy does not validate for its version: %v", testCase.abi, err)
 		}
 	}
 
 	if got := landlock.FormatProfile(profile); got != before {
-		t.Errorf("DowngradeToABI changed its argument: %s", got)
+		t.Errorf("Downgrade changed its argument: %s", got)
 	}
 
-	_, err := landlock.DowngradeToABI(nil, landlock.ABIV1)
+	_, err := landlock.Options{ABI: landlock.ABIV1}.Downgrade(nil)
 	if !errors.Is(err, landlock.ErrNilProfile) {
 		t.Errorf("nil profile: got %v, want ErrNilProfile", err)
 	}
 
-	_, err = landlock.DowngradeToABI(profile, 0)
+	_, err = landlock.Options{ABI: 0}.Downgrade(profile)
 	if !errors.Is(err, landlock.ErrUnknownABIVersion) {
 		t.Errorf("version 0: got %v, want ErrUnknownABIVersion", err)
 	}
 }
 
-// TestDowngradeToABIKeepsWhatValidateReports covers what the copy leaves
+// TestOptionsDowngradeKeepsWhatValidateReports covers what the copy leaves
 // alone: a right this package does not know and a rule that granted nothing
 // to begin with are the validators' to report, not the downgrade's to hide.
-func TestDowngradeToABIKeepsWhatValidateReports(t *testing.T) {
+func TestOptionsDowngradeKeepsWhatValidateReports(t *testing.T) {
 	t.Parallel()
 
 	profile := &landlock.Profile{
@@ -999,7 +1079,7 @@ func TestDowngradeToABIKeepsWhatValidateReports(t *testing.T) {
 		NetRules:         nil,
 	}
 
-	downgraded, err := landlock.DowngradeToABI(profile, landlock.ABIV1)
+	downgraded, err := landlock.Options{ABI: landlock.ABIV1}.Downgrade(profile)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1010,9 +1090,9 @@ func TestDowngradeToABIKeepsWhatValidateReports(t *testing.T) {
 	}
 }
 
-// TestValidateForABIAgreesWithRequired ties the two together: a profile
+// TestOptionsValidateAgreesWithRequired ties the two together: a profile
 // validates against exactly the versions at or above what it requires.
-func TestValidateForABIAgreesWithRequired(t *testing.T) {
+func TestOptionsValidateAgreesWithRequired(t *testing.T) {
 	t.Parallel()
 
 	profile := &landlock.Profile{
@@ -1023,10 +1103,10 @@ func TestValidateForABIAgreesWithRequired(t *testing.T) {
 		NetRules:         nil,
 	}
 
-	required := landlock.RequiredABIVersion(profile)
+	required := requiredABI(t, profile)
 
 	for abi := landlock.ABIV1; abi <= landlock.LatestABIVersion; abi++ {
-		err := landlock.ValidateForABI(profile, abi)
+		err := landlock.Options{ABI: abi}.Validate(profile)
 
 		if abi < required && err == nil {
 			t.Errorf("v%d is below the required v%d but validated", abi, required)
@@ -1039,10 +1119,10 @@ func TestValidateForABIAgreesWithRequired(t *testing.T) {
 	}
 }
 
-func TestValidateForABINil(t *testing.T) {
+func TestOptionsValidateNil(t *testing.T) {
 	t.Parallel()
 
-	err := landlock.ValidateForABI(nil, landlock.ABIV1)
+	err := landlock.Options{ABI: landlock.ABIV1}.Validate(nil)
 	if !errors.Is(err, landlock.ErrNilProfile) {
 		t.Errorf("expected ErrNilProfile, got: %v", err)
 	}
@@ -1105,10 +1185,10 @@ func TestValidateArtifact(t *testing.T) {
 	}
 }
 
-// TestValidateForABIReportsNetworkRuleRights covers the network rules, which
+// TestOptionsValidateReportsNetworkRuleRights covers the network rules, which
 // carry their own rights and so have to be checked against the ABI just like
 // the handled sets and the path rules.
-func TestValidateForABIReportsNetworkRuleRights(t *testing.T) {
+func TestOptionsValidateReportsNetworkRuleRights(t *testing.T) {
 	t.Parallel()
 
 	profile := &landlock.Profile{
@@ -1126,24 +1206,24 @@ func TestValidateForABIReportsNetworkRuleRights(t *testing.T) {
 		}},
 	}
 
-	err := landlock.ValidateForABI(profile, landlock.ABIV4)
+	err := landlock.Options{ABI: landlock.ABIV4}.Validate(profile)
 	if !errors.Is(err, landlock.ErrUnsupportedABIRight) {
-		t.Fatalf("ValidateForABI(v4) = %v, want %v", err, landlock.ErrUnsupportedABIRight)
+		t.Fatalf("Options{v4}.Validate() = %v, want %v", err, landlock.ErrUnsupportedABIRight)
 	}
 
 	// Both the handled set and the rule are reported, so a reader sees
 	// every place the right appears.
 	if got := strings.Count(err.Error(), string(landlock.NetAccessConnectSendUDP)); got != 2 {
-		t.Errorf("ValidateForABI(v4) names connect_send_udp %d times, want 2: %v", got, err)
+		t.Errorf("Options{v4}.Validate() names connect_send_udp %d times, want 2: %v", got, err)
 	}
 
 	if !strings.Contains(err.Error(), "NetRules[0]") {
-		t.Errorf("ValidateForABI(v4) does not name the network rule: %v", err)
+		t.Errorf("Options{v4}.Validate() does not name the network rule: %v", err)
 	}
 
-	err = landlock.ValidateForABI(profile, landlock.ABIV10)
+	err = landlock.Options{ABI: landlock.ABIV10}.Validate(profile)
 	if err != nil {
-		t.Errorf("ValidateForABI(v10) = %v, want nil", err)
+		t.Errorf("Options{v10}.Validate() = %v, want nil", err)
 	}
 }
 

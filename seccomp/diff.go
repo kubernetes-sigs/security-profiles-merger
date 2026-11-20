@@ -61,35 +61,42 @@ type ProfileDiff struct {
 // IsEqual reports Equal: whether the two profiles compare equal in the
 // normalized form Diff describes.
 //
-// It has a value receiver, so that a ProfileDiff satisfies spm.Diff by value
-// as well as by pointer, and therefore needs a diff to read: calling it on a
-// nil *ProfileDiff panics. Diff and DiffForArch return a nil diff only
-// together with an error.
+// IsEqual and String have value receivers, so a ProfileDiff and a pointer to
+// one both implement fmt.Stringer. Diff returns a non-nil diff whenever its
+// error is nil; called through a nil pointer, either method panics.
 func (d ProfileDiff) IsEqual() bool { return d.Equal }
 
 // String returns FormatDiff of the diff, so that fmt prints a diff the way
 // FormatDiff renders it.
-//
-// It has a value receiver, as IsEqual has, so calling it on a nil
-// *ProfileDiff panics, and fmt prints such a pointer as <nil> rather than
-// as FormatDiff(nil) renders it.
 func (d ProfileDiff) String() string { return FormatDiff(&d) }
 
-// ActionDiff represents a change in seccomp action.
+// ActionDiff represents a change in seccomp action. The actions are
+// reported as the profiles write them, except that SCMP_ACT_KILL_THREAD,
+// which libseccomp defines as the same action as SCMP_ACT_KILL, is reported
+// as SCMP_ACT_KILL, the spelling a merge result uses; the two compare equal
+// and are never reported as a change.
 type ActionDiff struct {
-	Left  specs.LinuxSeccompAction `json:"left"`
+	// Left is the action of the left profile.
+	Left specs.LinuxSeccompAction `json:"left"`
+	// Right is the action of the right profile.
 	Right specs.LinuxSeccompAction `json:"right"`
 }
 
-// UintPtrDiff represents a change in an optional uint value.
+// UintPtrDiff represents a change in an optional uint value, such as an
+// errno. A nil side stands for no value, which is distinct from 0.
 type UintPtrDiff struct {
-	Left  *uint `json:"left"`
+	// Left is the value of the left profile, or nil where it has none.
+	Left *uint `json:"left"`
+	// Right is the value of the right profile, or nil where it has none.
 	Right *uint `json:"right"`
 }
 
-// StringDiff represents a change in a string value.
+// StringDiff represents a change in a string value. The empty string
+// stands for no value.
 type StringDiff struct {
-	Left  string `json:"left"`
+	// Left is the value of the left profile.
+	Left string `json:"left"`
+	// Right is the value of the right profile.
 	Right string `json:"right"`
 }
 
@@ -97,33 +104,66 @@ type StringDiff struct {
 // [spm.SliceDiff], which the apparmor and landlock diffs name as well.
 type SliceDiff[T comparable] = spm.SliceDiff[T]
 
-// SyscallsDiff describes differences in the syscall entries.
+// SyscallsDiff describes differences in the syscall entries, compared per
+// syscall name by the rules a runtime loads for it.
 type SyscallsDiff struct {
-	Added   []SyscallEntry  `json:"added,omitempty"`
-	Removed []SyscallEntry  `json:"removed,omitempty"`
+	// Added holds the rules of the syscalls only the right profile loads
+	// rules for, one entry per rule, sorted by name and then as
+	// SyscallChange.Left orders the rules of one syscall.
+	Added []SyscallEntry `json:"added,omitempty"`
+	// Removed holds the rules of the syscalls only the left profile loads
+	// rules for, ordered as Added.
+	Removed []SyscallEntry `json:"removed,omitempty"`
+	// Changed holds the syscalls both profiles load rules for, with
+	// different rules, sorted by name.
 	Changed []SyscallChange `json:"changed,omitempty"`
 }
 
-// SyscallEntry represents a single syscall with its action and arguments.
+// SyscallEntry is one rule of one syscall: the action a call of that name
+// gets when it matches every condition of Args.
 type SyscallEntry struct {
-	Name     string                   `json:"name"`
-	Action   specs.LinuxSeccompAction `json:"action"`
-	ErrnoRet *uint                    `json:"errnoRet,omitempty"`
-	Args     []specs.LinuxSeccompArg  `json:"args,omitempty"`
+	// Name is the syscall name.
+	Name string `json:"name"`
+	// Action is the action of the rule. SCMP_ACT_KILL_THREAD is reported as
+	// SCMP_ACT_KILL, as a merge result spells it, since the two compare
+	// equal.
+	Action specs.LinuxSeccompAction `json:"action"`
+	// ErrnoRet is the errno the rule returns, set only for SCMP_ACT_ERRNO
+	// and SCMP_ACT_TRACE, where an unset value reads as EPERM (see the
+	// Errno values section of the package documentation).
+	ErrnoRet *uint `json:"errnoRet,omitempty"`
+	// Args are the conditions of the rule, sorted by argument index and
+	// written as libseccomp compares them; an unconditional rule has none.
+	Args []specs.LinuxSeccompArg `json:"args,omitempty"`
 }
 
-// SyscallChange represents a syscall present in both profiles with differences.
+// SyscallChange represents a syscall both profiles load rules for, with
+// different rules.
 type SyscallChange struct {
-	Name  string          `json:"name"`
-	Left  []SyscallDetail `json:"left"`
+	// Name is the syscall name.
+	Name string `json:"name"`
+	// Left holds the rules the left profile loads for the syscall, in the
+	// normal form Diff compares: rules equal to the profile default are left
+	// out, an unconditional rule hides the conditional ones and is then the
+	// only rule, and conditional rules are sorted by their conditions. For a
+	// syscall past the read budget (see the Cost bounds section of the
+	// package documentation) it holds instead the unconditional rules a
+	// collapse could pick: its most restrictive and its least restrictive
+	// action, each unless it equals the default, and one where they agree.
+	Left []SyscallDetail `json:"left"`
+	// Right holds the rules of the right profile, as Left holds the left's.
 	Right []SyscallDetail `json:"right"`
 }
 
-// SyscallDetail holds the action, errno, and args of a syscall entry.
+// SyscallDetail is one rule of the syscall a SyscallChange names. Its
+// fields mean what those of SyscallEntry mean.
 type SyscallDetail struct {
-	Action   specs.LinuxSeccompAction `json:"action"`
-	ErrnoRet *uint                    `json:"errnoRet,omitempty"`
-	Args     []specs.LinuxSeccompArg  `json:"args,omitempty"`
+	// Action is the action of the rule.
+	Action specs.LinuxSeccompAction `json:"action"`
+	// ErrnoRet is the errno of the rule, as in SyscallEntry.
+	ErrnoRet *uint `json:"errnoRet,omitempty"`
+	// Args are the conditions of the rule, as in SyscallEntry.
+	Args []specs.LinuxSeccompArg `json:"args,omitempty"`
 }
 
 // Diff compares two seccomp profiles by the rules a runtime loads from them
@@ -146,41 +186,20 @@ type SyscallDetail struct {
 // Architectures are compared with the architecture of the running program
 // (see NativeArchitecture) implied on both sides, so a profile destined for
 // another architecture compares differently here than on the target node;
-// use DiffForArch to name that architecture. See the Diff section of the
+// use Options.Diff to name that architecture. See the Diff section of the
 // package documentation.
+//
+// Diff compares the fields this package reads, so two profiles that differ
+// only in a field of a newer runtime-spec compare equal; Validate rejects
+// such a field (ErrUnsupportedSpecField).
 func Diff(left, right *specs.LinuxSeccomp) (*ProfileDiff, error) {
-	native, ok := NativeArchitecture()
-	if !ok {
-		// No architecture is implied, so every listed one is compared.
-		// Only a GOARCH with no seccomp architecture constant gets here,
-		// which no platform this module builds for has.
-		native = ""
-	}
-
-	return DiffForArch(native, left, right)
+	return Options{Arch: NativeHost}.Diff(left, right)
 }
 
-// DiffForArch compares two seccomp profiles as a node running the given
-// native architecture would load them, and is otherwise identical to Diff.
-// Runtimes always cover the native architecture whether or not a profile
-// lists it, so it is implied on both sides and never reported as a
-// difference. Pass the empty Arch to imply none, which compares the
-// architecture lists as written.
-//
-// Use this rather than Diff whenever the profiles are destined for a node
-// that may not run the same architecture as the caller, as a control plane
-// comparing profiles for a mixed-architecture cluster does. An architecture
-// this package does not know is reported with ErrUnknownArch, as
-// IntersectForArch reports it.
-func DiffForArch(
-	native specs.Arch, left, right *specs.LinuxSeccomp,
-) (*ProfileDiff, error) {
-	err := checkNative(native)
-	if err != nil {
-		return nil, err
-	}
-
-	err = merge.RequireNonNil(left, right)
+// diffProfiles compares two profiles with the given native architecture
+// implied on both sides, or none for the empty Arch.
+func diffProfiles(native specs.Arch, left, right *specs.LinuxSeccomp) (*ProfileDiff, error) {
+	err := merge.RequireNonNil(left, right)
 	if err != nil {
 		return nil, err
 	}
@@ -206,23 +225,9 @@ func DiffForArch(
 	return diff, nil
 }
 
-// DiffSyscalls compares two bare syscall slices and returns the syscall
-// portion of a profile diff, or nil when they are equal. Entries are
-// compared as described for Diff, except that without a profile default no
-// entry is ignored for equaling it. Multi-name entries are normalized to
-// one-name-per-entry and argument filters are sorted before comparison, so
-// entries differing only in filter order compare equal. This is the
-// syscall-slice analogue of Diff, matching IntersectSyscalls and
-// UnionSyscalls.
-//
-// This function does not validate its inputs.
-func DiffSyscalls(left, right []specs.LinuxSyscall) *SyscallsDiff {
-	return diffSyscallLists(left, right, nil, nil)
-}
-
 // diffSyscallLists compares two syscall lists by the rules a runtime loads
 // from them and returns nil when they are equal. leftDef and rightDef are
-// the profile defaults, or nil for bare lists.
+// the profile defaults.
 //
 // A syscall read in summarized form on either side (see collectRules) is
 // listed by the two clauses a collapse could pick rather than by its rules,
@@ -309,7 +314,7 @@ func loadedEntryKey(entry *specs.LinuxSyscall, def *clause) string {
 	var builder strings.Builder
 
 	for _, next := range entryClauses(entry) {
-		if def != nil && next.sameResult(*def) {
+		if next.sameResult(*def) {
 			continue
 		}
 
@@ -393,13 +398,12 @@ func equalUintPtr(first, second *uint) bool {
 func diffArchitectures(
 	diff *ProfileDiff, native specs.Arch, left, right *specs.LinuxSeccomp,
 ) {
-	added, removed := merge.DiffSlice(
+	diff.Architectures = merge.NewSliceDiff(
 		withoutNative(native, left.Architectures),
 		withoutNative(native, right.Architectures),
 	)
-	if len(added) > 0 || len(removed) > 0 {
+	if diff.Architectures != nil {
 		diff.Equal = false
-		diff.Architectures = &SliceDiff[specs.Arch]{Added: added, Removed: removed}
 	}
 }
 
@@ -416,10 +420,9 @@ func withoutNative(native specs.Arch, archs []specs.Arch) []specs.Arch {
 func diffFlags(
 	diff *ProfileDiff, left, right *specs.LinuxSeccomp,
 ) {
-	added, removed := merge.DiffSlice(loadedFlags(left.Flags), loadedFlags(right.Flags))
-	if len(added) > 0 || len(removed) > 0 {
+	diff.Flags = merge.NewSliceDiff(loadedFlags(left.Flags), loadedFlags(right.Flags))
+	if diff.Flags != nil {
 		diff.Equal = false
-		diff.Flags = &SliceDiff[specs.LinuxSeccompFlag]{Added: added, Removed: removed}
 	}
 }
 
@@ -512,7 +515,7 @@ func collectChangedSyscalls(
 
 // buildSyscallMap expands syscall entries into the per-name entries a
 // runtime loads from them, in the normal form the merge produces. def is
-// the profile default, or nil for bare syscall lists.
+// the profile default.
 func buildSyscallMap(
 	syscalls []specs.LinuxSyscall, def *clause,
 ) map[string][]SyscallEntry {
@@ -689,15 +692,8 @@ func writeScalarDiffs(out *merge.Builder, parts *merge.Joiner, diff *ProfileDiff
 }
 
 func writeSliceDiffs(out *merge.Builder, parts *merge.Joiner, diff *ProfileDiff) {
-	if diff.Architectures != nil {
-		parts.Next()
-		merge.WriteSliceDiff(out, "arch", *diff.Architectures)
-	}
-
-	if diff.Flags != nil {
-		parts.Next()
-		merge.WriteSliceDiff(out, "flags", *diff.Flags)
-	}
+	merge.WriteSliceDiff(out, parts, "arch", diff.Architectures)
+	merge.WriteSliceDiff(out, parts, "flags", diff.Flags)
 }
 
 func writeListenerDiffs(out *merge.Builder, parts *merge.Joiner, diff *ProfileDiff) {

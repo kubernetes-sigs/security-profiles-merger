@@ -88,10 +88,10 @@ var (
 	// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, which belong to a node-local
 	// listener that an artifact must not control.
 	ErrListenerNotAllowed = errors.New("listener settings are not allowed")
-	// ErrTooManyEntries is returned by ValidateArtifact and ValidateStrict
-	// when one syscall name appears in more than
+	// ErrTooManyEntriesPerSyscall is returned by ValidateArtifact and
+	// ValidateStrict when one syscall name appears in more than
 	// MaxArtifactEntriesPerSyscall entries.
-	ErrTooManyEntries = errors.New("too many entries for syscall")
+	ErrTooManyEntriesPerSyscall = errors.New("too many entries for syscall")
 	// ErrErrnoOutOfRange is returned when errnoRet or defaultErrnoRet
 	// exceeds the largest errno the kernel can return, on an action that
 	// returns it (SCMP_ACT_ERRNO or SCMP_ACT_TRACE).
@@ -119,17 +119,17 @@ var (
 	// an order of its own (see the package documentation). A runtime fails
 	// to load many such entries, and silently drops or reorders the others.
 	ErrConflictingEntries = errors.New("conflicting entries")
-	// ErrTooManyClauses is returned by ValidateArtifact and ValidateStrict
-	// when one syscall loads more than MaxArtifactClausesPerSyscall rules.
-	ErrTooManyClauses = errors.New("too many rules for syscall")
-	// ErrTooManyNames is returned by ValidateArtifact and ValidateStrict
-	// when one syscall entry carries more than MaxArtifactNamesPerEntry
-	// names.
-	ErrTooManyNames = errors.New("too many syscall names in entry")
-	// ErrTooManyProfileClauses is returned by ValidateArtifact and
-	// ValidateStrict when the profile as a whole loads more than
-	// MaxArtifactClauses rules.
-	ErrTooManyProfileClauses = errors.New("too many rules in profile")
+	// ErrTooManyRulesPerSyscall is returned by ValidateArtifact and
+	// ValidateStrict when one syscall loads more than
+	// MaxArtifactRulesPerSyscall rules.
+	ErrTooManyRulesPerSyscall = errors.New("too many rules for syscall")
+	// ErrTooManyNamesPerEntry is returned by ValidateArtifact and
+	// ValidateStrict when one syscall entry carries more than
+	// MaxArtifactNamesPerEntry names.
+	ErrTooManyNamesPerEntry = errors.New("too many syscall names in entry")
+	// ErrTooManyRules is returned by ValidateArtifact and ValidateStrict
+	// when the profile as a whole loads more than MaxArtifactRules rules.
+	ErrTooManyRules = errors.New("too many rules in profile")
 	// ErrTooManyProfileEntries is returned by ValidateArtifact and
 	// ValidateStrict when a profile holds more than MaxArtifactEntries
 	// syscall entries.
@@ -153,27 +153,27 @@ var (
 
 // MaxArtifactEntriesPerSyscall bounds how many entries may name the same
 // syscall in a profile accepted by ValidateArtifact, which reports
-// ErrTooManyEntries past it. Real profiles use a handful of
+// ErrTooManyEntriesPerSyscall past it. Real profiles use a handful of
 // argument-filtered entries per syscall.
 //
-// The cap bounds one syscall, not the profile: MaxArtifactClauses bounds the
+// The cap bounds one syscall, not the profile: MaxArtifactRules bounds the
 // profile as a whole (see the Cost bounds section of the package
 // documentation).
 const MaxArtifactEntriesPerSyscall = 128
 
 // MaxArtifactNamesPerEntry bounds how many syscall names one entry may carry
-// in a profile accepted by ValidateArtifact, which reports ErrTooManyNames
-// past it. Linux has well under a thousand syscalls, and a profile covering
-// all of them names each one once.
+// in a profile accepted by ValidateArtifact, which reports
+// ErrTooManyNamesPerEntry past it. Linux has well under a thousand syscalls,
+// and a profile covering all of them names each one once.
 //
 // An entry loads one rule per name, so this bounds the expansion of a single
 // entry, which the per-syscall caps do not: they count per name.
 const MaxArtifactNamesPerEntry = 1024
 
-// MaxArtifactClauses bounds how many rules a profile accepted by
+// MaxArtifactRules bounds how many rules a profile accepted by
 // ValidateArtifact loads in total, counted the way
-// MaxArtifactClausesPerSyscall counts them for one syscall.
-// ValidateArtifact reports ErrTooManyProfileClauses past it.
+// MaxArtifactRulesPerSyscall counts them for one syscall.
+// ValidateArtifact reports ErrTooManyRules past it.
 //
 // The rules of a profile grow as the product of its name and condition
 // counts rather than with its size, and the per-syscall caps bound only one
@@ -181,25 +181,26 @@ const MaxArtifactNamesPerEntry = 1024
 // pass both caps, and load ten million rules, which cost the merge seconds
 // and gigabytes. This cap is what keeps a merge of an accepted artifact
 // proportional to the size of the file it came in.
-const MaxArtifactClauses = 16384
+const MaxArtifactRules = 16384
 
 // MaxArtifactEntries bounds how many syscall entries a profile accepted by
-// ValidateArtifact may hold, which reports ErrTooManyProfileEntries past it.
+// ValidateArtifact may hold, which reports ErrTooManyProfileEntries past
+// it.
 // An entry that loads anything loads at least one rule, so an artifact
-// within MaxArtifactClauses needs no more entries than that. Only entries
+// within MaxArtifactRules needs no more entries than that. Only entries
 // that load nothing can exceed it, such as entries equal to the default or
 // without names, and each costs every check a step of its own: a document of
 // a few megabytes holds millions of "{}".
-const MaxArtifactEntries = MaxArtifactClauses
+const MaxArtifactEntries = MaxArtifactRules
 
-// MaxArtifactClausesPerSyscall bounds how many rules one syscall may load in
-// a profile accepted by ValidateArtifact, which reports ErrTooManyClauses
-// past it. Rules are counted the way runtimes add them: one per entry naming
-// the syscall, except that an entry repeating an argument index adds one
-// rule per condition, and entries equal to the default add none. It thereby
-// also bounds the conditions of such an entry. Every other entry has at most
-// one condition per argument index, so at most six once Validate limits
-// indices to 0-5.
+// MaxArtifactRulesPerSyscall bounds how many rules one syscall may load in
+// a profile accepted by ValidateArtifact, which reports
+// ErrTooManyRulesPerSyscall past it. Rules are counted the way runtimes add
+// them: one per entry naming the syscall, except that an entry repeating an
+// argument index adds one rule per condition, and entries equal to the
+// default add none. It thereby also bounds the conditions of such an entry.
+// Every other entry has at most one condition per argument index, so at
+// most six once Validate limits indices to 0-5.
 //
 // Intersect compares every rule of a syscall against every rule for it on
 // the other side, and collapses the syscall to its most restrictive action
@@ -208,7 +209,7 @@ const MaxArtifactEntries = MaxArtifactClauses
 // baseline with a dozen filtered entries for the same syscall, so an
 // artifact within the bound is merged precisely there, and one beyond it is
 // rejected here rather than silently denied the syscall.
-const MaxArtifactClausesPerSyscall = 256
+const MaxArtifactRulesPerSyscall = 256
 
 // Validate checks that a seccomp profile contains only known actions and
 // that every syscall entry has non-empty names, known argument operators,
@@ -217,8 +218,10 @@ const MaxArtifactClausesPerSyscall = 256
 // listenerPath it needs, which is what a runtime needs to load the profile
 // at all. It also rejects a syscall name holding a NUL byte
 // (ErrInvalidSyscallName), which a runtime loads as another name than the
-// merges read. It is what Intersect and Union run on every input, so
-// callers that want to report all problems up front can call it themselves.
+// merges read, and a field of the runtime-spec types this package does not
+// read (ErrUnsupportedSpecField), which a merge would drop. It is what
+// Intersect and Union run on every input, so callers that want to report
+// all problems up front can call it themselves.
 //
 // Failures are collected and returned together, up to a bound: past it the
 // error matches ErrMoreProblems instead of listing the rest, so a sentinel
@@ -245,6 +248,7 @@ func Validate(profile *specs.LinuxSeccomp) error {
 	errs.Add(validateArchitectures(profile.Architectures))
 	errs.Add(validateFlags(profile.Flags))
 	errs.Add(validateNotifySupport(profile))
+	errs.Add(validateSpecFields(profile))
 
 	for idx := range profile.Syscalls {
 		if len(profile.Syscalls[idx].Names) == 0 {
@@ -335,25 +339,11 @@ func validateNotifySupport(profile *specs.LinuxSeccomp) error {
 // ErrListenerNotAllowed). Merge results are not meant to pass it either,
 // since they often list one syscall in several entries; check them with
 // Validate.
+//
+// Its result depends on the native architecture of the running program, as
+// that of ValidateArtifact does; Options.ValidateStrict names another.
 func ValidateStrict(profile *specs.LinuxSeccomp) error {
-	native := runningArchitecture()
-
-	return validateWith(profile, strictChecks(native), syscallRuleCheck(native))
-}
-
-// ValidateStrictForArch checks a profile as ValidateStrict does on a node
-// whose native architecture is the given one, and is otherwise identical to
-// it. It accepts only what ValidateArtifactForArch accepts for the same
-// architecture, which keeps the lattice of the three validators where the
-// check does not run on the node that loads the profile. The native
-// architecture is taken as ValidateArtifactForArch takes it.
-func ValidateStrictForArch(native specs.Arch, profile *specs.LinuxSeccomp) error {
-	err := checkNative(native)
-	if err != nil {
-		return err
-	}
-
-	return validateWith(profile, strictChecks(native), syscallRuleCheck(native))
+	return Options{Arch: NativeHost}.ValidateStrict(profile)
 }
 
 // strictChecks returns the checks ValidateStrict runs besides Validate, for
@@ -382,12 +372,13 @@ func strictChecks(native specs.Arch) []profileCheck {
 //     covers a 32-bit architecture, one the profile lists or the native
 //     architecture of the running program (ErrValueTooWide);
 //   - a profile past MaxArtifactEntries, MaxArtifactNamesPerEntry or
-//     MaxArtifactClauses (ErrTooManyProfileEntries, ErrTooManyNames,
-//     ErrTooManyProfileClauses), which are checked before anything else and
+//     MaxArtifactRules (ErrTooManyProfileEntries, ErrTooManyNamesPerEntry,
+//     ErrTooManyRules), which are checked before anything else and
 //     reported on their own, since every other check costs a step per entry
 //     or name;
 //   - a profile past MaxArtifactEntriesPerSyscall or
-//     MaxArtifactClausesPerSyscall (ErrTooManyEntries, ErrTooManyClauses);
+//     MaxArtifactRulesPerSyscall (ErrTooManyEntriesPerSyscall,
+//     ErrTooManyRulesPerSyscall);
 //   - rules of one syscall with different results where the filter of one
 //     is equal to or wider than the other's, or where the conditional rules
 //     do not form a safe shape (ErrConflictingEntries).
@@ -404,28 +395,13 @@ func strictChecks(native specs.Arch) []profileCheck {
 // load the result of intersecting it with their baseline rather than the
 // artifact itself. See the Conflicting rules, Cost bounds and Architectures
 // sections of the package documentation.
+//
+// What it reports depends on the native architecture of the running program
+// (ErrValueTooWide, and the conflicts on a multiplexer), so run it on the
+// node that loads the result, or name that node's architecture with
+// Options.ValidateArtifact.
 func ValidateArtifact(profile *specs.LinuxSeccomp) error {
-	native := runningArchitecture()
-
-	return validateWith(profile, artifactChecks(native), syscallRuleCheck(native))
-}
-
-// ValidateArtifactForArch checks an artifact as ValidateArtifact does on a
-// node whose native architecture is the given one, and is otherwise
-// identical to it. The native architecture decides whether the filter
-// covers a 32-bit architecture, and so whether a value above 32 bits is
-// reported (ErrValueTooWide). Use it with IntersectForArch where the check
-// does not run on the node that loads the result. The empty Arch implies
-// none, as IntersectForArch takes it, so that only the listed architectures
-// decide. An architecture this package does not know is reported with
-// ErrUnknownArch.
-func ValidateArtifactForArch(native specs.Arch, profile *specs.LinuxSeccomp) error {
-	err := checkNative(native)
-	if err != nil {
-		return err
-	}
-
-	return validateWith(profile, artifactChecks(native), syscallRuleCheck(native))
+	return Options{Arch: NativeHost}.ValidateArtifact(profile)
 }
 
 // artifactChecks returns the checks ValidateArtifact runs besides Validate,
@@ -728,7 +704,7 @@ func syscallRuleCheck(native specs.Arch) profileCheck {
 }
 
 // validateSyscallRules checks the rules each syscall loads: their count
-// (MaxArtifactClausesPerSyscall) and, for syscalls within that bound,
+// (MaxArtifactRulesPerSyscall) and, for syscalls within that bound,
 // conflicts between them (see ValidateArtifact), on the syscall and, where
 // the profile covers an architecture that multiplexes it, on the
 // multiplexer. Rules are expanded the way a runtime adds them: entries equal
@@ -752,7 +728,7 @@ func validateSyscallRules(profile *specs.LinuxSeccomp, native specs.Arch) error 
 	// Past the profile-wide bound, expanding the entries is the very work
 	// that bound exists to prevent. validateWith runs this only after
 	// validateProfileSize has passed, which checks that bound first.
-	if sumCounts(checker.counts) <= MaxArtifactClauses {
+	if sumCounts(checker.counts) <= MaxArtifactRules {
 		forEachClause(profile.Syscalls, def, checker.skip, checker.record)
 		checker.checkShapes()
 
@@ -768,7 +744,7 @@ func validateSyscallRules(profile *specs.LinuxSeccomp, native specs.Arch) error 
 // hold, the names one entry may carry and the rules the profile may load.
 // The per-syscall caps count per name, so neither of them bounds an entry
 // that names a hundred thousand syscalls, and the rules such a profile loads
-// are the product of its name and condition counts (see MaxArtifactClauses).
+// are the product of its name and condition counts (see MaxArtifactRules).
 // It counts the rules without expanding the entries, so it costs one pass
 // over the profile and allocates only for what it reports, and none for a
 // profile past MaxArtifactEntries, which it reports without reading.
@@ -787,18 +763,18 @@ func validateProfileSize(profile *specs.LinuxSeccomp) error {
 			errs.Report(func() error {
 				return fmt.Errorf(
 					"syscall entry %d: %w (%d, max %d)",
-					idx, ErrTooManyNames, names, MaxArtifactNamesPerEntry,
+					idx, ErrTooManyNamesPerEntry, names, MaxArtifactNamesPerEntry,
 				)
 			})
 		}
 	}
 
 	total := totalClauses(profile.Syscalls, defaultClause(profile))
-	if total > MaxArtifactClauses {
+	if total > MaxArtifactRules {
 		errs.Report(func() error {
 			return fmt.Errorf(
 				"profile: %w (%d, max %d)",
-				ErrTooManyProfileClauses, total, MaxArtifactClauses,
+				ErrTooManyRules, total, MaxArtifactRules,
 			)
 		})
 	}
@@ -823,7 +799,7 @@ func (c *ruleChecker) checkCounts() {
 	var over []string
 
 	for name, count := range c.counts {
-		if count > MaxArtifactClausesPerSyscall {
+		if count > MaxArtifactRulesPerSyscall {
 			over = append(over, name)
 		}
 	}
@@ -834,8 +810,8 @@ func (c *ruleChecker) checkCounts() {
 		c.errs.Report(func() error {
 			return fmt.Errorf(
 				"syscall %s: %w (%d, max %d)",
-				merge.QuoteBounded(name), ErrTooManyClauses,
-				c.counts[name], MaxArtifactClausesPerSyscall,
+				merge.QuoteBounded(name), ErrTooManyRulesPerSyscall,
+				c.counts[name], MaxArtifactRulesPerSyscall,
 			)
 		})
 	}
@@ -858,7 +834,7 @@ func (c *ruleChecker) conflict(idx int, name string) {
 func (c *ruleChecker) skip(name string) bool {
 	_, done := c.reported[name]
 
-	return done || c.counts[name] > MaxArtifactClausesPerSyscall
+	return done || c.counts[name] > MaxArtifactRulesPerSyscall
 }
 
 // record checks the rule an entry adds for a syscall against the rules
@@ -1052,7 +1028,7 @@ func validateEntryCount(profile *specs.LinuxSeccomp) error {
 			errs.Report(func() error {
 				return fmt.Errorf(
 					"syscall %s: %w (%d, max %d)",
-					merge.QuoteBounded(name), ErrTooManyEntries, counts[name],
+					merge.QuoteBounded(name), ErrTooManyEntriesPerSyscall, counts[name],
 					MaxArtifactEntriesPerSyscall,
 				)
 			})

@@ -67,7 +67,7 @@ func assertLinear(t *testing.T, what string, size int, measure func(size int) fu
 //
 //nolint:paralleltest // allocatedBytes needs the runtime to itself
 func TestIntersectNestedRulesScaleLinearly(t *testing.T) {
-	all := landlock.KnownFSRights()
+	all := knownRights(landlock.FSAccessRights())
 	baseline := fsProfile(all,
 		landlock.PathRule{Path: "/", AccessFS: all},
 		landlock.PathRule{Path: "/b", AccessFS: all},

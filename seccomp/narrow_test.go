@@ -83,7 +83,7 @@ func TestMergesReadRulesUnconditionalOn32Bit(t *testing.T) {
 			"intersection": {baseline, artifact},
 			"normal form":  {baseline},
 		} {
-			result, err := seccomp.IntersectForArch(testCase.native, inputs...)
+			result, err := forNode(testCase.native).Intersect(inputs...)
 			if err != nil {
 				t.Fatalf("%s: %s: %v", testCase.name, name, err)
 			}
@@ -99,7 +99,7 @@ func TestMergesReadRulesUnconditionalOn32Bit(t *testing.T) {
 		filtered("msgget", specs.ActErrno))
 	input.Architectures = []specs.Arch{specs.ArchX86_64, specs.ArchX32}
 
-	result, err := seccomp.UnionForArch(specs.ArchX86_64, input, profileOf(specs.ActTrap))
+	result, err := seccomp.Options{Arch: specs.ArchX86_64}.Union(input, profileOf(specs.ActTrap))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestMergesPickBetweenTheTwoRulesOn32Bit(t *testing.T) {
 	for _, testCase := range []struct {
 		name    string
 		native  specs.Arch
-		merge   func(specs.Arch, ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error)
+		merge   func(seccomp.Options, ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error)
 		profile *specs.LinuxSeccomp
 		others  []*specs.LinuxSeccomp
 		syscall string
@@ -134,7 +134,7 @@ func TestMergesPickBetweenTheTwoRulesOn32Bit(t *testing.T) {
 	}{
 		{
 			name: "intersection picks the stricter rule", native: specs.ArchX86,
-			merge: seccomp.IntersectForArch,
+			merge: seccomp.Options.Intersect,
 			profile: listing(specs.ActErrno,
 				filtered("personality", specs.ActLog, masked(0, upperHalfMask, 0)),
 				filtered("personality", specs.ActAllow)),
@@ -142,7 +142,7 @@ func TestMergesPickBetweenTheTwoRulesOn32Bit(t *testing.T) {
 		},
 		{
 			name: "union picks the looser rule", native: specs.ArchX86,
-			merge: seccomp.UnionForArch,
+			merge: seccomp.Options.Union,
 			profile: listing(specs.ActLog,
 				filtered("personality", specs.ActKillProcess, masked(0, upperHalfMask, 0)),
 				filtered("personality", specs.ActErrno)),
@@ -150,7 +150,7 @@ func TestMergesPickBetweenTheTwoRulesOn32Bit(t *testing.T) {
 		},
 		{
 			name: "equality above 32 bits keeps a lower half", native: specs.ArchX86,
-			merge: seccomp.IntersectForArch,
+			merge: seccomp.Options.Intersect,
 			profile: listing(specs.ActErrno,
 				filtered("personality", specs.ActKillProcess, arg(0, specs.OpEqualTo, 1<<32)),
 				filtered("personality", specs.ActAllow)),
@@ -160,7 +160,7 @@ func TestMergesPickBetweenTheTwoRulesOn32Bit(t *testing.T) {
 			// The pick keeps the multiplexer path of socket on x86 safe,
 			// so x86 stays, and the syscall is read as it loads there.
 			name: "multiplexed syscall", native: specs.ArchX86_64,
-			merge: seccomp.IntersectForArch,
+			merge: seccomp.Options.Intersect,
 			profile: listing(specs.ActKillProcess,
 				filtered("socket", specs.ActTrap, masked(0, 0xffff000000000000, 1<<32)),
 				filtered("socket", specs.ActAllow)),
@@ -170,7 +170,7 @@ func TestMergesPickBetweenTheTwoRulesOn32Bit(t *testing.T) {
 		for _, inputs := range [][]*specs.LinuxSeccomp{
 			{testCase.profile}, append([]*specs.LinuxSeccomp{testCase.profile}, testCase.others...),
 		} {
-			result, err := testCase.merge(testCase.native, inputs...)
+			result, err := testCase.merge(forNode(testCase.native), inputs...)
 			if err != nil {
 				t.Fatalf("%s: %v", testCase.name, err)
 			}
@@ -195,7 +195,7 @@ func TestUnionReadsEachInputByItsOwnArchitectures(t *testing.T) {
 	narrow := profileOf(specs.ActKillProcess)
 	narrow.Architectures = []specs.Arch{specs.ArchX86}
 
-	result, err := seccomp.UnionForArch(specs.ArchX86_64, wide, narrow)
+	result, err := seccomp.Options{Arch: specs.ArchX86_64}.Union(wide, narrow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,12 +218,12 @@ func TestDiffShowsTheSettledRuleOn32Bit(t *testing.T) {
 		t.Fatal("personality is not in a safe shape")
 	}
 
-	settled, err := seccomp.IntersectForArch(specs.ArchX86_64, profile)
+	settled, err := seccomp.Options{Arch: specs.ArchX86_64}.Intersect(profile)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	diff, err := seccomp.DiffForArch(specs.ArchX86_64, profile, settled)
+	diff, err := seccomp.Options{Arch: specs.ArchX86_64}.Diff(profile, settled)
 	if err != nil {
 		t.Fatal(err)
 	}

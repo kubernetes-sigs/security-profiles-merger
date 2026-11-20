@@ -234,8 +234,8 @@ func archMergeCase(t *testing.T, left, right *specs.LinuxSeccomp) mergeCase {
 		}
 
 		for _, direction := range []libseccompDirection{
-			nativeDirection(intersectDirection(), native, seccomp.IntersectForArch),
-			nativeDirection(unionDirection(), native, seccomp.UnionForArch),
+			nativeDirection(intersectDirection(), native, seccomp.Options.Intersect),
+			nativeDirection(unionDirection(), native, seccomp.Options.Union),
 		} {
 			result, err := direction.merge(left, right)
 			if refusedLostRules(err) {
@@ -258,13 +258,13 @@ func archMergeCase(t *testing.T, left, right *specs.LinuxSeccomp) mergeCase {
 // architecture merges.
 func nativeDirection(
 	direction libseccompDirection, native specs.Arch,
-	merge func(specs.Arch, ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error),
+	merge func(seccomp.Options, ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error),
 ) libseccompDirection {
 	direction.name += " on " + string(native)
 	running, _ := seccomp.NativeArchitecture()
 	direction.foreign = native != running
 	direction.merge = func(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
-		return merge(native, profiles...)
+		return merge(forNode(native), profiles...)
 	}
 
 	return direction
@@ -909,7 +909,7 @@ func TestMergeResultsKeepRulesBehindAnAbsentSyscall(t *testing.T) {
 			}
 
 			for _, order := range [][]*specs.LinuxSeccomp{{baseline, artifact}, {artifact, baseline}} {
-				result, err := seccomp.IntersectForArch(testCase.mergeFor, order...)
+				result, err := forNode(testCase.mergeFor).Intersect(order...)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -971,9 +971,9 @@ func TestMergesDropX86_64WhereX32IsNativeAgainstLibseccomp(t *testing.T) {
 	artifact := profileOf(specs.ActAllow, filtered("socketcall", specs.ActErrno))
 	artifact.Architectures = archs
 
-	result, err := seccomp.IntersectForArch(specs.ArchX32, baseline, artifact)
+	result, err := seccomp.Options{Arch: specs.ArchX32}.Intersect(baseline, artifact)
 	if err != nil {
-		t.Fatalf("IntersectForArch: %v", err)
+		t.Fatalf("Options.Intersect: %v", err)
 	}
 
 	prog, err := libseccomp.CompileListedOnly(result, t.TempDir())

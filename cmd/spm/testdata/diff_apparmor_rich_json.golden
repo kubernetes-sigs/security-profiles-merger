@@ -1,24 +1,26 @@
 {
   "equal": false,
-  "executables": {
-    "added": [
-      "/usr/bin/python"
-    ],
-    "removed": [
-      "/usr/bin/bash",
-      "/usr/bin/tar"
-    ]
-  },
-  "libraries": {
-    "added": [
-      "/usr/lib/libssl.so"
-    ],
-    "removed": [
-      "/usr/lib/libz.so"
-    ]
+  "executable": {
+    "allowedExecutables": {
+      "added": [
+        "/usr/bin/python"
+      ],
+      "removed": [
+        "/usr/bin/bash",
+        "/usr/bin/tar"
+      ]
+    },
+    "allowedLibraries": {
+      "added": [
+        "/usr/lib/libssl.so"
+      ],
+      "removed": [
+        "/usr/lib/libz.so"
+      ]
+    }
   },
   "filesystem": {
-    "readOnly": {
+    "readOnlyPaths": {
       "added": [
         "/var/log"
       ],
@@ -27,12 +29,12 @@
         "/usr/share"
       ]
     },
-    "writeOnly": {
+    "writeOnlyPaths": {
       "added": [
         "/var/log/audit.log"
       ]
     },
-    "readWrite": {
+    "readWritePaths": {
       "removed": [
         "/run/app"
       ]
@@ -43,17 +45,21 @@
       "left": false,
       "right": true
     },
-    "allowUdp": {
-      "left": false,
-      "right": true
+    "allowedProtocols": {
+      "allowUdp": {
+        "left": false,
+        "right": true
+      }
     }
   },
-  "capabilities": {
-    "added": [
-      "SETUID"
-    ],
-    "removed": [
-      "SYS_TIME"
-    ]
+  "capability": {
+    "allowedCapabilities": {
+      "added": [
+        "SETUID"
+      ],
+      "removed": [
+        "SYS_TIME"
+      ]
+    }
   }
 }

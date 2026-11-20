@@ -34,11 +34,9 @@ var (
 	ErrNoProfiles = spm.ErrNoProfiles
 	// ErrNilProfile is returned when a nil profile is provided.
 	ErrNilProfile = spm.ErrNilProfile
-	// ErrMoreProblems is returned alongside the failures a report lists
-	// when it left others out: every validator bounds how many it reports,
-	// since a profile holds as many as it holds rules. A caller matching a
-	// sentinel must read a match here as "and possibly others", because a
-	// failure the profile holds can be absent from the error reporting it.
+	// ErrMoreProblems is spm.ErrMoreProblems, which a validation report
+	// matches when it left failures out: read a match as "and possibly
+	// others" before dispatching on another sentinel.
 	ErrMoreProblems = spm.ErrMoreProblems
 	// ErrNotifyWithoutListener is returned by Validate for a profile that
 	// applies SCMP_ACT_NOTIFY while naming no listener to hand the
@@ -77,9 +75,11 @@ var (
 	ErrLostRules = errors.New("libseccomp would lose the rules of an architecture")
 )
 
-// InputError is returned by Intersect and Union when one of the profiles
-// they were given fails validation or names a listener the merge refuses
-// (ErrConflictingListener), naming its position among the arguments.
+// InputError is [spm.InputError], the error a merge or Diff returns for
+// one of its inputs, naming it by its position among the arguments. See
+// spm.InputError for its fields, and for the errors a merge returns without
+// it. In this package it also wraps ErrConflictingListener, naming the
+// later of two inputs that name different listeners.
 type InputError = spm.InputError
 
 // Intersect merges seccomp profiles via intersection: the result permits a
@@ -106,7 +106,8 @@ type InputError = spm.InputError
 // 32-bit and multiplexing architectures may be dropped from the list, as
 // may one whose rules libseccomp would lose to a syscall it lacks, and
 // the result depends on the native architecture of the running program, so
-// run Intersect on the node that loads its result (see Architectures).
+// run Intersect on the node that loads its result, or name that node's
+// architecture with Options.Intersect (see Architectures).
 // SECCOMP_FILTER_FLAG_SPEC_ALLOW survives only if every input sets it and
 // SECCOMP_FILTER_FLAG_LOG if any does (see Flags). A single profile is
 // normalized (see Single profiles).
@@ -124,7 +125,7 @@ type InputError = spm.InputError
 // This implements the merge KEP-6061 defines for a CRI runtime combining an
 // artifact with its baseline.
 func Intersect(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
-	return foldProfiles(profiles, intersectRules())
+	return Options{Arch: NativeHost}.Intersect(profiles...)
 }
 
 // Union merges seccomp profiles via union: the result permits a call if
@@ -155,56 +156,7 @@ func Intersect(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 // This implements the merge the Security Profiles Operator uses to combine
 // recorded profiles.
 func Union(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
-	return foldProfiles(profiles, unionRules())
-}
-
-// IntersectForArch merges as Intersect does on a node whose native
-// architecture is the given one, and is otherwise identical to it.
-//
-// Intersect settles the result for the architecture of the running program,
-// which a runtime always adds to the filter: the 32-bit and multiplexing
-// architectures are read differently where one of them is native (see the
-// Architectures section of the package documentation). Use this where the
-// merge does not run on the node that loads its result, as in a control
-// plane merging for a node of another architecture. Pass the empty Arch to
-// imply none, as DiffForArch takes it and as Intersect runs on a platform
-// without a native architecture: the result is then settled by the listed
-// architectures alone. An architecture this package does not know is
-// reported with ErrUnknownArch.
-func IntersectForArch(
-	native specs.Arch, profiles ...*specs.LinuxSeccomp,
-) (*specs.LinuxSeccomp, error) {
-	err := checkNative(native)
-	if err != nil {
-		return nil, err
-	}
-
-	return foldProfiles(profiles, intersectRulesFor(native))
-}
-
-// UnionForArch merges as Union does on a node whose native architecture is
-// the given one, and is otherwise identical to it. See IntersectForArch.
-func UnionForArch(
-	native specs.Arch, profiles ...*specs.LinuxSeccomp,
-) (*specs.LinuxSeccomp, error) {
-	err := checkNative(native)
-	if err != nil {
-		return nil, err
-	}
-
-	return foldProfiles(profiles, unionRulesFor(native))
-}
-
-// checkNative reports a native architecture this package does not know. The
-// empty Arch implies none and passes.
-func checkNative(native specs.Arch) error {
-	if native != "" && !isKnownArch(native) {
-		return fmt.Errorf(
-			"native architecture: %w %s", ErrUnknownArch, merge.QuoteBounded(string(native)),
-		)
-	}
-
-	return nil
+	return Options{Arch: NativeHost}.Union(profiles...)
 }
 
 func foldProfiles(
@@ -634,48 +586,4 @@ func regroupSyscalls(syscalls []specs.LinuxSyscall) []specs.LinuxSyscall {
 
 func groupKey(entry *specs.LinuxSyscall) string {
 	return resultKey(entry.Action, entry.ErrnoRet, argsKey(entry.Args))
-}
-
-// UnionSyscalls merges two syscall lists via union, following the rules of
-// Union, including how errno values are compared and spelled, but without a
-// profile-level DefaultAction, so no entry is elided for equaling it.
-//
-// The result is only meaningful relative to the default the caller loads it
-// with. UnionSyscalls assumes that this default is the same for both lists
-// and the result, and more restrictive than every action in them, as in an
-// allowlist. Under that assumption the result never permits less than
-// either list. A syscall whose rules do not form a safe shape collapses to
-// its least restrictive action. Without a profile there are no
-// architectures, so the result gets none of the settling Union applies for
-// 32-bit or multiplexing architectures. The result is grouped and ordered
-// as Union orders it. See the Bare syscall lists section of the package
-// documentation.
-//
-// This function does not validate its inputs. Callers should ensure that
-// actions are known, that every entry has at least one name and that no
-// name holds a NUL byte, or call Validate on the enclosing profile first.
-func UnionSyscalls(left, right []specs.LinuxSyscall) []specs.LinuxSyscall {
-	return regroupSyscalls(unionRules().mergeBareSyscalls(left, right))
-}
-
-// IntersectSyscalls merges two syscall lists via intersection, following
-// the rules of Intersect, including how errno values are compared and
-// spelled, but without a profile-level DefaultAction.
-//
-// It makes the assumption UnionSyscalls makes about the caller's default,
-// and under it the result never permits more than either list. Calls a list
-// leaves to the default are left to it: syscalls present in only one list
-// are dropped, a conditional entry survives only where the other list
-// constrains every call it matches, and a syscall that does not form a safe
-// shape or exceeds the pair budget is dropped. Without a profile there are
-// no architectures, so the result gets none of the settling Intersect
-// applies for 32-bit or multiplexing architectures. The result is grouped
-// and ordered as Intersect orders it. See the Bare syscall lists section of
-// the package documentation.
-//
-// This function does not validate its inputs. Callers should ensure that
-// actions are known, that every entry has at least one name and that no
-// name holds a NUL byte, or call Validate on the enclosing profile first.
-func IntersectSyscalls(left, right []specs.LinuxSyscall) []specs.LinuxSyscall {
-	return regroupSyscalls(intersectRules().mergeBareSyscalls(left, right))
 }

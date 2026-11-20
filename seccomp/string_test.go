@@ -414,7 +414,7 @@ func manyNames(entries int, action specs.LinuxSeccompAction) *specs.LinuxSeccomp
 //nolint:paralleltest // it reads the allocation counters of the whole process
 func TestFormattersAreBounded(t *testing.T) {
 	ignored := manyNames(215, specs.ActErrno)
-	loaded := manyNames(seccomp.MaxArtifactClauses/seccomp.MaxArtifactNamesPerEntry, specs.ActAllow)
+	loaded := manyNames(seccomp.MaxArtifactRules/seccomp.MaxArtifactNamesPerEntry, specs.ActAllow)
 
 	for name, artifact := range map[string]*specs.LinuxSeccomp{"ignored": ignored, "loaded": loaded} {
 		err := seccomp.ValidateArtifact(artifact)

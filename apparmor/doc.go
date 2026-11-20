@@ -345,18 +345,24 @@ limitations under the License.
 // times the length of the name, so the work summed over every pair is up to
 // the product of the bytes the two sides hold. Both merges bound the number
 // of pairs (the pair budget) and that work (the work budget). Past either
-// budget an intersection keeps only the paths both sides spell alike, which
-// permits no more than the exact intersection would, and a union keeps
-// every path of both sides with the permissions its own side grants, which
+// budget the exact intersection is out of reach, and the paths both sides
+// spell alike, which is all an intersection could keep without matching,
+// may deny more than the inputs do, so [Intersect] fails with
+// [ErrBudgetExceeded] instead of returning them when the result may lose
+// access, which it reads as neither input being kept whole: a profile
+// intersected with itself succeeds, and an artifact asking for a path the
+// baseline lacks fails, although the exact intersection would only drop
+// that path. A union keeps every
+// path of both sides with the permissions its own side grants, which
 // permits exactly what the reduced union does: the literals the reduction
 // drops or raises are the ones a pattern of the other side already covers,
-// and that pattern is kept either way.
+// and that pattern is kept either way, so [Union] succeeds past the budget.
 //
 // [MaxArtifactPaths] keeps two artifacts inside the pair budget, and keeps
 // an artifact whose paths are a few dozen bytes long inside the work budget
 // against a baseline of a few kilobytes of paths. Two artifacts of that size
-// merged with each other, or a profile of long paths, may exceed the work
-// budget and be merged conservatively instead.
+// intersected with each other, or a profile of long paths, may exceed the
+// work budget and fail.
 //
 // The budgets apply to each list a merge matches: the executables, the
 // libraries, and the filesystem rules taken together. A merge of two
@@ -371,16 +377,19 @@ limitations under the License.
 // baseline of up to twice MaxArtifactPatternBytes of patterns and two
 // artifacts [ValidateArtifact] accepts after it are compiled in full. A
 // pattern past the bound is left uncompiled and matches no name and no other
-// pattern. An intersection keeps it only where every input lists it word
-// for word, with the permissions all of them grant, and a union keeps it as
-// it keeps every pattern, which is as safe as the fallbacks above. The call keeps every program
-// it compiled until it returns, and a program holds up to some 450 bytes per
-// byte of its pattern for the costliest shapes, such as a run of "*/"
-// components: a merge whose patterns fill the budget, which accepted
-// artifacts can, may hold on the order of a hundred megabytes while it runs
-// (two artifacts of sixteen four-kilobyte "*/" patterns intersected with
-// "/**" held some 25 megabytes). Profiles of the size KEP-6061 recommends,
-// a few patterns of a few dozen bytes, hold well under a megabyte.
+// pattern. A union keeps it as it keeps every pattern, which permits the
+// same. An intersection could keep it only where every input lists it word
+// for word, and would drop what it covers on another input, so where an
+// input holds such a pattern [Intersect] fails with [ErrBudgetExceeded] when
+// the result may lose access, read as above as neither input of a merge step
+// being kept whole. The call keeps every program it compiled until it
+// returns, and a program holds up to some 450 bytes per byte of its pattern
+// for the costliest shapes, such as a run of "*/" components: a merge whose
+// patterns fill the budget, which accepted artifacts can, may hold on the
+// order of a hundred megabytes while it runs (two artifacts of sixteen
+// four-kilobyte "*/" patterns intersected with "/**" held some 25
+// megabytes). Profiles of the size KEP-6061 recommends, a few patterns of a
+// few dozen bytes, hold well under a megabyte.
 //
 // What the merge bounds on its own is therefore the matching and the
 // compiling. Reading the profiles, validating them and normalizing their

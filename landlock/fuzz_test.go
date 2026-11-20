@@ -29,15 +29,15 @@ import (
 )
 
 func allFSRightsForFuzz() []landlock.FSAccessRight {
-	return landlock.KnownFSRights()
+	return knownRights(landlock.FSAccessRights())
 }
 
 func allNetRightsForFuzz() []landlock.NetAccessRight {
-	return landlock.KnownNetRights()
+	return knownRights(landlock.NetAccessRights())
 }
 
 func allScopeRightsForFuzz() []landlock.ScopeRight {
-	return landlock.KnownScopeRights()
+	return knownRights(landlock.ScopeRights())
 }
 
 func fuzzLandlockProfile(
@@ -825,11 +825,11 @@ func assertNetExact(
 }
 
 func allFSRights() []landlock.FSAccessRight {
-	return landlock.KnownFSRights()
+	return knownRights(landlock.FSAccessRights())
 }
 
 func allNetRights() []landlock.NetAccessRight {
-	return landlock.KnownNetRights()
+	return knownRights(landlock.NetAccessRights())
 }
 
 func assertUnionInvariants(
@@ -1262,7 +1262,7 @@ func FuzzLandlockValidateStrict(f *testing.F) {
 
 func assertRightsDiffSwapped[T comparable](
 	t *testing.T, label string,
-	fwd, rev *landlock.RightsDiff[T],
+	fwd, rev *landlock.SliceDiff[T],
 ) {
 	t.Helper()
 

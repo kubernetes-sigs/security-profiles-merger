@@ -363,7 +363,12 @@ func ExampleLoweredRulePaths() {
 	// The result grants the baseline's access on the artifact's path, so
 	// the runtime must open it without following symlinks out of /srv, or
 	// refuse the artifact.
-	fmt.Println(landlock.LoweredRulePaths(result, baseline, artifact))
+	lowered, err := landlock.LoweredRulePaths(result, baseline, artifact)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(lowered)
 
 	// Output:
 	// [/srv/data/link]
@@ -383,13 +388,20 @@ func ExampleRequiredABIVersion() {
 		NetRules:  nil,
 	}
 
-	fmt.Println(landlock.RequiredABIVersion(profile) == landlock.ABIV4)
+	abi, err := landlock.RequiredABIVersion(profile)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(abi)
 
 	// Output:
-	// true
+	// ABIV4
 }
 
-func ExampleValidateForABI() {
+// A runtime checks a merge result against the ABI version of the node's
+// kernel before it applies it.
+func ExampleOptions() {
 	profile := &landlock.Profile{
 		HandledAccessFS: []landlock.FSAccessRight{
 			landlock.FSAccessReadFile,
@@ -403,13 +415,133 @@ func ExampleValidateForABI() {
 
 	// truncate needs ABI version 3, so a node reporting version 2 would
 	// reject the ruleset.
-	err := landlock.ValidateForABI(profile, landlock.ABIV2)
+	err := landlock.Options{ABI: landlock.ABIV2}.Validate(profile)
 	fmt.Println(errors.Is(err, landlock.ErrUnsupportedABIRight))
 
 	// A version newer than this package knows is read as the latest one.
-	fmt.Println(landlock.ValidateForABI(profile, landlock.LatestABIVersion+1))
+	fmt.Println(landlock.Options{ABI: landlock.LatestABIVersion + 1}.Validate(profile))
 
 	// Output:
 	// true
 	// <nil>
+}
+
+// A node whose kernel is older than a profile needs can enforce what its
+// kernel knows instead: Options.Downgrade drops the rights that version lacks,
+// which that kernel then leaves unrestricted.
+func ExampleOptions_Downgrade() {
+	profile := &landlock.Profile{
+		HandledAccessFS: []landlock.FSAccessRight{
+			landlock.FSAccessReadFile,
+			landlock.FSAccessTruncate,
+		},
+		HandledAccessNet: nil,
+		Scoped:           nil,
+		PathRules: []landlock.PathRule{
+			{
+				Path: pathEtc,
+				AccessFS: []landlock.FSAccessRight{
+					landlock.FSAccessReadFile,
+					landlock.FSAccessTruncate,
+				},
+			},
+		},
+		NetRules: nil,
+	}
+
+	downgraded, err := landlock.Options{ABI: landlock.ABIV2}.Downgrade(profile)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(downgraded.HandledAccessFS, downgraded.PathRules[0].AccessFS)
+	fmt.Println(landlock.Options{ABI: landlock.ABIV2}.Validate(downgraded))
+
+	// Output:
+	// [read_file] [read_file]
+	// <nil>
+}
+
+func ExampleProfile_Clone() {
+	profile := &landlock.Profile{
+		HandledAccessFS:  []landlock.FSAccessRight{landlock.FSAccessReadFile},
+		HandledAccessNet: nil,
+		Scoped:           nil,
+		PathRules: []landlock.PathRule{{
+			Path: pathEtc, AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
+		}},
+		NetRules: nil,
+	}
+
+	clone := profile.Clone()
+	clone.PathRules[0].Path = "/srv"
+
+	fmt.Println(profile.PathRules[0].Path, clone.PathRules[0].Path)
+
+	// Output:
+	// /etc /srv
+}
+
+// The flow of a runtime: decode the artifact strictly, validate it as an
+// artifact, intersect it with the baseline, check the result against the
+// node's kernel, and open the lowered rule paths without following
+// symlinks.
+func Example() {
+	baseline := &landlock.Profile{
+		HandledAccessFS: []landlock.FSAccessRight{
+			landlock.FSAccessReadFile,
+			landlock.FSAccessWriteFile,
+		},
+		HandledAccessNet: nil,
+		Scoped:           nil,
+		PathRules: []landlock.PathRule{{
+			Path:     "/srv",
+			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
+		}},
+		NetRules: nil,
+	}
+
+	data := []byte(`{
+		"handledAccessFs": ["read_file", "write_file"],
+		"pathRules": [{"path": "/srv/data", "accessFs": ["read_file", "write_file"]}]
+	}`)
+
+	var artifact landlock.Profile
+
+	err := landlock.UnmarshalStrict(data, &artifact)
+	if err == nil {
+		err = landlock.ValidateArtifact(&artifact)
+	}
+
+	if err != nil {
+		fmt.Println("reject:", err)
+
+		return
+	}
+
+	effective, err := landlock.Intersect(baseline, &artifact)
+	if err != nil {
+		fmt.Println("reject:", err)
+
+		return
+	}
+
+	err = landlock.Options{ABI: landlock.ABIV1}.Validate(effective)
+	if err != nil {
+		fmt.Println("the node cannot enforce it:", err)
+
+		return
+	}
+
+	lowered, err := landlock.LoweredRulePaths(effective, baseline, &artifact)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(landlock.FormatProfile(effective))
+	fmt.Println("open beneath /srv:", lowered)
+
+	// Output:
+	// Profile{fs:read_file,write_file /srv/data(read_file)}
+	// open beneath /srv: [/srv/data]
 }

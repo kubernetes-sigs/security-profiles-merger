@@ -138,7 +138,7 @@ func TestValidateArtifactMultiplexedPair(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			err := seccomp.ValidateArtifactForArch(testCase.native, testCase.profile)
+			err := forNode(testCase.native).ValidateArtifact(testCase.profile)
 			if got := errors.Is(err, seccomp.ErrConflictingEntries); got != testCase.conflict {
 				t.Fatalf("conflicting entries reported = %v, want %v (error: %v)",
 					got, testCase.conflict, err)
@@ -165,7 +165,7 @@ func TestValidateArtifactMultiplexedNamesLoadedEntry(t *testing.T) {
 		ErrnoRet: &enosys,
 	}}, profile.Syscalls...)
 
-	err := seccomp.ValidateArtifactForArch(specs.ArchX86_64, profile)
+	err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(profile)
 	if err == nil || !strings.Contains(err.Error(), "syscall entry 1:") {
 		t.Fatalf("expected the report to name entry 1, got %v", err)
 	}
@@ -183,7 +183,7 @@ func TestValidateArtifactMultiplexedOverBound(t *testing.T) {
 		Architectures: []specs.Arch{specs.ArchX86},
 	}
 
-	for value := range uint64(seccomp.MaxArtifactClausesPerSyscall + 1) {
+	for value := range uint64(seccomp.MaxArtifactRulesPerSyscall + 1) {
 		entry := specs.LinuxSyscall{
 			Names:    []string{"socket"},
 			Action:   specs.ActErrno,
@@ -197,8 +197,8 @@ func TestValidateArtifactMultiplexedOverBound(t *testing.T) {
 		profile.Syscalls = append(profile.Syscalls, entry)
 	}
 
-	err := seccomp.ValidateArtifactForArch(specs.ArchX86_64, profile)
-	if !errors.Is(err, seccomp.ErrTooManyClauses) {
+	err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(profile)
+	if !errors.Is(err, seccomp.ErrTooManyRulesPerSyscall) {
 		t.Fatalf("expected the rule bound to be reported, got %v", err)
 	}
 

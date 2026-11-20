@@ -88,15 +88,15 @@ func TestArtifactLimitsAtTheirBoundary(t *testing.T) {
 	}{
 		{
 			"names per entry", seccomp.MaxArtifactNamesPerEntry, namesPerEntry,
-			seccomp.ErrTooManyNames,
+			seccomp.ErrTooManyNamesPerEntry,
 		},
 		{
-			"clauses per syscall", seccomp.MaxArtifactClausesPerSyscall, clausesPerSyscall,
-			seccomp.ErrTooManyClauses,
+			"clauses per syscall", seccomp.MaxArtifactRulesPerSyscall, clausesPerSyscall,
+			seccomp.ErrTooManyRulesPerSyscall,
 		},
 		{
-			"clauses per profile", seccomp.MaxArtifactClauses, profileClauses,
-			seccomp.ErrTooManyProfileClauses,
+			"clauses per profile", seccomp.MaxArtifactRules, profileClauses,
+			seccomp.ErrTooManyRules,
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {

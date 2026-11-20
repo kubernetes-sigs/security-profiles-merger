@@ -17,6 +17,7 @@ limitations under the License.
 package apparmor
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 )
@@ -62,6 +63,9 @@ func BenchmarkAnalyzePattern(b *testing.B) {
 // BenchmarkIntersectColdCache measures a merge as a runtime meets it: the
 // patterns of the profile it just pulled are new, so every one of them is
 // analyzed and compiled. The warm counterpart is BenchmarkAppArmorIntersect.
+// The two largest sizes exceed the work budget, so Intersect compiles every
+// pattern and then fails with ErrBudgetExceeded, which is what a runtime
+// meets there.
 func BenchmarkIntersectColdCache(b *testing.B) {
 	for _, numPaths := range []int{10, 200, 1024, 2000} {
 		left := coldProfile(numPaths, "left")
@@ -76,7 +80,7 @@ func BenchmarkIntersectColdCache(b *testing.B) {
 				b.StartTimer()
 
 				_, err := Intersect(left, right)
-				if err != nil {
+				if err != nil && !errors.Is(err, ErrBudgetExceeded) {
 					b.Fatal(err)
 				}
 			}

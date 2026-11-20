@@ -110,11 +110,11 @@ func FuzzMergesKeepRulesOnEveryArchitecture(f *testing.F) {
 			t.Skip("invalid input")
 		}
 
-		for name, merge := range map[string]func(specs.Arch, ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error){
-			"intersect": seccomp.IntersectForArch,
-			"union":     seccomp.UnionForArch,
+		for name, merge := range map[string]func(seccomp.Options, ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error){
+			"intersect": seccomp.Options.Intersect,
+			"union":     seccomp.Options.Union,
 		} {
-			result, err := merge(native, left, right)
+			result, err := merge(forNode(native), left, right)
 			if errors.Is(err, seccomp.ErrLostRules) {
 				continue
 			}
@@ -131,7 +131,7 @@ func FuzzMergesKeepRulesOnEveryArchitecture(f *testing.F) {
 // checkAbsentResult checks a result of FuzzMergesKeepRulesOnEveryArchitecture.
 func checkAbsentResult(
 	t *testing.T, name string, native specs.Arch,
-	merge func(specs.Arch, ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error),
+	merge func(seccomp.Options, ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error),
 	result, left, right *specs.LinuxSeccomp,
 ) {
 	t.Helper()
@@ -147,12 +147,12 @@ func checkAbsentResult(
 		}
 	}
 
-	again, err := merge(native, result)
+	again, err := merge(forNode(native), result)
 	if err != nil {
 		t.Fatalf("%s on %q of its result: %v", name, native, err)
 	}
 
-	diff, err := seccomp.DiffForArch(native, result, again)
+	diff, err := forNode(native).Diff(result, again)
 	if err != nil || !diff.Equal {
 		t.Errorf("%s on %q is not settled: %v %s\n  result: %s",
 			name, native, err, seccomp.FormatDiff(diff), seccomp.FormatProfile(result))

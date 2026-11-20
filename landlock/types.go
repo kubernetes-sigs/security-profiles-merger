@@ -16,7 +16,11 @@ limitations under the License.
 
 package landlock
 
-import "slices"
+import (
+	"maps"
+	"slices"
+	"strconv"
+)
 
 // Profile represents a Landlock ruleset for merge operations.
 type Profile struct {
@@ -220,6 +224,30 @@ const (
 	ABIV11
 )
 
+// String returns the name of the version's constant, such as "ABIV3", for
+// a version from ABIV1 on, newer ones included, and "ABIVersion(n)" for one
+// below, which names no kernel.
+func (v ABIVersion) String() string {
+	if v < ABIV1 {
+		return "ABIVersion(" + strconv.Itoa(int(v)) + ")"
+	}
+
+	return "ABIV" + strconv.Itoa(int(v))
+}
+
+// FSAccessRights returns every filesystem access right this package knows,
+// each with the ABI version that introduced it. The map is the caller's to
+// keep or change.
+func FSAccessRights() map[FSAccessRight]ABIVersion { return maps.Clone(fsAccessABI) }
+
+// NetAccessRights returns every network access right this package knows,
+// each with the ABI version that introduced it, as FSAccessRights does.
+func NetAccessRights() map[NetAccessRight]ABIVersion { return maps.Clone(netAccessABI) }
+
+// ScopeRights returns every scope this package knows, each with the ABI
+// version that introduced it, as FSAccessRights does.
+func ScopeRights() map[ScopeRight]ABIVersion { return maps.Clone(scopeABI) }
+
 // LatestABIVersion is the newest Landlock ABI this package knows. A newer
 // one is read as this one, since every right a Profile can hold is known
 // from it on.
@@ -227,8 +255,9 @@ const LatestABIVersion = ABIV11
 
 // The tables below are the single source of the rights this package knows,
 // each with the Landlock ABI version that introduced it. Validate accepts
-// exactly the rights listed here, RequiredABIVersion and ValidateForABI read
-// the versions, and tests enumerate them from here.
+// exactly the rights listed here, RequiredABIVersion and Options read the
+// versions, FSAccessRights, NetAccessRights and ScopeRights list them, and
+// tests enumerate them from here.
 //
 //nolint:gochecknoglobals // immutable lookup tables
 var (

@@ -26,12 +26,19 @@ limitations under the License.
 //     re-exports, so that errors.Is against a sentinel here matches an
 //     error any of the three returned.
 //   - MaxPathLen, the path length limit of apparmor and landlock.
-//   - Diff, the one method the three diff results share.
 //
 // Nothing needs to import this package: each profile package re-exports
 // what it uses under its own name. Import it to match a sentinel without
-// picking one of the three packages arbitrarily, or to hold a diff whose
-// profile type was decided elsewhere.
+// picking one of the three packages arbitrarily.
+//
+// A validator collects its failures into one error, which reports at most
+// 32 of them and matches ErrMoreProblems when it left others out. Where it
+// holds more than one failure, or left any out, that error implements
+// Unwrap() []error, which returns the failures it kept followed by
+// ErrMoreProblems when it left others out, so a caller can walk them as
+// errors.Is and errors.As do. A single failure is returned as it is, and
+// InputError wraps the report of one input with Unwrap() error, so look for
+// Unwrap() []error with errors.As and fall back to the error itself.
 //
 // It is deliberately small. The three profile types have no common shape,
 // and no operation over "a profile" can say anything before it knows which
@@ -53,6 +60,12 @@ var (
 	ErrNilProfile = errors.New("profile must not be nil")
 	// ErrEmptyPath is returned when a path rule contains an empty string.
 	ErrEmptyPath = errors.New("empty path")
+	// ErrNulInPath is returned by the apparmor and landlock packages when a
+	// path holds a NUL byte, which no file system path can hold: the kernel
+	// and apparmor_parser end a path there. landlock reports it from every
+	// validator and merge; apparmor from ValidateArtifact and
+	// ValidateStrict, and also for an escape that denotes a NUL byte.
+	ErrNulInPath = errors.New("path contains a NUL byte")
 	// ErrRelativePath is returned by the apparmor and landlock packages
 	// when a path does not start with "/". Neither an AppArmor file rule
 	// nor a Landlock path rule accepts one.
@@ -71,6 +84,20 @@ var (
 	// a failure the profile holds can be absent from the error that reports
 	// it.
 	ErrMoreProblems = errors.New("more problems omitted")
+	// ErrBudgetExceeded is returned by a merge that would run past a bound
+	// on its own work: apparmor.Intersect where matching or compiling
+	// patterns exceeds one of its budgets and the result may then lose
+	// access, which it reads as neither input being kept whole, and
+	// landlock.Intersect and
+	// landlock.Union where the inputs together would cost more than theirs,
+	// which they check before merging. It is not wrapped in an InputError,
+	// since it is the inputs together that exceed the budget. The landlock
+	// budget admits a baseline merged with artifacts ValidateArtifact
+	// accepts; the apparmor budget admits an artifact of short paths against
+	// a baseline of a few kilobytes of paths, and two artifacts of that size
+	// intersected with each other, or a profile of long paths, may exceed
+	// it. See the Cost bounds section of each package.
+	ErrBudgetExceeded = errors.New("merge budget exceeded")
 
 	// ErrDuplicateKey is returned by UnmarshalStrict of every package when
 	// a member occurs more than once in one JSON object, compared the way
@@ -125,15 +152,28 @@ var (
 // failed, not only that one did: a runtime refusing an artifact rejects a
 // workload, while one refusing its own baseline has a node to fix. Match it
 // with errors.As; errors.Is sees through it to the sentinels of Err.
+//
+// A merge returns some errors without an InputError, since no single input
+// caused them: ErrNoProfiles, ErrBudgetExceeded, and the errors each
+// package documents for its result, such as seccomp.ErrLostRules.
 type InputError struct {
+	// Index is the zero-based position of the failing profile among the
+	// arguments of the call: for a merge, 0 is the first profile, which a
+	// runtime passes its baseline as; for Diff, 0 is left and 1 is right.
 	Index int
-	Err   error
+	// Err is what was wrong with that profile: ErrNilProfile, or the error
+	// the package's Validate returned for it, which may report several
+	// failures (see the package documentation).
+	Err error
 }
 
+// Error returns "profile <Index>: " followed by the message of Err.
 func (e *InputError) Error() string {
 	return fmt.Sprintf("profile %d: %v", e.Index, e.Err)
 }
 
+// Unwrap returns Err, so that errors.Is and errors.As see the sentinels it
+// holds.
 func (e *InputError) Unwrap() error { return e.Err }
 
 // MaxPathLen is the longest path the apparmor and landlock packages accept,
@@ -145,21 +185,13 @@ const MaxPathLen = 4095
 // SliceDiff represents added and removed items in a set-like slice. It is
 // what every package's slice diff is: seccomp.SliceDiff, apparmor.SliceDiff
 // and landlock.SliceDiff all name this type.
-type SliceDiff[T comparable] struct {
-	Added   []T `json:"added,omitempty"`
-	Removed []T `json:"removed,omitempty"`
-}
-
-// Diff is the part of a profile diff that does not depend on the profile
-// type: whether the two profiles compared equal. seccomp.ProfileDiff,
-// apparmor.ProfileDiff and landlock.ProfileDiff all satisfy it, by value and
-// by pointer.
 //
-// It exists for code that holds a diff whose type was decided elsewhere, for
-// example a command that picked the profile type from the input and now only
-// needs the verdict. Everything else a diff carries is type-specific and
-// lives on the concrete type.
-type Diff interface {
-	// IsEqual reports whether the two compared profiles were equal.
-	IsEqual() bool
+// The lists are compared as sets, ignoring order and repeats. A diff field
+// of this type is nil when the two lists are equal, so a non-nil SliceDiff
+// holds at least one item.
+type SliceDiff[T comparable] struct {
+	// Added holds the items only the right profile lists, sorted.
+	Added []T `json:"added,omitempty"`
+	// Removed holds the items only the left profile lists, sorted.
+	Removed []T `json:"removed,omitempty"`
 }

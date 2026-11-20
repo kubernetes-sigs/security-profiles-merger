@@ -670,9 +670,11 @@ func TestCallCompileBudget(t *testing.T) {
 
 // TestCallCompileBudgetIgnoresTheSharedCache covers what a call past its
 // compile budget does with a pattern the shared cache holds compiled: it
-// treats it as uncompiled all the same, since what a merge keeps must not
-// depend on what earlier calls left in the cache. It swaps the shared
-// cache, so it does not run in parallel.
+// treats it as uncompiled all the same, since what a merge returns must not
+// depend on what earlier calls left in the cache. The uncompiled pattern
+// covers the baseline's file, which the intersection would lose, so both
+// calls fail with ErrBudgetExceeded. It swaps the shared cache, so it does
+// not run in parallel.
 func TestCallCompileBudgetIgnoresTheSharedCache(t *testing.T) {
 	swapGlobCache(t)
 
@@ -692,23 +694,18 @@ func TestCallCompileBudgetIgnoresTheSharedCache(t *testing.T) {
 	artifact := budgetProfile(paths...)
 	baseline := budgetProfile("/etc/passwd")
 
-	cold, err := Intersect(artifact, baseline)
-	if err != nil {
-		t.Fatal(err)
+	_, cold := Intersect(artifact, baseline)
+	if !errors.Is(cold, ErrBudgetExceeded) {
+		t.Fatalf("Intersect = %v cold, want ErrBudgetExceeded", cold)
 	}
 
 	if !matcherFor(late).usable() {
 		t.Fatal("the late pattern does not compile on its own")
 	}
 
-	warm, err := Intersect(artifact, baseline)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if len(cold.Filesystem.ReadOnlyPaths) != 0 || len(warm.Filesystem.ReadOnlyPaths) != 0 {
-		t.Errorf("Intersect kept %q cold and %q warm, want nothing past the budget",
-			cold.Filesystem.ReadOnlyPaths, warm.Filesystem.ReadOnlyPaths)
+	_, warm := Intersect(artifact, baseline)
+	if !errors.Is(warm, ErrBudgetExceeded) {
+		t.Errorf("Intersect = %v warm, want ErrBudgetExceeded as cold", warm)
 	}
 }
 
@@ -897,9 +894,10 @@ func TestBudgetGoesToInputsInOrder(t *testing.T) {
 // TestIntersectKeepsSharedPatternsPastTheCompileBudget covers a pattern
 // every input lists word for word when the call no longer compiles it. It
 // matches nothing here, but every input grants it, so the intersection keeps
-// it with the permissions all of them grant, as it does for a compiled one,
-// while a pattern past the budget that only one input lists still covers
-// nothing of the other.
+// it with the permissions all of them grant, as it does for a compiled one.
+// A pattern past the budget that only one input lists covers nothing of the
+// other, so where the other input holds a path it would cover, the
+// intersection fails with ErrBudgetExceeded instead of dropping that path.
 func TestIntersectKeepsSharedPatternsPastTheCompileBudget(t *testing.T) {
 	t.Parallel()
 
@@ -908,7 +906,7 @@ func TestIntersectKeepsSharedPatternsPastTheCompileBudget(t *testing.T) {
 	baseline := budgetProfile(append(budgetFiller(), "/opt/*")...)
 	baseline.Filesystem.ReadWritePaths = []string{"/srv/**", "/var/**"}
 
-	artifact := budgetProfile("/opt/x", "/var/**")
+	artifact := budgetProfile("/var/**")
 	artifact.Filesystem.ReadWritePaths = []string{"/srv/**"}
 
 	result, err := Intersect(baseline, artifact)
@@ -922,6 +920,18 @@ func TestIntersectKeepsSharedPatternsPastTheCompileBudget(t *testing.T) {
 
 	if got := result.Filesystem.ReadOnlyPaths; !slices.Equal(got, []string{"/var/**"}) {
 		t.Errorf("Intersect kept the read-only paths %q, want /var/** only", got)
+	}
+
+	// /opt/* is past the budget and would cover /opt/x.
+	covered := budgetProfile("/opt/x", "/var/**")
+	covered.Filesystem.ReadWritePaths = []string{"/srv/**"}
+
+	_, err = Intersect(baseline, covered)
+	if !errors.Is(err, ErrBudgetExceeded) {
+		t.Errorf(
+			"Intersect losing /opt/x to an uncompiled pattern = %v, want ErrBudgetExceeded",
+			err,
+		)
 	}
 
 	// Intersecting the baseline alone keeps what intersecting it with
@@ -941,6 +951,9 @@ func TestIntersectKeepsSharedPatternsPastTheCompileBudget(t *testing.T) {
 // first four spelling it with an escape and the last plainly, after the
 // first four have used the budget up. The merge gives every input the plain
 // spelling, which is the one past the budget, and still keeps the pattern.
+// Each input holds its filler in a list the input after it leaves empty, so
+// that no two fillers are matched against each other, which would exceed
+// the pair budget instead.
 func TestIntersectOfManyInputsKeepsSharedPatterns(t *testing.T) {
 	t.Parallel()
 
@@ -952,8 +965,21 @@ func TestIntersectOfManyInputsKeepsSharedPatterns(t *testing.T) {
 	inputs := make([]*Profile, 0, 5)
 
 	for idx := range 4 {
-		part := filler[min(idx*quarter, len(filler)):min((idx+1)*quarter, len(filler))]
-		input := budgetProfile(slices.Clone(part)...)
+		part := slices.Clone(
+			filler[min(idx*quarter, len(filler)):min((idx+1)*quarter, len(filler))],
+		)
+		input := budgetProfile()
+		input.Executable = &ExecutableRules{AllowedExecutables: nil, AllowedLibraries: nil}
+
+		switch idx % 3 {
+		case 0:
+			input.Filesystem.ReadOnlyPaths = part
+		case 1:
+			input.Executable.AllowedExecutables = part
+		default:
+			input.Executable.AllowedLibraries = part
+		}
+
 		input.Filesystem.ReadWritePaths = []string{escaped}
 		inputs = append(inputs, input)
 	}

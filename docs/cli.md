@@ -76,24 +76,16 @@ profile of the type the others reveal, and is rejected as it is under
 `--type` (`error: <input> holds no member of an apparmor profile`).
 
 Input order decides the seccomp tie-breaks: `errnoRet` follows the earlier
-input where the actions tie. An intersection takes `listenerPath` and
-`listenerMetadata` from the first input only and fails when a later one
-names a different listener; a union fails when two inputs do. So
+input where the actions tie, and an intersection takes the listener from the
+first input only (see
+[seccomp: the listener](integration.md#seccomp-the-listener)). So
 `spm merge a.json b.json` and `spm merge b.json a.json` are not the same
 command, and a runtime lists its inputs from most to least trusted.
 
 A seccomp profile without a `flags` member leaves the flags to the runtime,
 and runc and crun then set `SECCOMP_FILTER_FLAG_SPEC_ALLOW`, while
-`"flags": []` sets none. The merge keeps the two apart, and its output
-carries `"flags": []` where the flag has to stay off.
-
-A seccomp merge result depends on the architecture: a 32-bit architecture
-compares half of each value, and one that multiplexes socket and IPC calls
-reads those rules a second way (see
-[What the models leave out](integration.md#what-the-models-leave-out)). The
-merge and its `--validate artifact` and `--validate strict` checks settle for
-the host architecture unless `--arch` is given, so run them on the node that
-loads the result.
+`"flags": []` sets none. The output is written with `seccomp.Marshal`, which
+keeps the two apart.
 
 `--validate` names the checks to run on the inputs before merging: `default`
 (what the merge itself applies), `strict`, or `artifact`, as described under
@@ -121,11 +113,13 @@ spm merge --strategy intersect baseline.json > settled.json &&
 ```
 
 `--arch` names the native seccomp architecture of the node that loads the
-result. It decides how the 32-bit and multiplexing architectures are
-settled, and which argument values the `artifact` and `strict` checks
-accept. It defaults to the architecture `spm` runs on (`--arch native`), so
-the same inputs can merge differently on another machine; a control plane
-merging for a node of another architecture passes its name:
+result, which a seccomp merge result depends on (see
+[What the models leave out](integration.md#what-the-models-leave-out)). It
+decides how the 32-bit and multiplexing architectures are settled, and which
+argument values the `artifact` and `strict` checks accept. It defaults to the
+architecture `spm` runs on (`--arch native`), so the same inputs can merge
+differently on another machine; a control plane merging for a node of
+another architecture passes its name:
 
 ```sh
 spm merge --type seccomp --strategy intersect --validate default,artifact \
@@ -133,10 +127,10 @@ spm merge --type seccomp --strategy intersect --validate default,artifact \
 ```
 
 `--arch none` implies no architecture, so that only the listed ones count.
-The flag takes the values `diff --arch` takes, selects between
-`seccomp.Intersect` and `seccomp.IntersectForArch` (and their `Union` and
-validator counterparts), and is a usage error for an AppArmor or Landlock
-merge.
+The flag takes the values `diff --arch` takes and sets the `Arch` of the
+`seccomp.Options` the merge and the checks run with: `seccomp.NativeHost`
+for `native`, the empty `Arch` for `none`, and the name otherwise. It is a
+usage error for an AppArmor or Landlock merge.
 
 Profiles can also be read from stdin, as a single profile or a JSON array of
 profiles, and `-` reads stdin alongside file arguments:
@@ -225,19 +219,10 @@ usage error rather than a flag that does nothing.
 spm validate --type seccomp --artifact --arch SCMP_ARCH_X86 artifact.json
 ```
 
-A field repeated within one JSON object, including one that differs only in
-capitalization, is ambiguous: spm, like other Go programs, matches field
-names case-insensitively and keeps the last value, while other parsers may
-keep the first or treat the spellings as different fields. For the same
-reason a field spelled only in another case, such as `Syscalls` or
-`ſyscalls` (U+017F folds to `s`), is misspelled: spm reads it and a runtime
-comparing names exactly drops it. An unknown field, such as a misspelled
-key, silently drops the rule it was meant to carry. `encoding/json` replaces
-bytes that are not valid UTF-8 with U+FFFD, so two profiles whose syscall
-names differ only in those bytes would decode to the same name and merge into
-one rule. A Landlock network rule without a `port` decodes as a rule on port
-0, the port a socket binds to for an ephemeral one. `spm diff` has no
-strictness flag, so it warns about all of these and still prints its verdict.
+[Strict decoding](api.md#strict-decoding) says why each member check of the
+table lets two readers of one profile read different rules. `spm diff` has
+no strictness flag, so it warns about all of these and still prints its
+verdict.
 
 Every error and warning names the input it came from: a file by its path as
 written, stdin by `stdin`, and one element of a JSON array on stdin by
@@ -342,8 +327,8 @@ spm diff --type seccomp --arch SCMP_ARCH_X86_64 left.json right.json
 ```
 
 `--arch` applies to seccomp profiles only; naming it for an AppArmor or
-Landlock diff is a usage error rather than a silently ignored flag. It
-selects between `seccomp.Diff` and `seccomp.DiffForArch`.
+Landlock diff is a usage error rather than a silently ignored flag. It sets
+the `Arch` of the `seccomp.Options` whose `Diff` the command runs.
 
 ## Version
 

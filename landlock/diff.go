@@ -50,14 +50,14 @@ type ProfileDiff struct {
 
 // IsEqual reports whether the two compared profiles are equivalent after
 // normalization, as Equal does.
+//
+// IsEqual and String have value receivers, so a ProfileDiff and a pointer to
+// one both implement fmt.Stringer. Diff returns a non-nil diff whenever its
+// error is nil; called through a nil pointer, either method panics.
 func (d ProfileDiff) IsEqual() bool { return d.Equal }
 
 // String returns FormatDiff of the diff, so that fmt prints a diff the way
 // it prints a Profile.
-//
-// It has a value receiver, as IsEqual has, so calling it on a nil
-// *ProfileDiff panics, and fmt prints such a pointer as <nil> rather than
-// as FormatDiff(nil) renders it.
 func (d ProfileDiff) String() string { return FormatDiff(&d) }
 
 // SliceDiff represents added and removed items in a set-like slice, such as
@@ -65,40 +65,56 @@ func (d ProfileDiff) String() string { return FormatDiff(&d) }
 // apparmor.SliceDiff name too.
 type SliceDiff[T comparable] = spm.SliceDiff[T]
 
-// RightsDiff represents added and removed items in a rights set.
-//
-// Deprecated: Use SliceDiff, the name the other packages use for the same
-// type.
-type RightsDiff[T comparable] = spm.SliceDiff[T]
-
-// PathRulesDiff describes differences in path rules.
+// PathRulesDiff describes differences in path rules, compared by their
+// cleaned paths after the rules for one path are folded into one.
 type PathRulesDiff struct {
-	Added   []PathRule       `json:"added,omitempty"`
-	Removed []PathRule       `json:"removed,omitempty"`
+	// Added holds the rules on paths only the right profile has a rule
+	// on, sorted by path, with their rights sorted.
+	Added []PathRule `json:"added,omitempty"`
+	// Removed holds the rules on paths only the left profile has a rule
+	// on, ordered as Added.
+	Removed []PathRule `json:"removed,omitempty"`
+	// Changed holds the paths both profiles have a rule on, with different
+	// rights, sorted by path.
 	Changed []PathRuleChange `json:"changed,omitempty"`
 }
 
 // PathRuleChange represents a path rule present in both profiles with
 // different access rights.
 type PathRuleChange struct {
-	Path  string          `json:"path"`
-	Left  []FSAccessRight `json:"left"`
-	Right []FSAccessRight `json:"right"`
+	// Path is the cleaned path of the rule.
+	Path string `json:"path"`
+	// Left holds the rights the left profile's rule grants, sorted. It is
+	// empty where that rule grants none.
+	Left []FSAccessRight `json:"left,omitempty"`
+	// Right holds the rights the right profile's rule grants, as Left.
+	Right []FSAccessRight `json:"right,omitempty"`
 }
 
-// NetRulesDiff describes differences in network rules.
+// NetRulesDiff describes differences in network rules, compared by port
+// after the rules for one port are folded into one.
 type NetRulesDiff struct {
-	Added   []NetRule       `json:"added,omitempty"`
-	Removed []NetRule       `json:"removed,omitempty"`
+	// Added holds the rules on ports only the right profile has a rule on,
+	// sorted by port, with their rights sorted.
+	Added []NetRule `json:"added,omitempty"`
+	// Removed holds the rules on ports only the left profile has a rule
+	// on, ordered as Added.
+	Removed []NetRule `json:"removed,omitempty"`
+	// Changed holds the ports both profiles have a rule on, with different
+	// rights, sorted by port.
 	Changed []NetRuleChange `json:"changed,omitempty"`
 }
 
 // NetRuleChange represents a network rule present in both profiles with
 // different access rights.
 type NetRuleChange struct {
-	Port  uint16           `json:"port"`
-	Left  []NetAccessRight `json:"left"`
-	Right []NetAccessRight `json:"right"`
+	// Port is the port of the rule.
+	Port uint16 `json:"port"`
+	// Left holds the rights the left profile's rule grants, sorted. It is
+	// empty where that rule grants none.
+	Left []NetAccessRight `json:"left,omitempty"`
+	// Right holds the rights the right profile's rule grants, as Left.
+	Right []NetAccessRight `json:"right,omitempty"`
 }
 
 // Diff compares two Landlock profiles and returns a structured diff.
@@ -141,34 +157,21 @@ func Diff(left, right *Profile) (*ProfileDiff, error) {
 		NetRules:         nil,
 	}
 
-	setRightsDiff(diff, normLeft.HandledAccessFS, normRight.HandledAccessFS,
-		func(r *SliceDiff[FSAccessRight]) { diff.HandledAccessFS = r })
+	diff.HandledAccessFS = merge.NewSliceDiff(normLeft.HandledAccessFS, normRight.HandledAccessFS)
+	diff.HandledAccessNet = merge.NewSliceDiff(
+		normLeft.HandledAccessNet,
+		normRight.HandledAccessNet,
+	)
+	diff.Scoped = merge.NewSliceDiff(normLeft.Scoped, normRight.Scoped)
 
-	setRightsDiff(diff, normLeft.HandledAccessNet, normRight.HandledAccessNet,
-		func(r *SliceDiff[NetAccessRight]) { diff.HandledAccessNet = r })
-
-	setRightsDiff(diff, normLeft.Scoped, normRight.Scoped,
-		func(r *SliceDiff[ScopeRight]) { diff.Scoped = r })
+	if diff.HandledAccessFS != nil || diff.HandledAccessNet != nil || diff.Scoped != nil {
+		diff.Equal = false
+	}
 
 	diffPathRules(diff, normLeft.PathRules, normRight.PathRules)
 	diffNetRules(diff, normLeft.NetRules, normRight.NetRules)
 
 	return diff, nil
-}
-
-func setRightsDiff[T ~string](
-	diff *ProfileDiff,
-	left, right []T,
-	setter func(*SliceDiff[T]),
-) {
-	added, removed := merge.DiffSlice(left, right)
-	if len(added) == 0 && len(removed) == 0 {
-		return
-	}
-
-	diff.Equal = false
-
-	setter(&SliceDiff[T]{Added: added, Removed: removed})
 }
 
 func diffPathRules(diff *ProfileDiff, left, right []PathRule) {
@@ -292,9 +295,9 @@ func FormatDiff(diff *ProfileDiff) string {
 
 	parts := merge.NewJoiner(&out, " ")
 
-	writeRightsDiff(&out, &parts, "fs", diff.HandledAccessFS)
-	writeRightsDiff(&out, &parts, "net", diff.HandledAccessNet)
-	writeRightsDiff(&out, &parts, "scoped", diff.Scoped)
+	merge.WriteSliceDiff(&out, &parts, "fs", diff.HandledAccessFS)
+	merge.WriteSliceDiff(&out, &parts, "net", diff.HandledAccessNet)
+	merge.WriteSliceDiff(&out, &parts, "scoped", diff.Scoped)
 
 	if diff.PathRules != nil {
 		writePathRulesDiff(&out, &parts, diff.PathRules)
@@ -307,19 +310,6 @@ func FormatDiff(diff *ProfileDiff) string {
 	out.WriteString("}")
 
 	return out.String()
-}
-
-// writeRightsDiff writes a rights diff as a part of the diff, unless it is
-// nil.
-func writeRightsDiff[T ~string](
-	out *merge.Builder, parts *merge.Joiner, prefix string, rightsDiff *SliceDiff[T],
-) {
-	if rightsDiff == nil {
-		return
-	}
-
-	parts.Next()
-	merge.WriteSliceDiff(out, prefix, *rightsDiff)
 }
 
 func writePathRulesDiff(out *merge.Builder, parts *merge.Joiner, pathRulesDiff *PathRulesDiff) {

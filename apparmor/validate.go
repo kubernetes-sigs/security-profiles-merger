@@ -141,8 +141,9 @@ var (
 	// the kernel never hands AppArmor a name holding a NUL, so the rule
 	// matches nothing and vanishes from an intersection, like a path with a
 	// "." component (ErrDotComponent) or a pattern past the matcher's limits
-	// (ErrGlobTooComplex).
-	ErrNulInPath = errors.New("path contains a NUL byte")
+	// (ErrGlobTooComplex). It is spm.ErrNulInPath, which the landlock
+	// package returns as well.
+	ErrNulInPath = spm.ErrNulInPath
 
 	// ErrInvalidCapabilityName is returned by ValidateArtifact and
 	// ValidateStrict when a capability name holds a character that cannot
@@ -208,10 +209,11 @@ const MaxArtifactPaths = 1024
 // compiles on its own, at four times this bound per call, in the order of
 // its inputs, so a baseline of up to twice this bound and two artifacts
 // this bound admits are compiled and matched in full. A pattern past the
-// merge's bound matches no name and no other pattern: an intersection keeps
-// it only where every input lists it word for word, and a union keeps it. Compiled patterns are also kept
-// across calls in a cache bounded by an estimate of the memory they hold,
-// which only saves a later call the compiling.
+// merge's bound matches no name and no other pattern: an intersection fails
+// with ErrBudgetExceeded when the result may lose access, which is when
+// neither input is kept whole, and a union keeps it. Compiled patterns are
+// also kept across calls in a cache bounded by an estimate of the memory
+// they hold, which only saves a later call the compiling.
 //
 // Profiles of the size KEP-6061 recommends runtimes accept spell a few
 // patterns of a few dozen bytes each.

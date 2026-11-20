@@ -1233,36 +1233,6 @@ func refusedLostRules(err error) bool {
 	return errors.Is(err, seccomp.ErrLostRules)
 }
 
-// bareMergeCase merges the syscalls of both profiles as bare lists. The
-// bare-list functions assume the caller's default is more restrictive than
-// every action in the lists, so both lists and the results are loaded with
-// SCMP_ACT_KILL_PROCESS as the default, and the lists must not use it.
-func bareMergeCase(left, right *specs.LinuxSeccomp) mergeCase {
-	intersect := intersectDirection()
-	intersect.name = "IntersectSyscalls"
-
-	union := unionDirection()
-	union.name = "UnionSyscalls"
-
-	return mergeCase{
-		inputs: []*specs.LinuxSeccomp{left, right},
-		results: []mergeResult{
-			{
-				direction: intersect,
-				profile: profileOf(specs.ActKillProcess,
-					seccomp.IntersectSyscalls(left.Syscalls, right.Syscalls)...),
-				inputs: []int{0, 1},
-			},
-			{
-				direction: union,
-				profile: profileOf(specs.ActKillProcess,
-					seccomp.UnionSyscalls(left.Syscalls, right.Syscalls)...),
-				inputs: []int{0, 1},
-			},
-		},
-	}
-}
-
 // mergeStats counts the inputs libseccomp did not load.
 type mergeStats struct {
 	mu      sync.Mutex
@@ -1402,8 +1372,7 @@ func formatProfiles(profiles []*specs.LinuxSeccomp) string {
 // them, and judges every result by what libseccomp does rather than by the
 // evaluator: every result must compile, and Intersect must never permit
 // more, and Union never less, than any input libseccomp loads. It covers
-// Intersect and Union of two profiles and of one, and IntersectSyscalls and
-// UnionSyscalls under the default they assume.
+// Intersect and Union of two profiles and of one.
 func TestModelMatchesLibseccompForMerges(t *testing.T) {
 	t.Parallel()
 	requireNativeArch(t)
@@ -1420,20 +1389,15 @@ func TestModelMatchesLibseccompForMerges(t *testing.T) {
 			return action == specs.ActNotify
 		},
 	)
-	bareActions := allActions[1:]
 
 	rng := rand.New(rand.NewPCG(3, 4))
 
-	cases := make([]mergeCase, 0, 2*pairs)
+	cases := make([]mergeCase, 0, pairs)
 
 	for range pairs {
 		left := randomProfile(rng, defaults[rng.IntN(len(defaults))], allActions)
 		right := randomProfile(rng, defaults[rng.IntN(len(defaults))], allActions)
 		cases = append(cases, profileMergeCase(t, left, right))
-
-		bareLeft := randomProfile(rng, specs.ActKillProcess, bareActions)
-		bareRight := randomProfile(rng, specs.ActKillProcess, bareActions)
-		cases = append(cases, bareMergeCase(bareLeft, bareRight))
 	}
 
 	var stats mergeStats

@@ -321,7 +321,7 @@ func TestMaskedConditionsCompareUnderTheMask(t *testing.T) {
 	}
 }
 
-func TestIntersectSyscallsLeavesPartlyConstrainedCallsToDefault(t *testing.T) {
+func TestIntersectListsLeavesPartlyConstrainedCallsToDefault(t *testing.T) {
 	t.Parallel()
 
 	// The right filter matches write(0), which the left list leaves to the
@@ -333,7 +333,7 @@ func TestIntersectSyscallsLeavesPartlyConstrainedCallsToDefault(t *testing.T) {
 		filtered(syscallWrite, specs.ActTrap, masked(0, 6, 0)),
 	}
 
-	for _, entry := range seccomp.IntersectSyscalls(left, right) {
+	for _, entry := range intersectLists(t, left, right) {
 		if entryMatches(entry, []uint64{0}) {
 			t.Errorf("result entry %v decides write(0), which the left list leaves to the default",
 				entry)
@@ -341,7 +341,7 @@ func TestIntersectSyscallsLeavesPartlyConstrainedCallsToDefault(t *testing.T) {
 	}
 }
 
-func TestUnionSyscallsCollapsesUnsafeRules(t *testing.T) {
+func TestUnionListsCollapsesUnsafeRules(t *testing.T) {
 	t.Parallel()
 
 	left := []specs.LinuxSyscall{
@@ -349,7 +349,7 @@ func TestUnionSyscallsCollapsesUnsafeRules(t *testing.T) {
 		filtered(syscallRead, specs.ActTrap, arg(0, specs.OpGreaterThan, 2)),
 	}
 
-	result := seccomp.UnionSyscalls(left, nil)
+	result := unionLists(t, left, nil)
 
 	want := []specs.LinuxSyscall{filtered(syscallRead, specs.ActAllow)}
 	if !slices.EqualFunc(result, want, func(got, want specs.LinuxSyscall) bool {
@@ -359,8 +359,8 @@ func TestUnionSyscallsCollapsesUnsafeRules(t *testing.T) {
 		t.Errorf("got %v, want %v", result, want)
 	}
 
-	if got := seccomp.IntersectSyscalls(left, left); len(got) != 0 {
-		t.Errorf("IntersectSyscalls = %v, want the syscall left to the default", got)
+	if got := intersectLists(t, left, left); len(got) != 0 {
+		t.Errorf("Intersect of the lists = %v, want the syscall left to the default", got)
 	}
 }
 
@@ -407,11 +407,11 @@ func TestIntersectLargeArtifactWithUnconditionalBaseline(t *testing.T) {
 	// Such an artifact is too large to be accepted, so a caller learns about
 	// it rather than finding the syscall denied by a smaller baseline.
 	err = seccomp.ValidateArtifact(artifact)
-	if !errors.Is(err, seccomp.ErrTooManyClauses) {
-		t.Errorf("expected ErrTooManyClauses, got: %v", err)
+	if !errors.Is(err, seccomp.ErrTooManyRulesPerSyscall) {
+		t.Errorf("expected ErrTooManyRulesPerSyscall, got: %v", err)
 	}
 
-	err = seccomp.ValidateArtifact(ioctlArtifact(seccomp.MaxArtifactClausesPerSyscall / 5))
+	err = seccomp.ValidateArtifact(ioctlArtifact(seccomp.MaxArtifactRulesPerSyscall / 5))
 	if err != nil {
 		t.Errorf("artifact within the bound: %v", err)
 	}
@@ -424,7 +424,7 @@ func TestIntersectArtifactAtClauseBoundKeepsFilters(t *testing.T) {
 	// filtered entries for the same syscall stays within the merge budget.
 	const baselineEntries = 12
 
-	artifact := ioctlArtifact(seccomp.MaxArtifactClausesPerSyscall / 5)
+	artifact := ioctlArtifact(seccomp.MaxArtifactRulesPerSyscall / 5)
 	baseline := profileOf(specs.ActErrno)
 
 	for idx := range baselineEntries {
@@ -597,7 +597,7 @@ func TestValidateArtifactCountsRulesAsLoaded(t *testing.T) {
 	t.Parallel()
 
 	repeated := filtered(syscallRead, specs.ActAllow)
-	for value := range seccomp.MaxArtifactClausesPerSyscall {
+	for value := range seccomp.MaxArtifactRulesPerSyscall {
 		repeated.Args = append(repeated.Args, arg(0, specs.OpEqualTo, uint64(value)))
 	}
 
@@ -617,8 +617,8 @@ func TestValidateArtifactCountsRulesAsLoaded(t *testing.T) {
 	extra := filtered(syscallRead, specs.ActAllow, arg(1, specs.OpEqualTo, 1))
 
 	err = seccomp.ValidateArtifact(profileOf(specs.ActErrno, repeated, extra))
-	if !errors.Is(err, seccomp.ErrTooManyClauses) {
-		t.Errorf("expected ErrTooManyClauses, got: %v", err)
+	if !errors.Is(err, seccomp.ErrTooManyRulesPerSyscall) {
+		t.Errorf("expected ErrTooManyRulesPerSyscall, got: %v", err)
 	}
 }
 
@@ -647,8 +647,8 @@ func TestValidateArtifactStaysFastOnHugeEntries(t *testing.T) {
 	// The entry loads one rule per condition, which puts the profile past
 	// the size limits, so that is all ValidateArtifact reports.
 	err = seccomp.ValidateArtifact(profileOf(specs.ActErrno, repeated))
-	if !errors.Is(err, seccomp.ErrTooManyProfileClauses) {
-		t.Errorf("expected ErrTooManyProfileClauses, got: %v", err)
+	if !errors.Is(err, seccomp.ErrTooManyRules) {
+		t.Errorf("expected ErrTooManyRules, got: %v", err)
 	}
 
 	// Coverage counters slow these loops several times over, so the bound

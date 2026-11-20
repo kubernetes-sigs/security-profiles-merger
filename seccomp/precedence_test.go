@@ -270,10 +270,10 @@ func TestSameIndexConditionsAreAlternatives(t *testing.T) {
 	}
 }
 
-func TestBareSyscallsResolveMixedEntries(t *testing.T) {
+func TestListsResolveMixedEntries(t *testing.T) {
 	t.Parallel()
 
-	result := seccomp.UnionSyscalls(
+	result := unionLists(t,
 		[]specs.LinuxSyscall{{Names: []string{"socket"}, Action: specs.ActLog}},
 		[]specs.LinuxSyscall{
 			{
@@ -288,7 +288,7 @@ func TestBareSyscallsResolveMixedEntries(t *testing.T) {
 
 	want := "socket([0]SCMP_CMP_EQ:1)->SCMP_ACT_ALLOW socket([0]SCMP_CMP_NE:1)->SCMP_ACT_LOG"
 	if got := formatSyscalls(result); got != want {
-		t.Errorf("UnionSyscalls = %s, want %s", got, want)
+		t.Errorf("Union of the lists = %s, want %s", got, want)
 	}
 }
 
@@ -298,7 +298,7 @@ func formatSyscalls(syscalls []specs.LinuxSyscall) string {
 	return formatted[len("Profile{default: ") : len(formatted)-1]
 }
 
-func TestDiffSyscallsIgnoresArgOrder(t *testing.T) {
+func TestDiffListsIgnoresArgOrder(t *testing.T) {
 	t.Parallel()
 
 	left := []specs.LinuxSyscall{{
@@ -310,8 +310,8 @@ func TestDiffSyscallsIgnoresArgOrder(t *testing.T) {
 		Args: []specs.LinuxSeccompArg{argEq(1, 2), argEq(0, 1)},
 	}}
 
-	if diff := seccomp.DiffSyscalls(left, right); diff != nil {
-		t.Errorf("DiffSyscalls reported a change for reordered args: %+v", diff)
+	if diff := diffLists(t, left, right); diff != nil {
+		t.Errorf("Diff of the lists reported a change for reordered args: %+v", diff)
 	}
 }
 
@@ -530,13 +530,13 @@ func TestMergeCanonicalizesKillThread(t *testing.T) {
 		}
 	}
 
-	bare := seccomp.UnionSyscalls(
+	lists := unionLists(t,
 		[]specs.LinuxSyscall{{Names: []string{"read"}, Action: specs.ActKill}},
 		[]specs.LinuxSyscall{{Names: []string{"write"}, Action: specs.ActKillThread}},
 	)
 
-	if len(bare) != 1 || bare[0].Action != specs.ActKill || len(bare[0].Names) != 2 {
-		t.Errorf("UnionSyscalls = %+v, want one SCMP_ACT_KILL entry for both names", bare)
+	if len(lists) != 1 || lists[0].Action != specs.ActKill || len(lists[0].Names) != 2 {
+		t.Errorf("Union of the lists = %+v, want one SCMP_ACT_KILL entry for both names", lists)
 	}
 }
 

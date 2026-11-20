@@ -114,8 +114,21 @@ func DiffSlice[T cmp.Ordered](left, right []T) ([]T, []T) {
 	return added, removed
 }
 
+// NewSliceDiff compares two slices as sets, as DiffSlice does, and returns
+// the difference, or nil when the sets are equal, which is how every diff
+// of this module reports an unchanged list.
+func NewSliceDiff[T cmp.Ordered](left, right []T) *spm.SliceDiff[T] {
+	added, removed := DiffSlice(left, right)
+	if len(added) == 0 && len(removed) == 0 {
+		return nil
+	}
+
+	return &spm.SliceDiff[T]{Added: added, Removed: removed}
+}
+
 // IntersectSlice returns the elements present in both left and right, each
-// once, in the order left holds them.
+// once, in the order left holds them, or nil when there are none, whether
+// a side is empty or the two are disjoint.
 func IntersectSlice[T comparable](left, right []T) []T {
 	if len(left) == 0 || len(right) == 0 {
 		return nil
@@ -138,6 +151,10 @@ func IntersectSlice[T comparable](left, right []T) []T {
 			seen[val] = struct{}{}
 			result = append(result, val)
 		}
+	}
+
+	if len(result) == 0 {
+		return nil
 	}
 
 	return result

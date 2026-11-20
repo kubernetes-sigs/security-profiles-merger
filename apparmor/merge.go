@@ -31,16 +31,28 @@ var (
 	ErrNoProfiles = spm.ErrNoProfiles
 	// ErrNilProfile is returned when a nil profile is provided.
 	ErrNilProfile = spm.ErrNilProfile
-	// ErrMoreProblems is returned alongside the failures a report lists
-	// when it left others out: every validator bounds how many it reports,
-	// since a profile holds as many as it holds rules. A caller matching a
-	// sentinel must read a match here as "and possibly others", because a
-	// failure the profile holds can be absent from the error reporting it.
+	// ErrMoreProblems is spm.ErrMoreProblems, which a validation report
+	// matches when it left failures out: read a match as "and possibly
+	// others" before dispatching on another sentinel.
 	ErrMoreProblems = spm.ErrMoreProblems
+	// ErrBudgetExceeded is returned by Intersect when one of its budgets
+	// cut the matching short and the result may lose access, which is when
+	// neither input of a merge step is kept whole: matching the paths of two
+	// inputs against their patterns would exceed the pair or work budget, or
+	// an input holds a pattern past the call's compile budget, which matches
+	// only its own spelling (see the Cost bounds section of the package
+	// documentation). The check is conservative: it does not tell whether
+	// the paths left out were ones the budget cost. It is not wrapped in
+	// an InputError. Union never returns it: past the budget it keeps
+	// every path with its own permissions, which permits what the exact
+	// union permits.
+	ErrBudgetExceeded = spm.ErrBudgetExceeded
 )
 
-// InputError is returned by Intersect and Union when one of the profiles
-// they were given fails validation, naming its position among the arguments.
+// InputError is [spm.InputError], the error a merge or Diff returns for
+// one of its inputs, naming it by its position among the arguments. See
+// spm.InputError for its fields, and for the errors a merge returns without
+// it.
 type InputError = spm.InputError
 
 // Intersect merges multiple AppArmor profiles via intersection: the
@@ -61,17 +73,21 @@ type InputError = spm.InputError
 // More than two profiles are folded from left to right, and with patterns
 // involved the result depends on that order, but every grouping is safe:
 // the result permits only what every input permits. Matching paths against
-// patterns is bounded, and past the budget a list keeps only the paths both
-// sides spell alike, which permits no more than the exact intersection
-// would (see the Cost bounds section).
+// patterns and compiling them is bounded, and a merge past a budget fails
+// with ErrBudgetExceeded when the result may lose access, which is when
+// neither input is kept whole, rather than return a result that may be
+// narrower than its inputs call for (see the Cost bounds section).
 //
 // Each input is validated as the Validation section of the package
 // documentation describes, and a failure is returned as an InputError
 // naming the input.
 func Intersect(profiles ...*Profile) (*Profile, error) {
 	matchers := newMatcherCache()
+	exceeded := false
 
-	return foldProfiles(profiles, matchers, intersectStrategy{matchers: matchers})
+	return foldProfiles(
+		profiles, matchers, intersectStrategy{matchers: matchers, exceeded: &exceeded},
+	)
 }
 
 // Union merges multiple AppArmor profiles via union: the resulting profile
@@ -106,6 +122,9 @@ type strategy interface {
 	mergeFilesystem(left, right *FilesystemRules) *FilesystemRules
 	// prepare adjusts a normalized copy of an input before it is merged.
 	prepare(profile *Profile)
+	// budgetErr reports a merge step that ran past the budget and would
+	// return less than its inputs call for, which ends the fold.
+	budgetErr() error
 }
 
 // foldProfiles validates and merges the profiles. matchers is the call's
@@ -153,7 +172,9 @@ func foldProfiles(
 	// The normalized profiles are copies this call owns, so a single
 	// profile needs no further clone.
 	result, err := merge.Fold(normalized, ownedProfile, func(a, b *Profile) (*Profile, error) {
-		return mergeTwo(a, b, mergeOp), nil
+		merged := mergeTwo(a, b, mergeOp)
+
+		return merged, mergeOp.budgetErr()
 	})
 	if err != nil {
 		return nil, fmt.Errorf("merge: %w", err)
@@ -433,8 +454,36 @@ func mergeCapabilities(left, right *CapabilityRules, mergeStrategy strategy) *Ca
 
 // intersectStrategy implements intersection (AND) semantics. matchers is
 // the call's cache of pattern analyses, nil to read the shared cache only.
+// exceeded, where it is not nil, is set when matching two lists would
+// exceed the pair or work budget, which Intersect reports.
 type intersectStrategy struct {
 	matchers *matcherCache
+	exceeded *bool
+}
+
+// budgetErr reports ErrBudgetExceeded once a list ran past the budget.
+func (op intersectStrategy) budgetErr() error {
+	if op.exceeded != nil && *op.exceeded {
+		return fmt.Errorf("matching paths against patterns: %w", ErrBudgetExceeded)
+	}
+
+	return nil
+}
+
+// intersect intersects the permissions of two lists, recording whether the
+// budget cut the matching short. Once one has, the merge fails, so the lists
+// after it are not matched.
+func (op intersectStrategy) intersect(left, right map[string]fsPermission) map[string]fsPermission {
+	if op.exceeded != nil && *op.exceeded {
+		return nil
+	}
+
+	merged, exceeded := intersectPerms(left, right, op.matchers)
+	if exceeded && op.exceeded != nil {
+		*op.exceeded = true
+	}
+
+	return merged
 }
 
 // prepare makes omitted sections explicit, since to AppArmor an absent
@@ -502,7 +551,7 @@ func (intersectStrategy) mergeStrings(left, right []string) []string {
 // lists and the filesystem rules are narrowed, budgeted and fallen back by
 // one implementation.
 func (op intersectStrategy) mergePaths(left, right []string) []string {
-	return permittedPaths(intersectPerms(readPerms(left), readPerms(right), op.matchers))
+	return permittedPaths(op.intersect(readPerms(left), readPerms(right)))
 }
 
 // mergeBool never sees nil, since prepare populated every boolean.
@@ -527,13 +576,19 @@ func mergeBoolPtr(left, right *bool, combine func(lhs, rhs bool) bool) *bool {
 }
 
 func (op intersectStrategy) mergeFilesystem(left, right *FilesystemRules) *FilesystemRules {
-	return collapseFsPerms(intersectPerms(expandFsPerms(left), expandFsPerms(right), op.matchers))
+	return collapseFsPerms(op.intersect(expandFsPerms(left), expandFsPerms(right)))
 }
 
-// intersectPerms returns the permissions both sides grant, per path.
+// intersectPerms returns the permissions both sides grant, per path, and
+// whether a budget cut the result short: matching them would exceed the
+// pair or work budget, in which case the result holds only what both sides
+// list alike, or a side holds a pattern past the call's compile budget,
+// which matches only its own spelling. Either way the result may hold less
+// than the exact intersection, which is reported unless it keeps a side
+// whole.
 func intersectPerms(
 	leftPerms, rightPerms map[string]fsPermission, matchers *matcherCache,
-) map[string]fsPermission {
+) (map[string]fsPermission, bool) {
 	merged := make(map[string]fsPermission)
 
 	// Literal-vs-literal intersection via map lookup: O(n+m).
@@ -556,21 +611,48 @@ func intersectPerms(
 	// prefix land in one bucket, though, which the index cannot split, so
 	// the work is bounded as well: past the budget only the patterns both
 	// sides list alike are kept, next to the literals both sides list, which
-	// permits no more than matching them would.
+	// permits no more than matching them would, and Intersect reports it.
 	leftSide := buildFsSide(leftPerms, matchers)
 	rightSide := buildFsSide(rightPerms, matchers)
 
 	if exceedsPairBudget(leftSide.size(), rightSide.size()) {
 		addVerbatimGlobs(&leftSide, &rightSide, merged)
 
-		return merged
+		return merged, losesAccess(merged, leftPerms, rightPerms)
 	}
 
 	matchFsLiterals(leftSide.literals, &rightSide, merged)
 	matchFsLiterals(rightSide.literals, &leftSide, merged)
 	matchFsGlobs(&leftSide, &rightSide, merged)
 
-	return merged
+	// A pattern past the call's compile budget matches only its own
+	// spelling, so whatever it would have matched on the other side is
+	// missing here, unless the result keeps a side whole anyway.
+	uncompiled := len(leftSide.verbatim) > 0 || len(rightSide.verbatim) > 0
+
+	return merged, uncompiled && losesAccess(merged, leftPerms, rightPerms)
+}
+
+// losesAccess reports whether a result cut short by a budget may hold less
+// than the exact intersection: unless it keeps a side whole, it may, so a
+// result that leaves out a path for any reason counts, also one the exact
+// intersection would leave out too.
+func losesAccess(merged, left, right map[string]fsPermission) bool {
+	return !keepsAll(merged, left) && !keepsAll(merged, right)
+}
+
+// keepsAll reports whether merged grants every path of one side with all
+// the permissions that side grants it. The exact intersection permits no
+// more than either side, so a result that keeps one side whole loses
+// nothing to the budget, as when a profile is intersected with itself.
+func keepsAll(merged, side map[string]fsPermission) bool {
+	for path, perm := range side {
+		if merged[path] != perm {
+			return false
+		}
+	}
+
+	return true
 }
 
 // addFsMatch records the permissions two matching entries share under key,
@@ -665,6 +747,10 @@ type unionStrategy struct {
 // prepare leaves omitted sections alone: for a union, a nil section and an
 // empty one both yield the other side's grants.
 func (unionStrategy) prepare(*Profile) {}
+
+// budgetErr reports nothing: past the budget a union keeps every path,
+// which permits what the exact union permits.
+func (unionStrategy) budgetErr() error { return nil }
 
 func (unionStrategy) mergeStrings(left, right []string) []string {
 	return merge.UnionSlice(left, right)
