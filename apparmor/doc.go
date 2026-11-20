@@ -36,7 +36,10 @@ limitations under the License.
 // case, members repeated within one object, invalid UTF-8, data behind the
 // profile, and a document that is not a JSON object ([ErrNotAnObject]).
 // Decode an artifact with it and validate the result with
-// [ValidateArtifact].
+// [ValidateArtifact], or call [DecodeArtifact], which does both.
+// [ValidateBaseline] checks a baseline once, at config load, including
+// whether the merge reads every rule of it, and [QuotePath] spells a path
+// for a profile rule a consumer renders.
 //
 // # Validation
 //
@@ -52,7 +55,7 @@ limitations under the License.
 // within one list. [Intersect] and [Union] run the checks of Validate on
 // each input as the caller wrote it, leaving out a path or capability
 // listed twice within one list, and only then drop exact duplicates,
-// upper-case capability names and fold two spellings of one path within a
+// lower-case capability names and fold two spellings of one path within a
 // list into one entry. A merge therefore fails on a nil profile, an empty
 // or oversized path, an AppArmor variable, a path listed in two filesystem
 // categories (ErrDuplicatePath, however either is spelled) and an empty
@@ -62,10 +65,9 @@ limitations under the License.
 // is wrapped in an [InputError] naming the input, and names the entry at the
 // index and in the spelling the caller gave it.
 //
-// Every validator collects its failures and returns them together, up to
-// 32 of them: past that the error lists the first 32 and a count of the
-// rest, and matches [ErrMoreProblems], so a sentinel a profile violates can
-// be absent from the error that reports it. An oversized path ends the path
+// Every validator collects its failures into one bounded report, which
+// matches [ErrMoreProblems] when it left some out (see Reading a validation
+// error in the [spm] package documentation). An oversized path ends the path
 // checks of Validate and the pattern checks of ValidateArtifact and
 // ValidateStrict, since each would scan it, and ValidateArtifact and
 // ValidateStrict check the size limits first and on their own.
@@ -93,6 +95,15 @@ limitations under the License.
 // the original, which every merge here then takes at face value. Callers
 // must not map a profile holding deny rules onto this type.
 //
+// The priority= rule qualifier of AppArmor 5.0 has no place here either.
+// Where rules overlap, a rule of higher priority overrides those of lower
+// priority, so even a profile of allow rules alone can hold rules that
+// narrow each other: "priority=1 /etc/** r," next to "/etc/shadow w,"
+// grants only r on /etc/shadow, while flattening the two into this type
+// grants rw there. Callers must not map a profile holding priorities onto
+// this type, and the rules a consumer renders from a Profile are meant to
+// load at the default priority.
+//
 // The other rule kinds a profile may hold are outside the model as well:
 // the "m", "k", "l" and "a" permissions and link rules, owner conditionals,
 // mount, umount and pivot_root rules, signal, ptrace, dbus and unix rules,
@@ -101,13 +112,13 @@ limitations under the License.
 // # Capability names
 //
 // Capability names are compared with ASCII case folding, and the merge
-// upper-cases the names it keeps, so a result spells "CHOWN" rather than
-// "chown". The folding is deliberately not Unicode's: U+017F and U+0131
-// upper-case into "S" and "I", which would let a name spelled with one of
-// them pass ValidateStrict as a known capability and merge into the real
-// one. apparmor_parser accepts capability names in lower case only, so a
-// consumer rendering a result as "capability <name>," rules must lower-case
-// each name first; written as the merge returns them, the rules do not load.
+// lower-cases the names it keeps, so a result spells "chown" whether an
+// input spelled "chown" or "CHOWN", which is the only spelling
+// apparmor_parser accepts in a "capability chown," rule. The folding is
+// deliberately not Unicode's: U+017F and U+0131 upper-case into "S" and
+// "I", and U+212A lower-cases into "k", which would let a name spelled with
+// one of them pass ValidateStrict as a known capability and merge into the
+// real one.
 //
 // Otherwise the merge treats a name as opaque: an intersection keeps one
 // only when every profile grants it, and a union keeps every name any
@@ -383,11 +394,12 @@ limitations under the License.
 //
 // Before anything is matched, every pattern is compiled into a program,
 // which costs time and memory in proportion to the pattern's length. One
-// call compiles each pattern it reads once, and compiles at most four times
-// [MaxArtifactPatternBytes] of patterns in total, taking the inputs in the
-// order they are given, so a baseline listed first is compiled first: a
-// baseline of up to twice MaxArtifactPatternBytes of patterns and two
-// artifacts [ValidateArtifact] accepts after it are compiled in full. A
+// call compiles each pattern it reads once, and compiles patterns up to a
+// compile budget, a small multiple of [MaxArtifactPatternBytes], taking the
+// inputs in the order they are given, so a baseline listed first is
+// compiled first: a baseline holding more patterns than an artifact may,
+// and two artifacts [ValidateArtifact] accepts after it, are compiled in
+// full. A
 // pattern past the bound is left uncompiled and matches no name and no other
 // pattern. A union keeps it as it keeps every pattern, which permits the
 // same. An intersection could keep it only where every input lists it word

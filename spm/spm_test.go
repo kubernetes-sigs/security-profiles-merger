@@ -19,6 +19,8 @@ package spm_test
 import (
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -74,6 +76,19 @@ func TestSentinelsAreShared(t *testing.T) {
 			name:   "ErrPathTooLong",
 			errs:   []error{apparmor.ErrPathTooLong, landlock.ErrPathTooLong},
 			shared: spm.ErrPathTooLong,
+		},
+		{
+			name: "ErrArtifactTooLarge",
+			errs: []error{
+				seccomp.ErrArtifactTooLarge, apparmor.ErrArtifactTooLarge,
+				landlock.ErrArtifactTooLarge,
+			},
+			shared: spm.ErrArtifactTooLarge,
+		},
+		{
+			name:   "ErrInexactBaseline",
+			errs:   []error{seccomp.ErrInexactBaseline, apparmor.ErrInexactBaseline},
+			shared: spm.ErrInexactBaseline,
 		},
 		{
 			name: "ErrMoreProblems",
@@ -365,5 +380,323 @@ func TestUnmarshalStrictReportsNullBeforeDataBehindIt(t *testing.T) {
 	err := landlock.UnmarshalStrict([]byte("{} x"), &profile)
 	if !errors.Is(err, spm.ErrUnexpectedData) {
 		t.Errorf("UnmarshalStrict(%q) = %v, want ErrUnexpectedData", "{} x", err)
+	}
+}
+
+// TestLimitErrorsAreArtifactTooLarge checks that every limit error of the
+// three packages matches ErrArtifactTooLarge, as a validator returns it and
+// as the sentinel itself, while staying apart from the others.
+func TestLimitErrorsAreArtifactTooLarge(t *testing.T) {
+	t.Parallel()
+
+	limits := []error{
+		seccomp.ErrTooManyEntries, seccomp.ErrTooManyEntriesPerSyscall,
+		seccomp.ErrTooManyRulesPerSyscall, seccomp.ErrTooManyNamesPerEntry,
+		seccomp.ErrTooManyRules, apparmor.ErrTooManyPaths,
+		apparmor.ErrTooManyPatternBytes, apparmor.ErrTooManyCapabilities,
+		landlock.ErrTooManyRules,
+	}
+
+	for idx, limit := range limits {
+		if !errors.Is(limit, spm.ErrArtifactTooLarge) {
+			t.Errorf("limit %d (%v) does not match ErrArtifactTooLarge", idx, limit)
+		}
+
+		for other, unrelated := range limits {
+			if other != idx && errors.Is(limit, unrelated) {
+				t.Errorf("limit %d (%v) matches limit %d (%v)", idx, limit, other, unrelated)
+			}
+		}
+	}
+
+	if errors.Is(seccomp.ErrUnknownAction, spm.ErrArtifactTooLarge) {
+		t.Error("ErrUnknownAction matches ErrArtifactTooLarge")
+	}
+
+	tooMany := &landlock.Profile{PathRules: make([]landlock.PathRule, landlock.MaxArtifactRules+1)}
+
+	err := landlock.ValidateArtifact(tooMany)
+	if !errors.Is(err, landlock.ErrTooManyRules) || !errors.Is(err, spm.ErrArtifactTooLarge) {
+		t.Errorf("landlock.ValidateArtifact = %v, want ErrTooManyRules and ErrArtifactTooLarge",
+			err)
+	}
+}
+
+// Failures for TestProblems to list.
+var (
+	errFirst  = errors.New("first")
+	errSecond = errors.New("second")
+	errThird  = errors.New("third")
+)
+
+// TestProblems checks that Problems lists the failures of a join and of
+// nested joins, and leaves a single error whole, wrapped or not.
+func TestProblems(t *testing.T) {
+	t.Parallel()
+
+	wrapped := fmt.Errorf("x: %w", errFirst)
+	both := fmt.Errorf("x: %w, so %w", errFirst, errSecond)
+
+	for _, testCase := range []struct {
+		name string
+		err  error
+		want []error
+	}{
+		{name: "nil", err: nil, want: nil},
+		{name: "single", err: errFirst, want: []error{errFirst}},
+		{name: "wrapped single", err: wrapped, want: []error{wrapped}},
+		{name: "one failure of two sentinels", err: both, want: []error{both}},
+		{name: "join of a failure of two sentinels", err: errors.Join(both, errThird), want: []error{both, errThird}},
+		{name: "join", err: errors.Join(errFirst, errSecond), want: []error{errFirst, errSecond}},
+		{
+			name: "nested joins",
+			err:  errors.Join(errFirst, errors.Join(errSecond, spm.ErrMoreProblems), errThird),
+			want: []error{errFirst, errSecond, errThird, spm.ErrMoreProblems},
+		},
+		{
+			name: "more problems once and last",
+			err: errors.Join(
+				errors.Join(errFirst, spm.ErrMoreProblems),
+				errors.Join(errSecond, spm.ErrMoreProblems),
+			),
+			want: []error{errFirst, errSecond, spm.ErrMoreProblems},
+		},
+	} {
+		got := spm.Problems(testCase.err)
+		if !slices.Equal(got, testCase.want) {
+			t.Errorf("%s: Problems = %v, want %v", testCase.name, got, testCase.want)
+		}
+	}
+}
+
+// foreignListError lists failures the way a report does, but is no type of
+// this module, so Problems keeps it whole.
+type foreignListError struct{ errs []error }
+
+func (f foreignListError) Error() string   { return "foreign" }
+func (f foreignListError) Unwrap() []error { return f.errs }
+func (f foreignListError) FailureReport()  {}
+
+// TestProblemsKeepsForeignJoins checks that Problems flattens only the
+// module's own reports and errors.Join, whatever methods another error has.
+func TestProblemsKeepsForeignJoins(t *testing.T) {
+	t.Parallel()
+
+	foreign := foreignListError{errs: []error{errFirst, errSecond}}
+
+	got := spm.Problems(foreign)
+	if len(got) != 1 || !errors.Is(got[0], errFirst) || got[0].Error() != "foreign" {
+		t.Errorf("Problems(foreign) = %v, want the error itself", got)
+	}
+}
+
+// TestProblemsOfValidatorsAndMerges checks Problems on what the packages
+// return: a validator's report lists its failures, and a merge naming two
+// inputs lists their InputErrors, each whole.
+func TestProblemsOfValidatorsAndMerges(t *testing.T) {
+	t.Parallel()
+
+	profile := &specs.LinuxSeccomp{
+		DefaultAction: "SCMP_ACT_BOGUS",
+		Syscalls:      []specs.LinuxSyscall{{Names: nil, Action: specs.ActAllow}},
+	}
+
+	problems := spm.Problems(seccomp.Validate(profile))
+	if len(problems) != 2 || !errors.Is(problems[0], seccomp.ErrUnknownAction) ||
+		!errors.Is(problems[1], seccomp.ErrEmptySyscallNames) {
+		t.Errorf("Problems(Validate) = %v, want the unknown action and the empty names", problems)
+	}
+
+	valid := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
+
+	_, err := seccomp.Intersect(profile, valid, profile)
+
+	problems = spm.Problems(err)
+
+	var inputErr *spm.InputError
+	if len(problems) != 2 || !errors.As(problems[1], &inputErr) || inputErr.Index != 2 ||
+		len(spm.Problems(inputErr.Err)) != 2 {
+		t.Errorf("Problems(Intersect) = %v, want two InputErrors of two failures each", problems)
+	}
+}
+
+// TestProblemsKeepsOneFailureOfTwoSentinels checks that a failure matching
+// two sentinels, which apparmor builds with two %w verbs, stays one problem
+// with its path, rather than splitting into the bare sentinels.
+func TestProblemsKeepsOneFailureOfTwoSentinels(t *testing.T) {
+	t.Parallel()
+
+	strict := apparmor.ValidateStrict(&apparmor.Profile{
+		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{"ca$p"}},
+	})
+
+	problems := spm.Problems(strict)
+	if len(problems) != 1 || !errors.Is(problems[0], apparmor.ErrInvalidCapabilityName) ||
+		!errors.Is(problems[0], apparmor.ErrUnknownCapability) ||
+		!strings.Contains(problems[0].Error(), "allowedCapabilities[0]") {
+		t.Errorf("Problems(ValidateStrict) = %q, want one failure naming the capability", problems)
+	}
+}
+
+// TestValidateBaseline checks the config-load check of seccomp: a baseline
+// the merge reads exactly passes, and an invalid one fails as Validate
+// fails, without an InputError.
+func TestValidateBaseline(t *testing.T) {
+	t.Parallel()
+
+	exact := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls:      []specs.LinuxSyscall{{Names: []string{"read"}, Action: specs.ActAllow}},
+	}
+
+	aarch64 := seccomp.ForArch(specs.ArchAARCH64)
+
+	err := aarch64.ValidateBaseline(exact)
+	if err != nil {
+		t.Errorf("seccomp ValidateBaseline(exact) = %v, want nil", err)
+	}
+
+	err = aarch64.ValidateBaseline(&specs.LinuxSeccomp{DefaultAction: "SCMP_ACT_BOGUS"})
+
+	var inputErr *spm.InputError
+	if !errors.Is(err, seccomp.ErrUnknownAction) || errors.As(err, &inputErr) {
+		t.Errorf("seccomp ValidateBaseline(invalid) = %v, want ErrUnknownAction alone", err)
+	}
+
+	// A list naming s390x does not load next to an aarch64 node, which
+	// Intersect reports without an InputError here.
+	mixed := seccomp.Clone(exact)
+	mixed.Architectures = []specs.Arch{specs.ArchS390X}
+
+	err = aarch64.ValidateBaseline(mixed)
+	if !errors.Is(err, seccomp.ErrMixedByteOrder) || errors.As(err, &inputErr) {
+		t.Errorf("seccomp ValidateBaseline(s390x) = %v, want ErrMixedByteOrder alone", err)
+	}
+}
+
+// TestAppArmorValidateBaseline checks the config-load check of apparmor: a
+// pattern the intersection drops is ErrInexactBaseline, a path QuotePath
+// refuses is reported with its list and index, and an invalid baseline
+// fails as Validate fails, without an InputError.
+func TestAppArmorValidateBaseline(t *testing.T) {
+	t.Parallel()
+
+	var inputErr *spm.InputError
+
+	// A pattern apparmor_parser rejects matches nothing, so an intersection
+	// drops it.
+	unloadable := &apparmor.Profile{
+		Filesystem: &apparmor.FilesystemRules{ReadOnlyPaths: []string{"/etc/{a}", "/etc/b"}},
+	}
+
+	err := apparmor.ValidateBaseline(unloadable)
+	if !errors.Is(err, apparmor.ErrInexactBaseline) {
+		t.Errorf("apparmor ValidateBaseline(unloadable) = %v, want ErrInexactBaseline", err)
+	}
+
+	unloadable.Filesystem.ReadOnlyPaths = unloadable.Filesystem.ReadOnlyPaths[1:]
+
+	err = apparmor.ValidateBaseline(unloadable)
+	if err != nil {
+		t.Errorf("apparmor ValidateBaseline(exact) = %v, want nil", err)
+	}
+
+	// Paths QuotePath refuses would reach every result, so the baseline is
+	// refused at config load, each path named by its list and index.
+	unrenderable := &apparmor.Profile{
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths:  []string{"/etc/ok", "/etc/{a,,b}"},
+			ReadWritePaths: []string{"/a\\\tb", "/a\\\x01"},
+		},
+	}
+
+	err = apparmor.ValidateBaseline(unrenderable)
+
+	problems := spm.Problems(err)
+	if len(problems) != 3 || !errors.Is(err, apparmor.ErrUnquotablePath) ||
+		!strings.Contains(problems[0].Error(), "filesystem.readOnlyPaths[1]") ||
+		!strings.Contains(problems[2].Error(), "filesystem.readWritePaths[1]") {
+		t.Errorf("apparmor ValidateBaseline(unrenderable) = %v, want three ErrUnquotablePath", err)
+	}
+
+	err = apparmor.ValidateBaseline(&apparmor.Profile{
+		Executable: &apparmor.ExecutableRules{AllowedExecutables: []string{"ptrace"}},
+	})
+	if !errors.Is(err, apparmor.ErrRelativePath) {
+		t.Errorf("apparmor ValidateBaseline(relative) = %v, want ErrRelativePath", err)
+	}
+
+	err = apparmor.ValidateBaseline(nil)
+	if !errors.Is(err, apparmor.ErrNilProfile) || errors.As(err, &inputErr) {
+		t.Errorf("apparmor ValidateBaseline(nil) = %v, want ErrNilProfile alone", err)
+	}
+}
+
+// TestDecodeArtifact checks the decode helper of each package: a document
+// that decodes and validates comes back as a profile, one UnmarshalStrict
+// refuses fails as it does, and one ValidateArtifact refuses fails as that
+// does.
+func TestDecodeArtifact(t *testing.T) {
+	t.Parallel()
+
+	type decoded struct {
+		ok  bool
+		err error
+	}
+
+	seccompDecode := func(doc string) decoded {
+		profile, err := seccomp.ForArch(specs.ArchX86_64).DecodeArtifact([]byte(doc))
+
+		return decoded{ok: profile != nil, err: err}
+	}
+	apparmorDecode := func(doc string) decoded {
+		profile, err := apparmor.DecodeArtifact([]byte(doc))
+
+		return decoded{ok: profile != nil, err: err}
+	}
+	landlockDecode := func(doc string) decoded {
+		profile, err := landlock.DecodeArtifact([]byte(doc))
+
+		return decoded{ok: profile != nil, err: err}
+	}
+	landlockV1Decode := func(doc string) decoded {
+		profile, err := landlock.Options{ABI: landlock.ABIV1}.DecodeArtifact([]byte(doc))
+
+		return decoded{ok: profile != nil, err: err}
+	}
+
+	for _, testCase := range []struct {
+		name   string
+		decode func(string) decoded
+		doc    string
+		want   error
+	}{
+		{"seccomp", seccompDecode, `{"defaultAction":"SCMP_ACT_ERRNO"}`, nil},
+		{"seccomp misspelled", seccompDecode, `{"defaultAction":"SCMP_ACT_ERRNO","Syscalls":[]}`, spm.ErrMisspelledField},
+		{
+			"seccomp listener", seccompDecode,
+			`{"defaultAction":"SCMP_ACT_ERRNO","listenerPath":"/run/x"}`, seccomp.ErrListenerNotAllowed,
+		},
+		{"apparmor", apparmorDecode, `{"capability":{"allowedCapabilities":["chown"]}}`, nil},
+		{"apparmor duplicate", apparmorDecode, `{"capability":{},"capability":{}}`, spm.ErrDuplicateKey},
+		{"apparmor relative", apparmorDecode, `{"filesystem":{"readOnlyPaths":["etc"]}}`, spm.ErrRelativePath},
+		{"landlock", landlockDecode, `{"handledAccessFs":["refer"]}`, nil},
+		{"landlock null", landlockDecode, `null`, spm.ErrNotAnObject},
+		{"landlock empty ruleset", landlockDecode, `{}`, landlock.ErrEmptyRuleset},
+		{"landlock v1", landlockV1Decode, `{"handledAccessFs":["refer"]}`, landlock.ErrUnsupportedABIRight},
+	} {
+		got := testCase.decode(testCase.doc)
+		if testCase.want == nil {
+			if !got.ok || got.err != nil {
+				t.Errorf("%s: DecodeArtifact = %v, want a profile", testCase.name, got.err)
+			}
+
+			continue
+		}
+
+		if got.ok || !errors.Is(got.err, testCase.want) {
+			t.Errorf("%s: DecodeArtifact = %t, %v, want %v",
+				testCase.name, got.ok, got.err, testCase.want)
+		}
 	}
 }

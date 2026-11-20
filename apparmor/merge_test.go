@@ -27,11 +27,11 @@ import (
 )
 
 const (
-	capNetAdmin    = "NET_ADMIN"
-	capSysTime     = "SYS_TIME"
-	capChown       = "CHOWN"
-	capSysPtrace   = "SYS_PTRACE"
-	capDacOverride = "DAC_OVERRIDE"
+	capNetAdmin    = "net_admin"
+	capSysTime     = "sys_time"
+	capChown       = "chown"
+	capSysPtrace   = "sys_ptrace"
+	capDacOverride = "dac_override"
 
 	pathEtcConfig = "/etc/config"
 	pathVarLog    = "/var/log"
@@ -556,7 +556,7 @@ func TestCapabilityCaseRoundTrip(t *testing.T) {
 		t.Fatalf("union: %v", err)
 	}
 
-	wantUnion := []string{capNetAdmin, "SYS_ADMIN", capSysPtrace}
+	wantUnion := []string{capNetAdmin, "sys_admin", capSysPtrace}
 	if !slices.Equal(unioned.Capabilities.AllowedCapabilities, wantUnion) {
 		t.Errorf(
 			"union capabilities = %v, want %v",

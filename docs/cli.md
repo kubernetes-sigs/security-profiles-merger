@@ -170,16 +170,21 @@ spm merge --type seccomp --strategy intersect --validate default,artifact \
 
 `--arch none` names no architecture, for a node whose architecture is not
 known. The merge and the `artifact` and `strict` checks then take the node to
-be any architecture Go runs on, 32-bit and multiplexing ones included, so the
-result is safe on every node but keeps fewer rules than one settled for a
-known 64-bit node, and a value above 32 bits fails the checks whatever the
-profile lists. The byte order is the exception: with no node to compare with,
-an intersection accepts architectures of either byte order, and the checks
+be any architecture a runtime can be native on, including the ones only crun
+runs on natively, such as x32 and MIPS n32. The result is safe on every node
+but keeps fewer rules than one settled for a known 64-bit node, and a value
+above 32 bits fails the checks whatever the profile lists. Of the
+architectures only crun runs on, in practice only x32 changes a result: a
+narrow x86_64 denylist may be refused because libseccomp would lose its
+rules where x32 is native. Name the node's architecture where it is known.
+The byte order is the exception: with no node to compare with, an
+intersection accepts architectures of either byte order, and the checks
 refuse only a list mixing the two, while one of a single byte order loads
 only on nodes of that byte order. The flag takes the values `diff --arch`
-takes and sets the `Arch` of the `seccomp.Options` the merge and the checks
-run with: `seccomp.NativeHost` for `native`, the empty `Arch` for `none`, and
-the name otherwise. It is a usage error for an AppArmor or Landlock merge.
+takes and picks the `seccomp.Options` the merge and the checks run with:
+`seccomp.ForHost()` for `native`, `seccomp.ForAnyArch()` for `none`, and
+`seccomp.ForArch` of the name otherwise. It is a usage error for an
+AppArmor or Landlock merge.
 
 Profiles can also be read from stdin, as a single profile or a JSON array of
 profiles, and `-` reads stdin alongside file arguments. A document that
@@ -276,12 +281,11 @@ which libseccomp cannot load next to it: a profile listing
 walkthrough do, fails `validate --artifact` on an s390x or other big-endian
 machine unless `--arch` names an x86-64 node, and so does a seccomp
 `merge --strategy intersect` of them, which refuses such an input. With
-`--arch none` they take
-the node to be any architecture Go runs on and refuse a value above 32 bits
-everywhere, but refuse only an architecture list mixing the two byte
-orders. The default checks do not depend on the architecture, so `--arch`
-without one of the two flags is a usage error rather than a flag that does
-nothing.
+`--arch none` they take the node to be any architecture a runtime can be
+native on and refuse a value above 32 bits everywhere, but refuse only an
+architecture list mixing the two byte orders. The default checks do not
+depend on the architecture, so `--arch` without one of the two flags is a
+usage error rather than a flag that does nothing.
 
 ```sh
 spm validate --type seccomp --artifact --arch SCMP_ARCH_X86 artifact.json
@@ -339,7 +343,9 @@ profiles:
 cat profile.json | spm validate --type seccomp
 ```
 
-`--format=human` prints the profiles in a human-readable form:
+`--format=human` prints the profiles in a human-readable form, each on a
+line of its own; several profiles are separated by `---` lines, since the
+human format has no array:
 
 ```sh
 spm validate --type seccomp --format human profile.json
@@ -420,8 +426,8 @@ spm diff --type seccomp --arch SCMP_ARCH_X86_64 left.json right.json
 ```
 
 `--arch` applies to seccomp profiles only; naming it for an AppArmor or
-Landlock diff is a usage error rather than a silently ignored flag. It sets
-the `Arch` of the `seccomp.Options` whose `Diff` the command runs.
+Landlock diff is a usage error rather than a silently ignored flag. It picks
+the `seccomp.Options` whose `Diff` the command runs.
 
 ## Version
 

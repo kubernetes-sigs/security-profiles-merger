@@ -43,7 +43,7 @@ func distinctArchitectures(listed []specs.Arch, native specs.Arch) int {
 // TestSettlerTalliesEachBlockOnce checks that settling a merge result
 // tallies each block at most once, however many natives it tries and steps
 // it takes: on the CRI-O default intersected with a small artifact for an
-// unknown native, where every architecture Go runs on is tried, and on a
+// unknown native, where every possible native is tried, and on a
 // result that takes several steps to settle.
 func TestSettlerTalliesEachBlockOnce(t *testing.T) {
 	t.Parallel()

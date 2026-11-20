@@ -380,8 +380,8 @@ func TestCapabilityNamesFoldAsciiOnly(t *testing.T) {
 		t.Fatalf("Intersect: %v", err)
 	}
 
-	if got := merged.Capabilities.AllowedCapabilities; !slices.Equal(got, []string{"CHOWN"}) {
-		t.Errorf("Intersect = %q, want [CHOWN]", got)
+	if got := merged.Capabilities.AllowedCapabilities; !slices.Equal(got, []string{"chown"}) {
+		t.Errorf("Intersect = %q, want [chown]", got)
 	}
 }
 

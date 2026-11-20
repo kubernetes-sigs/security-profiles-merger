@@ -118,7 +118,7 @@ func TestCRIODefaultRestated(t *testing.T) {
 	t.Parallel()
 
 	profile := loadDefault(t, "crio-amd64-restated.json")
-	amd64 := seccomp.Options{Arch: specs.ArchX86_64}
+	amd64 := seccomp.ForArch(specs.ArchX86_64)
 
 	err := amd64.ValidateArtifact(profile)
 	if err != nil {
@@ -183,7 +183,7 @@ func TestDefaultsRepeatSyscalls(t *testing.T) {
 		t.Run(test.file, func(t *testing.T) {
 			t.Parallel()
 
-			err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateStrict(loadDefault(t, test.file))
+			err := seccomp.ForArch(specs.ArchX86_64).ValidateStrict(loadDefault(t, test.file))
 			if !errors.Is(err, seccomp.ErrDuplicateSyscallName) {
 				t.Fatalf("expected duplicate syscall names, got %v", err)
 			}
@@ -211,7 +211,7 @@ func TestMobyAndContainerdDefaultsPass(t *testing.T) {
 
 			profile := loadDefault(t, file)
 
-			err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(profile)
+			err := seccomp.ForArch(specs.ArchX86_64).ValidateArtifact(profile)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -247,7 +247,7 @@ func TestMobyAndContainerdDefaultSocketRules(t *testing.T) {
 				Syscalls:        rules,
 			}
 
-			err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(socket)
+			err := seccomp.ForArch(specs.ArchX86_64).ValidateArtifact(socket)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}

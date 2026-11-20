@@ -426,10 +426,10 @@ func ExampleProfile_Clone() {
 	// /etc /srv
 }
 
-// The flow of a runtime: decode the artifact strictly, validate it as an
-// artifact, intersect it with the baseline, check the result against the
-// node's kernel, and open the lowered rule paths without following
-// symlinks.
+// The flow of a runtime: decode the artifact strictly and validate it as an
+// artifact for the node's kernel, intersect it with the baseline, check the
+// result against that kernel, and open the lowered rule paths without
+// following symlinks.
 func Example() {
 	baseline := &landlock.Profile{
 		HandledAccessFS: []landlock.FSAccessRight{
@@ -447,34 +447,30 @@ func Example() {
 		"pathRules": [{"path": "/srv/data", "accessFs": ["read_file", "write_file"]}]
 	}`)
 
-	var artifact landlock.Profile
+	node := landlock.Options{ABI: landlock.ABIV1}
 
-	err := landlock.UnmarshalStrict(data, &artifact)
-	if err == nil {
-		err = landlock.ValidateArtifact(&artifact)
-	}
-
+	artifact, err := node.DecodeArtifact(data)
 	if err != nil {
 		fmt.Println("reject:", err)
 
 		return
 	}
 
-	effective, err := landlock.Intersect(baseline, &artifact)
+	effective, err := landlock.Intersect(baseline, artifact)
 	if err != nil {
 		fmt.Println("reject:", err)
 
 		return
 	}
 
-	err = landlock.Options{ABI: landlock.ABIV1}.Validate(effective)
+	err = node.Validate(effective)
 	if err != nil {
 		fmt.Println("the node cannot enforce it:", err)
 
 		return
 	}
 
-	lowered, err := landlock.LoweredRulePaths(effective, baseline, &artifact)
+	lowered, err := landlock.LoweredRulePaths(effective, baseline, artifact)
 	if err != nil {
 		panic(err)
 	}

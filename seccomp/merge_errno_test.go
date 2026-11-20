@@ -207,7 +207,7 @@ func TestMergeErrno(t *testing.T) {
 			// with the same filter on socketcall(2), where libseccomp
 			// refuses them, so the node is one that does not.
 			name:  "errno stays as written in an exact shape",
-			merge: seccomp.Options{Arch: specs.ArchX86_64}.Intersect,
+			merge: seccomp.ForArch(specs.ArchX86_64).Intersect,
 			profiles: []*specs.LinuxSeccomp{
 				profileOf(
 					specs.ActAllow,

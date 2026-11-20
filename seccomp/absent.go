@@ -506,7 +506,7 @@ func (s *absentSettler) dropRules(gone map[string]bool) {
 //   - where no architecture can be dropped, and always for union, which
 //     cannot drop an architecture an input covers, the merge is refused
 //     with ErrLostRules. Where the native architecture is not known, every
-//     architecture a Go program runs on is tried as native, only x32 can be
+//     architecture this package knows is tried as native, only x32 can be
 //     dropped (see droppedFor), and dropping the last listed architecture
 //     counts as none: the empty list would leave the filter to whatever
 //     architecture loads it.
@@ -539,21 +539,34 @@ func (s *absentSettler) settle() error {
 
 		if !s.m.intersect || len(remaining) == len(listed) ||
 			len(remaining) == 0 && s.m.native == "" {
-			return fmt.Errorf(
-				"%s: %w (it would test %s first, which it lacks)",
-				arch, ErrLostRules, offending[0],
-			)
+			return s.lostRules(arch, offending[0])
 		}
 
 		s.result.Architectures = remaining
 	}
 }
 
+// lostRules reports the block of arch losing its rules to the offending
+// syscall. Where the native architecture is not known, the block may be one
+// the list does not name, which the runtime adds as native, and the message
+// says so.
+func (s *absentSettler) lostRules(arch specs.Arch, offending string) error {
+	possible := ""
+	if s.m.native == "" && !slices.Contains(s.result.Architectures, arch) {
+		possible = ", a possible native architecture"
+	}
+
+	return fmt.Errorf(
+		"%s%s: %w (it would test %s first, which it lacks)",
+		arch, possible, ErrLostRules, offending,
+	)
+}
+
 // losingBlockOf returns the architecture whose block can lose its rules in
 // the filter a runtime loads the result into, the syscalls it may test
 // first, and the architectures that filter covers, or the empty Arch. Where
-// the native architecture is not known, the runtime may add any of those a
-// Go program runs on, so each of them is tried in turn.
+// the native architecture is not known, the runtime may add any of
+// possibleNatives, so each of them is tried in turn.
 func (s *absentSettler) losingBlockOf() (specs.Arch, []string, []specs.Arch) {
 	natives := []specs.Arch{s.m.native}
 	if s.m.native == "" {
@@ -573,8 +586,11 @@ func (s *absentSettler) losingBlockOf() (specs.Arch, []string, []specs.Arch) {
 }
 
 // possibleNatives are the architectures a runtime may add to a filter as
-// its native one: those of the platforms Go runs on, sorted.
-var possibleNatives = slices.Sorted(maps.Values(nativeArchitectures))
+// its native one, sorted: every architecture this package knows. runc only
+// runs where Go does, but crun is written in C and libseccomp resolves a
+// native architecture on every platform it supports, x32, MIPS n32, ppc,
+// s390, sh, m68k and parisc included, which no Go port targets.
+var possibleNatives = slices.Sorted(maps.Keys(byteOrders))
 
 // appliesNowhere returns the offending syscalls a rule on applies to no
 // call of the filter: no covered architecture has them, or where the native
@@ -600,17 +616,18 @@ func (m ruleMerger) appliesNowhere(offending []string, covered []specs.Arch) map
 // of arch from losing its rules to the offending syscalls (see
 // settleAbsentSyscalls).
 //
-// Where the native architecture is not known, any architecture a Go
-// program runs on may be native, and dropping it from the list would not
-// remove it from the filter, so only x32, which never is, can be dropped.
+// Where the native architecture is not known, any architecture may be
+// native, and dropping it from the list would not remove it from the
+// filter, so only x32 is offered, for the natives on which dropping it
+// helps; settle tries every possible native in turn, and one on which x32
+// is native finds the list unchanged and refuses the merge.
 func (m ruleMerger) droppedFor(
 	arch specs.Arch, offending []string, covered []specs.Arch,
 ) map[specs.Arch]bool {
 	if _, shares := sharedAuditArch[arch]; shares {
 		// x86_64 and x32 lose rules only together. Of the two, x32 is the
-		// one few processes use, and no platform Go runs on is natively
-		// x32, but a caller may name it native: the runtime then adds it
-		// back, so it is x86_64 that goes.
+		// one few processes use, but a node may be natively x32: the
+		// runtime then adds it back, so it is x86_64 that goes.
 		if m.native == specs.ArchX32 {
 			return map[specs.Arch]bool{specs.ArchX86_64: true}
 		}

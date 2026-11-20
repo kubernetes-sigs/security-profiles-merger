@@ -19,7 +19,6 @@ package apparmor_test
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
 )
@@ -45,7 +44,7 @@ func ExampleIntersect() {
 	fmt.Println("Capabilities:", result.Capabilities.AllowedCapabilities)
 
 	// Output:
-	// Capabilities: [CHOWN NET_ADMIN]
+	// Capabilities: [chown net_admin]
 }
 
 func ExampleValidate() {
@@ -101,7 +100,7 @@ func ExampleProfile_String() {
 	fmt.Println(profile.String())
 
 	// Output:
-	// Profile{caps:NET_ADMIN}
+	// Profile{caps:net_admin}
 }
 
 func ExampleDiff() {
@@ -128,8 +127,8 @@ func ExampleDiff() {
 
 	// Output:
 	// Equal: false
-	// Removed: [SYS_TIME]
-	// Added: [CHOWN]
+	// Removed: [sys_time]
+	// Added: [chown]
 }
 
 func ExampleProfileDiff_String() {
@@ -153,7 +152,7 @@ func ExampleProfileDiff_String() {
 	fmt.Println(diff.String())
 
 	// Output:
-	// Diff{caps:-SYS_TIME,+CHOWN}
+	// Diff{caps:-sys_time,+chown}
 }
 
 func ExampleIsGlobPattern() {
@@ -186,7 +185,7 @@ func ExampleUnion() {
 	fmt.Println("Capabilities:", result.Capabilities.AllowedCapabilities)
 
 	// Output:
-	// Capabilities: [NET_ADMIN SYS_TIME]
+	// Capabilities: [net_admin sys_time]
 }
 
 func ExampleUnmarshalStrict() {
@@ -234,10 +233,11 @@ func ExampleValidateArtifact() {
 	// true
 }
 
-// The flow of a runtime: decode the artifact strictly, validate it as an
-// artifact, intersect it with the baseline, and render the result for
-// apparmor_parser, lower-casing the capability names the merge returns
-// upper-cased.
+// The flow of a runtime: check the baseline once, decode the artifact
+// strictly and validate it as an artifact, intersect it with the baseline,
+// and render the result for apparmor_parser, which takes the capability
+// names in the lower case the merge returns them in, and each path through
+// QuotePath.
 func Example() {
 	allow := true
 	baseline := &apparmor.Profile{
@@ -263,20 +263,21 @@ func Example() {
 		"capability": {"allowedCapabilities": ["CHOWN", "NET_ADMIN"]}
 	}`)
 
-	var artifact apparmor.Profile
+	err := apparmor.ValidateBaseline(baseline)
+	if err != nil {
+		fmt.Println("node misconfigured:", err)
 
-	err := apparmor.UnmarshalStrict(data, &artifact)
-	if err == nil {
-		err = apparmor.ValidateArtifact(&artifact)
+		return
 	}
 
+	artifact, err := apparmor.DecodeArtifact(data)
 	if err != nil {
 		fmt.Println("reject:", err)
 
 		return
 	}
 
-	effective, err := apparmor.Intersect(baseline, &artifact)
+	effective, err := apparmor.Intersect(baseline, artifact)
 	if err != nil {
 		fmt.Println("reject:", err)
 
@@ -285,12 +286,24 @@ func Example() {
 
 	fmt.Println(effective.String())
 
+	for _, path := range effective.Filesystem.ReadOnlyPaths {
+		quoted, err := apparmor.QuotePath(path)
+		if err != nil {
+			fmt.Println("reject:", err)
+
+			return
+		}
+
+		fmt.Printf("%s r,\n", quoted)
+	}
+
 	for _, name := range effective.Capabilities.AllowedCapabilities {
-		fmt.Printf("capability %s,\n", strings.ToLower(name))
+		fmt.Printf("capability %s,\n", name)
 	}
 
 	// Output:
-	// Profile{exec:/usr/bin/app r:/etc/app.conf rw:/tmp/app net:!raw,tcp,!udp caps:CHOWN}
+	// Profile{exec:/usr/bin/app r:/etc/app.conf rw:/tmp/app net:!raw,tcp,!udp caps:chown}
+	// /etc/app.conf r,
 	// capability chown,
 }
 

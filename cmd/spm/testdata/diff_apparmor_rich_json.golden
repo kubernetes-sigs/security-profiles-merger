@@ -55,10 +55,10 @@
   "capability": {
     "allowedCapabilities": {
       "added": [
-        "SETUID"
+        "setuid"
       ],
       "removed": [
-        "SYS_TIME"
+        "sys_time"
       ]
     }
   }

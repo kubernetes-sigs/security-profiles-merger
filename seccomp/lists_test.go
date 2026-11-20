@@ -33,7 +33,7 @@ import (
 // values, so that no architecture is settled whatever the host is.
 
 // listNode is the node the list helpers merge for.
-func listNode() seccomp.Options { return seccomp.Options{Arch: specs.ArchAARCH64} }
+func listNode() seccomp.Options { return seccomp.ForArch(specs.ArchAARCH64) }
 
 // listProfile wraps a syscall list in a profile with the list default.
 func listProfile(syscalls []specs.LinuxSyscall) *specs.LinuxSeccomp {

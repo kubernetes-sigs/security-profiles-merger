@@ -169,7 +169,7 @@ func coversAny(archs []specs.Arch, set map[specs.Arch]bool, native specs.Arch) b
 
 // mayBeNative reports whether the architecture a runtime adds to the filter
 // may be one of the set: native itself, or, where native is empty and so
-// not known, any architecture a Go program runs on (see possibleNatives).
+// not known, any architecture this package knows (see possibleNatives).
 // Those include 32-bit and multiplexing ones, so a result settled for an
 // unknown native architecture is settled for both, which keeps it safe on
 // whichever node loads it.

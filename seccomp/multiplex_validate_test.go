@@ -165,7 +165,7 @@ func TestValidateArtifactMultiplexedNamesLoadedEntry(t *testing.T) {
 		ErrnoRet: &enosys,
 	}}, profile.Syscalls...)
 
-	err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(profile)
+	err := seccomp.ForArch(specs.ArchX86_64).ValidateArtifact(profile)
 	if err == nil || !strings.Contains(err.Error(), "syscalls[1]:") {
 		t.Fatalf("expected the report to name entry 1, got %v", err)
 	}
@@ -197,7 +197,7 @@ func TestValidateArtifactMultiplexedOverBound(t *testing.T) {
 		profile.Syscalls = append(profile.Syscalls, entry)
 	}
 
-	err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(profile)
+	err := seccomp.ForArch(specs.ArchX86_64).ValidateArtifact(profile)
 	if !errors.Is(err, seccomp.ErrTooManyRulesPerSyscall) {
 		t.Fatalf("expected the rule bound to be reported, got %v", err)
 	}

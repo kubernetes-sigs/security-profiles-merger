@@ -19,6 +19,7 @@ package seccomp_test
 import (
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -225,7 +226,7 @@ func TestMergesLeaveBlocksThatDoNotLoseRules(t *testing.T) {
 		filtered("socketcall", specs.ActErrno, arg(1, specs.OpEqualTo, 5)),
 		filtered("socket", specs.ActErrno, arg(0, specs.OpGreaterEqual, 40)))
 
-	result, err := seccomp.Options{Arch: specs.ArchAARCH64}.Intersect(profile)
+	result, err := seccomp.ForArch(specs.ArchAARCH64).Intersect(profile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +253,7 @@ func TestUnionRefusesRulesLibseccompLoses(t *testing.T) {
 	open := filtered("open", specs.ActAllow)
 	baseline, artifact := allowing(arm, socket), allowing(arm, open)
 
-	result, err := seccomp.Options{Arch: specs.ArchAARCH64}.Union(baseline, artifact)
+	result, err := seccomp.ForArch(specs.ArchAARCH64).Union(baseline, artifact)
 	if !errors.Is(err, seccomp.ErrLostRules) {
 		t.Errorf("Options.Union = %v, %v, want ErrLostRules", seccomp.FormatProfile(result), err)
 	}
@@ -261,9 +262,7 @@ func TestUnionRefusesRulesLibseccompLoses(t *testing.T) {
 	// and Union succeeds.
 	single := []specs.Arch{specs.ArchAARCH64}
 
-	result, err = seccomp.Options{
-		Arch: specs.ArchAARCH64,
-	}.Union(
+	result, err = seccomp.ForArch(specs.ArchAARCH64).Union(
 		allowing(single, socket),
 		allowing(single, open),
 	)
@@ -294,7 +293,7 @@ func TestMergesKeepTheBlockX86_64AndX32Share(t *testing.T) {
 	artifact.Architectures = archs
 
 	for _, profile := range []*specs.LinuxSeccomp{baseline, artifact} {
-		err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(profile)
+		err := seccomp.ForArch(specs.ArchX86_64).ValidateArtifact(profile)
 		if err != nil {
 			t.Fatalf("ValidateArtifact: %v", err)
 		}
@@ -302,7 +301,7 @@ func TestMergesKeepTheBlockX86_64AndX32Share(t *testing.T) {
 
 	// The read rule equals the artifact's default and goes, which leaves
 	// x32 nothing but set_thread_area: x32 goes with it.
-	result, err := seccomp.Options{Arch: specs.ArchX86_64}.Intersect(baseline, artifact)
+	result, err := seccomp.ForArch(specs.ArchX86_64).Intersect(baseline, artifact)
 	if err != nil {
 		t.Fatalf("Options.Intersect: %v", err)
 	}
@@ -329,7 +328,7 @@ func TestMergesKeepTheBlockX86_64AndX32Share(t *testing.T) {
 	denying := profileOf(specs.ActErrno)
 	denying.Architectures = archs
 
-	result, err = seccomp.Options{Arch: specs.ArchX86_64}.Union(allowing, denying)
+	result, err = seccomp.ForArch(specs.ArchX86_64).Union(allowing, denying)
 	if !errors.Is(err, seccomp.ErrLostRules) {
 		t.Errorf("Options.Union = %s, %v, want ErrLostRules", seccomp.FormatProfile(result), err)
 	}
@@ -348,7 +347,7 @@ func TestMergesKeepRulesForAnUnknownNative(t *testing.T) {
 		filtered("open", specs.ActErrno),
 		filtered("socket", specs.ActErrno, arg(0, specs.OpEqualTo, 40)))
 
-	result, err := seccomp.Options{}.Intersect(
+	result, err := seccomp.ForAnyArch().Intersect(
 		baseline,
 		listing(aarch64),
 	)
@@ -361,7 +360,7 @@ func TestMergesKeepRulesForAnUnknownNative(t *testing.T) {
 	}
 
 	// With aarch64 native, open applies on no covered architecture.
-	result, err = seccomp.Options{Arch: specs.ArchAARCH64}.Intersect(baseline, listing(aarch64))
+	result, err = seccomp.ForArch(specs.ArchAARCH64).Intersect(baseline, listing(aarch64))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +404,7 @@ func TestMergesKeepRulesOnSyscallsOnlyNewerLibseccompKnows(t *testing.T) {
 			baseline := listing(testCase.archs, mseal)
 			artifact := listing(testCase.archs, filtered(testCase.absent, specs.ActErrno))
 
-			result, err := seccomp.Options{Arch: specs.ArchX86_64}.Intersect(baseline, artifact)
+			result, err := seccomp.ForArch(specs.ArchX86_64).Intersect(baseline, artifact)
 			if err != nil {
 				t.Fatalf("Options.Intersect: %v", err)
 			}
@@ -438,7 +437,7 @@ func TestMergesTryEveryNativeNextToX32(t *testing.T) {
 	baseline := listing(x32, filtered("personality", specs.ActErrno, arg(0, specs.OpEqualTo, 1)))
 	artifact := listing(x32, filtered("socketcall", specs.ActErrno))
 
-	result, err := seccomp.Options{Arch: ""}.Intersect(baseline, artifact)
+	result, err := seccomp.ForAnyArch().Intersect(baseline, artifact)
 	if !errors.Is(err, seccomp.ErrLostRules) {
 		t.Errorf(
 			"Options.Intersect(\"\") = %s, %v, want ErrLostRules",
@@ -448,8 +447,35 @@ func TestMergesTryEveryNativeNextToX32(t *testing.T) {
 	}
 }
 
+// TestMergesTryX32AsAnUnknownNative covers an unknown native architecture
+// next to a list naming x86_64 alone, the one case where counting the
+// natives only crun runs on changes a result: x32 shares x86_64's block and
+// lacks uselib, so testing uselib first loses x86_64's rule on arch_prctl
+// there, while no other architecture has a rule at stake. Dropping x32 from
+// the list does not remove a native x32, so the merge is refused, naming
+// x32 as a possible native, while a named x86_64 node merges.
+func TestMergesTryX32AsAnUnknownNative(t *testing.T) {
+	t.Parallel()
+
+	x86_64 := []specs.Arch{specs.ArchX86_64}
+	baseline := listing(x86_64, filtered("arch_prctl", specs.ActErrno, arg(0, specs.OpEqualTo, 1)))
+	artifact := listing(x86_64, filtered("uselib", specs.ActErrno))
+
+	result, err := seccomp.ForAnyArch().Intersect(baseline, artifact)
+	if !errors.Is(err, seccomp.ErrLostRules) ||
+		!strings.Contains(err.Error(), "SCMP_ARCH_X32, a possible native architecture") {
+		t.Errorf("ForAnyArch().Intersect = %s, %v, want ErrLostRules naming x32 as possibly native",
+			seccomp.FormatProfile(result), err)
+	}
+
+	_, err = seccomp.ForArch(specs.ArchX86_64).Intersect(baseline, artifact)
+	if err != nil {
+		t.Errorf("ForArch(x86_64).Intersect = %v, want a result", err)
+	}
+}
+
 // TestMergesDropX86_64WhereX32IsNative covers a caller naming x32 native,
-// which Options accepts though no platform Go runs on is x32: the
+// which no Go program runs on but crun does: the
 // runtime adds x32 back whatever the list says, so the merge keeps the
 // x86_64 and x32 blocks apart by dropping x86_64 instead.
 func TestMergesDropX86_64WhereX32IsNative(t *testing.T) {
@@ -459,7 +485,7 @@ func TestMergesDropX86_64WhereX32IsNative(t *testing.T) {
 	baseline := listing(archs, filtered("personality", specs.ActErrno, arg(0, specs.OpEqualTo, 1)))
 	artifact := listing(archs, filtered("socketcall", specs.ActErrno))
 
-	result, err := seccomp.Options{Arch: specs.ArchX32}.Intersect(baseline, artifact)
+	result, err := seccomp.ForArch(specs.ArchX32).Intersect(baseline, artifact)
 	if err != nil {
 		t.Fatalf("Options.Intersect: %v", err)
 	}

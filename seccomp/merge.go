@@ -35,9 +35,14 @@ var (
 	// ErrNilProfile is returned when a nil profile is provided.
 	ErrNilProfile = spm.ErrNilProfile
 	// ErrMoreProblems is spm.ErrMoreProblems, which a validation report
-	// matches when it left failures out: read a match as "and possibly
-	// others" before dispatching on another sentinel.
+	// matches when it left failures out (see [spm.ErrMoreProblems]).
 	ErrMoreProblems = spm.ErrMoreProblems
+	// ErrInexactBaseline is spm.ErrInexactBaseline, which ValidateBaseline
+	// returns for a baseline the merge does not read exactly.
+	ErrInexactBaseline = spm.ErrInexactBaseline
+	// ErrArtifactTooLarge is spm.ErrArtifactTooLarge, which every error
+	// this package returns for a profile past a MaxArtifact limit matches.
+	ErrArtifactTooLarge = spm.ErrArtifactTooLarge
 	// ErrNotifyWithoutListener is returned by Validate for a profile that
 	// applies SCMP_ACT_NOTIFY while naming no listener to hand the
 	// notification to, and by Intersect and Union if a result would ever
@@ -89,98 +94,78 @@ type InputError = spm.InputError
 
 // Intersect merges seccomp profiles via intersection: the result permits a
 // call only if every input permits it, judged by what runc and crun load
-// through libseccomp rather than by the order of the entries. For each
-// syscall and argument region the more restrictive action is chosen, and
-// where the exact intersection is not expressible, or would not form a safe
-// shape, the affected calls fall back to the more restrictive action, so
-// the result never permits more than any input. See the Evaluation model
-// and Intersection sections of the package documentation.
+// through libseccomp rather than by the order of the entries. Where the
+// exact intersection is not expressible, or would not form a safe shape,
+// the affected calls fall back to the more restrictive action, so the
+// result never permits more than any input. This is the merge KEP-6061
+// defines for a CRI runtime combining an artifact with its baseline.
 //
 // Every input is checked with Validate first, and every one that fails is
-// reported as an *InputError naming its index: the error is that
-// InputError for one, and the InputErrors joined in input order for
-// several. Past an internal budget a syscall collapses to its most
-// restrictive action (see Cost bounds).
-//
-// When inputs share an action, DefaultErrnoRet and per-syscall ErrnoRet
-// come from the earliest of them (see Errno values). ListenerPath,
-// ListenerMetadata and SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV come from the
-// first input that sets a ListenerPath, which for Intersect is always the
-// first input: a later input naming another listener, or any listener where
-// the first names none, is refused with ErrConflictingListener. A result
-// that would notify without a listener is refused with
-// ErrNotifyWithoutListener, and one in which no entry notifies drops
-// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, which the kernel refuses there
-// (see Listener).
-// 32-bit and multiplexing architectures may be dropped from the list, as
-// may one whose rules libseccomp would lose to a syscall it lacks; the
-// calls of a dropped architecture get libseccomp's SCMP_ACT_KILL, which
-// kills the thread where an input may kill the process (see Intersection).
+// reported as an *InputError naming its index. Pass the inputs from most
+// to least trusted, the baseline first: ties in errno go to the earlier
+// input, and only the first may name a listener (ErrConflictingListener).
 // An input listing an architecture of another byte order than the native
-// architecture, which libseccomp cannot load next to it, is refused as an
-// InputError wrapping ErrMixedByteOrder, rather than its architecture
-// dropped, which would make a result load where the input does not. The
-// result depends on the native architecture of the running program, so
-// run Intersect on the node that loads its result, or name that node's
-// architecture with Options.Intersect (see Architectures).
-// SECCOMP_FILTER_FLAG_SPEC_ALLOW survives only if every input sets it and
-// SECCOMP_FILTER_FLAG_LOG if any does (see Flags). A single profile is
-// normalized (see Single profiles).
+// one is refused with ErrMixedByteOrder, and a result that would notify
+// without a listener with ErrNotifyWithoutListener. Intersect may drop
+// 32-bit and multiplexing architectures from the list, and one whose rules
+// libseccomp would lose, where it can drop none of those it refuses with
+// ErrLostRules.
 //
-// Entries sharing an action, errno and argument filters are grouped into
-// one entry with sorted names, and entries are sorted by first name, then
-// argument filter, action and errno, so equal inputs give equal output. The
-// result passes Validate, but often lists one syscall in several entries,
-// which ValidateStrict rejects (see Evaluation model).
+// The result depends on the native architecture of the running program,
+// so run Intersect on the node that loads its result, or name that node
+// with Options.Intersect. It passes Validate, but often lists one syscall
+// in several entries, which ValidateStrict rejects, and equal inputs give
+// equal output. It shares no memory with the inputs, a single input
+// included, so the caller may modify it.
 //
-// Input order matters: pass the inputs from most to least trusted, the
-// baseline first. Ties in errno go to the earlier input, and only the first
-// may name a listener.
-//
-// This implements the merge KEP-6061 defines for a CRI runtime combining an
-// artifact with its baseline.
-//
-// The result shares no memory with the inputs, a single input included, so
-// the caller may modify it.
+// The package documentation has the detail: the Evaluation model,
+// Intersection, Errno values, Architectures, Flags, Listener, Single
+// profiles and Cost bounds sections.
 func Intersect(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
-	return Options{Arch: NativeHost}.Intersect(profiles...)
+	return ForHost().Intersect(profiles...)
 }
 
 // Union merges seccomp profiles via union: the result permits a call if
-// any input permits it, judged as Intersect judges it. For each syscall and
-// argument region the less restrictive action is chosen: every conditional
-// entry of every input is kept, with its action raised to the least
-// restrictive action any input applies to calls matching its filter. Where
-// the exact union is not expressible, or would not form a safe shape, the
-// result over-approximates in the permissive direction, so it never permits
-// less than any input. See the Union section of the package documentation.
+// any input permits it, judged as Intersect judges it. Where the exact
+// union is not expressible, or would not form a safe shape, the result
+// over-approximates in the permissive direction, so it never permits less
+// than any input. This is the merge the Security Profiles Operator uses to
+// combine recorded profiles.
 //
-// Inputs are validated, results with SCMP_ACT_NOTIFY but no listener are
-// refused, and ties in errno and the listener are broken, as for Intersect.
-// Unlike Intersect, any input may name the listener, since union inputs are
-// peers rather than a baseline and what it constrains; inputs naming
-// different listeners are refused with ErrConflictingListener.
-// Past the pair or combined budget a syscall collapses to its least
-// restrictive action (see Cost bounds). Flags mirror Intersect:
-// SECCOMP_FILTER_FLAG_SPEC_ALLOW survives if any input sets it,
-// SECCOMP_FILTER_FLAG_LOG only if every input does. The covered
-// architectures are the union of the inputs', and Union never drops one:
-// where a 32-bit or multiplexing architecture would need settling, the
-// affected syscalls collapse to their least restrictive action instead, and
-// a result in which libseccomp would lose the rules of an architecture is
-// refused with ErrLostRules (see Architectures). It keeps one of another
-// byte order than the native architecture too, which Intersect refuses, so
-// the result fails to load as the input listing it does. Single profiles,
-// output
-// order and which validators the result passes are as for Intersect.
+// Inputs are validated and ties in errno are broken as for Intersect, but
+// any input may name the listener, since union inputs are peers; inputs
+// naming different listeners are refused with ErrConflictingListener.
+// Union never drops an architecture an input covers: where a 32-bit or
+// multiplexing architecture needs settling, the affected syscalls collapse
+// to their least restrictive action, and a result in which libseccomp would
+// lose the rules of an architecture is refused with ErrLostRules. It keeps
+// an architecture of another byte order, which Intersect refuses, so the
+// result fails to load as the input listing it does.
 //
-// This implements the merge the Security Profiles Operator uses to combine
-// recorded profiles.
-//
-// The result shares no memory with the inputs, a single input included, so
-// the caller may modify it.
+// The result depends on the native architecture, passes the validators and
+// shares memory as for Intersect. See the Union, Architectures, Flags and
+// Cost bounds sections of the package documentation.
 func Union(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
-	return Options{Arch: NativeHost}.Union(profiles...)
+	return ForHost().Union(profiles...)
+}
+
+// ValidateBaseline checks a baseline once, where a runtime loads its
+// configuration: Validate, then Intersect of the baseline alone, then Diff
+// of the baseline against that intersection. The intersection is equal to
+// the baseline exactly when the merge reads every rule of it, so an unequal
+// diff, reported with ErrInexactBaseline and the diff in the message, names
+// what every merge with that baseline takes away whatever the artifact
+// says. Treat any error as a misconfigured node.
+//
+// It returns the failures of Validate as Validate does and the errors of
+// the merge without an InputError, since there is one input. Like
+// Intersect, it depends on the native architecture of the running program;
+// Options.ValidateBaseline names another node. See the Diff section of the
+// package documentation for what the diff shows, and
+// https://github.com/kubernetes-sigs/security-profiles-merger/blob/main/docs/integration.md#the-runtime-flow
+// for where it fits.
+func ValidateBaseline(baseline *specs.LinuxSeccomp) error {
+	return ForHost().ValidateBaseline(baseline)
 }
 
 func foldProfiles(

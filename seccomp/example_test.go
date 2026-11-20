@@ -26,13 +26,13 @@ import (
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
 
-// Example shows the flow of a CRI runtime: validate the baseline once when
-// its configuration loads, decode and validate each artifact, intersect the
+// Example shows the flow of a CRI runtime: check the baseline once when its
+// configuration loads, decode and validate each artifact, intersect the
 // two, and load the result. The diff shows what the baseline took away.
 func Example() {
-	// At configuration load: check that the baseline loads at all. The
-	// defaults runtimes ship fail ValidateStrict, and ValidateArtifact
-	// rejects a notification listener.
+	// At configuration load: check that the baseline loads and that the
+	// merge reads every rule of it. The defaults runtimes ship fail
+	// ValidateStrict, and ValidateArtifact rejects a notification listener.
 	baseline := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
 		Syscalls: []specs.LinuxSyscall{
@@ -40,7 +40,7 @@ func Example() {
 		},
 	}
 
-	err := seccomp.Validate(baseline)
+	err := seccomp.ValidateBaseline(baseline)
 	if err != nil {
 		panic(err)
 	}
@@ -53,21 +53,14 @@ func Example() {
 		]
 	}`)
 
-	var artifact specs.LinuxSeccomp
-
-	err = seccomp.UnmarshalStrict(data, &artifact)
-	if err != nil {
-		panic(err)
-	}
-
-	err = seccomp.ValidateArtifact(&artifact)
+	artifact, err := seccomp.DecodeArtifact(data)
 	if err != nil {
 		panic(err)
 	}
 
 	// Intersect runs Validate on both inputs and reports a failure as an
 	// *seccomp.InputError naming the input's index.
-	result, err := seccomp.Intersect(baseline, &artifact)
+	result, err := seccomp.Intersect(baseline, artifact)
 	if err != nil {
 		var inputErr *seccomp.InputError
 		if errors.As(err, &inputErr) {
@@ -81,7 +74,7 @@ func Example() {
 		fmt.Println(strings.Join(sc.Names, ","), "->", sc.Action)
 	}
 
-	diff, err := seccomp.Diff(&artifact, result)
+	diff, err := seccomp.Diff(artifact, result)
 	if err != nil {
 		panic(err)
 	}
@@ -91,6 +84,35 @@ func Example() {
 	// Output:
 	// read,write -> SCMP_ACT_ALLOW
 	// Diff{-mkdir->SCMP_ACT_ALLOW}
+}
+
+// A baseline whose rules the merge cannot read exactly loses them in every
+// merge, whatever the artifact says, so a runtime refuses it at
+// configuration load. Here two conditional rules of one syscall with
+// different results on different arguments form no safe shape, and the
+// merge collapses them.
+func ExampleValidateBaseline() {
+	baseline := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+		Syscalls: []specs.LinuxSyscall{
+			{
+				Names:  []string{"read"},
+				Action: specs.ActAllow,
+				Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 1, Op: specs.OpEqualTo}},
+			},
+			{
+				Names:  []string{"read"},
+				Action: specs.ActKillProcess,
+				Args:   []specs.LinuxSeccompArg{{Index: 1, Value: 2, Op: specs.OpEqualTo}},
+			},
+		},
+	}
+
+	err := seccomp.ForArch(specs.ArchAARCH64).ValidateBaseline(baseline)
+	fmt.Println(errors.Is(err, seccomp.ErrInexactBaseline))
+
+	// Output:
+	// true
 }
 
 func ExampleUnmarshalStrict() {
@@ -129,7 +151,7 @@ func ExampleOptions() {
 	}
 
 	for _, native := range []specs.Arch{specs.ArchX86, specs.ArchAARCH64} {
-		err := seccomp.Options{Arch: native}.ValidateArtifact(artifact)
+		err := seccomp.ForArch(native).ValidateArtifact(artifact)
 		fmt.Printf("%s: value too wide: %v\n", native, errors.Is(err, seccomp.ErrValueTooWide))
 	}
 
@@ -151,7 +173,7 @@ func ExampleOptions_Diff() {
 		Architectures: []specs.Arch{specs.ArchS390X},
 	}
 
-	diff, err := seccomp.Options{Arch: specs.ArchAARCH64}.Diff(left, right)
+	diff, err := seccomp.ForArch(specs.ArchAARCH64).Diff(left, right)
 	if err != nil {
 		panic(err)
 	}
@@ -159,9 +181,9 @@ func ExampleOptions_Diff() {
 	fmt.Println("added:", diff.Architectures.Added)
 	fmt.Println("removed:", diff.Architectures.Removed)
 
-	// The zero Options know no native architecture, so the lists compare as
+	// Options naming no known native architecture compare the lists as
 	// written.
-	diff, err = seccomp.Options{Arch: ""}.Diff(left, right)
+	diff, err = seccomp.ForAnyArch().Diff(left, right)
 	if err != nil {
 		panic(err)
 	}
@@ -485,7 +507,7 @@ func ExampleNativeArchitecture() { //nolint:testableexamples // prints the host 
 		panic(err)
 	}
 
-	named, err := seccomp.Options{Arch: native}.Intersect(profile)
+	named, err := seccomp.ForArch(native).Intersect(profile)
 	if err != nil {
 		panic(err)
 	}

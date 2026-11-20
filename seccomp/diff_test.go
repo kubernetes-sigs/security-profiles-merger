@@ -468,7 +468,7 @@ func TestDiffReportsChanges(t *testing.T) {
 
 			diff, err := seccomp.Diff(test.left, test.right)
 			if test.arch != "" {
-				diff, err = seccomp.Options{Arch: test.arch}.Diff(test.left, test.right)
+				diff, err = forNode(test.arch).Diff(test.left, test.right)
 			}
 
 			if err != nil {
@@ -671,7 +671,7 @@ func TestOptionsDiffIsHostIndependent(t *testing.T) {
 	}
 	unlisted := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
 
-	onTarget, err := seccomp.Options{Arch: specs.ArchAARCH64}.Diff(listed, unlisted)
+	onTarget, err := seccomp.ForArch(specs.ArchAARCH64).Diff(listed, unlisted)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -681,7 +681,7 @@ func TestOptionsDiffIsHostIndependent(t *testing.T) {
 			onTarget.String())
 	}
 
-	elsewhere, err := seccomp.Options{Arch: specs.ArchX86_64}.Diff(listed, unlisted)
+	elsewhere, err := seccomp.ForArch(specs.ArchX86_64).Diff(listed, unlisted)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -690,7 +690,7 @@ func TestOptionsDiffIsHostIndependent(t *testing.T) {
 		t.Error("a node running x86_64 loses aarch64, want a difference")
 	}
 
-	none, err := seccomp.Options{Arch: ""}.Diff(listed, unlisted)
+	none, err := seccomp.ForAnyArch().Diff(listed, unlisted)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -739,7 +739,7 @@ func TestDiffOperatorSpellingTwoConditions(t *testing.T) {
 	left := profileOf(specs.ActErrno, both)
 	right := profileOf(specs.ActErrno, both, crafted)
 
-	diff, err := seccomp.Options{Arch: specs.ArchX86_64}.Diff(left, right)
+	diff, err := seccomp.ForArch(specs.ArchX86_64).Diff(left, right)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

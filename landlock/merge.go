@@ -35,9 +35,11 @@ var (
 	// ErrNilProfile is returned when a nil profile is provided.
 	ErrNilProfile = spm.ErrNilProfile
 	// ErrMoreProblems is spm.ErrMoreProblems, which a validation report
-	// matches when it left failures out: read a match as "and possibly
-	// others" before dispatching on another sentinel.
+	// matches when it left failures out (see [spm.ErrMoreProblems]).
 	ErrMoreProblems = spm.ErrMoreProblems
+	// ErrArtifactTooLarge is spm.ErrArtifactTooLarge, which every error
+	// this package returns for a profile past a MaxArtifact limit matches.
+	ErrArtifactTooLarge = spm.ErrArtifactTooLarge
 	// ErrBudgetExceeded is returned by Intersect and Union when merging
 	// their inputs would cost more than the merge budget (see the Cost
 	// bounds section of the package documentation). It is not wrapped in an
@@ -66,49 +68,30 @@ type InputError = spm.InputError
 // is the merge KEP-6061 defines for a CRI runtime combining an artifact
 // with its baseline.
 //
-// The handled access sets and scoped sets are unioned, since an unhandled
-// right is implicitly allowed. A right is granted for a path or port only
-// if every input permits it there, either by not handling it or through a
-// rule; a path rule covers the hierarchy beneath its path, so the result
-// carries the narrower of two rule paths, and a rule loses the rights its
-// ancestors in the result already grant. As in the kernel, a profile
-// handling any filesystem right denies FSAccessRefer unless a rule grants
-// it, and the result drops refer where it would allow a move an input
-// denies, so it may deny moves and links that every input allows. One kind
-// of move is not covered: inside a mount other than the root mount, an
-// input can deny a move for a right its rule on "/" and another of its
-// rules both grant, which gains the file nothing, and the result may allow
-// it. See the Handled access, Refer and Rule paths sections of the package
+// The handled access and scoped sets are unioned, and a right is granted
+// for a path or port only where every input permits it, by not handling it
+// or through a rule; the result carries the narrower of two rule paths, and
+// a rule loses the rights its ancestors in the result already grant. The
+// result drops FSAccessRefer where it would allow a move an input denies,
+// so it may deny moves and links that every input allows. Inside a mount
+// other than the root mount it can allow a move an input denies for a
+// right that input's rule on "/" grants as well (see the Refer section).
+// See the Handled access, Refer and Rule paths sections of the package
 // documentation.
 //
 // Hierarchy resolution is textual, so a rule of the result can carry an
-// ancestor's access onto a deeper path another input chose, which the
-// kernel binds to whatever that path resolves to. A caller merging an
-// artifact must check LoweredRulePaths or enforce the inputs as separate
-// layers; see the Lowered rule paths section.
+// ancestor's access onto a deeper path another input chose. A caller
+// merging an artifact must check LoweredRulePaths or enforce the inputs as
+// separate layers; see the Lowered rule paths section.
 //
-// Each input is checked with Validate, which lets duplicate rules and
-// rights pass; the merge folds them. Every input that fails is reported as
-// an InputError naming the input: the error is that InputError for one, and
-// the InputErrors joined in input order for several.
-//
-// The merge takes memory in proportion to the size of the inputs, and time
-// in proportion to the number of rules times the depth of their paths times
-// the length of those paths, since it looks up every ancestor of every rule
-// path, once per input to settle refer; MaxPathLen bounds the depth and the
-// length. Inputs whose merge would exceed the budget are refused with
-// ErrBudgetExceeded after validation and before anything is merged (see the
-// Cost bounds section).
-// Validate does not bound how many rules one input holds, so an untrusted
-// artifact must still pass ValidateArtifact, whose MaxArtifactRules does,
-// before it is merged.
-//
-// A result that handles and scopes nothing, which happens only when no input
-// handles or scopes anything, restricts nothing; the kernel refuses to load
-// it, and ValidateArtifact reports it with ErrEmptyRuleset.
-//
-// The result shares no memory with the inputs, a single input included, so
-// the caller may modify it.
+// Each input is checked with Validate, and every one that fails is
+// reported as an InputError naming it. Inputs whose merge would exceed the
+// budget are refused with ErrBudgetExceeded before anything is merged (see
+// the Cost bounds section); Validate counts no rules, so an untrusted
+// artifact must pass ValidateArtifact first. A result that handles and
+// scopes nothing restricts nothing, and ValidateArtifact reports it with
+// ErrEmptyRuleset. The result shares no memory with the inputs, a single
+// input included, so the caller may modify it.
 func Intersect(profiles ...*Profile) (*Profile, error) {
 	return foldProfiles(profiles, intersectTwo, finishIntersect)
 }
@@ -117,33 +100,20 @@ func Intersect(profiles ...*Profile) (*Profile, error) {
 // permits access if any input permits it. This is the merge the Security
 // Profiles Operator uses to combine recorded profiles.
 //
-// The handled access sets and scoped sets are intersected, since handling
-// fewer rights restricts less. Rules for one path or port have their rights
-// unioned, and a rule only one input holds is kept, even where a rule on an
-// ancestor grants the same rights, since a nested path that is a symlink
-// covers a different hierarchy. Rights outside the merged handled sets are
-// pruned from rules, as Intersect prunes them.
-//
-// When every input handles a filesystem right the result denies
-// FSAccessRefer too, and it may need ABIV2 to list refer where the inputs
-// share no other handled filesystem right. Where a right one input grants
-// at a destination would deny a move another input allows, the result stops
-// handling that right, which permits it everywhere and more than any input
-// does. That is judged with and without the rights of a rule on "/", which
-// the kernel leaves out of the comparison for moves outside the root mount.
-// See the Handled access, Refer and ABI versions sections of the package
+// The handled access and scoped sets are intersected, rules for one path or
+// port have their rights unioned, and a rule only one input holds is kept,
+// even where an ancestor grants the same rights. Where a right one input
+// grants at a destination would deny a move another input allows, the
+// result stops handling that right, which permits it everywhere and more
+// than any input does, and it may need ABIV2 to list FSAccessRefer. See the
+// Handled access, Refer and ABI versions sections of the package
 // documentation.
 //
-// Inputs are validated as for Intersect, and the cost is bounded as for
-// Intersect, with the same budget and ErrBudgetExceeded: an untrusted input
-// must pass ValidateArtifact first, since Validate bounds no rule count. A
-// result that handles and scopes nothing, for example the union of a
-// profile handling only filesystem rights with one handling only network
-// rights, restricts nothing; the kernel refuses to load it, and
-// ValidateArtifact reports it with ErrEmptyRuleset.
-//
-// The result shares no memory with the inputs, a single input included, so
-// the caller may modify it.
+// Inputs are validated, the cost is bounded, and the result is owned by the
+// caller, as for Intersect. A result that handles and scopes nothing, for
+// example the union of a profile handling only filesystem rights with one
+// handling only network rights, restricts nothing, and ValidateArtifact
+// reports it with ErrEmptyRuleset.
 func Union(profiles ...*Profile) (*Profile, error) {
 	return foldProfiles(profiles, unionTwo, finishUnion)
 }
@@ -730,6 +700,31 @@ func validateInputs(profiles []*Profile) ([][]string, error) {
 	return cleaned, nil
 }
 
+// ResultError is the error LoweredRulePaths returns for a merge result that
+// is nil or fails Validate. The result is not an input, so it is not an
+// InputError: match it with errors.As to tell a bad result, which is the
+// caller's own, from a bad input. errors.Is sees through it to the
+// sentinels of Err.
+type ResultError struct {
+	// Err is what was wrong with the result: ErrNilProfile or the error
+	// Validate returned for it.
+	Err error
+}
+
+// Error returns "result: " followed by the message of Err, or "result:
+// <nil>" where Err is nil.
+func (e *ResultError) Error() string {
+	if e.Err == nil {
+		return "result: <nil>"
+	}
+
+	return "result: " + e.Err.Error()
+}
+
+// Unwrap returns Err, so that errors.Is and errors.As see the sentinels it
+// holds.
+func (e *ResultError) Unwrap() error { return e.Err }
+
 // LoweredRulePaths reports the rule paths of a merge result that carry
 // access an input granted only on an ancestor path. A path is reported when
 // the result grants a right there that some input grants through a rule on
@@ -751,11 +746,11 @@ func validateInputs(profiles []*Profile) ([][]string, error) {
 // LoweredRulePaths(effective, baseline, artifact) the baseline is Index 0,
 // as it is in Intersect(baseline, artifact). Several failing inputs are
 // joined in input order, as a merge joins them. A result that is nil or
-// fails is reported first and on its own, as an error prefixed "result: "
-// that is not an InputError, so a caller dispatching on InputError never
-// blames an input for it; errors.Is still matches ErrNilProfile or the
-// sentinels of the failure. Without inputs nothing can have been lowered,
-// so it returns nil and no error once the result passes.
+// fails is reported first and on its own, as a *ResultError, which is not
+// an InputError, so a caller dispatching on InputError never blames an
+// input for it; errors.Is still matches ErrNilProfile or the sentinels of
+// the failure. Without inputs nothing can have been lowered, so it returns
+// nil and no error once the result passes.
 //
 // The Lowered rule paths section of the package documentation explains why
 // this matters: hierarchy resolution is textual, while the kernel binds a
@@ -771,7 +766,7 @@ func validateInputs(profiles []*Profile) ([][]string, error) {
 func LoweredRulePaths(result *Profile, inputs ...*Profile) ([]string, error) {
 	resultPaths, err := validateProfile(result, tierMerge)
 	if err != nil {
-		return nil, fmt.Errorf("result: %w", err)
+		return nil, &ResultError{Err: err}
 	}
 
 	cleaned, err := validateInputs(inputs)

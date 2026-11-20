@@ -37,7 +37,11 @@ import (
 // forNode returns the options of a node whose native architecture is the
 // given one, the empty Arch for one that is not known.
 func forNode(native specs.Arch) seccomp.Options {
-	return seccomp.Options{Arch: native}
+	if native == "" {
+		return seccomp.ForAnyArch()
+	}
+
+	return seccomp.ForArch(native)
 }
 
 // littleEndianNode returns the options for the node the tests run on
@@ -49,10 +53,21 @@ func forNode(native specs.Arch) seccomp.Options {
 func littleEndianNode() seccomp.Options {
 	native, known := seccomp.NativeArchitecture()
 	if known && !seccomp.BigEndian(native) {
-		return seccomp.Options{Arch: seccomp.NativeHost}
+		return seccomp.ForHost()
 	}
 
-	return seccomp.Options{Arch: specs.ArchX86_64}
+	return seccomp.ForArch(specs.ArchX86_64)
+}
+
+// littleEndianArch returns the architecture littleEndianNode names, or the
+// empty Arch where it is the host.
+func littleEndianArch() specs.Arch {
+	native, known := seccomp.NativeArchitecture()
+	if known && !seccomp.BigEndian(native) {
+		return ""
+	}
+
+	return specs.ArchX86_64
 }
 
 // errorText returns the message of err, or "" for nil.
@@ -84,13 +99,13 @@ func TestValidateArtifactRejectsWideValueOn32Bit(t *testing.T) {
 	} {
 		profile := on(profileOf(specs.ActErrno, wideEntry), archs...)
 
-		err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(profile)
+		err := seccomp.ForArch(specs.ArchX86_64).ValidateArtifact(profile)
 		if !errors.Is(err, seccomp.ErrValueTooWide) {
 			t.Errorf("ValidateArtifact(%s) = %v, want ErrValueTooWide",
 				seccomp.FormatProfile(profile), err)
 		}
 
-		err = seccomp.Options{Arch: specs.ArchX86_64}.ValidateStrict(profile)
+		err = seccomp.ForArch(specs.ArchX86_64).ValidateStrict(profile)
 		if !errors.Is(err, seccomp.ErrValueTooWide) {
 			t.Errorf("ValidateStrict(%s) = %v, want ErrValueTooWide",
 				seccomp.FormatProfile(profile), err)
@@ -115,7 +130,7 @@ func TestValidateArtifactAcceptsWideValueWithout32Bit(t *testing.T) {
 			}),
 		), specs.ArchX86),
 	} {
-		err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(profile)
+		err := seccomp.ForArch(specs.ArchX86_64).ValidateArtifact(profile)
 		if err != nil {
 			t.Errorf("ValidateArtifact(%s) = %v, want nil", seccomp.FormatProfile(profile), err)
 		}
@@ -127,7 +142,7 @@ func TestValidateArtifactAcceptsWideValueWithout32Bit(t *testing.T) {
 		filtered("personality", specs.ActAllow, masked(0, 1<<32, 1<<32)),
 	), specs.ArchX86)
 
-	err := seccomp.Options{Arch: specs.ArchX86_64}.ValidateArtifact(profile)
+	err := seccomp.ForArch(specs.ArchX86_64).ValidateArtifact(profile)
 	if !errors.Is(err, seccomp.ErrValueTooWide) {
 		t.Errorf("ValidateArtifact(%s) = %v, want ErrValueTooWide",
 			seccomp.FormatProfile(profile), err)
@@ -155,7 +170,7 @@ func TestIntersectDropsNarrowArchitecturesForWideValues(t *testing.T) {
 
 	baseline, artifact := wideValuePair()
 
-	result, err := seccomp.Options{Arch: specs.ArchX86_64}.Intersect(baseline, artifact)
+	result, err := seccomp.ForArch(specs.ArchX86_64).Intersect(baseline, artifact)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +198,7 @@ func TestIntersectDropsArchitectureUnderKillProcess(t *testing.T) {
 		filtered("read", specs.ActAllow, arg(0, specs.OpEqualTo, 1<<32|1)),
 	), specs.ArchX86_64, specs.ArchX86)
 
-	result, err := seccomp.Options{Arch: specs.ArchX86_64}.Intersect(baseline, artifact)
+	result, err := seccomp.ForArch(specs.ArchX86_64).Intersect(baseline, artifact)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +238,7 @@ func TestIntersectRefusesArchitecturesOfTheOtherByteOrder(t *testing.T) {
 				`(big-endian, native SCMP_ARCH_X86_64 is little-endian)`,
 		},
 	} {
-		node := seccomp.Options{Arch: testCase.native}
+		node := forNode(testCase.native)
 
 		for _, inputs := range [][]*specs.LinuxSeccomp{
 			{mixed},
@@ -240,7 +255,7 @@ func TestIntersectRefusesArchitecturesOfTheOtherByteOrder(t *testing.T) {
 		}
 	}
 
-	result, err := seccomp.Options{Arch: ""}.Intersect(mixed, mixed)
+	result, err := seccomp.ForAnyArch().Intersect(mixed, mixed)
 	if err != nil || len(result.Architectures) != len(mixed.Architectures) {
 		t.Errorf("Options{}.Intersect = %s, %v, want every architecture kept",
 			seccomp.FormatProfile(result), err)
@@ -260,7 +275,7 @@ func checkByteOrderRefused(
 	if !errors.As(err, &inputErr) || inputErr.Index != index ||
 		!errors.Is(err, seccomp.ErrMixedByteOrder) || !strings.Contains(err.Error(), want) {
 		t.Errorf("%s: Intersect of %d inputs = %s, %v, want input %d refused with %s",
-			node.Arch, len(inputs), seccomp.FormatProfile(result), err, index, want)
+			node, len(inputs), seccomp.FormatProfile(result), err, index, want)
 	}
 }
 
@@ -272,7 +287,7 @@ func checkByteOrderRefused(
 func TestIntersectRefusesOnlyForeignByteOrder(t *testing.T) {
 	t.Parallel()
 
-	amd64 := seccomp.Options{Arch: specs.ArchX86_64}
+	amd64 := seccomp.ForArch(specs.ArchX86_64)
 	profile := on(profileOf(specs.ActErrno, filtered("read", specs.ActAllow)), specs.ArchS390X)
 
 	_, err := amd64.Intersect(profile)
@@ -293,7 +308,7 @@ func TestIntersectCollapsesWideValuesOnNarrowNative(t *testing.T) {
 
 	baseline, artifact := wideValuePair()
 
-	result, err := seccomp.Options{Arch: specs.ArchX86}.Intersect(baseline, artifact)
+	result, err := seccomp.ForArch(specs.ArchX86).Intersect(baseline, artifact)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +326,7 @@ func TestUnionCollapsesWideValuesOn32Bit(t *testing.T) {
 
 	baseline, artifact := wideValuePair()
 
-	result, err := seccomp.Options{Arch: specs.ArchX86_64}.Union(baseline, artifact)
+	result, err := seccomp.ForArch(specs.ArchX86_64).Union(baseline, artifact)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +346,7 @@ func TestMergeKeepsWideValuesWithout32Bit(t *testing.T) {
 	baseline.Architectures = []specs.Arch{specs.ArchX86_64}
 	artifact.Architectures = []specs.Arch{specs.ArchX86_64}
 
-	result, err := seccomp.Options{Arch: specs.ArchX86_64}.Intersect(baseline, artifact)
+	result, err := seccomp.ForArch(specs.ArchX86_64).Intersect(baseline, artifact)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +375,7 @@ func TestIntersectDropsMultiplexingArchitectures(t *testing.T) {
 
 	baseline, artifact := socketPair(specs.ArchX86_64, specs.ArchX86, specs.ArchPPC64LE)
 
-	result, err := seccomp.Options{Arch: specs.ArchX86_64}.Intersect(baseline, artifact)
+	result, err := seccomp.ForArch(specs.ArchX86_64).Intersect(baseline, artifact)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +390,7 @@ func TestIntersectCollapsesMultiplexedOnMultiplexingNative(t *testing.T) {
 
 	baseline, artifact := socketPair(specs.ArchPPC64LE)
 
-	result, err := seccomp.Options{Arch: specs.ArchPPC64LE}.Intersect(baseline, artifact)
+	result, err := seccomp.ForArch(specs.ArchPPC64LE).Intersect(baseline, artifact)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +413,7 @@ func TestUnionCollapsesMultiplexed(t *testing.T) {
 		filtered("socket", specs.ActErrno, arg(0, specs.OpEqualTo, 3)),
 	)
 
-	result, err := seccomp.Options{Arch: specs.ArchX86_64}.Union(artifact, baseline)
+	result, err := seccomp.ForArch(specs.ArchX86_64).Union(artifact, baseline)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +436,7 @@ func TestMergeSettlesMultiplexerRules(t *testing.T) {
 		filtered("socket", specs.ActAllow),
 	), specs.ArchX86)
 
-	result, err := seccomp.Options{Arch: specs.ArchX86}.Intersect(denying, allowing)
+	result, err := seccomp.ForArch(specs.ArchX86).Intersect(denying, allowing)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +460,7 @@ func TestIntersectLowersMultiplexerRule(t *testing.T) {
 		filtered("socket", specs.ActAllow),
 	), specs.ArchS390X)
 
-	result, err := seccomp.Options{Arch: specs.ArchS390X}.Intersect(denying, allowing)
+	result, err := seccomp.ForArch(specs.ArchS390X).Intersect(denying, allowing)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,7 +476,7 @@ func TestIntersectLowersMultiplexerRule(t *testing.T) {
 		filtered("socketcall", specs.ActAllow, arg(1, specs.OpEqualTo, 5)),
 	), specs.ArchS390X)
 
-	result, err = seccomp.Options{Arch: specs.ArchS390X}.Intersect(conditional, conditional)
+	result, err = seccomp.ForArch(specs.ArchS390X).Intersect(conditional, conditional)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -485,7 +500,7 @@ func TestMergeKeepsMultiplexedRulesThatAreSafe(t *testing.T) {
 		filtered("connect", specs.ActAllow),
 	), specs.ArchPPC64LE)
 
-	result, err := seccomp.Options{Arch: specs.ArchPPC64LE}.Intersect(baseline, artifact)
+	result, err := seccomp.ForArch(specs.ArchPPC64LE).Intersect(baseline, artifact)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,7 +515,7 @@ func TestMergeKeepsMultiplexedRulesThatAreSafe(t *testing.T) {
 		filtered("setsockopt", specs.ActAllow, arg(1, specs.OpEqualTo, 1)),
 	), specs.ArchPPC64LE)
 
-	result, err = seccomp.Options{Arch: specs.ArchPPC64LE}.Intersect(self, self)
+	result, err = seccomp.ForArch(specs.ArchPPC64LE).Intersect(self, self)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,7 +580,7 @@ func TestMergeKeepsMultiplexedRulesTestingOtherArguments(t *testing.T) {
 		errnoFiltered("socket", 97, arg(0, specs.OpEqualTo, 40)),
 	), specs.ArchX86_64, specs.ArchX86)
 
-	result, err := seccomp.Options{Arch: specs.ArchX86_64}.Intersect(families, families)
+	result, err := seccomp.ForArch(specs.ArchX86_64).Intersect(families, families)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -582,7 +597,7 @@ func TestMergeKeepsMultiplexedRulesTestingOtherArguments(t *testing.T) {
 		errnoFiltered("socket", 38, arg(0, specs.OpEqualTo, 10)),
 	), specs.ArchX86)
 
-	result, err = seccomp.Options{Arch: specs.ArchX86}.Intersect(errnos, errnos)
+	result, err = seccomp.ForArch(specs.ArchX86).Intersect(errnos, errnos)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -631,7 +646,7 @@ func TestIntersectUnhidesMultiplexedRules(t *testing.T) {
 func requireEqualProfiles(t *testing.T, got, want *specs.LinuxSeccomp) {
 	t.Helper()
 
-	diff, err := seccomp.Options{Arch: ""}.Diff(got, want)
+	diff, err := seccomp.ForAnyArch().Diff(got, want)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -654,12 +669,12 @@ func TestOptionsNameTheNativeArchitecture(t *testing.T) {
 
 	// A 32-bit native architecture compares half the value, whatever the
 	// profile lists, and a 64-bit one all of it.
-	err := seccomp.Options{Arch: specs.ArchX86}.ValidateArtifact(wide)
+	err := seccomp.ForArch(specs.ArchX86).ValidateArtifact(wide)
 	if !errors.Is(err, seccomp.ErrValueTooWide) {
 		t.Errorf("Options{x86}.ValidateArtifact = %v, want ErrValueTooWide", err)
 	}
 
-	err = seccomp.Options{Arch: specs.ArchAARCH64}.ValidateArtifact(wide)
+	err = seccomp.ForArch(specs.ArchAARCH64).ValidateArtifact(wide)
 	if err != nil {
 		t.Errorf("Options{aarch64}.ValidateArtifact = %v, want no error", err)
 	}
@@ -669,12 +684,12 @@ func TestOptionsNameTheNativeArchitecture(t *testing.T) {
 	// architectures the profiles list are dropped instead.
 	baseline, artifact := wideValuePair()
 
-	narrow, err := seccomp.Options{Arch: specs.ArchX86}.Intersect(baseline, artifact)
+	narrow, err := seccomp.ForArch(specs.ArchX86).Intersect(baseline, artifact)
 	if err != nil {
 		t.Fatalf("Options{x86}.Intersect: %v", err)
 	}
 
-	full, err := seccomp.Options{Arch: specs.ArchAARCH64}.Intersect(baseline, artifact)
+	full, err := seccomp.ForArch(specs.ArchAARCH64).Intersect(baseline, artifact)
 	if err != nil {
 		t.Fatalf("Options{aarch64}.Intersect: %v", err)
 	}
@@ -685,7 +700,7 @@ func TestOptionsNameTheNativeArchitecture(t *testing.T) {
 	}
 
 	// Naming the architecture of the running program is what the plain
-	// functions, and NativeHost, do.
+	// functions, and Options{Host: true}, do.
 	if native, ok := seccomp.NativeArchitecture(); ok {
 		named, err := forNode(native).Union(wide)
 		if err != nil {
@@ -704,6 +719,43 @@ func TestOptionsNameTheNativeArchitecture(t *testing.T) {
 	}
 }
 
+// TestZeroOptionsAreInvalid checks that the zero Options, which name no
+// node, fail every method with ErrInvalidOptions before a profile is looked
+// at, rather than standing for some node, and that ForArch of the empty
+// architecture names an unknown one.
+func TestZeroOptionsAreInvalid(t *testing.T) {
+	t.Parallel()
+
+	profile := profileOf(specs.ActErrno)
+
+	_, err := seccomp.ForArch("").Intersect(profile)
+	if !errors.Is(err, seccomp.ErrUnknownArch) {
+		t.Errorf("ForArch(\"\").Intersect = %v, want ErrUnknownArch", err)
+	}
+
+	for _, opts := range []seccomp.Options{{}} {
+		_, intersectErr := opts.Intersect(profile)
+		_, unionErr := opts.Union(profile)
+		_, diffErr := opts.Diff(profile, profile)
+		_, decodeErr := opts.DecodeArtifact([]byte(`{"defaultAction":"SCMP_ACT_ERRNO"}`))
+
+		for name, err := range map[string]error{
+			"Intersect":        intersectErr,
+			"Union":            unionErr,
+			"Diff":             diffErr,
+			"Validate":         opts.Validate(profile),
+			"ValidateArtifact": opts.ValidateArtifact(profile),
+			"ValidateStrict":   opts.ValidateStrict(profile),
+			"ValidateBaseline": opts.ValidateBaseline(profile),
+			"DecodeArtifact":   decodeErr,
+		} {
+			if !errors.Is(err, seccomp.ErrInvalidOptions) {
+				t.Errorf("%v.%s = %v, want ErrInvalidOptions", opts, name, err)
+			}
+		}
+	}
+}
+
 func TestOptionsRejectUnknownArchitecture(t *testing.T) {
 	t.Parallel()
 
@@ -711,27 +763,27 @@ func TestOptionsRejectUnknownArchitecture(t *testing.T) {
 
 	profile := profileOf(specs.ActErrno)
 
-	_, err := seccomp.Options{Arch: bogus}.Intersect(profile)
+	_, err := seccomp.ForArch(bogus).Intersect(profile)
 	if !errors.Is(err, seccomp.ErrUnknownArch) {
 		t.Errorf("Options.Intersect = %v, want ErrUnknownArch", err)
 	}
 
-	_, err = seccomp.Options{Arch: bogus}.Union(profile)
+	_, err = seccomp.ForArch(bogus).Union(profile)
 	if !errors.Is(err, seccomp.ErrUnknownArch) {
 		t.Errorf("Options.Union = %v, want ErrUnknownArch", err)
 	}
 
-	err = seccomp.Options{Arch: bogus}.ValidateArtifact(profile)
+	err = seccomp.ForArch(bogus).ValidateArtifact(profile)
 	if !errors.Is(err, seccomp.ErrUnknownArch) {
 		t.Errorf("Options.ValidateArtifact = %v, want ErrUnknownArch", err)
 	}
 
-	err = seccomp.Options{Arch: bogus}.ValidateStrict(profile)
+	err = seccomp.ForArch(bogus).ValidateStrict(profile)
 	if !errors.Is(err, seccomp.ErrUnknownArch) {
 		t.Errorf("Options.ValidateStrict = %v, want ErrUnknownArch", err)
 	}
 
-	diff, err := seccomp.Options{Arch: bogus}.Diff(profile, profile)
+	diff, err := seccomp.ForArch(bogus).Diff(profile, profile)
 	if !errors.Is(err, seccomp.ErrUnknownArch) {
 		t.Errorf("Options.Diff = %s, %v, want ErrUnknownArch", diff.String(), err)
 	}
@@ -745,11 +797,11 @@ func wideOnly() *specs.LinuxSeccomp {
 	)
 }
 
-// TestZeroOptionsValidateForAnyArchitecture checks that the zero Options, a
-// node of unknown architecture, validate as for any architecture a Go
-// program runs on, 32-bit and multiplexing ones included, so that what they
-// accept loads as written on whichever node loads it.
-func TestZeroOptionsValidateForAnyArchitecture(t *testing.T) {
+// TestAnyArchValidatesForAnyArchitecture checks that AnyArch, a node of
+// unknown architecture, validates as for any architecture a runtime can be
+// native on, 32-bit and multiplexing ones included, so that what it accepts
+// loads as written on whichever node loads it.
+func TestAnyArchValidatesForAnyArchitecture(t *testing.T) {
 	t.Parallel()
 
 	// On socketcall(2) both rules lose the condition on the family and
@@ -767,13 +819,13 @@ func TestZeroOptionsValidateForAnyArchitecture(t *testing.T) {
 		for _, opts := range []seccomp.Options{forNode(""), forNode(specs.ArchX86)} {
 			err := validate(opts, wideOnly())
 			if !errors.Is(err, seccomp.ErrValueTooWide) {
-				t.Errorf("%s(%q) = %v, want ErrValueTooWide", name, opts.Arch, err)
+				t.Errorf("%s(%v) = %v, want ErrValueTooWide", name, opts, err)
 			}
 
 			err = validate(opts, multiplexed)
 			if !errors.Is(err, seccomp.ErrConflictingEntries) {
 				t.Errorf("%s(%q) of multiplexed rules = %v, want ErrConflictingEntries",
-					name, opts.Arch, err)
+					name, opts, err)
 			}
 		}
 
@@ -796,18 +848,12 @@ func TestZeroOptionsValidateForAnyArchitecture(t *testing.T) {
 				name, err)
 		}
 	}
-
-	// NativeHost names no architecture a profile may list.
-	err := seccomp.Validate(on(profileOf(specs.ActErrno), seccomp.NativeHost))
-	if !errors.Is(err, seccomp.ErrUnknownArch) {
-		t.Errorf("Validate of a profile listing NativeHost = %v, want ErrUnknownArch", err)
-	}
 }
 
-// TestZeroOptionsMergeForAnyArchitecture checks that the zero Options merge
-// as for any architecture a Go program runs on, 32-bit and multiplexing ones
-// included, so that what they build is safe on whichever node loads it.
-func TestZeroOptionsMergeForAnyArchitecture(t *testing.T) {
+// TestAnyArchMergesForAnyArchitecture checks that AnyArch merges as for any
+// architecture a runtime can be native on, 32-bit and multiplexing ones
+// included, so that what it builds is safe on whichever node loads it.
+func TestAnyArchMergesForAnyArchitecture(t *testing.T) {
 	t.Parallel()
 
 	// One allows read(0x100000005), which a 32-bit node reads as read(5),
@@ -873,24 +919,24 @@ func requireSameMerge(
 
 	got, err := mergeFor(opts, inputs...)
 	if err != nil {
-		t.Fatalf("%s(%q): %v", name, opts.Arch, err)
+		t.Fatalf("%s(%v): %v", name, opts, err)
 	}
 
 	want, err := mergeFor(like, inputs...)
 	if err != nil {
-		t.Fatalf("%s(%q): %v", name, like.Arch, err)
+		t.Fatalf("%s(%v): %v", name, like, err)
 	}
 
 	if seccomp.FormatProfile(got) != seccomp.FormatProfile(want) {
-		t.Errorf("%s(%q) = %s, want %s as for %s", name, opts.Arch,
-			seccomp.FormatProfile(got), seccomp.FormatProfile(want), like.Arch)
+		t.Errorf("%s(%v) = %s, want %s as for %s", name, opts,
+			seccomp.FormatProfile(got), seccomp.FormatProfile(want), like)
 	}
 }
 
-// TestNativeHostIsThePlainFunctions checks that NativeHost stands for the
-// running program's architecture, as the plain functions do, and that the
-// zero Options do not.
-func TestNativeHostIsThePlainFunctions(t *testing.T) {
+// TestHostIsThePlainFunctions checks that Host stands for the running
+// program's architecture, as the plain functions do, and that AnyArch does
+// not.
+func TestHostIsThePlainFunctions(t *testing.T) {
 	t.Parallel()
 
 	baseline, artifact := wideValuePair()
@@ -898,11 +944,11 @@ func TestNativeHostIsThePlainFunctions(t *testing.T) {
 	// The pair lists x86 architectures, which a big-endian host refuses,
 	// so the two are compared by their errors as well.
 	plain, plainErr := seccomp.Intersect(baseline, artifact)
-	host, hostErr := seccomp.Options{Arch: seccomp.NativeHost}.Intersect(baseline, artifact)
+	host, hostErr := seccomp.ForHost().Intersect(baseline, artifact)
 
 	if seccomp.FormatProfile(plain) != seccomp.FormatProfile(host) ||
 		errorText(plainErr) != errorText(hostErr) {
-		t.Errorf("Options{NativeHost}.Intersect = %s, %v, Intersect = %s, %v",
+		t.Errorf("Options{Host}.Intersect = %s, %v, Intersect = %s, %v",
 			seccomp.FormatProfile(host), hostErr, seccomp.FormatProfile(plain), plainErr)
 	}
 
@@ -911,8 +957,8 @@ func TestNativeHostIsThePlainFunctions(t *testing.T) {
 		return
 	}
 
-	// NativeHost implies the running architecture on both sides of a diff,
-	// which the zero Options do not.
+	// Host implies the running architecture on both sides of a diff, which
+	// AnyArch does not.
 	listed := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
 		Architectures: []specs.Arch{native},
@@ -923,13 +969,13 @@ func TestNativeHostIsThePlainFunctions(t *testing.T) {
 		opts  seccomp.Options
 		equal bool
 	}{
-		{seccomp.Options{Arch: seccomp.NativeHost}, true},
-		{seccomp.Options{Arch: ""}, false},
+		{seccomp.ForHost(), true},
+		{seccomp.ForAnyArch(), false},
 	} {
 		diff, err := testCase.opts.Diff(listed, unlisted)
 		if err != nil || diff.Equal != testCase.equal {
-			t.Errorf("Options{%q}.Diff = %s, %v, want equal %t",
-				testCase.opts.Arch, diff, err, testCase.equal)
+			t.Errorf("%v.Diff = %s, %v, want equal %t",
+				testCase.opts, diff, err, testCase.equal)
 		}
 	}
 }
@@ -956,7 +1002,7 @@ func TestOptionsValidateStrictAcceptsOnlyWhatArtifactAccepts(t *testing.T) {
 		}
 	}
 
-	err := seccomp.Options{Arch: specs.ArchAARCH64}.ValidateStrict(profile)
+	err := seccomp.ForArch(specs.ArchAARCH64).ValidateStrict(profile)
 	if err != nil {
 		t.Errorf("Options{aarch64}.ValidateStrict = %v, want nil", err)
 	}
@@ -1018,7 +1064,7 @@ func TestMultiplexerSettlesOnAMultiplexingNative(t *testing.T) {
 			right = test.left
 		}
 
-		result, err := seccomp.Options{Arch: specs.ArchS390X}.Intersect(test.left, right)
+		result, err := seccomp.ForArch(specs.ArchS390X).Intersect(test.left, right)
 		if err != nil {
 			t.Fatalf("%s: %v", test.name, err)
 		}

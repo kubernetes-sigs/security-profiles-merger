@@ -30,6 +30,7 @@ import (
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
 	"sigs.k8s.io/security-profiles-merger/landlock"
+	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
 
 const (
@@ -114,7 +115,7 @@ func testInvocation(inputs []profileInput) *invocation {
 		report:      newInputReport(inputs),
 		kind:        nil,
 		checks:      nil,
-		arch:        archOption{named: false, value: ""},
+		arch:        archOption{named: false, value: seccomp.ForAnyArch()},
 		format:      formatJSON,
 		out:         bytes.Buffer{},
 		stdout:      io.Discard,

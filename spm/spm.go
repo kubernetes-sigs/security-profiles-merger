@@ -24,21 +24,34 @@ limitations under the License.
 //     others.
 //   - InputError and the sentinel errors below, which each package
 //     re-exports, so that errors.Is against a sentinel here matches an
-//     error any of the three returned.
+//     error any of the three returned. ErrArtifactTooLarge is matched by
+//     every limit error of the three, such as seccomp.ErrTooManyRules.
+//   - Problems, which lists the failures an error reports.
 //   - MaxPathLen, the path length limit of apparmor and landlock.
 //
 // Nothing needs to import this package: each profile package re-exports
 // what it uses under its own name. Import it to match a sentinel without
 // picking one of the three packages arbitrarily.
 //
-// A validator collects its failures into one error, which reports at most
-// 32 of them and matches ErrMoreProblems when it left others out. Where it
-// holds more than one failure, or left any out, that error implements
-// Unwrap() []error, which returns the failures it kept followed by
-// ErrMoreProblems when it left others out, so a caller can walk them as
-// errors.Is and errors.As do. A single failure is returned as it is, and
-// InputError wraps the report of one input with Unwrap() error, so look for
-// Unwrap() []error with errors.As and fall back to the error itself.
+// # Reading a validation error
+//
+// A validator collects its failures into one error and reports at most 32
+// of them. Past that the error matches ErrMoreProblems instead of listing
+// the rest, so errors.Is for a sentinel the profile violates can be false.
+// Treat a match of ErrMoreProblems as "and possibly others" before
+// dispatching on another sentinel, and do not branch on the absence of one.
+// A merge bounds the InputErrors of its failing inputs the same way. This
+// is the one place the bound is described; the packages refer here.
+//
+// Where an error holds more than one failure, or left any out, it
+// implements Unwrap() []error, which returns the failures it kept followed
+// by ErrMoreProblems when it left others out. A single failure is returned
+// as it is. [Problems] lists the failures of either kind, so a caller need
+// not walk them itself. InputError wraps the report of one input with
+// Unwrap() error, so call Problems on its Err to list that input's
+// failures.
+//
+// # Scope
 //
 // It is deliberately small. The three profile types have no common shape,
 // and no operation over "a profile" can say anything before it knows which
@@ -50,7 +63,10 @@ package spm
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
+
+	"sigs.k8s.io/security-profiles-merger/internal/report"
 )
 
 var (
@@ -82,25 +98,43 @@ var (
 	// ErrMoreProblems stands in for the validation failures a report left
 	// out. A profile holds as many failures as it holds rules, and an
 	// artifact chooses how many that is, so every validator bounds what it
-	// reports and matches this instead of the rest. A caller dispatching on
-	// a sentinel must therefore treat a match here as "and possibly others":
-	// a failure the profile holds can be absent from the error that reports
-	// it.
+	// reports and matches this instead of the rest. See Reading a
+	// validation error in the package documentation.
 	ErrMoreProblems = errors.New("more problems omitted")
 	// ErrBudgetExceeded is returned by a merge that would run past a bound
-	// on its own work: apparmor.Intersect where matching or compiling
-	// patterns exceeds one of its budgets and the result may then lose
-	// access, which it reads as neither input being kept whole, and
-	// landlock.Intersect and
-	// landlock.Union where the inputs together would cost more than theirs,
-	// which they check before merging. It is not wrapped in an InputError,
-	// since it is the inputs together that exceed the budget. The landlock
-	// budget admits a baseline merged with artifacts ValidateArtifact
-	// accepts; the apparmor budget admits an artifact of short paths against
-	// a baseline of a few kilobytes of paths, and two artifacts of that size
-	// intersected with each other, or a profile of long paths, may exceed
-	// it. See the Cost bounds section of each package.
+	// on its own work. It is not wrapped in an InputError, since it is the
+	// inputs together that exceed the budget.
+	//
+	// apparmor.Intersect returns it where matching or compiling patterns
+	// exceeds one of its budgets and the result may then lose access, which
+	// it reads as neither input being kept whole. landlock.Intersect and
+	// landlock.Union return it where the inputs together would cost more
+	// than their budget, which they check before merging.
+	//
+	// The landlock budget admits a baseline merged with artifacts
+	// ValidateArtifact accepts. The apparmor budget admits an artifact of
+	// short paths against a baseline of a few kilobytes of paths; two
+	// artifacts of that size intersected with each other, or a profile of
+	// long paths, may exceed it. See the Cost bounds section of each
+	// package.
 	ErrBudgetExceeded = errors.New("merge budget exceeded")
+	// ErrInexactBaseline is returned by seccomp.ValidateBaseline and
+	// apparmor.ValidateBaseline for a baseline that Validate accepts but
+	// whose intersection with itself differs from it: the merge does not
+	// read every rule of it, so every merge with that baseline takes those
+	// rules away, whatever the artifact says. The message names what the
+	// merge settles. A runtime treats it as a misconfigured node.
+	ErrInexactBaseline = errors.New("baseline holds rules the merge does not read exactly")
+	// ErrArtifactTooLarge is matched, through errors.Is, by every error
+	// ValidateArtifact and ValidateStrict of the three packages return for a
+	// profile past one of their MaxArtifact limits: seccomp's
+	// ErrTooManyEntries, ErrTooManyEntriesPerSyscall,
+	// ErrTooManyRulesPerSyscall, ErrTooManyNamesPerEntry and
+	// ErrTooManyRules, apparmor's ErrTooManyPaths, ErrTooManyPatternBytes and
+	// ErrTooManyCapabilities, and landlock's ErrTooManyRules. A caller that
+	// treats every oversized artifact alike matches this rather than each
+	// limit. It is never returned on its own.
+	ErrArtifactTooLarge = errors.New("profile exceeds an artifact limit")
 
 	// ErrDuplicateKey is returned by UnmarshalStrict of every package when
 	// a member occurs more than once in one JSON object, compared the way
@@ -150,6 +184,75 @@ var (
 	ErrNotAnObject = errors.New("not a JSON object")
 )
 
+// Problems returns the failures err reports, so that a caller can handle
+// each on its own. It returns nil for a nil err, the failures of a report
+// a validator or a merge of this module returns, or of an errors.Join of
+// errors, and err itself otherwise. A report or join among those is
+// replaced by its own failures in turn. ErrMoreProblems, which a report
+// holds when it left failures out, comes last and once, however many of
+// the reports held it.
+//
+// Problems flattens nothing else: an error that wraps a single one, such as
+// an InputError, or one built with several %w verbs, which describes one
+// failure matching several sentinels, is one problem. A merge naming one
+// failing input returns that InputError as the only problem, and Problems
+// of its Err lists the failures of that input.
+func Problems(err error) []error {
+	if err == nil {
+		return nil
+	}
+
+	var problems []error
+
+	more := false
+
+	var walk func(error)
+
+	walk = func(err error) {
+		joined, ok := err.(interface{ Unwrap() []error })
+		if !ok || !isReport(err) {
+			//nolint:err113,errorlint // the sentinel itself, not an error wrapping it
+			if err == ErrMoreProblems {
+				more = true
+			} else {
+				problems = append(problems, err)
+			}
+
+			return
+		}
+
+		for _, each := range joined.Unwrap() {
+			if each != nil {
+				walk(each)
+			}
+		}
+	}
+
+	walk(err)
+
+	if more {
+		problems = append(problems, ErrMoreProblems)
+	}
+
+	return problems
+}
+
+// joinType is the type errors.Join returns.
+var joinType = reflect.TypeOf(errors.Join(ErrMoreProblems))
+
+// isReport reports whether err lists failures of its own: the report a
+// validator or merge of this module returns, or a join errors.Join
+// returned. Only those two types count, so no method of another error
+// makes Problems take it apart.
+func isReport(err error) bool {
+	//nolint:errorlint // the report itself, not one wrapped
+	if _, ok := err.(*report.ListError); ok {
+		return true
+	}
+
+	return reflect.TypeOf(err) == joinType
+}
+
 // InputError names the one input profile an error is about. Intersect and
 // Union of every package return one for each profile that is nil or fails
 // validation, Diff for a nil one, and landlock.LoweredRulePaths for each of
@@ -158,11 +261,11 @@ var (
 // seccomp.ErrConflictingListener. Index is that profile's zero-based
 // position among the inputs, and Err what was wrong with it. When several
 // inputs of a merge or of landlock.LoweredRulePaths fail, the InputErrors
-// are joined in input order and bounded as a validator bounds its failures: the error
-// implements Unwrap() []error, which lists at most 32 of them followed by
-// ErrMoreProblems when it left others out. A caller that names every
-// failing input walks that list rather than stopping at the first. Diff
-// reports only the first nil profile, so Diff(nil, nil) names Index 0.
+// are joined in input order and bounded as a validator bounds its failures
+// (see Reading a validation error in the package documentation). A caller
+// that names every failing input lists them with [Problems] rather than
+// stopping at the first. Diff reports only the first nil profile, so
+// Diff(nil, nil) names Index 0.
 //
 // A caller merging inputs of different standing needs to know which one
 // failed, not only that one did: a runtime refusing an artifact rejects a

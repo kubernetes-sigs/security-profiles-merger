@@ -547,7 +547,7 @@ func TestMultiplexerPathKeepsTheReadBudget(t *testing.T) {
 
 	allocated := func(native specs.Arch) uint64 {
 		return testutil.AllocatedBytes(func() {
-			_, err := seccomp.Options{Arch: native}.Intersect(profile, profile)
+			_, err := forNode(native).Intersect(profile, profile)
 			if err != nil {
 				t.Fatal(err)
 			}

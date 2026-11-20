@@ -56,7 +56,7 @@ func TestProfileString(t *testing.T) {
 	}
 
 	const want = "Profile{exec:/usr/bin/ls lib:/usr/lib/libc.so " +
-		"r:/etc/passwd rw:/tmp net:raw,tcp,!udp caps:NET_ADMIN,SYS_TIME}"
+		"r:/etc/passwd rw:/tmp net:raw,tcp,!udp caps:net_admin,sys_time}"
 
 	if got := profile.String(); got != want {
 		t.Errorf("String() = %q, want %q", got, want)
@@ -135,7 +135,7 @@ func TestCapabilityRulesString(t *testing.T) {
 		AllowedCapabilities: []string{capChown, capDacOverride},
 	}
 
-	const want = "caps:CHOWN,DAC_OVERRIDE"
+	const want = "caps:chown,dac_override"
 
 	if got := rules.String(); got != want {
 		t.Errorf("String() = %q, want %q", got, want)
@@ -215,7 +215,7 @@ func TestProfileStringCapabilitiesOnly(t *testing.T) {
 		},
 	}
 
-	const want = "Profile{caps:NET_ADMIN}"
+	const want = "Profile{caps:net_admin}"
 
 	if got := profile.String(); got != want {
 		t.Errorf("String() = %q, want %q", got, want)
@@ -314,7 +314,7 @@ func TestProfileStringQuotesSeparators(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, want := diff.String(), `Diff{caps:+"KILL,-CHOWN,+SYS_ADMIN"}`; got != want {
+	if got, want := diff.String(), `Diff{caps:+"kill,-chown,+sys_admin"}`; got != want {
 		t.Errorf("String() = %s, want %s", got, want)
 	}
 }

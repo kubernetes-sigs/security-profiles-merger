@@ -28,7 +28,7 @@ import (
 // list the way a profile does.
 type ProfileDiff struct {
 	// Equal is true when the two profiles are equivalent after
-	// normalization: paths normalized, capability names upper-cased,
+	// normalization: paths normalized, capability names lower-cased,
 	// duplicates removed, and omitted sections compared as the empty
 	// sections they stand for (see Diff).
 	Equal bool `json:"equal"`
@@ -91,7 +91,7 @@ type AllowedProtocolsDiff struct {
 // CapabilityDiff describes differences in the capability rules.
 type CapabilityDiff struct {
 	// AllowedCapabilities is set when the allowed capabilities differ. The
-	// names are upper-cased, as the merge returns them.
+	// names are lower-cased, as the merge returns them.
 	AllowedCapabilities *SliceDiff[string] `json:"allowedCapabilities,omitempty"`
 }
 

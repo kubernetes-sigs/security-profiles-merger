@@ -109,12 +109,17 @@ make build   # produces build/spm
 ## Packages
 
 Each profile package provides `Intersect`, `Union`, `Validate`,
-`ValidateStrict`, `ValidateArtifact`, `UnmarshalStrict` and `Diff`
-functions, and a `String` method on its diff type; `seccomp.FormatProfile`
-renders a `specs.LinuxSeccomp`, where the other two packages' profile types
-have a `String` method. `ValidateArtifact` runs the checks a
-runtime applies to an artifact, a profile it did not author
-([KEP-6061](https://github.com/kubernetes/enhancements/issues/6061)).
+`ValidateStrict`, `ValidateArtifact`, `UnmarshalStrict`, `DecodeArtifact`
+and `Diff` functions, and a `String` method on its diff type;
+`seccomp.FormatProfile` renders a `specs.LinuxSeccomp`, where the other two
+packages' profile types have a `String` method. `ValidateArtifact` runs the
+checks a runtime applies to an artifact, a profile it did not author
+([KEP-6061](https://github.com/kubernetes/enhancements/issues/6061)), and
+`DecodeArtifact` decodes one strictly and runs them in one call. `seccomp`
+and `apparmor` add `ValidateBaseline`, the check of a baseline at config
+load, and `apparmor.QuotePath` spells a path for a rendered rule.
+`seccomp.Options` and `landlock.Options` name the node a call is for: its
+native architecture and its Landlock ABI version.
 
 - **[seccomp](docs/api.md#seccomp)** - Operates on `specs.LinuxSeccomp` from the
   [OCI runtime-spec](https://github.com/opencontainers/runtime-spec).
@@ -123,9 +128,9 @@ runtime applies to an artifact, a profile it did not author
 - **[landlock](docs/api.md#landlock)** - Merges Linux unprivileged sandboxing
   rulesets.
 - **[spm](docs/api.md#spm)** - What the three have in common, such as
-  `SliceDiff`, `InputError` and the shared sentinel errors. Each package
-  re-exports every shared sentinel it returns under its own name, so no
-  import is needed.
+  `SliceDiff`, `InputError`, `Problems` and the shared sentinel errors. Each
+  package re-exports every shared sentinel it returns under its own name,
+  so no import is needed.
 
 See [Concurrency](docs/api.md#concurrency) for calling the functions from
 several goroutines at once.
@@ -172,7 +177,7 @@ runtime loads. From v1.0.0 on:
 - **No `context.Context`.** No function takes one, since every merge is
   bounded by budgets of its own rather than by its caller. A cancellable
   variant would be added beside the current functions, for example as
-  methods taking a context on an options type, so adding it breaks no
+  methods taking a context on the `Options` types, so adding it breaks no
   caller. Until then, bound how long a caller waits as
   [Limits](docs/integration.md#limits) describes.
 
@@ -193,25 +198,14 @@ var artifactBytes []byte
 ```go
 // Once, at config load: a baseline the merge cannot read exactly loses
 // those rules in every merge, so it is a misconfiguration, not an artifact
-// problem. The runtime defaults need restating first (see the flow).
-settled, err := seccomp.Intersect(baseline)
-if err != nil {
+// problem. The CRI-O default needs restating first (see the flow).
+if err := seccomp.ValidateBaseline(baseline); err != nil {
     return err
-}
-diff, err := seccomp.Diff(baseline, settled)
-if err != nil {
-    return err
-}
-if !diff.Equal {
-    return fmt.Errorf("baseline has rules the merge cannot apply: %s", diff)
 }
 
-// Per artifact.
-artifact := new(specs.LinuxSeccomp)
-if err := seccomp.UnmarshalStrict(artifactBytes, artifact); err != nil {
-    return err // a permanent rejection
-}
-if err := seccomp.ValidateArtifact(artifact); err != nil {
+// Per artifact: decode strictly and validate as an artifact.
+artifact, err := seccomp.DecodeArtifact(artifactBytes)
+if err != nil {
     return err // a permanent rejection
 }
 effective, err := seccomp.Intersect(baseline, artifact)
@@ -224,7 +218,7 @@ if err != nil {
 crun load through libseccomp. As in runc and crun, every profile covers the
 native architecture plus the ones it lists, and the result depends on the
 native architecture, so run the merge on the node that loads the result or
-name its architecture with `seccomp.Options`; see
+name its architecture with `seccomp.ForArch`; see
 [What the models leave out](docs/integration.md#what-the-models-leave-out).
 Write the result with `seccomp.Marshal`, which keeps an empty flag list that
 `json.Marshal` would drop; a runtime embedding it in a whole `specs.Spec`
@@ -251,25 +245,44 @@ Input order decides tie-breaks such as errno values; see
 ### AppArmor profile merge
 
 <!-- go-snippet
-var baseline, artifact, recorded1, recorded2 *apparmor.Profile
+var baseline, recorded1, recorded2 *apparmor.Profile
+var artifactBytes []byte
 -->
 ```go
+// Once, at config load, as for seccomp.
+if err := apparmor.ValidateBaseline(baseline); err != nil {
+    return err
+}
+
 // A section a profile omits denies everything it covers, as it does in
 // AppArmor, so a baseline without a capability section grants no
 // capability to the intersection.
+artifact, err := apparmor.DecodeArtifact(artifactBytes)
+if err != nil {
+    return err // a permanent rejection
+}
 aaEffective, err := apparmor.Intersect(baseline, artifact)
 if err != nil {
     return err
 }
-log.Print(aaEffective)
 
-// Capability names come back upper-cased ("CHOWN"), while apparmor_parser
-// accepts only lower-case ones, so lower-case them when rendering rules; see
-// the rendering checklist of docs/integration.md for the rest.
+// Render the rules yourself: Profile.String is for people. QuotePath
+// spells a path as one token of the rule, and capability names come back
+// in the lower case apparmor_parser takes. See the rendering checklist of
+// docs/integration.md for the rest.
 var rules strings.Builder
+if aaEffective.Filesystem != nil {
+    for _, path := range aaEffective.Filesystem.ReadOnlyPaths {
+        quoted, err := apparmor.QuotePath(path)
+        if err != nil {
+            return err
+        }
+        fmt.Fprintf(&rules, "  %s r,\n", quoted)
+    }
+}
 if aaEffective.Capabilities != nil {
     for _, name := range aaEffective.Capabilities.AllowedCapabilities {
-        fmt.Fprintf(&rules, "  capability %s,\n", strings.ToLower(name))
+        fmt.Fprintf(&rules, "  capability %s,\n", name)
     }
 }
 
@@ -284,20 +297,39 @@ log.Print(aaCombined)
 ### Landlock profile merge
 
 <!-- go-snippet
-var baseline, artifact, recorded1, recorded2 *landlock.Profile
+var baseline, recorded1, recorded2 *landlock.Profile
+var artifactBytes []byte
 var nodeABI landlock.ABIVersion
+var openBeneath func(string) error
 -->
 ```go
+// A kernel rejects a right its ABI does not know, so validate against the
+// ABI version of the node that applies the result, which
+// landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION) returns.
+node := landlock.Options{ABI: nodeABI}
+artifact, err := node.DecodeArtifact(artifactBytes)
+if err != nil {
+    return err // a permanent rejection
+}
 llEffective, err := landlock.Intersect(baseline, artifact)
 if err != nil {
     return err
 }
-
-// A kernel rejects a right its ABI does not know, so check the result
-// against the ABI version of the node that applies it, which
-// landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION) returns.
-if err := (landlock.Options{ABI: nodeABI}).Validate(llEffective); err != nil {
+if err := node.Validate(llEffective); err != nil {
     return err
+}
+
+// A rule of the result can carry the baseline's grant on an ancestor down
+// to a path the artifact chose. Open each such path without leaving the
+// ancestor's hierarchy, or refuse the profile (see docs/integration.md).
+lowered, err := landlock.LoweredRulePaths(llEffective, baseline, artifact)
+if err != nil {
+    return err
+}
+for _, path := range lowered {
+    if err := openBeneath(path); err != nil {
+        return err
+    }
 }
 
 llCombined, err := landlock.Union(recorded1, recorded2)

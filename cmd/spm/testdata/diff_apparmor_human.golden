@@ -1,1 +1,1 @@
-Diff{exec:-/usr/bin/bash,+/usr/bin/python r:-/etc/config,+/var/log caps:-SYS_TIME,+CHOWN}
+Diff{exec:-/usr/bin/bash,+/usr/bin/python r:-/etc/config,+/var/log caps:-sys_time,+chown}

@@ -37,7 +37,8 @@ limitations under the License.
 // case, members repeated within one object, a network rule without its port
 // or a path rule without its path, invalid UTF-8, data behind the profile,
 // and a document that is not a JSON object. Decode an artifact with it and
-// validate the result with [ValidateArtifact].
+// validate the result with [ValidateArtifact], or call [DecodeArtifact] or
+// [Options.DecodeArtifact], which do both.
 //
 // # Validation
 //
@@ -54,10 +55,9 @@ limitations under the License.
 // failure is wrapped in an [InputError] naming the input and its own rule
 // indices.
 //
-// Every validator collects its failures and returns them together, up to
-// 32 of them: past that the error lists the first 32 and a count of the
-// rest, and matches [ErrMoreProblems], so a sentinel a profile violates can
-// be absent from the error that reports it. ValidateArtifact and
+// Every validator collects its failures into one bounded report, which
+// matches [ErrMoreProblems] when it left some out (see Reading a validation
+// error in the [spm] package documentation). ValidateArtifact and
 // ValidateStrict check [MaxArtifactRules] first and on their own, and every
 // validator rejects an oversized path before scanning it.
 //
@@ -308,14 +308,14 @@ limitations under the License.
 // The rest is bounded by a budget. [Intersect] and [Union] validate their
 // inputs, then count the number of inputs times the ancestors of all their
 // rule paths, cleaned as the merge cleans them (a network rule counting
-// one), and refuse more than 2^25 with [ErrBudgetExceeded] before they merge
-// anything. The cost grows with the square of the number of inputs: the
-// budget admits three inputs of [MaxArtifactRules] rules on the deepest
-// paths MaxPathLen allows, and about 300 recordings of 50 rules on paths of
-// five components, but not 500 of them. A caller combining more recordings
-// than that leaves duplicates out first, which changes no union. Validate
-// counts no rules, so [ValidateArtifact] is still what keeps one artifact
-// small.
+// one), and refuse more than their budget with [ErrBudgetExceeded] before
+// they merge anything. The cost grows with the square of the number of
+// inputs: the budget admits three inputs of [MaxArtifactRules] rules on
+// the deepest paths MaxPathLen allows, and a few hundred recordings of a
+// few dozen rules each, but not arbitrarily many. A caller combining more
+// recordings than that leaves duplicates out first, which changes no union.
+// The budget may change in a minor release. Validate counts no rules, so
+// [ValidateArtifact] is still what keeps one artifact small.
 //
 // # Concurrency
 //

@@ -500,20 +500,20 @@ func TestParseArch(t *testing.T) {
 
 	for _, testCase := range []struct {
 		value    string
-		wantArch specs.Arch
+		wantArch seccomp.Options
 		wantErr  bool
 	}{
-		{archNative, seccomp.NativeHost, false},
-		{archNone, "", false},
-		{string(specs.ArchX86_64), specs.ArchX86_64, false},
-		{string(specs.ArchLOONGARCH64), specs.ArchLOONGARCH64, false},
-		{"", "", true},
-		{"x86_64", "", true},
-		{testBogus, "", true},
+		{archNative, seccomp.ForHost(), false},
+		{archNone, seccomp.ForAnyArch(), false},
+		{string(specs.ArchX86_64), seccomp.ForArch(specs.ArchX86_64), false},
+		{string(specs.ArchLOONGARCH64), seccomp.ForArch(specs.ArchLOONGARCH64), false},
+		{"", seccomp.Options{}, true},
+		{"x86_64", seccomp.Options{}, true},
+		{testBogus, seccomp.Options{}, true},
 		// Spelled like an architecture but naming none: implied by neither
 		// profile, so accepting it would silently compare as --arch none
 		// does rather than as the node the caller named.
-		{archPrefix + "ARM64", "", true},
+		{archPrefix + "ARM64", seccomp.Options{}, true},
 	} {
 		got, err := parseArch(testCase.value, true)
 
@@ -532,7 +532,7 @@ func TestParseArch(t *testing.T) {
 		}
 
 		if got.value != testCase.wantArch {
-			t.Errorf("%q = %q, want %q", testCase.value, got.value, testCase.wantArch)
+			t.Errorf("%q = %+v, want %+v", testCase.value, got.value, testCase.wantArch)
 		}
 	}
 }
