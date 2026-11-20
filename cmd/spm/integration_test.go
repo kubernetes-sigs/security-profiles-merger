@@ -479,7 +479,7 @@ func TestIntegrationInputErrors(t *testing.T) {
 			name:     "a file that does not exist",
 			args:     []string{cmdValidate, flagType, typeSeccomp, filepath.Join(dir, "gone.json")},
 			wantCode: 1,
-			wantErr:  "reading",
+			wantErr:  "error: " + filepath.Join(dir, "gone.json") + ": ",
 			skip:     false,
 		},
 		{
@@ -493,14 +493,14 @@ func TestIntegrationInputErrors(t *testing.T) {
 			name:     "a directory as input",
 			args:     []string{cmdValidate, flagType, typeSeccomp, dir},
 			wantCode: 1,
-			wantErr:  "reading",
+			wantErr:  "error: " + dir + ": ",
 			skip:     false,
 		},
 		{
 			name:     "a file that cannot be read",
 			args:     []string{cmdValidate, flagType, typeSeccomp, unreadable},
 			wantCode: 1,
-			wantErr:  "reading",
+			wantErr:  "error: " + unreadable + ": ",
 			// Only a test running as an unprivileged user is stopped by the
 			// permission bits.
 			skip: os.Geteuid() == 0 || runtime.GOOS == "windows",

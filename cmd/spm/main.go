@@ -95,7 +95,7 @@ func validateProfileType(profileType string, stderr io.Writer) int {
 		return 0
 	}
 
-	if _, ok := kindByName(profileType); !ok {
+	if !knownType(profileType) {
 		return unknownType(stderr, profileType)
 	}
 

@@ -104,6 +104,25 @@ func rawInputs(docs ...string) []profileInput {
 	return inputs
 }
 
+// testInvocation returns the invocation of a command run on inputs, with
+// the JSON format and both streams discarded.
+func testInvocation(inputs []profileInput) *invocation {
+	return &invocation{
+		inputs:      inputs,
+		paths:       nil,
+		stdinUnread: false,
+		report:      newInputReport(inputs),
+		kind:        nil,
+		checks:      nil,
+		arch:        archOption{named: false, value: ""},
+		format:      formatJSON,
+		out:         bytes.Buffer{},
+		stdout:      io.Discard,
+		stderr:      io.Discard,
+		refusals:    nil,
+	}
+}
+
 // inputData returns the raw documents of inputs, for an assertion that only
 // cares about the bytes.
 func inputData(inputs []profileInput) []string {

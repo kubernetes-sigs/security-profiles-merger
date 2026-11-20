@@ -217,10 +217,9 @@ func TestMergeSeccompInvalidStrategy(t *testing.T) {
 
 	data := rawInputs(seccompJSON(t, testSyscallRead))
 
-	code := mergeProfiles(
+	code := mergeProfiles(testInvocation(data),
 		defaultMergeRequest(data, testBogus,
 			seccomp.Intersect, seccomp.Union, seccomp.FormatProfile),
-		&bytes.Buffer{}, &bytes.Buffer{},
 	)
 
 	if code != exitUsage {
@@ -231,10 +230,9 @@ func TestMergeSeccompInvalidStrategy(t *testing.T) {
 func TestMergeSeccompNoProfiles(t *testing.T) {
 	t.Parallel()
 
-	code := mergeProfiles(
+	code := mergeProfiles(testInvocation(nil),
 		defaultMergeRequest(nil, strategyIntersect,
 			seccomp.Intersect, seccomp.Union, seccomp.FormatProfile),
-		&bytes.Buffer{}, &bytes.Buffer{},
 	)
 
 	if code != 1 {
@@ -247,10 +245,9 @@ func TestMergeAppArmorInvalidStrategy(t *testing.T) {
 
 	data := rawInputs(apparmorJSON(t, "NET_ADMIN"))
 
-	code := mergeProfiles(
+	code := mergeProfiles(testInvocation(data),
 		defaultMergeRequest(data, testBogus,
 			apparmor.Intersect, apparmor.Union, apparmor.FormatProfile),
-		&bytes.Buffer{}, &bytes.Buffer{},
 	)
 
 	if code != exitUsage {
@@ -261,10 +258,9 @@ func TestMergeAppArmorInvalidStrategy(t *testing.T) {
 func TestMergeAppArmorNoProfiles(t *testing.T) {
 	t.Parallel()
 
-	code := mergeProfiles(
+	code := mergeProfiles(testInvocation(nil),
 		defaultMergeRequest(nil, strategyIntersect,
 			apparmor.Intersect, apparmor.Union, apparmor.FormatProfile),
-		&bytes.Buffer{}, &bytes.Buffer{},
 	)
 
 	if code != 1 {
@@ -277,10 +273,9 @@ func TestMergeLandlockInvalidStrategy(t *testing.T) {
 
 	data := rawInputs(landlockJSON(t, "read_file"))
 
-	code := mergeProfiles(
+	code := mergeProfiles(testInvocation(data),
 		defaultMergeRequest(data, testBogus,
 			landlock.Intersect, landlock.Union, landlock.FormatProfile),
-		&bytes.Buffer{}, &bytes.Buffer{},
 	)
 
 	if code != exitUsage {
@@ -291,10 +286,9 @@ func TestMergeLandlockInvalidStrategy(t *testing.T) {
 func TestMergeLandlockNoProfiles(t *testing.T) {
 	t.Parallel()
 
-	code := mergeProfiles(
+	code := mergeProfiles(testInvocation(nil),
 		defaultMergeRequest(nil, strategyUnion,
 			landlock.Intersect, landlock.Union, landlock.FormatProfile),
-		&bytes.Buffer{}, &bytes.Buffer{},
 	)
 
 	if code != 1 {
@@ -1301,10 +1295,7 @@ func defaultMergeRequest[T any](
 	}
 
 	return mergeRequest[T]{
-		inputs:     inputs,
-		report:     newInputReport(inputs),
 		strategy:   strategy,
-		format:     formatJSON,
 		checks:     checks,
 		strict:     make([]bool, len(inputs)),
 		inputCheck: nil,

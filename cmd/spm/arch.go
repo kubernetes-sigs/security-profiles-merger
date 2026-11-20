@@ -101,22 +101,6 @@ func parseArch(value string, named bool) (archOption, error) {
 	}
 }
 
-// rejectArch reports --arch named for a profile type that has no
-// architectures. The usage error turns on whether --arch was named at all,
-// not on whether its value changes anything: "--arch native" asks for what
-// the flag's absence already implies, but naming it for a kind that has no
-// architectures is the same mistake the other values are, rather than a
-// flag that quietly does nothing.
-func rejectArch(arch archOption, hasArch bool, stderr io.Writer) bool {
-	if !arch.named || hasArch {
-		return false
-	}
-
-	_, _ = fmt.Fprintf(stderr, "error: --arch only applies to %s profiles\n", typeSeccomp)
-
-	return true
-}
-
 // knownArch reports whether the seccomp package knows the architecture. It
 // has no predicate for a single name, so the name is checked the way a
 // profile carrying it is.

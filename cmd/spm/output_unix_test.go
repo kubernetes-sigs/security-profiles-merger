@@ -19,6 +19,7 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -48,7 +49,7 @@ func TestOutputOverMountPointIsWrittenInPlace(t *testing.T) {
 		return &os.LinkError{Op: "rename", Old: oldPath, New: newPath, Err: syscall.EBUSY}
 	}
 
-	err = replaceOutputFileWith(target, []byte("new"), busy)
+	err = replaceOutputFileWith(target, []byte("new"), busy, syncDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -87,7 +88,7 @@ func TestOutputReportsOtherRenameFailures(t *testing.T) {
 		return &os.LinkError{Op: "rename", Old: oldPath, New: newPath, Err: syscall.EACCES}
 	}
 
-	err = replaceOutputFileWith(target, []byte("other"), denied)
+	err = replaceOutputFileWith(target, []byte("other"), denied, syncDir)
 	if !errors.Is(err, syscall.EACCES) || strings.Contains(err.Error(), dir) {
 		t.Errorf("got %v, want a bare permission error", err)
 	}
@@ -95,6 +96,111 @@ func TestOutputReportsOtherRenameFailures(t *testing.T) {
 	content, err := os.ReadFile(target)
 	if err != nil || string(content) != "previous" {
 		t.Errorf("content = %q (%v), want the previous content", content, err)
+	}
+}
+
+// TestOutputSwappedForARegularFileIsRefused covers an output path that was
+// a device or a FIFO when it was checked and is a regular file by the time
+// it is opened. Such a file is opened without truncating it, so writing it
+// in place would leave the end of its old content behind the new: it is
+// refused and left as it was. The swap is stood in for by handing a regular
+// file to the step that writes a device or a FIFO.
+func TestOutputSwappedForARegularFileIsRefused(t *testing.T) {
+	t.Parallel()
+
+	target := filepath.Join(t.TempDir(), "out.json")
+
+	err := os.WriteFile(target, []byte("a longer previous content"), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = writeInPlace(target, []byte("new"), false)
+	if !errors.Is(err, errBecameRegular) {
+		t.Errorf("writeInPlace = %v, want %v", err, errBecameRegular)
+	}
+
+	content, err := os.ReadFile(target)
+	if err != nil || string(content) != "a longer previous content" {
+		t.Errorf("content = %q (%v), want the previous content", content, err)
+	}
+
+	// A device is still written in place.
+	err = writeInPlace(os.DevNull, []byte("new"), false)
+	if err != nil {
+		t.Errorf("writeInPlace(%s) = %v, want it written", os.DevNull, err)
+	}
+}
+
+// TestOutputWarnsWhenItsDirectoryCannotBeSynced covers a directory sync
+// that fails after the rename: the file holds the new content by then, so
+// the run succeeds and only warns.
+func TestOutputWarnsWhenItsDirectoryCannotBeSynced(t *testing.T) {
+	t.Parallel()
+
+	target := filepath.Join(t.TempDir(), "out.json")
+
+	err := os.WriteFile(target, []byte("previous"), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	failing := func(string) error { return syscall.EIO }
+
+	err = replaceOutputFileWith(target, []byte("new"), os.Rename, failing)
+
+	var stderr bytes.Buffer
+
+	code := reportWrite(target, err, &stderr)
+
+	want := "warning: writing " + target + ": written, but it may not outlast a crash: " +
+		syscall.EIO.Error() + "\n"
+	if code != 0 || stderr.String() != want {
+		t.Errorf("exit code = %d, stderr = %q, want 0 and %q", code, stderr.String(), want)
+	}
+
+	content, err := os.ReadFile(target)
+	if err != nil || string(content) != "new" {
+		t.Errorf("content = %q (%v), want the new content", content, err)
+	}
+}
+
+// TestOutputSyncsItsDirectory covers the directory an output file is
+// renamed into, which is synced so that the rename outlasts a crash: a
+// directory that can be synced is, and one the caller cannot read, which
+// cannot be opened to sync it, does not fail a write that has succeeded.
+func TestOutputSyncsItsDirectory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	err := syncDir(dir)
+	if err != nil {
+		t.Errorf("syncDir = %v, want the directory synced", err)
+	}
+
+	err = syncDir(filepath.Join(dir, "missing"))
+	if !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "syncing directory") {
+		t.Errorf("syncDir of a missing directory = %v, want it reported", err)
+	}
+
+	if os.Geteuid() == 0 {
+		return
+	}
+
+	unreadable := filepath.Join(dir, "unreadable")
+
+	err = os.Mkdir(unreadable, 0o300)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The directory has to be readable again for it to be removed.
+	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o700) })
+
+	err = replaceOutputFile(filepath.Join(unreadable, "out.json"), []byte("new"))
+	if err != nil {
+		t.Errorf("writing into a directory that cannot be read = %v, want it written", err)
 	}
 }
 

@@ -72,7 +72,7 @@ func TestDiffErrors(t *testing.T) {
 			args:       []string{cmdDiff, seccompFile, "-"},
 			stdin:      strings.NewReader(stdinPair),
 			wantCode:   exitUsage,
-			wantStderr: "got 3 profiles: ",
+			wantStderr: "got 3 profiles from stdin and the files: ",
 		},
 		{
 			name:       "auto-detect type",

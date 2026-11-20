@@ -399,7 +399,7 @@ func TestInteractiveStdinPrintsUsage(t *testing.T) {
 		t.Fatalf("exit code = %d, stdout = %q, want %d and no output", code, stdout, exitUsage)
 	}
 
-	if !strings.Contains(stderr, "stdin is a terminal") ||
+	if !strings.Contains(stderr, "stdin is a terminal or another character device\n") ||
 		!strings.Contains(stderr, "Usage: spm merge") {
 		t.Errorf("stderr = %q, want the hint and the usage", stderr)
 	}
@@ -873,7 +873,7 @@ func TestSeparatorAfterBooleanFlag(t *testing.T) {
 
 		// The wording of a missing file differs between platforms, so the
 		// check is that the name was read as a file.
-		if !strings.Contains(stderr, "reading -missing.json:") {
+		if !strings.Contains(stderr, "error: -missing.json: ") {
 			t.Errorf("%v: stderr = %q, want a missing file", args, stderr)
 		}
 	}

@@ -21,8 +21,11 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"syscall"
+
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
 // oNoFollow makes opening --output fail on a symlink rather than follow it.
@@ -51,6 +54,69 @@ func chmodOutput(file *os.File) error {
 	}
 
 	return nil
+}
+
+// syncDir syncs the directory an output file was renamed into, so that the
+// rename outlasts a crash: syncing the file makes its data durable, but not
+// the directory entry that names it. Two failures leave the rename as
+// durable as the file system makes it on its own and are not reported: a
+// directory the caller may add a file to but not read, which cannot be
+// opened, and a file system that cannot sync a directory (see
+// cannotSyncDir). Any other failure is returned, for the caller to warn
+// about: the file holds the new content by then, but may not outlast a
+// crash.
+func syncDir(dir string) error {
+	// The directory is the one the caller's --output value names.
+	handle, err := os.Open(dir) //nolint:gosec // the caller named this path
+	if errors.Is(err, fs.ErrPermission) {
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("syncing directory %s: %w", merge.SafeName(dir), bareFileError(err))
+	}
+
+	// A plain fsync is what makes a directory entry durable. Sync is not
+	// used: on darwin it asks for F_FULLFSYNC, a flush of the drive's cache
+	// as well, which is more than a directory entry needs and not known to
+	// work on a directory.
+	err = fsyncRetrying(int(handle.Fd()))
+	closeErr := handle.Close()
+
+	if err != nil && !cannotSyncDir(err) {
+		return fmt.Errorf("syncing directory %s: %w", merge.SafeName(dir), bareFileError(err))
+	}
+
+	if closeErr != nil {
+		return fmt.Errorf("syncing directory %s: %w", merge.SafeName(dir), bareFileError(closeErr))
+	}
+
+	return nil
+}
+
+// fsyncRetrying syncs the file descriptor, retrying for as long as a signal
+// interrupts the sync: the os package retries EINTR on its own calls, and a
+// direct one must too, or a signal arriving during a slow sync, as on a
+// network file system, would read as a failed one.
+func fsyncRetrying(fd int) error {
+	for {
+		err := syscall.Fsync(fd)
+
+		switch {
+		case err == nil:
+			return nil
+		case !errors.Is(err, syscall.EINTR):
+			return fmt.Errorf("fsync: %w", err)
+		}
+	}
+}
+
+// cannotSyncDir reports a failure to sync a directory that says the file
+// system or the platform cannot sync one at all, which PostgreSQL's
+// fsync_fname ignores as well: EINVAL and EBADF, and ENOTSUP and ENOSYS.
+func cannotSyncDir(err error) bool {
+	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.EBADF) ||
+		errors.Is(err, errors.ErrUnsupported)
 }
 
 // isMountPoint reports whether a rename failed because its target is a

@@ -17,7 +17,6 @@ limitations under the License.
 package main
 
 import (
-	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -54,20 +53,12 @@ Options:
 // two.
 var errDiffRequiresTwo = errors.New("diff requires exactly 2 profiles")
 
-// diffOptions holds the parsed flags of the diff command.
-type diffOptions struct {
-	commonOptions
+// bindDiffFlags declares the diff flags, which are the common ones, on the
+// set and returns the struct they fill in.
+func bindDiffFlags(flags *flag.FlagSet) *commonOptions {
+	opts := new(commonOptions)
 
-	arch string
-}
-
-// bindDiffFlags declares the diff flags on the set and returns the struct
-// they fill in.
-func bindDiffFlags(flags *flag.FlagSet) *diffOptions {
-	opts := new(diffOptions)
-
-	opts.bind(flags, "the diff", "stdout")
-	bindArchFlag(flags, &opts.arch, "implied on both sides")
+	opts.bind(flags, "the diff", "stdout", "implied on both sides")
 
 	return opts
 }
@@ -76,135 +67,89 @@ func runDiff(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := newFlagSet(cmdDiff)
 	opts := bindDiffFlags(flags)
 
-	if done, code := parseFlags(flags, diffUsage, args, stdout, stderr); done {
+	inv, code := startCommand(flags, opts, diffUsage, args, stdin, stdout, stderr)
+	if inv == nil {
 		return code
 	}
 
-	// The flag order is checked first, so that a flag after the file
-	// arguments is reported as such, and then the flag values.
-	if code := checkFlagOrder(flags.Args(), argsSeparated(flags, args), stderr); code != 0 {
-		return code
-	}
-
-	if code := opts.check(stderr); code != 0 {
-		return code
-	}
-
-	arch, code := parseArchFlag(flags, opts.arch, stderr)
-	if code != 0 {
-		return code
-	}
-
-	if code := checkStdin(flags, diffUsage, stdin, stderr); code != 0 {
-		return code
-	}
-
-	inputs, err := readDiffInputs(flags.Args(), stdin)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
-
-		return exitUsage
-	}
-
-	return diffInputs(opts, arch, inputs, stdout, stderr)
+	return diffInputs(opts, inv)
 }
 
 // diffInputs resolves the profile type, compares the two profiles, and
 // writes the result.
-func diffInputs(
-	opts *diffOptions, arch archOption, inputs []profileInput, stdout, stderr io.Writer,
-) int {
+func diffInputs(opts *commonOptions, inv *invocation) int {
+	checkDiffCount(inv)
+
 	// Exit code 1 means "different" for diff, so unparsable input is a
 	// usage error like every other diff failure.
-	kind, report, code := resolveKind(
-		opts.profileType, inputs, exitUsage, opts.noDetectNote, stderr,
-	)
+	code := resolveKind(inv, opts.profileType, exitUsage, opts.noDetectNote)
 	if code != 0 {
 		return code
 	}
 
-	var out bytes.Buffer
-
-	code = kind.diff(inputs, report, arch, opts.format, &out, stderr)
+	code = inv.kind.diffCommand(inv)
 	if code != 0 && code != exitDiff {
 		return code
 	}
 
 	// Exit code 1 means "different" for diff, so a failed flush is a usage
 	// error like every other diff failure.
-	if flushOutput(opts.output, out.Bytes(), stdout, stderr) != 0 {
+	if inv.flushOutput(opts.output) != 0 {
 		return exitUsage
 	}
 
 	return code
 }
 
-func readDiffInputs(
-	paths []string, stdin io.Reader,
-) ([]profileInput, error) {
-	if len(paths) == 0 {
-		data, err := readFromStdin(stdin)
-		if err != nil {
-			return nil, err
-		}
-
-		if len(data) != diffProfileCount {
-			return nil, fmt.Errorf(
-				"got %d %s from stdin: %w",
-				len(data), plural(len(data), "profile"), errDiffRequiresTwo,
-			)
-		}
-
-		return data, nil
+// checkDiffCount refuses a diff of another number of profiles than two,
+// once the inputs are checked, so that an input that cannot be read or
+// parsed is reported first. Stdin that could not be read brings one profile
+// at least, an unknown number of them, so it is counted as one, and only
+// too many profiles are refused then.
+func checkDiffCount(inv *invocation) {
+	count := len(inv.inputs)
+	if count == diffProfileCount || inv.stdinUnread && count < diffProfileCount {
+		return
 	}
 
-	// A "-" argument may expand to several profiles when stdin holds a JSON
-	// array, so only file arguments alone can be counted before reading.
-	if !slices.Contains(paths, "-") && len(paths) != diffProfileCount {
-		return nil, fmt.Errorf(
-			"got %d %s: %w", len(paths), plural(len(paths), "file"), errDiffRequiresTwo,
-		)
+	noun, from := "profile", ""
+
+	switch {
+	case len(inv.paths) == 0:
+		from = " from stdin"
+	case slices.Contains(inv.paths, stdinArg):
+		from = " from stdin and the files"
+	default:
+		noun = "file"
 	}
 
-	data, err := readInputs(paths, stdin)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(data) != diffProfileCount {
-		return nil, fmt.Errorf(
-			"got %d %s: %w", len(data), plural(len(data), "profile"), errDiffRequiresTwo,
-		)
-	}
-
-	return data, nil
+	inv.refusals = append(inv.refusals, fmt.Errorf(
+		"got %d %s%s: %w", count, plural(count, noun), from, errDiffRequiresTwo,
+	))
 }
 
 func diffProfiles[T any, D any](
-	inputs []profileInput,
-	report *inputReport,
-	format string,
+	inv *invocation,
 	diffFn func(*T, *T) (*D, error),
 	formatFn func(*D) string,
 	equalFn func(*D) bool,
-	stdout, stderr io.Writer,
 ) int {
-	profiles := unmarshalAll[T](inputs, make([]bool, len(inputs)), report)
+	profiles := unmarshalAll[T](inv.inputs, make([]bool, len(inv.inputs)), inv.report)
 
-	report.flush(stderr)
-
-	if report.anyFailed() {
-		return exitUsage
+	if inv.halted() {
+		return inv.stop(exitUsage)
 	}
+
+	inv.report.flush(inv.stderr)
 
 	result, err := diffFn(profiles[0], profiles[1])
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+		_, _ = fmt.Fprintf(inv.stderr, "error: %v\n", err)
 
 		return exitUsage
 	}
 
-	if code := writeOutput(result, formatFn(result), format, stdout, stderr); code != 0 {
+	if code := inv.write(result, formatFn(result)); code != 0 {
 		return exitUsage
 	}
 

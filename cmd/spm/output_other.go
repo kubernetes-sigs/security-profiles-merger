@@ -39,6 +39,12 @@ func chmodOutput(_ *os.File) error {
 	return nil
 }
 
+// syncDir does nothing where a directory cannot be opened and synced as a
+// file is, as on Windows.
+func syncDir(_ string) error {
+	return nil
+}
+
 // isMountPoint is always false where a rename failure does not say that
 // its target is a mount point.
 func isMountPoint(_ error) bool {

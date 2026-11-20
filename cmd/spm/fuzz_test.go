@@ -76,7 +76,7 @@ func FuzzDetectProfileType(f *testing.F) {
 			return
 		}
 
-		if _, ok := kindByName(detected); !ok {
+		if !knownType(detected) {
 			t.Errorf("detectProfileType returned the unknown type %q", detected)
 		}
 
@@ -100,7 +100,7 @@ func checkDetectedFamilies(t *testing.T, raw string) []string {
 	families := detectOneProfileType([]byte(raw))
 
 	for _, family := range families {
-		if _, ok := kindByName(family); !ok {
+		if !knownType(family) {
 			t.Errorf("detectOneProfileType returned the unknown type %q", family)
 		}
 	}

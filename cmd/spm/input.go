@@ -24,6 +24,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"slices"
 	"strconv"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
@@ -40,18 +41,45 @@ const (
 
 var (
 	errDuplicateStdin = errors.New("stdin (\"-\") can only be specified once")
-	errTooManyFiles   = fmt.Errorf("too many input files (max %d)", maxInputFiles)
-	errTooManyStdin   = fmt.Errorf("too many profiles on stdin (max %d)", maxInputFiles)
-	errTooManyInputs  = fmt.Errorf(
+	errEmptyInput     = errors.New("no input provided")
+	errEmptyFile      = errors.New("file is empty")
+	errEmptyArgument  = errors.New("empty file argument (use - for stdin)")
+)
+
+// The inputs past the limits (see limitError).
+var (
+	errTooManyFiles  = newLimitError("too many input files (max %d)", maxInputFiles)
+	errTooManyStdin  = newLimitError("too many profiles on stdin (max %d)", maxInputFiles)
+	errTooManyInputs = newLimitError(
 		"too many profiles (max %d, counting each element of a stdin array and each file)",
 		maxInputFiles,
 	)
-	errEmptyInput    = errors.New("no input provided")
-	errStdinTooLarge = fmt.Errorf("stdin input exceeds %d bytes", maxInputSize)
-	errFileTooLarge  = fmt.Errorf("file exceeds %d byte limit", maxInputSize)
-	errInputTooLarge = fmt.Errorf("inputs exceed %d bytes in total", maxTotalInputSize)
-	errEmptyArgument = errors.New("empty file argument (use - for stdin)")
+	errStdinTooLarge = newLimitError("stdin input exceeds %d bytes", maxInputSize)
+	errFileTooLarge  = newLimitError("file exceeds %d byte limit", maxInputSize)
+	errInputTooLarge = newLimitError("inputs exceed %d bytes in total", maxTotalInputSize)
 )
+
+// limitError is an input past the limits. Such an input ends the run before
+// any input is checked, and exits like every other usage error whatever the
+// other inputs hold, so that the exit code does not depend on which of them
+// were read before it: it was never read, so nothing about it is known to
+// be wrong, and reading on would hold more in memory than the limits allow.
+type limitError struct {
+	text string
+}
+
+func newLimitError(format string, bound int) *limitError {
+	return &limitError{text: fmt.Sprintf(format, bound)}
+}
+
+func (e *limitError) Error() string { return e.text }
+
+// isLimitError reports whether err is an input past the limits.
+func isLimitError(err error) bool {
+	var limit *limitError
+
+	return errors.As(err, &limit)
+}
 
 // stdinName is how an input read from stdin is named in errors and
 // warnings. Elements of a JSON array read from stdin get an index appended.
@@ -79,12 +107,40 @@ type profileInput struct {
 	// inArray reports an element of a stdin array, which validate writes
 	// back as an array however many elements it holds.
 	inArray bool
+	// err says why the input could not be read, and is nil for one that
+	// was. Such an input fails on its own, as one that does not parse does
+	// (see newInputReport), and its data is nil.
+	err error
 }
 
 // newInput returns the input of a document read whole, from a file or
 // stdin.
 func newInput(name string, data []byte) profileInput {
-	return profileInput{name: name, data: data, source: nil, offset: 0, inArray: false}
+	return profileInput{name: name, data: data, source: nil, offset: 0, inArray: false, err: nil}
+}
+
+// failedInput returns the input of a file or of stdin that could not be
+// read, and why.
+func failedInput(name string, err error) profileInput {
+	return profileInput{name: name, data: nil, source: nil, offset: 0, inArray: false, err: err}
+}
+
+// unread reports whether the input could not be read.
+func (input *profileInput) unread() bool {
+	return input.err != nil
+}
+
+// stdinUnread reports whether readInputs read stdin for paths and could
+// not, which leaves the number of profiles it held unknown, so the inputs
+// cannot be counted. Its input is the one at the position of "-", since
+// every file before it brings one, or the only one without file arguments.
+func stdinUnread(paths []string, inputs []profileInput) bool {
+	at := slices.Index(paths, stdinArg)
+	if len(paths) == 0 {
+		at = 0
+	}
+
+	return at >= 0 && at < len(inputs) && inputs[at].unread()
 }
 
 // position returns where the byte at offset of the input's data sits in the
@@ -103,29 +159,21 @@ func (input *profileInput) position(offset int64) string {
 	return fmt.Sprintf("line %d, column %d", line, column)
 }
 
-// readErrorExit returns the exit code for a readInputs failure. The
-// sentinels below report an invocation mistake rather than a bad profile,
-// so they exit like every other usage error.
-func readErrorExit(err error) int {
-	for _, sentinel := range []error{
-		errDuplicateStdin, errTooManyFiles, errTooManyStdin, errTooManyInputs,
-		errFileTooLarge, errStdinTooLarge, errInputTooLarge, errEmptyArgument,
-	} {
-		if errors.Is(err, sentinel) {
-			return exitUsage
-		}
-	}
-
-	return 1
-}
-
+// readInputs reads the profiles the file arguments name, or stdin without
+// any. An input that cannot be read, because it is missing, unreadable or
+// empty, or because stdin holds an array that does not parse, is returned
+// with its failure (see profileInput.err), and the others are still read.
+// Every error it returns is a usage error: file arguments that cannot be
+// meant, which are refused before anything is read (see checkPaths), or an
+// input past the limits (see limitError).
 func readInputs(paths []string, stdin io.Reader) ([]profileInput, error) {
 	if len(paths) == 0 {
 		return readFromStdin(stdin)
 	}
 
-	if len(paths) > maxInputFiles {
-		return nil, errTooManyFiles
+	err := checkPaths(paths)
+	if err != nil {
+		return nil, err
 	}
 
 	var (
@@ -133,62 +181,77 @@ func readInputs(paths []string, stdin io.Reader) ([]profileInput, error) {
 		total  int
 	)
 
-	stdinUsed := false
-
 	for _, path := range paths {
-		added := 0
+		var items []profileInput
 
 		if path == stdinArg {
-			if stdinUsed {
-				return nil, errDuplicateStdin
-			}
-
-			stdinUsed = true
-
 			// Every other argument is one more profile.
-			items, err := readStdinArgument(stdin, len(paths)-1)
-			if err != nil {
-				return nil, err
-			}
-
-			for _, item := range items {
-				added += len(item.data)
-			}
-
-			result = append(result, items...)
+			items, err = readStdinArgument(stdin, len(paths)-1)
 		} else {
-			input, err := readFileInput(path)
-			if err != nil {
-				return nil, err
-			}
+			var input profileInput
 
-			added = len(input.data)
-			result = append(result, input)
+			input, err = readFileInput(path)
+			items = []profileInput{input}
 		}
 
-		total += added
+		if err != nil {
+			return nil, err
+		}
+
+		for _, item := range items {
+			total += len(item.data)
+		}
+
 		if total > maxTotalInputSize {
 			return nil, errInputTooLarge
 		}
+
+		result = append(result, items...)
 	}
 
 	return result, nil
 }
 
-// readFileInput reads the profile of a file argument.
+// checkPaths refuses file arguments that cannot be meant: too many of them,
+// an empty one, which names no file, and stdin named twice. None of these
+// depends on what an input holds, so they are refused before one is read.
+func checkPaths(paths []string) error {
+	if len(paths) > maxInputFiles {
+		return errTooManyFiles
+	}
+
+	stdinUsed := false
+
+	for _, path := range paths {
+		switch {
+		case path == "":
+			// os.Open would report it as a file that does not exist, under
+			// an empty name.
+			return errEmptyArgument
+		case path == stdinArg && stdinUsed:
+			return errDuplicateStdin
+		case path == stdinArg:
+			stdinUsed = true
+		}
+	}
+
+	return nil
+}
+
+// readFileInput reads the profile of a file argument. A file it cannot read
+// is returned as an input that failed; only a file past the limit is an
+// error.
 func readFileInput(path string) (profileInput, error) {
-	// An empty argument names no file; os.Open would report it as one that
-	// does not exist, under an empty name.
-	if path == "" {
-		return newInput("", nil), errEmptyArgument
-	}
-
 	data, err := readFileWithLimit(path)
-	if err != nil {
-		return newInput(path, nil), fmt.Errorf("reading %s: %w", merge.SafeName(path), err)
-	}
 
-	return newInput(path, data), nil
+	switch {
+	case isLimitError(err):
+		return profileInput{}, fmt.Errorf("reading %s: %w", merge.SafeName(path), err)
+	case err != nil:
+		return failedInput(path, err), nil
+	default:
+		return newInput(path, data), nil
+	}
 }
 
 // readStdinArgument reads the profiles of a "-" argument given beside others
@@ -232,10 +295,10 @@ func readFileWithLimit(path string) ([]byte, error) {
 		return nil, errFileTooLarge
 	}
 
-	// An empty file is reported the way empty stdin is, rather than left to
-	// the decoder, which would call it a truncated document.
+	// An empty file is reported as such, as empty stdin is, rather than
+	// left to the decoder, which would call it a truncated document.
 	if len(bytes.TrimSpace(data)) == 0 {
-		return nil, errEmptyInput
+		return nil, errEmptyFile
 	}
 
 	return data, nil
@@ -254,14 +317,22 @@ func bareFileError(err error) error {
 	return err
 }
 
+// jsonSpace holds the bytes JSON allows between tokens.
+const jsonSpace = " \t\r\n"
+
+// readFromStdin reads the profiles on stdin: the elements of a JSON array,
+// or a single profile. Stdin that cannot be read, or holds nothing, or an
+// array that does not parse, is returned as the one input stdin brings,
+// named stdin, which fails as a file that cannot be read does; only an input
+// past the limits is an error.
 func readFromStdin(reader io.Reader) ([]profileInput, error) {
 	if reader == nil {
-		return nil, errEmptyInput
+		return unreadStdin(errEmptyInput), nil
 	}
 
 	data, err := io.ReadAll(io.LimitReader(reader, maxInputSize+1))
 	if err != nil {
-		return nil, fmt.Errorf("reading stdin: %w", err)
+		return unreadStdin(bareFileError(err)), nil
 	}
 
 	if len(data) > maxInputSize {
@@ -269,156 +340,159 @@ func readFromStdin(reader io.Reader) ([]profileInput, error) {
 	}
 
 	if len(bytes.TrimSpace(data)) == 0 {
-		return nil, errEmptyInput
+		return unreadStdin(errEmptyInput), nil
 	}
-
-	array, err := readStdinArray(data)
-	if err != nil {
-		return nil, err
-	}
-
-	if array != nil {
-		return array, nil
-	}
-
-	return []profileInput{newInput(stdinName, data)}, nil
-}
-
-// readStdinArray reads a JSON array of profiles, naming each element by its
-// index. It returns nil for a document that is not an array, which the
-// caller reads as a single profile.
-//
-// The element count is read from the token stream before the array is
-// decoded: decoding first materializes every element of a document that
-// chooses how many there are, which costs orders of magnitude more than the
-// document itself before the limit could refuse it.
-func readStdinArray(data []byte) ([]profileInput, error) {
-	count, isArray, err := countArrayElements(data)
 
 	// Anything that does not open an array is a single document. That
 	// includes null, which decodes into a slice as no elements at all and
 	// would otherwise read as no input rather than as the document it is.
-	if !isArray {
-		return nil, nil
+	if !bytes.HasPrefix(bytes.TrimLeft(data, jsonSpace), []byte("[")) {
+		return []profileInput{newInput(stdinName, data)}, nil
 	}
 
-	if err == nil && count > maxInputFiles {
-		return nil, errTooManyStdin
-	}
+	return readStdinArray(data)
+}
 
-	// A document that is not an array is a single profile, which the caller
-	// reads from the same bytes, so the decoder's complaint about it says
-	// nothing here.
+// unreadStdin returns the input of stdin that could not be read, and why.
+func unreadStdin(err error) []profileInput {
+	return []profileInput{failedInput(stdinName, err)}
+}
+
+// readStdinArray reads a JSON array of profiles, naming each element by its
+// index. An array that does not parse fails as a whole, at the line and
+// column of what the decoder refused: no profile is an array, so reading it
+// as a single profile would only hide where it went wrong. The syntax is
+// checked first, which builds no value, so that a syntax error is reported
+// wherever it sits rather than only when it comes before the bound.
+func readStdinArray(data []byte) ([]profileInput, error) {
 	if !json.Valid(data) {
-		return nil, nil
+		// The syntax error itself, which json.Valid does not return, is
+		// looked for only once the array has failed.
+		var raw json.RawMessage
+
+		whole := newInput(stdinName, data)
+
+		return unreadStdin(decodeError(&whole, json.Unmarshal(data, &raw))), nil
 	}
 
 	result, err := splitArray(data)
 	if err != nil {
-		return nil, nil //nolint:nilerr // not an array: the caller reads a single profile
+		return nil, err
 	}
 
 	if len(result) == 0 {
-		return nil, errEmptyInput
+		return unreadStdin(errEmptyInput), nil
 	}
 
 	return result, nil
 }
 
-// splitArray returns the elements of a valid JSON array, each named by its
-// index and placed at its offset in the array.
+// splitArray returns the elements of a JSON array that is known to be
+// valid, each as the bytes it spans in data, named by its index and placed
+// at its offset in the array. It walks the array once, following only
+// strings and nesting, and decodes nothing: the elements are decoded one by
+// one later, each as the profile it is. The count is checked before each
+// element is kept, so that an array of more elements than the bound is
+// refused without holding them.
 func splitArray(data []byte) ([]profileInput, error) {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-
-	_, err := decoder.Token()
-	if err != nil {
-		return nil, err //nolint:wrapcheck // the caller reads a single profile
+	split := arraySplitter{
+		data: data, result: nil, depth: 0, start: -1, inString: false, escaped: false,
 	}
 
-	var result []profileInput
+	for idx, char := range data {
+		if split.inString {
+			split.inStringByte(char)
 
-	for decoder.More() {
-		var item json.RawMessage
-
-		err = decoder.Decode(&item)
-		if err != nil {
-			return nil, err //nolint:wrapcheck // the caller reads a single profile
+			continue
 		}
 
-		result = append(result, profileInput{
-			name:    stdinName + "[" + strconv.Itoa(len(result)) + "]",
-			data:    item,
-			source:  data,
-			offset:  int(decoder.InputOffset()) - len(item),
-			inArray: true,
-		})
+		err := split.step(idx, char)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	return result, nil
+	return split.result, nil
 }
 
-// countArrayElements reports how many elements a JSON array holds, reading
-// the tokens rather than the values. It reports whether the document is an
-// array at all, and stops counting past maxInputFiles, which is all the
-// caller needs to refuse it.
-func countArrayElements(data []byte) (int, bool, error) {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	// Numbers are kept as text: they only need to be skipped, and one past
-	// the float64 range would otherwise stop the count, and with it the
-	// bound, before the array is decoded whole.
-	decoder.UseNumber()
-
-	token, err := decoder.Token()
-	if err != nil {
-		//nolint:wrapcheck // the caller reads a single profile
-		return 0, false, err
-	}
-
-	if delim, ok := token.(json.Delim); !ok || delim != '[' {
-		return 0, false, nil
-	}
-
-	count := 0
-
-	for decoder.More() {
-		err = skipValue(decoder)
-		if err != nil {
-			return count, true, err
-		}
-
-		count++
-
-		if count > maxInputFiles {
-			return count, true, nil
-		}
-	}
-
-	return count, true, nil
+// arraySplitter is where splitArray is in the array it walks.
+type arraySplitter struct {
+	data   []byte
+	result []profileInput
+	// depth counts the arrays and objects the walk is in, the array split
+	// included, and start is where the element being walked starts, or -1
+	// between elements.
+	depth int
+	start int
+	// inString reports a walk inside a string, and escaped one just past
+	// a backslash in it.
+	inString, escaped bool
 }
 
-// skipValue reads one value from the decoder without keeping it, following
-// nested arrays and objects to their end.
-func skipValue(decoder *json.Decoder) error {
-	depth := 0
+// inStringByte follows a byte inside a string to the quote that ends it.
+func (split *arraySplitter) inStringByte(char byte) {
+	switch {
+	case split.escaped:
+		split.escaped = false
+	case char == '\\':
+		split.escaped = true
+	case char == '"':
+		split.inString = false
+	}
+}
 
-	for {
-		token, err := decoder.Token()
-		if err != nil {
-			//nolint:wrapcheck // the caller reads a single profile
-			return err
-		}
-
-		if delim, ok := token.(json.Delim); ok {
-			switch delim {
-			case '[', '{':
-				depth++
-			case ']', '}':
-				depth--
-			}
-		}
-
-		if depth == 0 {
+// step follows the byte at idx outside a string, keeping an element where a
+// comma of the array or its closing bracket ends one.
+func (split *arraySplitter) step(idx int, char byte) error {
+	switch char {
+	case ' ', '\t', '\r', '\n':
+		return nil
+	case '"':
+		split.inString = true
+	case '[', '{':
+		split.depth++
+		if split.depth == 1 {
+			// The bracket of the array itself.
 			return nil
 		}
+	case ']', '}':
+		split.depth--
+		if split.depth == 0 {
+			return split.keep(idx)
+		}
+	case ',':
+		if split.depth == 1 {
+			return split.keep(idx)
+		}
 	}
+
+	if split.start < 0 {
+		split.start = idx
+	}
+
+	return nil
+}
+
+// keep keeps the element that ends before end, if one started, after
+// checking the count.
+func (split *arraySplitter) keep(end int) error {
+	if split.start < 0 {
+		return nil
+	}
+
+	if len(split.result) == maxInputFiles {
+		return errTooManyStdin
+	}
+
+	split.result = append(split.result, profileInput{
+		name:    stdinName + "[" + strconv.Itoa(len(split.result)) + "]",
+		data:    bytes.TrimRight(split.data[split.start:end], jsonSpace),
+		source:  split.data,
+		offset:  split.start,
+		inArray: true,
+		err:     nil,
+	})
+	split.start = -1
+
+	return nil
 }

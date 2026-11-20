@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -48,13 +49,27 @@ type commonOptions struct {
 	profileType  string
 	format       string
 	output       string
+	arch         string
 	noDetectNote bool
 }
 
+// commandOptions is the options of a command that reads profiles.
+type commandOptions interface {
+	// common returns the flags every such command takes.
+	common() *commonOptions
+	// checkFlags reports flag values the command does not take, or cannot
+	// take together, as a usage error.
+	checkFlags(flags *flag.FlagSet, stderr io.Writer) int
+}
+
+func (opts *commonOptions) common() *commonOptions { return opts }
+
 // bind declares the common flags on the set. result names what the command
-// writes, which the help of --no-detect-note says still goes to stdout, and
-// outputDefault what --output defaults to, as its help says it.
-func (opts *commonOptions) bind(flags *flag.FlagSet, result, outputDefault string) {
+// writes, which the help of --no-detect-note says still goes to stdout,
+// outputDefault what --output defaults to, as its help says it, and archFor
+// what the architecture --arch names is for.
+func (opts *commonOptions) bind(flags *flag.FlagSet, result, outputDefault, archFor string) {
+	bindArchFlag(flags, &opts.arch, archFor)
 	flags.StringVar(
 		&opts.profileType, "type", "",
 		"profile type: seccomp, apparmor, landlock (auto-detected if omitted)",
@@ -68,6 +83,12 @@ func (opts *commonOptions) bind(flags *flag.FlagSet, result, outputDefault strin
 		"do not note an auto-detected profile type on stderr; "+result+
 			", errors and warnings still go to their usual streams",
 	)
+}
+
+// checkFlags checks the common flags (see commandOptions), which are all
+// the flags diff takes; the other commands check theirs as well.
+func (opts *commonOptions) checkFlags(_ *flag.FlagSet, stderr io.Writer) int {
+	return opts.check(stderr)
 }
 
 // check reports a --format or --type value no command takes.
@@ -297,14 +318,14 @@ func checkFlagOrder(args []string, separated bool, stderr io.Writer) int {
 
 // checkStdin rejects running without file arguments when stdin is a
 // terminal: input would come from stdin, which would block without a hint,
-// so the usage is printed instead.
+// so the usage is printed instead. What is taken for a terminal differs
+// between the platforms (see isTerminal), and the error says what it was
+// (see terminalStdin).
 func checkStdin(
 	flags *flag.FlagSet, usageText string, stdin io.Reader, stderr io.Writer,
 ) int {
 	if flags.NArg() == 0 && isInteractive(stdin) {
-		_, _ = fmt.Fprintln(
-			stderr, "error: no input files given and stdin is a terminal",
-		)
+		_, _ = fmt.Fprintln(stderr, "error: no input files given and "+terminalStdin)
 
 		printUsage(flags, usageText, stderr)
 
@@ -314,11 +335,154 @@ func checkStdin(
 	return 0
 }
 
-// isInteractive reports whether reader is a terminal.
+// isInteractive reports whether reader is a terminal, as isTerminal tells
+// one.
 func isInteractive(reader io.Reader) bool {
 	file, ok := reader.(*os.File)
 
 	return ok && file != nil && isTerminal(file)
+}
+
+// invocation is one run of a command that reads profiles, as it passes from
+// one step to the next.
+type invocation struct {
+	// paths holds the file arguments, and inputs what they brought.
+	paths  []string
+	inputs []profileInput
+	// stdinUnread reports stdin read and not readable, which leaves the
+	// number of profiles unknown (see stdinUnread).
+	stdinUnread bool
+	// report holds what was found about the inputs so far; resolveKind
+	// creates it.
+	report *inputReport
+	// kind is the profile kind the run uses, which resolveKind sets.
+	kind profileKind
+	// checks says how the command checks each input, which a run whose
+	// inputs disagree on the type needs before it has a kind.
+	checks *inputChecks
+	arch   archOption
+	format string
+	// out holds what the command writes on success, which flushOutput then
+	// writes to stdout or to the --output file, so that a failed run never
+	// truncates an existing file.
+	out    bytes.Buffer
+	stdout io.Writer
+	stderr io.Writer
+	// refusals holds the usage errors that came up once the inputs were
+	// read, such as an --arch the profile type does not take, which are
+	// reported once the inputs are checked (see stop).
+	refusals []error
+}
+
+// startCommand runs the steps every command that reads profiles starts
+// with: it parses args into flags and opts, checks the flag order and then
+// the flag values, parses --arch, refuses a terminal on stdin and reads the
+// inputs, every failure of which is a usage error (see readInputs). It
+// returns the invocation to go on with, or nil and the exit code to stop
+// with.
+func startCommand(
+	flags *flag.FlagSet, opts commandOptions, usageText string, args []string,
+	stdin io.Reader, stdout, stderr io.Writer,
+) (*invocation, int) {
+	if done, code := parseFlags(flags, usageText, args, stdout, stderr); done {
+		return nil, code
+	}
+
+	// The flag order is checked first, so that a flag after the file
+	// arguments is reported as such, and then the flag values.
+	if code := checkFlagOrder(flags.Args(), argsSeparated(flags, args), stderr); code != 0 {
+		return nil, code
+	}
+
+	if code := opts.checkFlags(flags, stderr); code != 0 {
+		return nil, code
+	}
+
+	common := opts.common()
+
+	arch, code := parseArchFlag(flags, common.arch, stderr)
+	if code != 0 {
+		return nil, code
+	}
+
+	if code := checkStdin(flags, usageText, stdin, stderr); code != 0 {
+		return nil, code
+	}
+
+	inputs, err := readInputs(flags.Args(), stdin)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+
+		return nil, exitUsage
+	}
+
+	return &invocation{
+		paths:       flags.Args(),
+		inputs:      inputs,
+		stdinUnread: stdinUnread(flags.Args(), inputs),
+		report:      nil,
+		kind:        nil,
+		checks:      nil,
+		arch:        arch,
+		format:      common.format,
+		out:         bytes.Buffer{},
+		stdout:      stdout,
+		stderr:      stderr,
+		refusals:    nil,
+	}, 0
+}
+
+// halted reports whether the run cannot go on: an input failed, or a usage
+// error came up once the inputs were read.
+func (inv *invocation) halted() bool {
+	return inv.report.anyFailed() || len(inv.refusals) > 0
+}
+
+// stop ends a run that cannot go on. It writes what the report holds, then
+// the usage errors that came up once the inputs were read, and returns
+// failedExit when an input failed, since a bad input is the answer the
+// command was asked for, and the usage exit code otherwise. Every input is
+// checked before a run stops for such a usage error, so that its exit code
+// does not depend on how an input is bad.
+func (inv *invocation) stop(failedExit int) int {
+	inv.report.flush(inv.stderr)
+
+	for _, err := range inv.refusals {
+		_, _ = fmt.Fprintf(inv.stderr, "error: %v\n", err)
+	}
+
+	if inv.report.anyFailed() {
+		return failedExit
+	}
+
+	return exitUsage
+}
+
+// write writes a command's result to out in the format --format names:
+// humanStr, the result as FormatProfile or FormatDiff writes it, for the
+// human one.
+func (inv *invocation) write(result any, humanStr string) int {
+	switch inv.format {
+	case formatHuman:
+		_, _ = fmt.Fprintln(&inv.out, humanStr)
+
+		warnTruncated(inv.stderr, humanStr)
+	default:
+		err := encodeJSON(&inv.out, result)
+		if err != nil {
+			_, _ = fmt.Fprintf(inv.stderr, "error: %v\n", err)
+
+			return 1
+		}
+	}
+
+	return 0
+}
+
+// flushOutput writes what the command wrote to out to stdout, or to the
+// file path names.
+func (inv *invocation) flushOutput(path string) int {
+	return flushOutput(path, inv.out.Bytes(), inv.stdout, inv.stderr)
 }
 
 // plural returns noun with an "s" appended unless count is one.
