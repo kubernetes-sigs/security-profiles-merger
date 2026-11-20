@@ -28,129 +28,87 @@ import (
 )
 
 var (
-	// ErrUnknownRight is returned when a profile contains an unrecognized
-	// access right value.
+	// ErrUnknownRight is returned by Validate and every function that runs
+	// it when a profile holds an access right this package does not know.
 	ErrUnknownRight = errors.New("unknown access right")
 
-	// ErrDuplicateRule is returned by ValidateStrict when a profile contains
-	// more than one rule for a path or port. No other validator reports it,
-	// and the merge folds such rules.
+	// ErrDuplicateRule is returned by ValidateStrict alone when a profile
+	// holds more than one rule for a cleaned path or a port.
 	ErrDuplicateRule = errors.New("duplicate rule")
 
-	// ErrEmptyPath is returned when a path rule has an empty path string
-	// or a path that cleans to ".", such as "./".
+	// ErrEmptyPath is returned by Validate and every function that runs it
+	// when a path rule is empty or cleans to ".", such as "./".
 	ErrEmptyPath = spm.ErrEmptyPath
 
-	// ErrNulInPath is returned by every validator and merge when a path
-	// rule holds a NUL byte, which no file system path can hold. It is
-	// spm.ErrNulInPath, which the apparmor package returns as well.
+	// ErrNulInPath is returned by Validate and every function that runs it
+	// when a path rule holds a NUL byte.
 	ErrNulInPath = spm.ErrNulInPath
 
-	// ErrPathTooLong is returned when a path rule is longer than
-	// MaxPathLen bytes. The length is checked before the path is scanned,
-	// so an oversized path costs no further work: every other path check,
-	// and the merge's hierarchy resolution, walks the path component by
-	// component. Only the empty-path check and the MaxArtifactRules limit
-	// of ValidateArtifact and ValidateStrict come first.
+	// ErrPathTooLong is returned by Validate and every function that runs
+	// it when a path rule is longer than MaxPathLen bytes;
+	// spm.ErrPathTooLong says what is checked before it.
 	ErrPathTooLong = spm.ErrPathTooLong
+
 	// ErrTooManyRules is returned by ValidateArtifact and ValidateStrict
 	// when a profile holds more than MaxArtifactRules rules.
 	ErrTooManyRules = merge.LimitError("too many rules")
 
-	// ErrParentPath is returned when a path rule contains a ".." component.
-	// The kernel resolves ".." against the file system, where a symlink can
-	// make "/srv/data/../public" name a directory other than "/srv/public",
-	// so such a path cannot be compared with other rule paths.
+	// ErrParentPath is returned by Validate and every function that runs it
+	// when a path rule holds a ".." component.
 	ErrParentPath = errors.New(`path contains a ".." component`)
 
 	// ErrUnhandledRight is returned by ValidateBaseline, ValidateArtifact
-	// and ValidateStrict when a rule grants an access right that is not
-	// listed in the profile's handled access set. The merge prunes such
-	// rights instead.
+	// and ValidateStrict when a rule grants a right its profile does not
+	// handle; the merge prunes such rights instead.
 	ErrUnhandledRight = errors.New("rule grants unhandled access right")
 
-	// ErrDuplicateRight is returned by ValidateStrict when an access right
-	// appears more than once in a handled set, rule, or scoped set. No other
-	// validator reports it, and the merge folds such rights.
+	// ErrDuplicateRight is returned by ValidateStrict alone when a right
+	// appears more than once in a handled set, a rule or the scoped set.
 	ErrDuplicateRight = errors.New("duplicate access right")
 
 	// ErrRelativePath is returned by ValidateBaseline, ValidateArtifact and
-	// ValidateStrict when a path rule uses a relative path. Landlock
-	// requires absolute paths for filesystem rules.
+	// ValidateStrict when a path rule is not absolute.
 	ErrRelativePath = spm.ErrRelativePath
 
 	// ErrTrailingSlash is returned by ValidateBaseline, ValidateArtifact and
-	// ValidateStrict when a path rule other than one on the root ends in "/"
-	// or "/.". The kernel opens such a path only when it names a directory,
-	// so a rule on "/srv/f/" for a regular file "/srv/f" cannot be loaded,
-	// while the merge and Diff clean the suffix away and read it as a rule
-	// on "/srv/f", which can.
+	// ValidateStrict when a path rule other than "/" ends in "/" or "/.".
 	ErrTrailingSlash = errors.New(`path ends in "/" or "/."`)
 
 	// ErrInvalidUTF8Path is returned by ValidateBaseline, ValidateArtifact
-	// and ValidateStrict when a path rule is not valid UTF-8. A profile
-	// travels as JSON, which cannot carry such a path: encoding/json writes
-	// U+FFFD in place of each invalid byte, so the profile written out names
-	// another file, and UnmarshalStrict refuses the document.
+	// and ValidateStrict when a path rule is not valid UTF-8.
 	ErrInvalidUTF8Path = errors.New("path is not valid UTF-8")
 
 	// ErrEmptyRule is returned by ValidateBaseline, ValidateArtifact and
-	// ValidateStrict when a path or network rule grants no access right. The
-	// kernel rejects such a rule with ENOMSG.
+	// ValidateStrict when a rule grants no right (the kernel's ENOMSG).
 	ErrEmptyRule = errors.New("rule grants no access right")
 
 	// ErrEmptyRuleset is returned by ValidateBaseline, ValidateArtifact and
-	// ValidateStrict when a profile handles no filesystem or network access
-	// right and scopes nothing. Such a ruleset restricts nothing, and the
-	// kernel refuses to create it with ENOMSG.
+	// ValidateStrict when a profile handles and scopes nothing (ENOMSG).
 	ErrEmptyRuleset = errors.New("ruleset handles no access right and scopes nothing")
 
 	// ErrUnsupportedABIRight is returned by the validators of Options when
-	// a profile uses an access right the ABI version they name does not
-	// know. The kernel rejects such a ruleset with EINVAL.
+	// a profile uses a right their ABI version does not know (EINVAL).
 	ErrUnsupportedABIRight = errors.New("access right needs a newer Landlock ABI")
 
 	// ErrUnknownABIVersion is returned by every method of Options for a
-	// version below ABIV1, 0 included, which names no kernel. The error
-	// matches ErrInvalidOptions as well. A version above LatestABIVersion
-	// is accepted and read as LatestABIVersion.
+	// version below ABIV1, 0 included; it matches ErrInvalidOptions too.
 	ErrUnknownABIVersion = errors.New("unknown Landlock ABI version")
 
-	// ErrInvalidOptions is matched by every error a method of Options
-	// returns for a version that names no kernel, together with
-	// ErrUnknownABIVersion. It is spm.ErrInvalidOptions, which
-	// seccomp.Options errors match too, so a runtime reads a misconfigured
-	// node from one sentinel.
+	// ErrInvalidOptions is spm.ErrInvalidOptions, matched by every error
+	// a method of Options returns for a version naming no kernel, as
+	// seccomp.Options errors do.
 	ErrInvalidOptions = spm.ErrInvalidOptions
 )
 
-// MaxPathLen is the longest rule path this package accepts, following the
-// PATH_MAX of Linux less its terminating NUL, and the limit the apparmor
-// package applies to its patterns. A rule path names a file the kernel
-// opens, so nothing longer can ever be loaded, while resolving one against
-// the paths of the other rules costs time in the length of the path for
-// every rule.
+// MaxPathLen is the longest rule path this package accepts: PATH_MAX of
+// Linux less its terminating NUL, the limit the apparmor package applies
+// too. Every validator applies it.
 const MaxPathLen = spm.MaxPathLen
 
-// MaxArtifactRules bounds how many rules a profile accepted by
-// ValidateArtifact or ValidateStrict may hold, counted over its path rules
-// and its network rules together.
-//
-// Merging a profile costs the number of rules times the depth of their
-// paths, since both merges look up the ancestors of every rule path among
-// the rules: forty thousand rules of two-thousand-component paths took an
-// intersection fourteen seconds and close to four gigabytes. A union also
-// settles the moves between the directories the inputs name, comparing each
-// with at most 64 classes of the others, which keeps it linear in the rules
-// as well. MaxPathLen bounds the depth of one path, and this bounds how many
-// of them there are, so an over-large profile is refused where the reason
-// can still be reported rather than merged slowly. Validate, which is all
-// Intersect and Union run, counts no rules, so an artifact must pass
-// ValidateArtifact before it is merged. The seccomp and apparmor packages
-// bound an artifact the same way.
-//
-// Landlock profiles name the directories a workload may touch; the ones
-// KEP-6061 recommends runtimes accept hold a few dozen rules.
+// MaxArtifactRules bounds the path and network rules, counted together, of
+// a profile ValidateArtifact or ValidateStrict accepts (ErrTooManyRules).
+// Validate counts no rules, so an artifact must pass ValidateArtifact before
+// it is merged. See the Cost bounds section.
 const MaxArtifactRules = 1024
 
 // fieldRef names a list of rights in error messages by its JSON path: a
@@ -201,20 +159,12 @@ func rulePath(rules string, idx int, member string) string {
 	return fmt.Sprintf("%s[%d].%s", rules, idx, member)
 }
 
-// Validate checks what the merge needs: a profile must contain only known
-// access right values and valid paths. Paths must not be empty, longer than
-// MaxPathLen, contain NUL bytes, or contain ".." components.
-//
-// Validate is what Intersect and Union run on each input, so a profile it
-// accepts is one they merge. Duplicate rules and rights pass: the kernel
-// folds them and so does the merge. ValidateArtifact adds what a kernel
-// could not load and ValidateStrict adds the duplicate checks, so what
-// Validate rejects ValidateArtifact rejects, and what ValidateArtifact
-// rejects ValidateStrict rejects.
-//
-// Failures are collected into one bounded report, which matches
-// ErrMoreProblems when it left some out; see Reading a validation error in
-// the spm package documentation.
+// Validate checks what the merge needs, and is what Intersect and Union run
+// on every input: known access rights (ErrUnknownRight) and paths that are
+// not empty (ErrEmptyPath), longer than MaxPathLen (ErrPathTooLong), or
+// holding a NUL byte (ErrNulInPath) or a ".." component (ErrParentPath).
+// Duplicate rules and rights pass. Failures are collected into one bounded
+// report. See the Validation and Rule paths sections.
 func Validate(profile *Profile) error {
 	_, err := validateProfile(profile, tierMerge)
 
@@ -524,60 +474,30 @@ func isKnownNetRight(right NetAccessRight) bool {
 	return ok
 }
 
-// ValidateArtifact validates an artifact: a profile the caller did not
-// write, such as one a container runtime pulled from a registry. It runs
-// every check of Validate and rejects what a kernel could not load: relative
-// paths (ErrRelativePath), paths that only load when they name a directory,
-// which the merge would clean into paths that load either way
-// (ErrTrailingSlash), rules granting a right outside the profile's handled
-// access set (ErrUnhandledRight, EINVAL), rules granting no right
-// (ErrEmptyRule, ENOMSG), and a ruleset that handles and scopes nothing
-// (ErrEmptyRuleset, ENOMSG). It also rejects paths that are not valid UTF-8
-// (ErrInvalidUTF8Path), which the JSON form of a profile cannot carry. A
-// profile holding more than MaxArtifactRules rules (ErrTooManyRules) is
-// refused first and on its own, rather than walked.
-//
-// Duplicate rules and rights are accepted, as the kernel and the merge fold
-// them; ValidateStrict reports them. ValidateArtifact does not check the
-// profile against a kernel's ABI, since the artifact does not know where it
-// will run; Options.ValidateArtifact names the node's ABI version for that.
-// It does not compare the profile against a baseline either; callers
-// intersect the result with their baseline afterwards.
-//
-// A profile it accepts still chooses its own rule paths, which Intersect
-// may give access the baseline grants on an ancestor. ValidateArtifact
-// cannot see this, since it looks at one profile and at path strings rather
-// than at files: see the Lowered rule paths section of the package
-// documentation and LoweredRulePaths.
+// ValidateArtifact validates a profile the caller did not write: every
+// check of ValidateBaseline, after refusing a profile of more than
+// MaxArtifactRules rules first and on its own (ErrTooManyRules). Duplicate
+// rules and rights pass. It checks no ABI version (Options.ValidateArtifact
+// does) and does not see the rule paths Intersect may lower onto (see
+// LoweredRulePaths).
 func ValidateArtifact(profile *Profile) error {
 	_, err := validateProfile(profile, tierArtifact)
 
 	return err
 }
 
-// ValidateBaseline validates a baseline: the profile a runtime trusts and
-// intersects every artifact with. It runs every check of ValidateArtifact
-// but MaxArtifactRules, which bounds what an untrusted author may send
-// rather than what a node operator configures, so what Validate rejects
-// ValidateBaseline rejects, and what ValidateBaseline rejects
-// ValidateArtifact rejects.
+// ValidateBaseline validates the profile a runtime trusts: every check of
+// Validate, and what a kernel could not load: a relative path
+// (ErrRelativePath), a path other than "/" ending in "/" or "/."
+// (ErrTrailingSlash), a path that is not valid UTF-8 (ErrInvalidUTF8Path),
+// a rule granting a right its profile does not handle (ErrUnhandledRight)
+// or none (ErrEmptyRule), and a profile that handles and scopes nothing
+// (ErrEmptyRuleset). It applies no MaxArtifactRules and checks no ABI
+// version; a runtime calls Options.ValidateBaseline at config load.
 //
-// Validate is not enough for a baseline. It accepts a relative path, which
-// no kernel loads and which covers no absolute path in the merge, so an
-// intersection silently drops what the baseline grants there; a path
-// ending in a slash, which the merge cleans into another rule; and a rule
-// granting a right the baseline does not handle, which the merge ignores.
-// Each of these turns into a merge result other than the operator meant,
-// for every workload, rather than an error at config load.
-//
-// A runtime calls Options.ValidateBaseline with the node's ABI version, at
-// config load, so that a baseline carrying a right the node's kernel does
-// not know fails there rather than in every merge result; this function
-// checks no ABI version. Unlike the seccomp and apparmor ValidateBaseline,
-// it does not compare the baseline with the intersection of the baseline
-// alone: Intersect drops the rights a rule on an ancestor already grants,
-// and refer where the kernel denies it anyway, which changes what the result
-// spells but not what it permits.
+// Unlike the seccomp and apparmor ValidateBaseline, it does not compare the
+// baseline with Intersect of the baseline alone, which changes how rules
+// are spelled but not what they permit.
 func ValidateBaseline(profile *Profile) error {
 	_, err := validateProfile(profile, tierBaseline)
 
@@ -597,20 +517,10 @@ func validateRuleCount(profile *Profile) error {
 	return nil
 }
 
-// ValidateStrict validates a profile a person wrote. It runs every check of
-// ValidateArtifact, MaxArtifactRules included, and additionally rejects
-// duplicate rules (ErrDuplicateRule) and rights (ErrDuplicateRight): the
-// kernel, the merge, Validate and ValidateArtifact accept them, but in a
-// profile a person wrote they are likely mistakes. Duplicate rules are
-// detected on cleaned paths, so "/etc", "/etc/" and "//etc" count as the
-// same rule.
-//
-// A merge result passes ValidateStrict when the inputs use absolute paths
-// that are valid UTF-8, the result handles or scopes at least one right, and
-// it holds no more than MaxArtifactRules rules, which a merge of large
-// inputs can exceed: the union of two profiles of a thousand distinct rules
-// holds two thousand. Intersect and Union deduplicate, prune unhandled
-// rights, and drop empty rules, so nothing else fails.
+// ValidateStrict validates a profile a person wrote: every check of
+// ValidateArtifact, and duplicate rules (ErrDuplicateRule), compared on
+// cleaned paths, and rights (ErrDuplicateRight). The Validation section says
+// when a merge result passes it.
 func ValidateStrict(profile *Profile) error {
 	_, err := validateProfile(profile, tierStrict)
 
@@ -618,10 +528,8 @@ func ValidateStrict(profile *Profile) error {
 }
 
 // RequiredABIVersion returns the lowest Landlock ABI version supporting every
-// access right the profile uses, or ABIV1 for a profile that uses none. The
-// profile is checked with Validate first, and its error returned, so that a
-// right this package does not know cannot be read as needing no newer
-// version; a nil profile is reported with ErrNilProfile.
+// access right the profile uses, or ABIV1 for one that uses none. It returns
+// the error of Validate for a profile that fails it, ErrNilProfile for nil.
 func RequiredABIVersion(profile *Profile) (ABIVersion, error) {
 	err := Validate(profile)
 	if err != nil {
@@ -660,51 +568,31 @@ func highestABI[T ~string](rights []T, table map[T]ABIVersion) ABIVersion {
 	return highest
 }
 
-// Options names the Landlock ABI version of the kernel a profile is
-// checked for. A kernel rejects a ruleset carrying a right its ABI does not
-// know, and a runtime that treats a ruleset failing to load as "run without
-// Landlock" would then fail open, so a runtime checks a merge result with
-// the methods of Options before it applies it.
-//
-// The zero value names no version and every method reports it with
-// ErrUnknownABIVersion, so that a runtime whose probe of the kernel failed
-// and left the version at 0 does not pass every profile. A kernel without
-// Landlock reports no version at all; such a node applies no ruleset.
-//
-// Options has a method for every validator and for every other operation
-// whose result depends on the ABI version: Validate, ValidateBaseline,
-// ValidateArtifact, ValidateStrict, DecodeArtifact and Downgrade. The
-// merges, Diff and LoweredRulePaths do not depend on it and have no method;
-// check a merge result with Validate of the options instead.
-// RequiredABIVersion asks the question the other way round.
+// Options names the Landlock ABI version of the kernel a profile is checked
+// for. It has a method for every operation whose result depends on that
+// version; the merges, Diff and LoweredRulePaths do not, so a runtime checks
+// a merge result with Options.Validate before it applies it. The zero value
+// names no version, and every method reports it with ErrUnknownABIVersion.
+// A kernel without Landlock reports no version; such a node applies no
+// ruleset. See the ABI versions section.
 type Options struct {
 	// ABI is the version the kernel reports, as
 	// landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)
 	// returns it. A version newer than LatestABIVersion is read as
-	// LatestABIVersion: Landlock ABI versions are cumulative, so a kernel
-	// reporting one supports every right this package knows, and a node
-	// running ahead of this package must not fail validation for profiles
-	// it can load. A version below ABIV1, 0 included, names no kernel and is
-	// reported with ErrUnknownABIVersion.
+	// LatestABIVersion, and one below ABIV1, 0 included, is reported with
+	// ErrUnknownABIVersion.
 	ABI ABIVersion
 }
 
 // Validate runs Validate and reports every access right the ABI version
 // does not support (ErrUnsupportedABIRight), in one report.
-//
-// Use RequiredABIVersion to ask the same question the other way round: which
-// ABI version a profile needs. An Intersect result can require up to the
-// highest version any input needs; Union can raise it to ABIV2 in one case.
-// See the ABI versions section of the package documentation.
 func (o Options) Validate(profile *Profile) error {
 	return o.validate(profile, tierMerge)
 }
 
 // ValidateBaseline runs ValidateBaseline and reports every access right the
-// ABI version does not support, as Validate of the options does. A
-// runtime checks its baseline with it at config load, naming the node's
-// ABI version, so that a baseline the node's kernel cannot load is a
-// misconfigured node rather than a failure of every merge.
+// ABI version does not support, as Validate of the options does. A runtime
+// calls it at config load with the node's ABI version.
 func (o Options) ValidateBaseline(profile *Profile) error {
 	return o.validate(profile, tierBaseline)
 }
@@ -722,9 +610,8 @@ func (o Options) ValidateStrict(profile *Profile) error {
 }
 
 // DecodeArtifact decodes an artifact with UnmarshalStrict and checks it
-// with ValidateArtifact of the options, so that an artifact carrying a
-// right the node's kernel does not know is refused with the rest. It
-// returns the profile only when both pass.
+// with ValidateArtifact of the options. It returns the profile only when
+// both pass.
 func (o Options) DecodeArtifact(data []byte) (*Profile, error) {
 	err := o.checkABI()
 	if err != nil {
@@ -735,35 +622,22 @@ func (o Options) DecodeArtifact(data []byte) (*Profile, error) {
 }
 
 // Downgrade returns a copy of the profile without the access rights the ABI
-// version of the options does not support, so that a kernel reporting that
-// version does not reject it for them. It is for a node that prefers
-// enforcing what its kernel can enforce over enforcing nothing when a
-// profile fails Validate of the same options.
+// version does not support, for a node that would rather enforce what its
+// kernel can than nothing. The copy is another policy: a right dropped from
+// a handled or scoped set is no longer restricted, except FSAccessRefer. A
+// kernel at ABIV1 denies every move or link into another directory under a
+// ruleset handling a filesystem right, so where the copy still handles one
+// it denies the moves the profile granted, and where refer was the only
+// filesystem right handled it restricts none.
 //
-// The copy is not the same policy:
-//
-//   - A right dropped from a handled set or from the scoped set is no
-//     longer restricted, since that kernel cannot restrict it: the copy
-//     permits what the profile denied.
-//   - FSAccessRefer is the exception. A kernel at ABIV1 knows no refer right
-//     and denies every move or link into another directory under a ruleset
-//     handling a filesystem right, which no rule can lift. Where the copy
-//     still handles one, it denies the moves the profile granted, and where
-//     refer was the only filesystem right handled, it restricts none.
-//
-// Rules lose the dropped rights, and every rule without a right is dropped,
-// whether the downgrade emptied it or it granted none to begin with, since
-// ValidateArtifact reports such a rule with ErrEmptyRule. A copy that
-// handles and scopes nothing restricts nothing: the kernel refuses to load
-// it, and ValidateArtifact reports it with ErrEmptyRuleset. Rights this
-// package does not know are kept for Validate to report.
-//
-// A version newer than LatestABIVersion drops no right, as Validate rejects
-// none for it, and one below ABIV1, 0 included, is reported with
-// ErrUnknownABIVersion, as the validators of Options report it. A nil
-// profile is reported with ErrNilProfile. The profile is not validated
-// otherwise and not modified, and the copy shares no memory with it, so the
-// caller may modify the copy.
+// Rules lose the dropped rights and every rule left without a right is
+// dropped, also one that had none; rights this package does not know are
+// kept. A copy that handles and scopes nothing restricts nothing;
+// ValidateBaseline reports it (ErrEmptyRuleset), and a caller applies no
+// ruleset then. A version newer than LatestABIVersion drops nothing; one
+// below ABIV1 returns ErrUnknownABIVersion and a nil profile ErrNilProfile.
+// The profile is not otherwise validated and not modified, and the copy
+// shares no memory with it.
 func (o Options) Downgrade(profile *Profile) (*Profile, error) {
 	err := o.checkABI()
 	if err != nil {

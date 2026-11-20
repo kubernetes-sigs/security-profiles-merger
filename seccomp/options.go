@@ -27,61 +27,42 @@ import (
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
-// ErrInvalidOptions is matched by every error a method returns for an
-// Options that names no node it can check for: the zero value, and a
-// ForArch architecture this package does not know, which matches
-// ErrUnknownArch as well. It comes before any profile is looked at and is
-// not wrapped in an InputError, so it never matches what an artifact
-// listing an unknown architecture returns. It is spm.ErrInvalidOptions,
-// which landlock.Options errors match too.
+// ErrInvalidOptions is [spm.ErrInvalidOptions], matched by every error a
+// method returns for an Options naming no node it can check for: the zero
+// value, or a ForArch architecture this package does not know, which also
+// matches ErrUnknownArch. It comes before any profile is read and never in
+// an InputError, so it never matches what an artifact listing an unknown
+// architecture returns.
 var ErrInvalidOptions = spm.ErrInvalidOptions
 
 // Options names the node a merge, diff or check is for. Runtimes always add
-// the native architecture of the node to a filter, whether or not the
-// profile lists it, and the 32-bit and multiplexing architectures are read
-// differently where one of them is native (see the Architectures section of
-// the package documentation), so what these functions return depends on it.
+// the node's native architecture to a filter, and the 32-bit and
+// multiplexing architectures are read differently where one of them is
+// native (see the Architectures section), so the results depend on it.
 //
-// An Options comes from one of three constructors:
-//
-//   - ForArch names the native architecture of another node, as in a
-//     control plane merging for a node of another architecture.
+//   - ForArch names the native architecture of another node.
 //   - ForHost names the node this program runs on: the native architecture
 //     of the running program (see NativeArchitecture), or, on a platform
 //     without one, any architecture as for ForAnyArch. The plain functions
 //     of this package are the methods of ForHost().
 //   - ForAnyArch names a node whose native architecture is not known. The
-//     merges and validators then read it as possibly any architecture a
-//     runtime can be native on, which is every architecture this package
-//     knows, since crun, written in C, also runs natively where no Go
-//     program does. A result is settled, and a check runs, as for every one
-//     of them, so it loads safely wherever it runs, at the cost of rules a
-//     node of a known 64-bit architecture keeps. The byte order is the
-//     exception: either byte order may be native, so Intersect and the
-//     stricter validators refuse only a list mixing the two
-//     (ErrMixedByteOrder), which loads on no node. The architectures no Go
-//     program runs on change results too: each lacks syscalls the others
-//     have, and libseccomp loses the rules of an architecture whose block
-//     tests such a syscall first, so a narrow denylist may be refused with
-//     ErrLostRules, as one denying newfstatat outright and mmap on a
-//     condition is for parisc, and an x86_64 one for x32, which shares the
-//     block of x86_64. Where the node's architecture is known, name it
-//     with ForArch. Diff, which settles nothing, implies no architecture
+//     merges and validators then settle and check for every architecture
+//     this package knows, crun's C-only natives included, so a result loads
+//     safely wherever it runs, at the cost of rules a known 64-bit node
+//     keeps. Only a list mixing byte orders is refused by Intersect and the
+//     stricter validators ([ErrMixedByteOrder]), and a narrow denylist may
+//     be refused with [ErrLostRules] for an architecture no Go program runs
+//     on, as one denying newfstatat outright and mmap on a condition is for
+//     parisc, and an x86_64 one for x32. Diff then implies no architecture
 //     and compares the lists as written.
 //
-// The zero value names no node and every method that returns an error
-// reports it with ErrInvalidOptions, so that an Options a caller forgot to
-// fill in does not silently stand for one. Options values are comparable,
-// and two are equal when they come from the same constructor with the same
-// argument: ForHost() and ForArch of the running program's architecture
-// behave alike but are not equal.
-//
-// Options has a method for every validator and for every other operation
-// whose result depends on the node: Validate, ValidateArtifact,
-// ValidateStrict, ValidateBaseline, DecodeArtifact, Intersect, Union and
-// Diff. Validate does not depend on the node; it is here so that a caller
-// holding an Options runs every check through it. Marshal, Clone and
-// FormatProfile do not depend on the node and have no method.
+// The zero value names no node, and every method that returns an error
+// reports it with [ErrInvalidOptions]. Options values are comparable, and
+// equal when they come from the same constructor with the same argument:
+// ForHost() and ForArch of the running program's architecture behave alike
+// but are not equal. Validate does not depend on the node and is a method
+// so that every check can run through an Options; Marshal, Clone and
+// FormatProfile have no method.
 type Options struct {
 	node nodeKind
 	arch specs.Arch
@@ -98,9 +79,9 @@ const (
 )
 
 // ForArch returns the Options of a node whose native architecture is arch.
-// An architecture this package does not know, the empty one included, is
-// reported with an error matching both ErrInvalidOptions and ErrUnknownArch
-// by every method that returns an error, before it looks at a profile.
+// Every method that returns an error reports an architecture this package
+// does not know, the empty one included, with an error matching both
+// ErrInvalidOptions and ErrUnknownArch, before it looks at a profile.
 func ForArch(arch specs.Arch) Options {
 	return Options{node: nodeArch, arch: arch}
 }
@@ -160,13 +141,9 @@ func (o Options) Validate(profile *specs.LinuxSeccomp) error {
 	return Validate(profile)
 }
 
-// ValidateArtifact is ValidateArtifact for the node the options name. The
-// native architecture decides whether the filter covers a 32-bit
-// architecture, and so whether a value above 32 bits is reported
-// (ErrValueTooWide), whether it covers an architecture that multiplexes
-// socket and SysV IPC calls, which decides the conflicts reported on the
-// multiplexers (ErrConflictingEntries), and which listed architectures
-// have another byte order than the node's (ErrMixedByteOrder).
+// ValidateArtifact is ValidateArtifact for the node the options name, whose
+// native architecture decides ErrValueTooWide, the multiplexer conflicts of
+// ErrConflictingEntries, ErrMixedByteOrder and ErrLostRules.
 func (o Options) ValidateArtifact(profile *specs.LinuxSeccomp) error {
 	native, err := o.native()
 	if err != nil {
@@ -177,9 +154,7 @@ func (o Options) ValidateArtifact(profile *specs.LinuxSeccomp) error {
 }
 
 // ValidateStrict is ValidateStrict for the node the options name. It accepts
-// only what ValidateArtifact of the same options accepts, which keeps the
-// lattice of the three validators where the check does not run on the node
-// that loads the profile.
+// only what ValidateArtifact of the same options accepts.
 func (o Options) ValidateStrict(profile *specs.LinuxSeccomp) error {
 	native, err := o.native()
 	if err != nil {

@@ -20,13 +20,10 @@ import (
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
-// String returns a human-readable representation of the profile, as a
-// single line that is safe to log: a value holding a control character, an
-// invisible rune, a byte that is not valid UTF-8 or the punctuation the
-// format is built from is quoted, and the line is cut at 64 KiB, ending in
-// "... (output truncated)" where it is. No real profile comes near that
-// bound; it is there because an artifact chooses how many rules it holds
-// and how many bytes of their paths need escaping. A nil profile reads
+// String returns the profile as a single line that is safe to log: a value
+// holding a control character, an invisible rune, invalid UTF-8 or the
+// format's punctuation is quoted, and the line is cut at 64 KiB, ending in
+// "... (output truncated)" where it is. A nil profile reads
 // "Profile{<nil>}".
 func (p *Profile) String() string {
 	if p == nil {

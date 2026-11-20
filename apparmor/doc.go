@@ -15,481 +15,353 @@ limitations under the License.
 */
 
 // Package apparmor merges, compares and validates AppArmor profiles in the
-// structured [Profile] form this package defines, which mirrors what the
-// Security Profiles Operator records without depending on its CRD types.
+// structured [Profile] form, which mirrors what the Security Profiles
+// Operator records without depending on its CRD types.
 //
-// [Intersect] produces a profile that permits an operation only where every
-// input permits it, which is what a CRI runtime needs to combine an
-// artifact (the untrusted profile it pulled) with its baseline (the profile
-// it trusts), as KEP-6061 describes. [Union] produces one that permits an
-// operation where any input does, which is what the Security Profiles
-// Operator needs to combine recorded profiles. [Diff] compares two profiles
-// in the same terms.
+// [Intersect] permits an operation only where every input permits it, the
+// merge a CRI runtime uses to combine an artifact (the untrusted profile it
+// pulled) with its baseline (the profile it trusts), as KEP-6061 describes.
+// [Union] permits an operation where any input does, the merge the Security
+// Profiles Operator uses to combine recorded profiles. [Diff] compares two
+// profiles in the same terms. Paths are matched as apparmor_parser matches
+// them (see Glob patterns), and [IsGlobPattern] reports whether a path is a
+// pattern.
 //
-// Paths are matched the way AppArmor matches them: this package ports the
-// stages apparmor_parser runs a file rule through, so a glob pattern covers
-// here what it covers on a node. [IsGlobPattern] reports whether a path is a
-// pattern at all.
-//
-// [UnmarshalStrict] decodes a profile and refuses what encoding/json accepts
-// silently: members no field reads, members that name a field only ignoring
-// case, members repeated within one object, invalid UTF-8, data behind the
-// profile, and a document that is not a JSON object ([ErrNotAnObject]).
-// Decode an artifact with it and validate the result with
-// [ValidateArtifact], or call [DecodeArtifact], which does both.
-// [ValidateBaseline] checks a baseline once, at config load, including
-// whether the merge reads every rule of it, and [QuotePath] spells a path
-// for a profile rule a consumer renders.
+// Decode an artifact with [UnmarshalStrict] and check it with
+// [ValidateArtifact], or call [DecodeArtifact], which does both. Check a
+// baseline once, at config load, with [ValidateBaseline], and spell each
+// path of a result a consumer renders with [QuotePath].
 //
 // # Validation
 //
-// [Validate] reports what makes a profile ill-formed: empty, oversized or
-// relative paths, AppArmor variables, and paths or capabilities listed
-// twice.
-// [ValidateArtifact] adds the checks a runtime applies to an artifact: the
-// size limits, the patterns apparmor_parser rejects, and the paths a
-// consumer rendering the profile would turn into rules of the author's
-// choosing. [ValidateStrict] adds the checks worth making on a profile a
-// person wrote, so each rejects everything the one before it rejects.
+// The validators are ordered by strictness, each rejecting everything the
+// one before it rejects:
 //
-// Validate is what the merge runs on its inputs, except for duplicates
-// within one list. [Intersect] and [Union] run the checks of Validate on
-// each input as the caller wrote it, leaving out a path or capability
-// listed twice within one list, and only then drop exact duplicates,
-// lower-case capability names and fold two spellings of one path within a
-// list into one entry. A merge therefore fails on a nil profile, an empty,
-// oversized or relative path, an AppArmor variable, a path listed in two
-// filesystem categories (ErrDuplicatePath, however either is spelled) and
-// an empty capability name, but not on a path or capability listed twice
-// within one list. Everything else, such as a pattern apparmor_parser
-// rejects, the merge treats as opaque text or as a pattern matching
-// nothing. A failure is wrapped in an [InputError] naming the input, and
-// names the entry at the index and in the spelling the caller gave it.
+//   - [Validate] reports what makes a profile ill-formed: empty, oversized
+//     or relative paths, AppArmor variables, and paths or capabilities
+//     listed twice.
+//   - [ValidateArtifact] adds what a runtime checks on an artifact: the size
+//     limits, the patterns apparmor_parser rejects, and the paths and
+//     capability names a consumer rendering the profile would turn into
+//     rules of the author's choosing.
+//   - [ValidateStrict] adds unknown capability names and duplicate
+//     executable or library paths, worth reporting in a profile a person
+//     wrote.
+//
+// [Intersect] and [Union] run the checks of Validate on each input as the
+// caller wrote it, except for a path or capability listed twice within one
+// list, and only then drop exact duplicates, lower-case capability names and
+// fold two spellings of one path within a list into one entry. A failure is
+// wrapped in an [InputError] naming the input, and names the entry at the
+// index and in the spelling the caller gave it. Everything Validate accepts,
+// such as a pattern apparmor_parser rejects, the merge treats as opaque text
+// or as a pattern matching nothing.
 //
 // Every validator collects its failures into one bounded report, which
 // matches [ErrMoreProblems] when it left some out (see Reading a validation
-// error in the [spm] package documentation). An oversized path ends the path
-// checks of Validate and the pattern checks of ValidateArtifact and
-// ValidateStrict, since each would scan it, and ValidateArtifact and
-// ValidateStrict check the size limits first and on their own.
+// error in the [spm] package documentation). An oversized path ends the
+// other checks of Validate, capability checks included, and the pattern
+// checks of ValidateArtifact and ValidateStrict. Those two check the size
+// limits first and refuse a profile past one with that failure alone,
+// rather than scan it.
 //
 // # Scope
 //
-// [Profile] models the part of an AppArmor profile the Security Profiles
-// Operator records: paths that may be executed or loaded as a library, paths
-// that may be read, written or both, three network permissions, and
-// capability names. It models nothing else, and this package neither reads
-// nor writes profile text, so nothing is lost inside it; the loss is in
-// whatever maps a real profile onto this type, and two of its consequences
-// need stating.
+// [Profile] models what the Security Profiles Operator records: executable
+// and library paths, read, write and read-write paths, raw, TCP and UDP
+// network access, and capability names. This package neither reads nor
+// writes profile text, so whatever maps a real profile onto a Profile must
+// stay within the model:
 //
-// A file rule's exec transition modifiers (ix, px, Px, ux, Ux, cx, Cx, pix
-// and the rest) have no place here, so two profiles listing one path in
-// AllowedExecutables intersect to a shared exec permission even where one
-// grants it "ix" and the other "Ux", which is not a permission they share.
-// Callers must not map exec modes into AllowedExecutables where the
-// distinction matters.
+//   - Exec transition modes (ix, px, Ux, cx and the rest) are not modeled:
+//     two profiles listing one path in AllowedExecutables intersect to a
+//     shared exec permission even where one grants "ix" and the other "Ux".
+//     Do not map exec modes where the distinction matters.
+//   - Deny rules are not modeled, and in AppArmor a deny rule beats an allow
+//     rule whatever their order, so mapping only the allow rules of a
+//     profile holding deny rules grants more than the original. Do not map
+//     such a profile.
+//   - The priority= qualifier of AppArmor 5.0 is not modeled: "priority=1
+//     /etc/** r," next to "/etc/shadow w," grants only r on /etc/shadow,
+//     the flattened Profile rw. Do not map a profile holding priorities;
+//     rules rendered from a Profile are meant to load at the default
+//     priority.
 //
-// A deny rule has no place here either, and a deny rule beats an allow rule
-// in AppArmor whatever their order. A caller that maps only the allow rules
-// of a profile holding deny rules produces a [Profile] granting more than
-// the original, which every merge here then takes at face value. Callers
-// must not map a profile holding deny rules onto this type.
-//
-// The priority= rule qualifier of AppArmor 5.0 has no place here either.
-// Where rules overlap, a rule of higher priority overrides those of lower
-// priority, so even a profile of allow rules alone can hold rules that
-// narrow each other: "priority=1 /etc/** r," next to "/etc/shadow w,"
-// grants only r on /etc/shadow, while flattening the two into this type
-// grants rw there. Callers must not map a profile holding priorities onto
-// this type, and the rules a consumer renders from a Profile are meant to
-// load at the default priority.
-//
-// The other rule kinds a profile may hold are outside the model as well:
-// the "m", "k", "l" and "a" permissions and link rules, owner conditionals,
-// mount, umount and pivot_root rules, signal, ptrace, dbus and unix rules,
-// abi and include directives, profile flags, and subprofiles or hats.
+// Also outside the model: the "m", "k", "l" and "a" permissions and link
+// rules, owner conditionals, mount, umount and pivot_root rules, signal,
+// ptrace, dbus and unix rules, abi and include directives, profile flags,
+// and subprofiles or hats. So is a profile naming paths longer than
+// [MaxPathLen], which AppArmor can match but the validators and merges
+// refuse.
 //
 // # Capability names
 //
-// Capability names are compared with ASCII case folding, and the merge
-// lower-cases the names it keeps, so a result spells "chown" whether an
-// input spelled "chown" or "CHOWN", which is the only spelling
-// apparmor_parser accepts in a "capability chown," rule. The folding is
-// deliberately not Unicode's: U+017F and U+0131 upper-case into "S" and
-// "I", and U+212A lower-cases into "k", which would let a name spelled with
-// one of them pass ValidateStrict as a known capability and merge into the
-// real one.
+// Capability names are compared with ASCII case folding, not Unicode's, so
+// that U+017F, U+0131 or U+212A cannot spell a real name. The merges return
+// them lower-cased, the only spelling apparmor_parser accepts in a
+// "capability chown," rule, and otherwise treat them as opaque: an
+// intersection keeps a name every input grants, a union every name any
+// input grants.
 //
-// Otherwise the merge treats a name as opaque: an intersection keeps one
-// only when every profile grants it, and a union keeps every name any
-// profile grants. Validate accepts any non-empty name, because the kernel
-// gains capabilities over time and failing a merge because one input names
-// a capability newer than this package would leave callers unable to merge
-// at all. ValidateArtifact requires a word of letters, digits and "_"
-// ([ErrInvalidCapabilityName]), for the reason it reports an unquotable
-// path, without the "cap_" prefix of the kernel's constants, in any case:
-// apparmor_parser loads "chown" but not "cap_chown", which is what the
-// merge makes of "CAP_CHOWN". It does not check the name against the known
-// set, since a newer kernel may know it. [ValidateBaseline] checks the
-// spelling as ValidateArtifact does. ValidateStrict also reports a name
-// outside the known set ([ErrUnknownCapability]), which in a profile a
-// person wrote is a typo.
+// Validate accepts any non-empty name, so that a capability newer than this
+// package does not fail a merge. ValidateArtifact and [ValidateBaseline]
+// require a word of letters, digits and "_" without the kernel's "cap_"
+// prefix in any case ([ErrInvalidCapabilityName]): apparmor_parser loads
+// "chown" but not "cap_chown", and any other character lets a rendered name
+// add rules. Only ValidateStrict checks the name against the known set
+// ([ErrUnknownCapability]), since a newer kernel may know more.
 //
 // # Glob patterns
 //
 // Paths may use AppArmor glob syntax: "*" (any bytes except "/"), "**" (any
 // bytes including "/"), "?" (one byte except "/"), character classes such
 // as "[abc]", "[a-z]" and "[^a]", and alternations such as "{a,b}", which
-// may nest and may contain further glob tokens. The results of a merge are
-// loaded by apparmor_parser, so the package gives every pattern the meaning
-// the parser gives it, in both directions: it ports the parser's escape
-// handling, slash filtering, and translation of patterns into its
-// byte-oriented regex engine (convert_aaregex_to_pcre and libapparmor_re).
-// In particular:
+// may nest and hold further glob tokens. The package ports apparmor_parser's
+// escape handling, slash filtering and translation into its byte-oriented
+// regex engine, so a pattern covers here exactly what it covers on a node:
 //
-//   - Matching works on bytes, not characters: "?" matches one byte, so
-//     "/tmp/?" does not match "/tmp/é" (two bytes in UTF-8) and "/tmp/??"
-//     does, and a class member such as "é" stands for each of its bytes.
-//   - A run of two or more stars is one "**": the extra stars match what the
-//     first two already match, so "/etc/***" narrows another pattern exactly
-//     as "/etc/**" does rather than dropping out of an intersection.
+//   - Matching works on bytes: "?" matches one byte, so "/tmp/?" does not
+//     match "/tmp/é" (two bytes in UTF-8) and "/tmp/??" does, and a class
+//     member such as "é" stands for each of its bytes.
+//   - A run of two or more stars is one "**".
 //   - A star run requires a character only when it fills a whole path
-//     component: when it follows a "/" and is followed by "/" or ends the
-//     pattern. So "/dir/*" and "/dir/**" do not match "/dir/" itself, while
-//     "/etc/*.conf" matches "/etc/.conf" and "/etc/**foo" matches
-//     "/etc/foo". The parser checks the last character it emitted and the
-//     raw pattern character after the run, so inside an alternation
-//     "/etc/{x/*,y}" matches "/etc/x/" (the run follows "/" but is followed
-//     by ","), and "/etc/{a,*}" matches "/etc/" (the run follows the
-//     alternation's separator, not "/").
-//   - Classes are passed to the regex engine as written: only "^" negates
-//     ("[!a]" matches "!" and "a", and is reported as [ErrUnquotablePath]
-//     for the unescaped "!"), a class may match "/" ("[/]", "[^a]", or a
-//     range spanning it), "-" between two members is a range operator even
-//     when escaped, and a reversed range such as "[z-a]" is swapped.
+//     component, following a "/" and followed by "/" or the end: "/dir/*"
+//     and "/dir/**" do not match "/dir/", while "/etc/*.conf" matches
+//     "/etc/.conf" and "/etc/**foo" matches "/etc/foo". The parser checks
+//     the last character it emitted and the raw character after the run, so
+//     "/etc/{x/*,y}" matches "/etc/x/" and "/etc/{a,*}" matches "/etc/".
+//   - Classes are passed on as written: only "^" negates ("[!a]" matches "!"
+//     and "a"), a class may match "/" ("[/]", "[^a]", or a range spanning
+//     it), "-" between two members is a range even when escaped, and a
+//     reversed range such as "[z-a]" is swapped.
 //
 // A pattern with more than 100 alternatives in total never matches, and
 // neither does a pattern apparmor_parser rejects (see Paths the validators
-// reject), which includes one that does not start with "/": "**" covers
-// every name and grants none. The merge drops such a pattern on intersection
-// and keeps it verbatim on union. Intersecting a single profile drops them
-// too, so Intersect(p) equals Intersect(p, p).
-//
-// A union therefore still holds every pattern of its inputs that does not
-// load, and a consumer rendering it checks the result with
-// [ValidateArtifact] first, as it would an input. One such pattern does not
-// fail to load but stops the parser: apparmor_parser 5.0.2 does not return
-// from a class holding an escaped comma, such as "/a/[\,]", and its worker
+// reject), including one that does not start with "/". Intersect drops such
+// a pattern, also from a single input, so Intersect(p) equals
+// Intersect(p, p); Union keeps it verbatim, so check a union with
+// [ValidateArtifact] before rendering it. One such pattern stops the parser
+// rather than fail to load: apparmor_parser 5.0.2 does not return from a
+// class holding an escaped comma, such as "/a/[\,]", and its worker
 // processes outlive it.
 //
 // # Path spelling
 //
-// Escape sequences are resolved as the parser resolves them: \n, \t, \r, \f,
-// \a, \e, octal (\101), decimal (\d65) and hex (\x41) denote the byte they
-// encode, so `/tmp/\x41` names "/tmp/A", while a sequence that encodes a
-// pattern metacharacter (\x2a) stays a literal "*". A backslash before any
-// other character makes it literal (`\*`, `\{`) or, for an ordinary
-// character, is dropped (`\q` is "q"). An escaped literal such as `/etc/\*`
-// is matched against globs as the file name "/etc/*".
+// Escapes are resolved as the parser resolves them: \n, \t, \r, \f, \a, \e,
+// octal (\101), decimal (\d65) and hex (\x41) denote the byte they encode,
+// so `/tmp/\x41` names "/tmp/A", except that one encoding a pattern
+// metacharacter (\x2a) stays a literal "*". A backslash before any other
+// character makes it literal (`\*` is matched as the file name "*") or, for
+// an ordinary character, is dropped (`\q` is "q").
 //
-// Paths are normalized as the parser's filter_slashes normalizes them: a
-// path starting with exactly two slashes keeps them ("//a//b" becomes
-// "//a/b"), and every other run of slashes collapses into one ("///a"
-// becomes "/a"). As in the parser, an escape that encodes a slash (\x2f,
-// \057, \d047) counts as one, so `///\x2fetc` becomes "/etc". A trailing
-// slash is kept, which distinguishes a directory rule from a file rule. "."
-// and ".." components are not resolved: the kernel hands AppArmor canonical
-// paths, so a rule such as "/etc/../etc/passwd" matches nothing, and
-// resolving it would make it grant "/etc/passwd". The merge keeps such paths
-// as written.
+// Slashes are filtered as the parser's filter_slashes filters them: a path
+// starting with exactly two slashes keeps them ("//a//b" becomes "//a/b"),
+// every other run collapses ("///a" becomes "/a"), and an escaped slash
+// (\x2f, \057, \d047) counts as one. A trailing slash is kept, as it marks a
+// directory rule. "." and ".." components are not resolved: the kernel hands
+// AppArmor canonical paths, so "/etc/../etc/passwd" matches nothing, and the
+// merge keeps it as written.
 //
-// Two spellings of one path are one rule. The validators compare paths with
-// repeated slashes collapsed and escapes resolved, so "/tmp/A" and
-// `/tmp/\x41` listed in two categories are reported with [ErrDuplicatePath],
-// and the merge folds two spellings within one list into one entry. Two
-// profiles spelling one rule differently are given a common spelling before
-// they are merged, so intersecting a profile listing "/tmp/A" with one
-// listing `/tmp/\x41` keeps the file both grant. The spelling kept is one an
-// input holds once its slash runs are filtered, never one derived from the
-// decoded name, and among them one that stays renderable as a rule, then the
-// shortest: deriving it could produce a path ValidateArtifact rejects
-// ([ErrUnquotablePath]) from inputs it accepts.
+// Two spellings of one path are one rule: the validators report "/tmp/A" and
+// `/tmp/\x41` in two categories with [ErrDuplicatePath], a merge folds two
+// spellings within one list, and inputs spelling one rule differently are
+// given a common spelling first, so their intersection keeps the file. The
+// spelling kept is one an input holds once its slashes are filtered, never
+// one derived from the decoded name, preferring one that renders as a rule,
+// then the shortest.
 //
 // # Paths the validators reject
 //
-// Validate reports a path longer than [MaxPathLen] ([ErrPathTooLong]), an
-// empty path ([ErrEmptyPath]), a path that does not start with "/"
-// ([ErrRelativePath]) and an AppArmor variable such as @{HOME}
-// ([ErrUnsupportedVariable]), whose expansion this package does not know.
-// The variable check applies also where the "@" is spelled as an escape
-// (`\x40{HOME}`), since the parser resolves escapes before it expands
-// variables, and not to what the parser reads as no variable: an escaped
-// "@", an "@{" without a closing "}", and "@{a,b}", which apparmor_parser
-// reads as an alternation after a literal "@". The relative check reads the
-// path as written: file rules must use absolute paths, and apparmor_parser's
-// lexer takes a path to start with a raw "/", so `\x2fetc/passwd`,
-// `\57etc/passwd` and `\/etc/passwd` are relative, whatever their escapes
-// decode to. Validate rejects them, and so do the merges, so that a merge
-// never returns one beside the absolute spelling of the same name, a result
-// ValidateArtifact would reject. [Diff] reads such a path as naming no file,
-// so it is not "/etc/passwd" there either. A path referencing a variable is
-// reported as that alone, not as relative too. Validate accepts everything
-// below, and the merge treats it as opaque text or as a pattern matching
-// nothing; ValidateArtifact and ValidateStrict report it.
+// Every validator and every merge reports a path longer than [MaxPathLen]
+// ([ErrPathTooLong], before any other check of that path), an empty path
+// ([ErrEmptyPath]), a path that does not start with "/" ([ErrRelativePath])
+// and an AppArmor variable such as @{HOME} ([ErrUnsupportedVariable]),
+// whose expansion this package does not know. The variable check applies
+// also where the "@" is an escape (`\x40{HOME}`), and not to what the parser
+// reads as no variable: an escaped "@" (`\@{a}`), an "@{" without a closing
+// "}", and "@{a,b}", an alternation after a literal "@". A path referencing
+// a variable is reported as that alone, not as relative too. The relative
+// check reads the path as written, as the parser's lexer does, so
+// `\x2fetc/passwd`, `\57etc/passwd` and `\/etc/passwd` are relative, and
+// [Diff] reads such a path as naming no file.
 //
-// A pattern apparmor_parser rejects is reported with [ErrInvalidGlob]: an
-// unclosed "{" or "[", a "}" or "]" without its opening counterpart (in
-// "[]a]" the first "]" closes the class), an alternation without a comma
-// ("{a}", "{*}", "{}"), alternations nested 50 deep, a malformed class such
-// as "[a-]", a trailing backslash, and a NUL byte. So are the class forms
-// the parser accepts but translates into something other than what they
-// say: "*" or "?" inside a class, an escaped "," inside a class, "[]" or
-// "[^]", and an escaped "^" opening a class (`[\^x]`, `[\x5ex]` or
-// `[\136x]`). The parser keeps that "^" escaped until it translates the
-// class, drops the backslash there, and reads the "^" left as negating the
-// class, so the rule says "^ or x" and grants every byte but x, "/"
-// included. The merge matches it as the negated class the parser loads,
-// where it treats the other forms as matching nothing. IsGlobPattern
-// reports such paths as patterns. A pattern past the matcher's limits is
-// reported with [ErrGlobTooComplex].
+// ValidateArtifact and ValidateStrict also report what follows, which
+// Validate accepts and the merge treats as opaque text or as a pattern
+// matching nothing.
 //
-// A path is written the way apparmor_parser's lexer reads one: a run of
-// characters other than space, tab, carriage return, newline, `"`, "!" and
-// ",", which each have an escaped form (`\ `, \t, `\"`, `\!`, `\,`) the
-// parser accepts and this package resolves. A comma is also accepted where
-// another path character follows it, as inside an alternation "{a,b}". A
-// path holding one of these unescaped is reported with [ErrUnquotablePath]:
-// the rule does not load, and a consumer that renders "  <path> <perms>,\n"
-// would turn a path holding a newline into further rules of the profile
-// author's choosing. A backslash protects only a character that can be
-// written in a rule: the parser drops a backslash it resolves no escape for
-// and keeps the byte after it, so a backslash followed by a raw newline is a
-// path holding a newline, which a consumer renders raw, and is reported too.
-// The two-character forms (\n, \r, \t, or \x0a) spell those paths safely,
-// and [QuotePath] writes them. A backslash also escapes only where
-// the lexer reads it as the start of an escape: after a comma the lexer
-// takes the next byte as a plain character, so in `/a,\ b` the space still
-// ends the path and the rest is read as profile syntax, and a path ending in
-// a backslash (including an escaped one, `/a\\`) escapes the space a
-// consumer renders after it. Both are reported. A class written "[!a]" is
-// unloadable for the same reason: the negation AppArmor accepts is "[^a]",
-// and a literal "!" in a class has to be escaped (`[\!a]`).
+// [ErrInvalidGlob] reports a pattern apparmor_parser rejects: an unclosed
+// "{" or "[", a "}" or "]" without its opening counterpart (in "[]a]" the
+// first "]" closes the class), an alternation without a comma ("{a}", "{*}",
+// "{}"), alternations nested 50 deep, a malformed class such as "[a-]", a
+// trailing backslash, and a NUL byte. It also reports the class forms the
+// parser loads as something other than what they say: "*" or "?" inside a
+// class, an escaped "," inside a class, "[]" or "[^]", and an escaped "^"
+// opening a class (`[\^x]`, `[\x5ex]`, `[\136x]`), which the parser loads as
+// a class granting every byte but x, "/" included. The merge matches that
+// last form as the negated class and the others as matching nothing;
+// [IsGlobPattern] reports all of them as patterns. [ErrGlobTooComplex]
+// reports a pattern past the matcher's limits (100 alternatives in total,
+// or a compiled program too large).
 //
-// A character that is not printable is reported with [ErrUnquotablePath] as
-// well, although the parser loads it: a C0 control or DEL, a character
-// strconv.IsPrint refuses, such as a C1 control, a bidirectional override
-// or U+2028, and one that renders as nothing or as a blank, such as U+3164
-// HANGUL FILLER or U+2800, with which "/usr/bin" reads as itself while
-// naming another file. These are the characters the package's error
-// messages escape when they quote a path. A consumer rendering or logging
-// the profile writes it out raw, where a terminal acts on an escape sequence
-// and line-based tools end a line at a vertical tab, a form feed, U+0085 or
-// U+2028. Each has an escaped form (`\x1b`, `\xc2\x85`), which is accepted.
-// Bytes that are not valid UTF-8 are accepted, since a file name may be in
-// another encoding, and Validate accepts all of these, since a trusted
-// baseline may name such a file. Where two spellings of one path reach a
-// merge, it keeps the one that can be rendered.
+// [ErrUnquotablePath] reports a character apparmor_parser's lexer does not
+// accept unescaped in a path: a space, tab, carriage return, newline, `"`,
+// "!", or a "," that ends the path (one another path character follows, as
+// in "{a,b}", is accepted). Each has an escaped form (`\ `, \t, `\"`, `\!`,
+// `\,`). It also reports a backslash before a character no rule can hold,
+// such as a raw newline, which the parser keeps; a backslash the lexer does
+// not read as an escape, after a comma (in `/a,\ b` the space still ends the
+// path) or ending the path (`/a\\` too); the class "[!a]", whose "!" has to
+// be escaped (`[\!a]`); and a character that is not printable, although the
+// parser loads it: a C0 control or DEL, a character strconv.IsPrint refuses
+// (a C1 control, a bidirectional override, U+2028), and one that renders as
+// nothing or as a blank (U+3164 HANGUL FILLER, U+2800, a variation
+// selector). The escaped forms (`\x1b`, `\xc2\x85`), which [QuotePath]
+// writes, are accepted, and so are bytes that are not valid UTF-8. Validate
+// accepts all of these, so a trusted baseline may name such a file; where
+// two spellings of one path reach a merge, it keeps the one that renders.
 //
-// A path holding a NUL byte, or an escape denoting one such as \000, \x00 or
-// \d000, loads but matches nothing, since no name the kernel hands AppArmor
-// holds a NUL; it is reported with [ErrNulInPath]. A path with a "." or ".."
-// component matches nothing either and is reported with [ErrDotComponent].
-// In a glob, the components of the literal text before the first glob token
-// count, and so do later components that are exactly "." or ".." outside
-// every alternation and class: "/a/*/../b" is reported, while "/{a,b/./c}"
-// is not, as its "/a" alternative can match.
+// [ErrNulInPath] reports a NUL byte or an escape denoting one (\000, \x00,
+// \d000), and [ErrDotComponent] a "." or ".." component; both load but
+// match nothing. In a glob, the components of the literal text before the
+// first glob token count, and so do later components that are exactly "."
+// or ".." outside every alternation and class: "/a/*/../b" is reported,
+// while "/{a,b/./c}" is not, as its "/a" alternative can match.
 //
 // # Filesystem merge
 //
 // Paths are expanded into read and write permissions, merged per path (AND
-// for intersection, OR for union), and collapsed back into read-only,
-// write-only and read-write lists. A read-write path intersected with a
-// read-only one becomes read-only; a read-only path in one profile and
-// write-only in the other is dropped on intersection but becomes read-write
-// on union.
+// for intersection, OR for union), and collapsed back into the three lists:
+// read-write intersected with read-only is read-only, and read-only in one
+// profile and write-only in the other is dropped by an intersection and
+// read-write in a union.
 //
-// On intersection a literal path survives when a glob on the other side
+// On intersection a literal path survives where a glob on the other side
 // matches it, and two globs survive only when they are identical or one is
-// the "**" expansion of a non-empty literal prefix containing the other's
-// prefix (so "/etc/**" narrows to "/etc/*.conf" and to "/etc/foo/*.conf").
-// As "<prefix>**" requires a character after the prefix, a glob that can
-// match the prefix itself is not narrowed by it: "/etc/**" and "/etc/{,**}"
-// intersect to nothing. The narrowing guarantee is over canonical paths, the
-// only names AppArmor matches: a glob whose literal prefix spells "//" with
-// an escaped slash (`/etc/\/foo/*`) is not narrowed, while one that spells a
-// "/" after a "/" inside an alternation or class (`/etc/{\/a,b}`,
-// "/etc/[/]x") is narrowed and may match a name containing "//" that the
-// "**" pattern does not.
+// "<prefix>**" for a non-empty literal prefix the other's prefix contains:
+// "/etc/**" narrows to "/etc/*.conf" and "/etc/foo/*.conf". "<prefix>**"
+// needs a character after the prefix, so "/etc/**" and "/etc/{,**}"
+// intersect to nothing.
+// This holds over canonical paths, the only names AppArmor matches: a glob
+// whose literal prefix spells "//" with an escaped slash (`/etc/\/foo/*`) is
+// not narrowed, while one that spells "//" inside an alternation or class
+// (`/etc/{\/a,b}`, "/etc/[/]x") is, and may match such a name the "**"
+// pattern does not.
 //
-// On union every glob of either profile is kept, and globs never prune
-// other globs. Globs prune the literals of the other profile they match: a
-// literal only one profile lists is dropped when the other profile's globs
-// grant everything it grants. When those globs grant only part of it, the
-// literal also takes their permissions, so a write-only literal under a
-// read-only glob of the other profile becomes read-write. A literal both
-// profiles list is kept with the permissions they list. A profile's own
-// globs never prune or promote its own literals, so a single profile's paths
-// are kept as written (Union(p, p) keeps the paths of p), and the result
-// depends neither on the order of the two profiles nor on the order of the
-// paths within them.
+// On union every glob is kept and globs never prune globs. A literal only
+// one profile lists is dropped where the other profile's globs grant all it
+// grants, and otherwise takes their permissions, so a write-only literal
+// under a read-only glob of the other profile becomes read-write. A literal
+// both list keeps the permissions they list, and a profile's own globs never
+// prune or promote its own literals, so Union(p, p) keeps the paths of p.
+// The union of two profiles depends neither on their order nor on the order
+// of their paths. A union whose every path is a literal is taken in one
+// pass, linear in the inputs apart from sorting the result.
 //
 // More than two profiles are folded from left to right. A pattern survives a
 // step only where the other side spells it alike or expands over it, so two
-// patterns that cover one literal without covering each other cancel out
-// when they are folded first, and take the literal with them. A step also
-// matches a literal only against the patterns of the other side, not against
-// those of the profile that lists it. An intersection of two or more
-// profiles therefore ends with a pass over the literal paths: the result
-// grants every literal path an input lists, in the list it is listed in, the
-// permissions every input grants it there, an input granting what it lists
-// for the path itself joined with what its patterns that match the path
-// grant. The pass adds to the literal only what the patterns the result
-// keeps do not grant it already. Intersecting "/data/*.txt",
-// "/data/report.*" and "/data/report.txt" keeps "/data/report.txt" in every
-// order, and intersecting {r: "/data/x.txt", w: "/data/*.txt"} with
-// {w: "/data/x.*"} keeps "/data/x.txt" write-only. A profile intersected
-// with itself gives what Intersect of it alone gives. Where an input's own
-// pattern grants a literal it lists more than the literal spells and the
-// result does not keep that pattern, the literal is listed with the more:
+// patterns that cover one literal without covering each other cancel out,
+// taking the literal with them, and a step matches a literal only against
+// the other side's patterns. An intersection therefore ends with a pass over
+// the literal paths: the result grants every literal an input lists, in its
+// list, what every input grants it there through its own entry and its
+// patterns that match it, adding only what the patterns the result keeps do
+// not grant. Intersecting "/data/*.txt", "/data/report.*" and
+// "/data/report.txt" keeps "/data/report.txt" in every order, and
 // {r: "/data/x", rw: "/data/*"} intersected with {rw: "/data/{x,y}"} lists
-// "/data/x" read-write.
+// "/data/x" read-write. A profile intersected with itself gives what
+// Intersect of it alone gives.
 //
-// Within the compile and pass budgets, what the result permits on every
-// literal path an input lists does not depend on the order of the inputs;
-// whether it permits that through the literal or through a pattern it
-// keeps, and which patterns it keeps, may. Every order is safe: the result
-// permits only what every input permits. Nesting the calls is not the
-// same: Intersect(a, Intersect(b, c)) loses a literal only a lists where
-// the patterns of b and c cancel out, as the inner call keeps neither
-// pattern and has no input that lists the literal.
-//
-// Both budgets can make what the result permits on the literal paths depend
-// on the order (see Cost bounds). The pass is bounded, and past its budget
-// the literal paths are those the fold kept. The compile budget is spent in
-// input order, so where the patterns of the inputs listed first fill it, a
-// pattern of a later input is left uncompiled and matches only its own
-// spelling: a literal it covers is then kept in some orders and not in
-// others, and some orders may fail with [ErrBudgetExceeded] instead.
-//
-// A union of profiles whose every path is a literal is taken in one pass
-// rather than folded, which returns what the fold returns at a cost linear
-// in the size of the inputs apart from sorting the result; a union holding
-// a pattern is folded.
+// Within the compile and pass budgets, what an intersection permits on every
+// literal an input lists does not depend on the order of the inputs; whether
+// through the literal or a kept pattern, and which patterns it keeps, may.
+// Every order is safe: the result permits only what every input permits.
+// Nesting is not the same: Intersect(a, Intersect(b, c)) loses a literal
+// only a lists where the patterns of b and c cancel out. Past the pass
+// budget the literals are those the fold kept, and the compile budget is
+// spent in input order, so a later input's uncompiled pattern matches only
+// its own spelling: a literal it covers is kept in some orders and not
+// others, and some orders may fail with [ErrBudgetExceeded] (see Cost
+// bounds).
 //
 // # Nil and empty sections
 //
 // A nil field means the profile says nothing about that section, which to
-// AppArmor denies everything the section covers. Intersect treats a nil
-// section as an explicit empty one and a nil network boolean as false, so
-// intersecting {caps: [NET_ADMIN]} with {caps: nil} yields [] just as
-// intersecting with {caps: []} does, and the result carries every section
-// explicitly; when no paths overlap, the result holds an empty
-// FilesystemRules. Union lets a nil section defer to the other profile,
-// which grants the same as an empty section would; only the shape of the
-// result differs, as a section nil on both sides stays nil.
-//
-// Diff compares the same way, so a profile that says nothing about raw
-// sockets and one that forbids them are equal, and Diff(p, Intersect(p)) is
-// equal unless p has patterns that match nothing, which the intersection
-// drops: the explicit sections an intersection writes are not reported as a
-// change.
+// AppArmor denies everything the section covers, so the zero [Profile]
+// permits nothing. Intersect treats a nil section as an explicit empty one
+// and a nil network boolean as false ({caps: [NET_ADMIN]} intersected with
+// {caps: nil} yields [], as with {caps: []}), and its result carries every
+// section explicitly, an empty FilesystemRules where no paths overlap.
+// Union lets a nil section defer to the other profile, which grants the same
+// as an empty one; a section nil on both sides stays nil. Diff compares the
+// same way, so a profile silent on raw sockets equals one forbidding them,
+// and Diff(p, Intersect(p)) is equal unless p has patterns that match
+// nothing, which the intersection drops.
 //
 // # Cost bounds
 //
-// Matching literals against patterns costs one comparison per pair, and the
-// prefix index only separates patterns rooted in different directories, so
-// a profile whose patterns share one prefix costs the product of the two
-// path counts. One comparison in turn costs up to the length of the pattern
-// times the length of the name, so the work summed over every pair is up to
-// the product of the bytes the two sides hold. Both merges bound the number
-// of pairs (the pair budget) and that work (the work budget), counting as
-// they match the comparisons the prefix index lets through, its lookups
-// included, and each merge only the comparisons it makes: a union compares
-// literals with patterns, not patterns with each other. Patterns rooted in
-// many directories, such as a baseline of "/usr/lib/<name>/**" patterns
-// against an artifact of long library paths, cost far less than the product
-// of the two sides, while patterns sharing one prefix cost all of it, and
-// matching stops once it is past a budget. Past either
-// budget the exact intersection is out of reach, and the paths both sides
-// spell alike, which is all an intersection could keep without matching,
-// may deny more than the inputs do, so [Intersect] fails with
-// [ErrBudgetExceeded] instead of returning them when the result may lose
-// access, which it reads as neither input being kept whole: a profile
-// intersected with itself succeeds, and an artifact asking for a path the
-// baseline lacks fails, although the exact intersection would only drop
-// that path. A union keeps every
-// path of both sides with the permissions its own side grants, which
-// permits exactly what the reduced union does: the literals the reduction
-// drops or raises are the ones a pattern of the other side already covers,
-// and that pattern is kept either way, so [Union] succeeds past the budget.
+// Matching literals against patterns costs one comparison per pair, and a
+// comparison up to the pattern's length times the name's. Both merges bound
+// the pairs they compare (the pair budget) and the work those cost (the
+// work budget), counting what the prefix index lets through, its lookups
+// included; patterns sharing one prefix cost the full product, patterns
+// rooted in different directories far less. A union compares only literals
+// with patterns.
 //
-// [MaxArtifactPaths] keeps two artifacts inside the pair budget, and keeps
-// an artifact whose paths are a few dozen bytes long inside the work budget
-// against a baseline of a few kilobytes of paths, however they share their
-// prefixes. Two artifacts of that size intersected with each other, or a
-// profile of long paths, may exceed the work budget and fail where their
-// paths share their prefixes.
+// Past either budget, [Intersect] fails with [ErrBudgetExceeded] when the
+// result may lose access, which it reads as neither input of a merge step
+// being kept whole: a profile intersected with itself succeeds, and an
+// artifact asking for a path the baseline lacks fails, although the exact
+// intersection would only drop that path. [Union] never fails with it: past
+// the budget it keeps every path of both sides with the permissions its own
+// side grants, which permits exactly what the reduced union permits.
+// [MaxArtifactPaths] keeps two artifacts inside the pair budget, and an
+// artifact of paths a few dozen bytes long inside the work budget against a
+// baseline of a few kilobytes of paths; two such artifacts intersected with
+// each other, or a profile of long paths, may exceed the work budget where
+// their paths share their prefixes.
 //
 // The budgets apply to each list a merge matches: the executables, the
-// libraries, and the filesystem rules taken together. A merge of two
-// profiles therefore costs up to three times what one list at its budget
-// costs. The pass an intersection of two or more profiles ends with
-// matches every literal path an input lists against the patterns of every
-// input, and is charged to budgets of the same size, each list to its own,
-// for the lookups it makes as well as the comparisons, so an intersection
-// of two profiles costs up to six times what one list at its budget costs.
-// Past them the pass leaves the list as the fold returned it, which permits
-// no more than the inputs do, so the pass never makes Intersect fail.
+// libraries, and the filesystem rules taken together, so a merge of two
+// profiles costs up to three times one list at its budget. The literal pass
+// an intersection ends with (see Filesystem merge) has budgets of the same
+// size, each list its own, so an intersection costs up to six times one
+// list at its budget. Past them the pass leaves the list as the fold
+// returned it, which permits no more than the inputs do, so the pass never
+// makes Intersect fail.
 //
-// Before anything is matched, every pattern is compiled into a program,
-// which costs time and memory in proportion to the pattern's length. One
-// call compiles each pattern it reads once, and compiles patterns up to a
-// compile budget, a small multiple of [MaxArtifactPatternBytes], taking the
-// inputs in the order they are given, so a baseline listed first is compiled
-// first: a baseline holding up to twice [MaxArtifactPatternBytes] of
-// patterns, and two artifacts [ValidateArtifact] accepts after it, are
-// compiled in full. [ValidateBaseline] refuses a baseline holding more with
-// [ErrBudgetExceeded], since its intersection with an artifact holding
-// patterns could fail with it. A pattern past the bound is left uncompiled
-// and matches no name and no other pattern. A union keeps it as it keeps
-// every pattern, which permits the same. An intersection could keep it only
-// where every input lists it word for word, and would drop what it covers on
-// another input, so where an input holds such a pattern [Intersect] fails
-// with [ErrBudgetExceeded] when the result may lose access, read as above.
-// The call keeps every program it compiled until it returns, and a program
-// holds up to some 450 bytes per byte of its pattern for the costliest
-// shapes, such as a run of "*/" components: a merge whose patterns fill the
-// budget, which accepted artifacts can, may hold on the order of a hundred
-// megabytes while it runs (two artifacts of sixteen four-kilobyte "*/"
-// patterns intersected with "/**" held some 25 megabytes). Profiles of the
-// size KEP-6061 recommends, a few patterns of a few dozen bytes, hold well
-// under a megabyte.
+// Every pattern is compiled before it is matched, at a cost in time and
+// memory proportional to its length. A call compiles each pattern once, up
+// to a compile budget, a small multiple of [MaxArtifactPatternBytes],
+// taking the inputs in the order given: a baseline listed first holding up
+// to twice [MaxArtifactPatternBytes] of patterns, and two artifacts
+// [ValidateArtifact] accepts after it, are compiled in full;
+// [ValidateBaseline] refuses a baseline holding more. A pattern past the
+// budget matches no name and no other pattern. A union keeps it, which
+// permits the same; where an input holds one, [Intersect] fails with
+// [ErrBudgetExceeded] when the result may lose access, read as above.
 //
-// What the merge bounds on its own is therefore the matching and the
-// compiling. Reading the profiles, validating them and normalizing their
-// paths stays linear in their size, which nothing but the caller bounds: a
-// profile checked only with Validate may hold any number of paths, each up
-// to [MaxPathLen] long. Diff compiles nothing and is linear in its inputs.
+// A call keeps the programs it compiled until it returns, up to some 450
+// bytes per byte of pattern for the costliest shapes, such as a run of "*/"
+// components: a merge whose patterns fill the budget, which accepted
+// artifacts can, may hold on the order of a hundred megabytes, while
+// profiles of the size KEP-6061 recommends hold well under a megabyte.
+// Reading, validating and normalizing profiles is linear in their size,
+// which only the caller bounds: a profile checked only with Validate may
+// hold any number of paths, each up to [MaxPathLen] long. [Diff] compiles
+// nothing and is linear in its inputs.
 //
 // # Concurrency
 //
-// Every exported function is safe to call from several goroutines at once.
-// The functions never modify their arguments, except UnmarshalStrict, which
-// replaces the profile it is given when decoding succeeds. The package keeps
-// one internal cache of compiled glob patterns, guarded by its own lock,
-// which is the only state shared between calls; it changes no result, only
-// the work a repeated pattern costs, since a call past its compile budget
-// ignores what the cache holds. It does hold the patterns of the profiles it
-// compiled, with their programs, bounded by an estimate of the memory they
-// take and evicted as newer patterns arrive, so a process merging artifacts
-// keeps some of their paths in memory after a call returns. Each call also
-// keeps the patterns it read for its own duration, without a lock, since no
-// other call sees them. Concurrent calls only need their profiles not to be
-// written to at the same time from elsewhere.
+// Every exported function is safe to call from several goroutines at once,
+// as long as no one writes the profiles passed in meanwhile. The functions
+// never modify their arguments, except [UnmarshalStrict], which replaces the
+// profile it is given on success. What [Intersect], [Union], [Diff] and
+// [Profile.Clone] return shares no memory with their arguments, also for a
+// single input, so either side may be modified without affecting the other.
 //
-// What [Intersect], [Union], [Diff] and [Profile.Clone] return shares no
-// memory with their arguments, also for a single input, so it is the
-// caller's to keep or modify without affecting the inputs, and modifying an
-// input later leaves the result as it was.
+// The only state shared between calls is a lock-guarded cache of compiled
+// patterns. It changes no result, only the work a repeated pattern costs,
+// and a call past its compile budget ignores it. It is bounded by an
+// estimate of its memory and evicts older patterns, but a process merging
+// artifacts keeps some of their paths in memory after a call returns.
 package apparmor

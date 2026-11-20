@@ -16,16 +16,11 @@ limitations under the License.
 
 package apparmor
 
-// Profile represents a structured AppArmor profile for merge operations.
-// This type mirrors the structure used by the Security Profiles Operator
-// without depending on its CRD types.
-//
-// A nil field means the profile says nothing about that section, which to
-// AppArmor denies everything the section covers. Intersect treats it as an
-// explicit empty section (e.g. &CapabilityRules{}), so intersecting
-// {caps: [NET_ADMIN]} with {caps: nil} yields [] like {caps: []} does. Union
-// lets a nil section defer to the other profile, which grants the same as
-// an empty one would; only the shape of the result differs.
+// Profile is a structured AppArmor profile. A nil field says nothing about
+// its section, which AppArmor reads as denying everything the section
+// covers, so the zero Profile permits nothing; see the Nil and empty
+// sections section for how the merges and Diff read it, and the Scope
+// section for what a Profile cannot express.
 type Profile struct {
 	// Executable lists the executables the profile may run and the
 	// libraries it may load, or nil to permit none.
@@ -41,11 +36,10 @@ type Profile struct {
 	Capabilities *CapabilityRules `json:"capability,omitempty"`
 }
 
-// ExecutableRules defines which executables and libraries may be run.
-//
-// Each path is an absolute path or an AppArmor glob pattern (see the Glob
-// patterns section of the package documentation). Exec transition modes
-// are not modeled (see the Scope section).
+// ExecutableRules defines which executables and libraries may be run. Each
+// path is an absolute path or an AppArmor glob pattern (see the Glob
+// patterns section); exec transition modes are not modeled (see the Scope
+// section).
 type ExecutableRules struct {
 	// AllowedExecutables are the paths the profile may execute.
 	AllowedExecutables []string `json:"allowedExecutables,omitempty"`
@@ -65,14 +59,10 @@ type FilesystemRules struct {
 	ReadWritePaths []string `json:"readWritePaths,omitempty"`
 }
 
-// NetworkRules defines network access permissions. A nil field denies what
-// it covers, as false does.
-//
-// The booleans are pointers, and the protocols a pointer to a struct of
-// them, to mirror the Security Profiles Operator's CRD field for field, so
-// that a profile it records maps onto this type without conversion. The
-// pointers carry no third state: nil and false mean the same to the merges,
-// Diff and the validators, as both deny the access in AppArmor.
+// NetworkRules defines network access permissions. A nil boolean denies
+// what it covers, as false does: the pointers mirror the Security Profiles
+// Operator's CRD and carry no third state for the merges, Diff or the
+// validators.
 type NetworkRules struct {
 	// AllowRaw permits raw sockets.
 	AllowRaw *bool `json:"allowRaw,omitempty"`
@@ -89,11 +79,9 @@ type AllowedProtocols struct {
 	AllowUDP *bool `json:"allowUdp,omitempty"`
 }
 
-// CapabilityRules defines which Linux capabilities are permitted.
-//
-// Names are compared ignoring ASCII case, and the merge functions return
-// them lower-cased ("chown", "net_admin"), the only spelling
-// apparmor_parser accepts in a "capability <name>," rule.
+// CapabilityRules defines which Linux capabilities are permitted. Names are
+// compared ignoring ASCII case, and the merges return them lower-cased (see
+// the Capability names section).
 type CapabilityRules struct {
 	// AllowedCapabilities are the capability names the profile may use,
 	// without the CAP_ prefix, such as "chown" or "CHOWN".

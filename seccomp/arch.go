@@ -24,13 +24,9 @@ import (
 )
 
 // NativeArchitecture returns the seccomp architecture of the running
-// program, derived from runtime.GOARCH. The second result is false when
-// GOARCH has no seccomp architecture constant.
-//
-// Runtimes always include the native architecture in a filter, whether or
-// not the profile lists it, so Intersect and Union need no help to account
-// for it. This is for callers that want to spell it out, for example when
-// reporting which architectures a merged profile covers.
+// program, derived from runtime.GOARCH, and false when GOARCH has none. The
+// merges account for it without help; it is for callers that want to spell
+// it out.
 func NativeArchitecture() (specs.Arch, bool) {
 	arch, ok := nativeArchitectures[runtime.GOARCH]
 

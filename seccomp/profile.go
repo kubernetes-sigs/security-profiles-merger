@@ -40,20 +40,13 @@ type profileJSON struct {
 	Syscalls         []specs.LinuxSyscall      `json:"syscalls,omitempty"`
 }
 
-// Marshal encodes a profile as JSON, the way a runtime is to read it. It
-// encodes what json.Marshal encodes for a specs.LinuxSeccomp, with one
-// difference: a Flags list that is set but empty is written as
-// "flags": [], where specs.LinuxSeccomp leaves the member out. runc 1.2 and
-// later and crun set SECCOMP_FILTER_FLAG_SPEC_ALLOW for a profile without
-// the member, and no flag for an empty list, so leaving it out turns on a
-// flag the profile turns off (see the Flags section of the package
-// documentation). Write a merge result with Marshal rather than
-// json.Marshal for that reason.
-//
-// Unlike json.Marshal it leaves '<', '>' and '&' unescaped, which decodes
-// to the same profile. A nil profile is reported with ErrNilProfile, and a
-// profile setting a field of the runtime-spec types this package does not
-// read with ErrUnsupportedSpecField, since that field would not be written.
+// Marshal encodes a profile as json.Marshal does, except that a Flags list
+// that is set but empty is written as "flags": [], and '<', '>' and '&' are
+// left unescaped. Runtimes set SECCOMP_FILTER_FLAG_SPEC_ALLOW for a profile
+// without the member and no flag for an empty list, so write a merge result
+// with Marshal (see the Flags section). It returns ErrNilProfile for a nil
+// profile and [ErrUnsupportedSpecField] for one setting a field this package
+// does not read, which it would not write.
 func Marshal(profile *specs.LinuxSeccomp) ([]byte, error) {
 	if profile == nil {
 		return nil, ErrNilProfile
@@ -91,13 +84,11 @@ func Marshal(profile *specs.LinuxSeccomp) ([]byte, error) {
 	return bytes.TrimSuffix(out.Bytes(), []byte("\n")), nil
 }
 
-// Clone returns a deep copy of the profile, sharing no slice or pointer of
-// the fields this package reads with it, or nil for a nil profile. A nil
-// slice stays nil and an empty one empty, so the copy encodes to the same
-// JSON, and a nil Flags list stays apart from an empty one (see Marshal). A
-// field of a newer runtime-spec this package does not read (see
-// ErrUnsupportedSpecField) is copied as Go assigns it, which shares what it
-// points to.
+// Clone returns a deep copy of the profile, or nil for a nil profile. The
+// copy shares no slice or pointer of the fields this package reads and keeps
+// nil and empty slices apart, so it encodes to the same JSON. A field this
+// package does not read ([ErrUnsupportedSpecField]) is copied as Go assigns
+// it, sharing what it points to.
 func Clone(profile *specs.LinuxSeccomp) *specs.LinuxSeccomp {
 	if profile == nil {
 		return nil

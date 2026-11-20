@@ -22,12 +22,9 @@ import (
 )
 
 // ErrDuplicateKey, ErrUnknownField, ErrMisspelledField, ErrInvalidUTF8,
-// ErrUnexpectedData and ErrNotAnObject are returned by UnmarshalStrict for a
-// document encoding/json would decode without a word: one repeating a
-// member, holding a member no field reads, holding a member that names a
-// field only ignoring case, holding a byte the decoder replaces, followed by
-// more data, or not an object at all, such as null. See the spm package for
-// each.
+// ErrUnexpectedData and ErrNotAnObject are returned by UnmarshalStrict and
+// DecodeArtifact for what encoding/json decodes silently, as UnmarshalStrict
+// lists. They are the spm sentinels of the same names.
 var (
 	ErrDuplicateKey    = spm.ErrDuplicateKey
 	ErrUnknownField    = spm.ErrUnknownField
@@ -38,28 +35,21 @@ var (
 )
 
 // UnmarshalStrict decodes an AppArmor profile and rejects what encoding/json
-// accepts silently: members the profile type has no field for, members that
-// name a field only ignoring case, members repeated within one object, bytes
-// that are not valid UTF-8, and data behind the profile. A document that is
-// not a JSON object, such as null, is rejected too ([ErrNotAnObject]).
+// accepts silently, with which a scanner that approved an artifact and the
+// runtime loading it could read two different profiles: a member no field
+// reads (ErrUnknownField), a member naming a field only ignoring case, such
+// as "readonlyPaths" (ErrMisspelledField), a member repeated within one
+// object (ErrDuplicateKey), bytes that are not valid UTF-8
+// (ErrInvalidUTF8), data behind the profile (ErrUnexpectedData), and a
+// document that is not a JSON object, such as null (ErrNotAnObject).
 //
-// Each of these lets a scanner that approved an artifact and the runtime
-// that loads it read two different profiles; the spm sentinels these errors
-// are, such as [spm.ErrDuplicateKey], say how. Here a member
-// such as "Filesystem" or "readonlyPaths" names a field only ignoring
-// case, so encoding/json fills the field from it while a reader comparing
-// names exactly drops it. Use this instead of json.Unmarshal to decode an
-// artifact, and validate the result with ValidateArtifact afterwards.
-//
-// Unlike json.Unmarshal, the document is decoded into a fresh Profile that
-// replaces *profile only once every check has passed: a member the document
-// omits is left at its zero value whatever *profile held, and *profile is
-// left untouched when an error is returned.
-//
-// Bound the size of an untrusted document first: decoding holds many times
-// that in heap, as the Limits section of
-// https://github.com/kubernetes-sigs/security-profiles-merger/blob/main/docs/integration.md#limits
-// says. DecodeArtifact decodes and validates an artifact in one call.
+// It replaces *profile with a freshly decoded Profile only once every check
+// has passed, so a member the document omits is left at its zero value and
+// *profile is left untouched on error; a nil profile returns ErrNilProfile.
+// Bound the size of an untrusted document first, since decoding holds many
+// times that in heap (see
+// https://github.com/kubernetes-sigs/security-profiles-merger/blob/main/docs/integration.md#limits).
+// Validate the result with ValidateArtifact, or call DecodeArtifact.
 func UnmarshalStrict(data []byte, profile *Profile) error {
 	if profile == nil {
 		return ErrNilProfile
@@ -69,10 +59,9 @@ func UnmarshalStrict(data []byte, profile *Profile) error {
 }
 
 // DecodeArtifact decodes an artifact with UnmarshalStrict and checks it
-// with ValidateArtifact, the first two steps a runtime takes with a profile
-// it did not write. It returns the profile only when both pass, and the
-// error of the first that fails otherwise, either of which rejects the
-// artifact. Bound the size of data first, as UnmarshalStrict says.
+// with ValidateArtifact. It returns the profile only when both pass, and
+// otherwise the error of the first that fails. Bound the size of data
+// first, as for UnmarshalStrict.
 func DecodeArtifact(data []byte) (*Profile, error) {
 	return strictjson.DecodeValidated(data, UnmarshalStrict, ValidateArtifact)
 }

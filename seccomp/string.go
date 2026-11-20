@@ -22,13 +22,10 @@ import (
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
-// FormatProfile returns a human-readable representation of a seccomp
-// profile, as a single line that is safe to log: a value holding a control
-// character, an invisible rune or the punctuation the format is built from
-// is quoted, and the line is cut at 64 KiB, ending in
-// "... (output truncated)" where it is. No real profile comes near that
-// bound; it is there because an artifact chooses how many entries it holds
-// and how long their names are.
+// FormatProfile returns the profile as a single line that is safe to log: a
+// value holding a control character, an invisible rune or the punctuation
+// the format is built from is quoted, and the line is cut at 64 KiB, ending
+// in "... (output truncated)".
 func FormatProfile(profile *specs.LinuxSeccomp) string {
 	if profile == nil {
 		return "Profile{<nil>}"
