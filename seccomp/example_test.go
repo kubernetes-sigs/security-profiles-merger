@@ -219,7 +219,7 @@ func ExampleValidate() {
 	fmt.Println(err)
 
 	// Output:
-	// default action: unknown seccomp action "SCMP_ACT_BOGUS"
+	// defaultAction: "SCMP_ACT_BOGUS": unknown seccomp action
 }
 
 func ExampleValidate_valid() {
@@ -281,7 +281,7 @@ func ExampleValidateStrict() {
 	fmt.Println(err)
 
 	// Output:
-	// syscall "read" in entries 0 and 1: duplicate syscall name
+	// syscalls[1]: "read": duplicate syscall name (named by entries 0 and 1)
 }
 
 func ExampleDiff() {
@@ -391,7 +391,7 @@ func ExampleValidateArtifact() {
 	fmt.Println(err)
 
 	// Output:
-	// syscall entry 1 action: SCMP_ACT_NOTIFY is not allowed
+	// syscalls[1].action: SCMP_ACT_NOTIFY is not allowed
 	// listenerPath: listener settings are not allowed
 }
 

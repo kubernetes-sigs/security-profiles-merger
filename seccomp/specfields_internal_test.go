@@ -102,7 +102,7 @@ func TestUnreadFieldsAreReportedWhenSet(t *testing.T) {
 
 	err = set.Err()
 	if !errors.Is(err, ErrUnsupportedSpecField) ||
-		err.Error() != "arg: field this package does not read: Added" {
+		err.Error() != "arg.Added: field this package does not read" {
 		t.Errorf("a set unread field = %v, want ErrUnsupportedSpecField naming it", err)
 	}
 }

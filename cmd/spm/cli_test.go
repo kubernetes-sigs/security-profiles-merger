@@ -245,7 +245,7 @@ func TestDuplicateKeysAreRejected(t *testing.T) {
 	file := writeTemp(t, testDuplicateProfile)
 	// The error names the file, so that one of a thousand arguments can be
 	// found without counting.
-	want := `error: parsing ` + file + `: duplicate key "defaultAction"`
+	want := `error: ` + file + `: duplicate key "defaultAction"`
 
 	// diff exits 1 for profiles that differ, and 2 for an error.
 	for _, testCase := range []struct {
@@ -301,7 +301,7 @@ func TestDuplicateKeysDifferingInCaseAreRejected(t *testing.T) {
 			t.Fatalf("%s: exit code = %d, want 1: %s", flag, code, stderr)
 		}
 
-		want := `error: parsing ` + file + `: duplicate key "DefaultAction"`
+		want := `error: ` + file + `: duplicate key "DefaultAction"`
 		if !strings.Contains(stderr, want) || stdout != "" {
 			t.Errorf("%s: stdout = %q, stderr = %q, want %q", flag, stdout, stderr, want)
 		}
@@ -575,17 +575,22 @@ func TestTypeFlagRejectsInputOfNoKind(t *testing.T) {
 	wrapped := writeTemp(t,
 		`{"apiVersion":"v1","kind":"AppArmorProfile","spec":{"filesystem":{}}}`)
 
-	for _, args := range [][]string{
-		{cmdValidate, flagType, typeAppArmor, "--artifact", wrapped},
-		{cmdMerge, flagType, typeAppArmor, flagStrategy, strategyIntersect, wrapped, wrapped},
-		{cmdDiff, flagType, typeAppArmor, wrapped, wrapped},
-		{cmdValidate, flagType, typeLandlock, wrapped},
+	// The input is what fails, which exits as a bad profile does: 1, and 2
+	// for diff, where 1 is taken.
+	for _, test := range []struct {
+		args []string
+		code int
+	}{
+		{[]string{cmdValidate, flagType, typeAppArmor, "--artifact", wrapped}, 1},
+		{[]string{cmdMerge, flagType, typeAppArmor, flagStrategy, strategyIntersect, wrapped, wrapped}, 1},
+		{[]string{cmdDiff, flagType, typeAppArmor, wrapped, wrapped}, exitUsage},
+		{[]string{cmdValidate, flagType, typeLandlock, wrapped}, 1},
 	} {
-		code, stdout, stderr := runCapture(t, args, nil)
-		if code != exitUsage || stdout != "" ||
+		code, stdout, stderr := runCapture(t, test.args, nil)
+		if code != test.code || stdout != "" ||
 			!strings.Contains(stderr, "holds no member of") {
 			t.Errorf("%v: exit code = %d, stdout = %q, stderr = %q, want %d and the reason",
-				args, code, stdout, stderr, exitUsage)
+				test.args, code, stdout, stderr, test.code)
 		}
 	}
 
@@ -609,17 +614,20 @@ func TestDetectedTypeRejectsInputOfNoKind(t *testing.T) {
 	wrapped := writeTemp(t, `{"apparmorProfile":`+apparmorJSON(t, "chown")+`}`)
 	landlockBaseline := writeTemp(t, landlockJSON(t, "read_file"))
 
-	for _, args := range [][]string{
-		{cmdMerge, flagStrategy, strategyIntersect, baseline, wrapped},
-		{cmdMerge, flagStrategy, strategyIntersect, wrapped, baseline},
-		{cmdValidate, baseline, wrapped},
-		{cmdDiff, landlockBaseline, wrapped},
+	for _, test := range []struct {
+		args []string
+		code int
+	}{
+		{[]string{cmdMerge, flagStrategy, strategyIntersect, baseline, wrapped}, 1},
+		{[]string{cmdMerge, flagStrategy, strategyIntersect, wrapped, baseline}, 1},
+		{[]string{cmdValidate, baseline, wrapped}, 1},
+		{[]string{cmdDiff, landlockBaseline, wrapped}, exitUsage},
 	} {
-		code, stdout, stderr := runCapture(t, args, nil)
-		if code != exitUsage || stdout != "" ||
-			!strings.Contains(stderr, wrapped+" holds no member of") {
+		code, stdout, stderr := runCapture(t, test.args, nil)
+		if code != test.code || stdout != "" ||
+			!strings.Contains(stderr, "error: "+wrapped+": holds no member of") {
 			t.Errorf("%v: exit code = %d, stdout = %q, stderr = %q, want %d and the reason",
-				args, code, stdout, stderr, exitUsage)
+				test.args, code, stdout, stderr, test.code)
 		}
 	}
 
@@ -631,18 +639,19 @@ func TestDetectedTypeRejectsInputOfNoKind(t *testing.T) {
 		t.Errorf("empty object: exit code = %d, stderr = %q, want 0", code, stderr)
 	}
 
-	// With no input revealing a type, the error names where it looked.
+	// With no input revealing a type, the error names every input it
+	// looked at.
+	undetected := "error: " + wrapped + ": could not detect profile type, use --type\n"
+
 	code, _, stderr = runCapture(t, []string{cmdValidate, wrapped}, nil)
-	if code != exitUsage ||
-		!strings.Contains(stderr, "could not detect profile type from "+wrapped+",") {
-		t.Errorf("no type: exit code = %d, stderr = %q, want %d and the input",
-			code, stderr, exitUsage)
+	if code != 1 || stderr != undetected {
+		t.Errorf("no type: exit code = %d, stderr = %q, want 1 and %q", code, stderr, undetected)
 	}
 
 	code, _, stderr = runCapture(t, []string{cmdValidate, wrapped, wrapped}, nil)
-	if code != exitUsage || !strings.Contains(stderr, wrapped+" or any other input") {
-		t.Errorf("no type in two: exit code = %d, stderr = %q, want %d and the inputs",
-			code, stderr, exitUsage)
+	if code != 1 || stderr != undetected+undetected {
+		t.Errorf("no type in two: exit code = %d, stderr = %q, want 1 and %q twice",
+			code, stderr, undetected)
 	}
 }
 
@@ -683,20 +692,34 @@ func TestFlagErrorIsEscaped(t *testing.T) {
 }
 
 // TestFlagErrorsSpellFlagsWithTwoDashes covers the errors the flag package
-// writes, which name a flag with one dash where the usage and the
-// documentation spell it with two.
-func TestFlagErrorsSpellFlagsWithTwoDashes(t *testing.T) {
+// writes, which name a flag with one dash however the caller wrote it. They
+// are written as the caller wrote them, and with two dashes, as the usage
+// and the documentation spell a flag, where the arguments do not show them.
+func TestFlagErrorsSpellFlagsAsWritten(t *testing.T) {
 	t.Parallel()
 
 	for _, test := range []struct {
 		args []string
 		want string
 	}{
-		{[]string{cmdMerge, "--typo"}, "flag provided but not defined: --typo"},
-		{[]string{cmdMerge, flagType}, "flag needs an argument: --type"},
+		{[]string{cmdMerge, "--typo"}, "error: flag provided but not defined: --typo\n"},
+		{[]string{cmdMerge, "-real.json"}, "error: flag provided but not defined: -real.json\n"},
+		{[]string{cmdMerge, flagType}, "error: flag needs an argument: --type\n"},
+		{[]string{cmdMerge, "-type"}, "error: flag needs an argument: -type\n"},
+		// A name holding the separator of a reason is still the whole name.
+		{[]string{cmdValidate, "-a: b"}, "error: flag provided but not defined: -a: b\n"},
+		// A phrase a quoted value holds is not the one the name follows.
+		{
+			[]string{cmdValidate, "--strict=a for flag -b"},
+			`error: invalid boolean value "a for flag -b" for --strict: parse error`,
+		},
 		{
 			[]string{cmdValidate, "--strict=maybe"},
-			`invalid boolean value "maybe" for --strict`,
+			`error: invalid boolean value "maybe" for --strict`,
+		},
+		{
+			[]string{cmdValidate, "-strict=maybe"},
+			`error: invalid boolean value "maybe" for -strict`,
 		},
 	} {
 		code, _, stderr := runCapture(t, test.args, nil)
@@ -713,8 +736,8 @@ func TestFlagErrorsSpellFlagsWithTwoDashes(t *testing.T) {
 		want   = `invalid value " for -x" for flag --n: parse error`
 	)
 
-	if got := twoDashes(quoted); got != want {
-		t.Errorf("twoDashes(%q) = %q, want %q", quoted, got, want)
+	if got := flagAsWritten(quoted, []string{"--n=1"}); got != want {
+		t.Errorf("flagAsWritten(%q) = %q, want %q", quoted, got, want)
 	}
 }
 
@@ -801,5 +824,70 @@ func TestHumanOutputWarnsWhenCut(t *testing.T) {
 		if code, _, stderr := runCapture(t, args, nil); code != 0 || stderr != "" {
 			t.Errorf("%v: exit code = %d, stderr = %q, want 0 and no warning", args, code, stderr)
 		}
+	}
+}
+
+// TestExitCodeContract pins the documented exit codes as literal integers.
+// Every other assertion in the suite compares against these constants, so
+// changing one would otherwise leave the whole suite green while breaking
+// every caller that reads the exit status.
+func TestExitCodeContract(t *testing.T) {
+	t.Parallel()
+
+	if exitUsage != 2 {
+		t.Errorf("exitUsage = %d, want 2", exitUsage)
+	}
+
+	if exitDiff != 1 {
+		t.Errorf("exitDiff = %d, want 1", exitDiff)
+	}
+
+	if maxInputFiles != 1000 {
+		t.Errorf("maxInputFiles = %d, want 1000", maxInputFiles)
+	}
+
+	if maxInputSize != 10<<20 {
+		t.Errorf("maxInputSize = %d, want %d", maxInputSize, 10<<20)
+	}
+
+	if maxTotalInputSize != 64<<20 {
+		t.Errorf("maxTotalInputSize = %d, want %d", maxTotalInputSize, 64<<20)
+	}
+}
+
+// TestSeparatorAfterBooleanFlag covers "--" after a flag that takes no
+// value: what follows is a file name, so a missing one is a missing file
+// rather than a misplaced flag.
+func TestSeparatorAfterBooleanFlag(t *testing.T) {
+	t.Parallel()
+
+	for _, args := range [][]string{
+		{cmdValidate, flagStrict, "--", "-missing.json"},
+		{cmdValidate, "--strict=true", "--", "-missing.json"},
+		{cmdMerge, flagStrategy, strategyUnion, flagNoDetectNote, "--", "-missing.json"},
+	} {
+		code, _, stderr := runCapture(t, args, nil)
+		if code != 1 {
+			t.Errorf("%v: exit code = %d, want 1: %s", args, code, stderr)
+		}
+
+		// The wording of a missing file differs between platforms, so the
+		// check is that the name was read as a file.
+		if !strings.Contains(stderr, "reading -missing.json:") {
+			t.Errorf("%v: stderr = %q, want a missing file", args, stderr)
+		}
+	}
+
+	// A "--" that is the value of a flag is not a separator.
+	flags := newFlagSet(cmdValidate)
+	flags.String("output", "", "")
+	flags.Bool("strict", false, "")
+
+	if argsSeparated(flags, []string{"--output", "--", "-x"}) {
+		t.Error("a flag value \"--\" was taken for the separator")
+	}
+
+	if !argsSeparated(flags, []string{"-strict", "--", "-x"}) {
+		t.Error("a \"--\" after a boolean flag was not taken for the separator")
 	}
 }

@@ -135,7 +135,7 @@ func (o Options) native() (specs.Arch, error) {
 
 	if !isKnownArch(o.Arch) {
 		return "", fmt.Errorf(
-			"native architecture: %w %s", ErrUnknownArch, merge.QuoteBounded(string(o.Arch)),
+			"native architecture: %s: %w", merge.QuoteBounded(string(o.Arch)), ErrUnknownArch,
 		)
 	}
 

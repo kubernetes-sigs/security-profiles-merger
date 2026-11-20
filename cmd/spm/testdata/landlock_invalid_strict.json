@@ -1,0 +1,11 @@
+{
+  "handledAccessFs": ["read_file", "read_file"],
+  "pathRules": [
+    {"path": "/etc", "accessFs": ["read_file"]},
+    {"path": "bin/sh", "accessFs": ["write_file"]},
+    {"path": "//etc", "accessFs": []}
+  ],
+  "netRules": [
+    {"port": 443, "accessNet": ["connect_tcp"]}
+  ]
+}

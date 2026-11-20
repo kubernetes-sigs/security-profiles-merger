@@ -95,9 +95,11 @@ type InputError = spm.InputError
 // the result never permits more than any input. See the Evaluation model
 // and Intersection sections of the package documentation.
 //
-// Every input is checked with Validate first; the first failure is returned
-// as an *InputError naming its index. Past an internal budget a syscall
-// collapses to its most restrictive action (see Cost bounds).
+// Every input is checked with Validate first, and every one that fails is
+// reported as an *InputError naming its index: the error is that
+// InputError for one, and the InputErrors joined in input order for
+// several. Past an internal budget a syscall collapses to its most
+// restrictive action (see Cost bounds).
 //
 // When inputs share an action, DefaultErrnoRet and per-syscall ErrnoRet
 // come from the earliest of them (see Errno values). ListenerPath,
@@ -168,14 +170,14 @@ func Union(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 func foldProfiles(
 	profiles []*specs.LinuxSeccomp, rules ruleMerger,
 ) (*specs.LinuxSeccomp, error) {
-	for idx, profile := range profiles {
-		err := Validate(profile)
-		if err != nil {
-			return nil, &spm.InputError{Index: idx, Err: err}
-		}
+	err := merge.CheckInputs(profiles, func(_ int, profile *specs.LinuxSeccomp) error {
+		return Validate(profile)
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	err := checkListeners(profiles, rules.intersect)
+	err = checkListeners(profiles, rules.intersect)
 	if err != nil {
 		return nil, err
 	}
@@ -480,15 +482,14 @@ func sameListener(profiles []*specs.LinuxSeccomp, first, idx int) error {
 	switch {
 	case profile.ListenerPath != chosen.ListenerPath:
 		err = fmt.Errorf(
-			"%w: listenerPath %s, but the merge's listener is %s",
-			ErrConflictingListener,
-			merge.QuoteBounded(profile.ListenerPath), merge.QuoteBounded(chosen.ListenerPath),
+			"listenerPath: %s: %w (the merge's listener is %s)",
+			merge.QuoteBounded(profile.ListenerPath), ErrConflictingListener,
+			merge.QuoteBounded(chosen.ListenerPath),
 		)
 	case profile.ListenerMetadata != chosen.ListenerMetadata:
 		err = fmt.Errorf(
-			"%w: listenerMetadata %s, but the merge's listener has %s",
-			ErrConflictingListener,
-			merge.QuoteBounded(profile.ListenerMetadata),
+			"listenerMetadata: %s: %w (the merge's listener has %s)",
+			merge.QuoteBounded(profile.ListenerMetadata), ErrConflictingListener,
 			merge.QuoteBounded(chosen.ListenerMetadata),
 		)
 	default:

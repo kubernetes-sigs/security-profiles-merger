@@ -25,7 +25,6 @@ import (
 	"slices"
 	"strings"
 
-	"sigs.k8s.io/security-profiles-merger/internal/merge"
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
@@ -36,8 +35,9 @@ A single profile is normalized without merging.
 Reads from stdin when no files are provided: a single profile, or a JSON
 array of profiles. A file argument of - reads stdin beside the files.
 Flags must precede file arguments, and -- ends them.
-Exit status: 0 on success, 1 when a profile is invalid or cannot be read or
-the result cannot be written, 2 on a usage error.
+Exit status: 0 on success, 1 when a profile is invalid, of another type, or
+cannot be read, or the result cannot be written, 2 on a usage error; 1 when
+a usage error comes up after a profile was found invalid.
 
 --validate names the checks to run on the inputs before merging: one mode
 for all of them, or one mode per input, separated by commas. A container
@@ -138,14 +138,14 @@ func mergeInputs(
 		return exitUsage
 	}
 
-	kind, code := resolveKind(opts.profileType, inputs, 1, opts.noDetectNote, stderr)
+	kind, report, code := resolveKind(opts.profileType, inputs, 1, opts.noDetectNote, stderr)
 	if code != 0 {
 		return code
 	}
 
 	var out bytes.Buffer
 
-	code = kind.merge(inputs, opts.strategy, modes, arch, opts.format, &out, stderr)
+	code = kind.merge(inputs, report, opts.strategy, modes, arch, opts.format, &out, stderr)
 	if code != 0 {
 		return code
 	}
@@ -230,15 +230,21 @@ func validateMergeFlags(
 // mergeRequest carries everything one merge run needs, so that the per-input
 // validation modes do not turn mergeProfiles into a long parameter list.
 type mergeRequest[T any] struct {
-	inputs   []profileInput
+	inputs []profileInput
+	// report holds what was found about the inputs so far.
+	report   *inputReport
 	strategy string
 	format   string
-	// checks and policies hold one entry per input, in the same order.
-	checks    []func(*T) error
-	policies  []decodePolicy
-	intersect func(...*T) (*T, error)
-	union     func(...*T) (*T, error)
-	formatFn  func(*T) string
+	// checks holds the check of each input, nil for one the merge checks,
+	// and strict whether each is decoded strictly, in the order of inputs.
+	checks []func(*T) error
+	strict []bool
+	// inputCheck is the check the merge functions run on each input on its
+	// own, or nil where only a merge of the input runs it (see kindOps).
+	inputCheck func(*T) error
+	intersect  func(...*T) (*T, error)
+	union      func(...*T) (*T, error)
+	formatFn   func(*T) string
 }
 
 func mergeProfiles[T any](request mergeRequest[T], stdout, stderr io.Writer) int {
@@ -256,66 +262,133 @@ func mergeProfiles[T any](request mergeRequest[T], stdout, stderr io.Writer) int
 		return exitUsage
 	}
 
-	profiles, err := unmarshalAll[T](request.inputs, request.policies, stderr)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+	report := request.report
+	profiles := unmarshalAll[T](request.inputs, request.strict, report)
 
-		return 1
+	for idx, profile := range profiles {
+		if check := request.checks[idx]; check != nil && profile != nil {
+			err := check(profile)
+			if err != nil {
+				report.fail(idx, err)
+			}
+		}
 	}
 
-	checkAt := func(idx int) func(*T) error { return request.checks[idx] }
+	if report.anyFailed() {
+		checkLeftInputs(request, mergeFn, profiles)
+		report.flush(stderr)
 
-	if failed := checkInputs(profiles, checkAt, request.inputs, stderr); failed {
 		return 1
 	}
 
 	result, err := mergeFn(profiles...)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "error: %v\n", nameMergeFailure(err, request.inputs))
+		reportMergeFailure(err, len(profiles), report, stderr)
 
 		return 1
 	}
 
+	report.flush(stderr)
+
 	return writeOutput(result, request.formatFn(result), request.format, stdout, stderr)
 }
 
-// nameMergeFailure replaces the position a merge function names with the
-// input it stands for. The merge validates the profiles it was handed, in
-// the order it was handed them, so the position is an index into the same
-// list the caller built; the caller knows what each one was read from, and
-// a file name or "stdin[2]" is what a reader can act on.
-func nameMergeFailure(err error, inputs []profileInput) error {
-	var inputErr *spm.InputError
-	if !errors.As(err, &inputErr) || inputErr.Index < 0 || inputErr.Index >= len(inputs) {
-		return err
+// checkLeftInputs runs the check the merge runs on each input on the ones
+// that decoded and asked for no check of their own, when another input has
+// failed and the merge does not run, so that one run names every bad input,
+// as the other validation modes do. Each is checked on its own, so that a
+// failure between two inputs, such as a conflict between their listeners,
+// is neither reported nor blamed on either: the merge was not going to run.
+// Where the package exports no such check, a merge of the input alone runs
+// it, and only a failure it blames on the input counts.
+func checkLeftInputs[T any](
+	request mergeRequest[T], mergeFn func(...*T) (*T, error), profiles []*T,
+) {
+	check := request.inputCheck
+	if check == nil {
+		check = func(profile *T) error {
+			_, err := mergeFn(profile)
+			_, inputErr := inputFailure(err, 1)
+
+			return inputErr
+		}
 	}
 
-	return fmt.Errorf("%s: %w", merge.SafeName(inputs[inputErr.Index].name), inputErr.Err)
-}
-
-// checkInputs runs each input's own validation, the one checkAt returns for
-// its index, and reports whether any failed. Every input is checked, so one
-// run names every problem. A nil check means the merge functions already
-// run what this input asked for.
-func checkInputs[T any](
-	profiles []*T, checkAt func(idx int) func(*T) error, inputs []profileInput,
-	stderr io.Writer,
-) bool {
-	failed := false
-
 	for idx, profile := range profiles {
-		check := checkAt(idx)
-		if check == nil {
+		if profile == nil || request.checks[idx] != nil {
 			continue
 		}
 
 		err := check(profile)
 		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "error: %s: %v\n", merge.SafeName(inputs[idx].name), err)
+			request.report.fail(idx, err)
+		}
+	}
+}
 
-			failed = true
+// reportMergeFailure reports why a merge of count inputs failed. The merge
+// functions report every input that fails as an spm.InputError naming its
+// position among the profiles they were given; each is recorded against its
+// input, since a file name or "stdin[2]" is what a reader can act on. A
+// failure that blames no input is written as it is.
+func reportMergeFailure(err error, count int, report *inputReport, stderr io.Writer) {
+	recorded, omitted := recordInputErrors(err, count, report)
+
+	report.flush(stderr)
+
+	switch {
+	case !recorded:
+		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+	case omitted != "":
+		_, _ = fmt.Fprintf(stderr, "error: %s\n", omitted)
+	}
+}
+
+// recordInputErrors records each spm.InputError err holds against the input
+// at its position among count, and reports whether it held one, and the
+// line saying how many failures the merge left out, if it left any out.
+func recordInputErrors(err error, count int, report *inputReport) (bool, string) {
+	errs := []error{err}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		errs = joined.Unwrap()
+	}
+
+	recorded, omitted := false, ""
+
+	for _, each := range errs {
+		if errors.Is(each, spm.ErrMoreProblems) && !isInputError(each) {
+			lines := strings.Split(err.Error(), "\n")
+			omitted = lines[len(lines)-1]
+
+			continue
+		}
+
+		idx, inputErr := inputFailure(each, count)
+		if inputErr != nil {
+			report.fail(idx, inputErr)
+
+			recorded = true
 		}
 	}
 
-	return failed
+	return recorded, omitted
+}
+
+// isInputError reports whether err is an spm.InputError.
+func isInputError(err error) bool {
+	var inputErr *spm.InputError
+
+	return errors.As(err, &inputErr)
+}
+
+// inputFailure returns the index of the input a merge failure names and the
+// failure without the position, or a nil error when it names none of count
+// inputs.
+func inputFailure(err error, count int) (int, error) {
+	var inputErr *spm.InputError
+	if !errors.As(err, &inputErr) || inputErr.Index < 0 || inputErr.Index >= count {
+		return 0, nil
+	}
+
+	return inputErr.Index, inputErr.Err
 }

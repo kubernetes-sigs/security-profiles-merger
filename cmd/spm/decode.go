@@ -17,10 +17,14 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"slices"
+	"strings"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
@@ -30,119 +34,285 @@ import (
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
-// decodePolicy selects which ambiguities in a profile's JSON are errors
-// rather than warnings. A member repeated within one object is an error
-// under every policy: encoding/json merges the repeated member into the
-// earlier one, an object field by field, so that
-// {"network":{"allowRaw":true},"network":{"allowedProtocols":{"allowTcp":true}}}
-// decodes as a profile allowing both, which neither reading of the document
-// grants, and other parsers keep the first or the last member instead.
-type decodePolicy struct {
-	// rejectUnknown rejects members the profile type has no field for.
-	rejectUnknown bool
-	// rejectMisspelled rejects members that name a field only ignoring
-	// case.
-	rejectMisspelled bool
-	// rejectInvalidUTF8 rejects bytes that are not valid UTF-8.
-	rejectInvalidUTF8 bool
-	// rejectMissing rejects a required member left out or set to null,
-	// which decodes as the zero value.
-	rejectMissing bool
-}
-
-// lenientDecode returns the policy that warns about every ambiguity but a
-// repeated member, which every policy rejects, repeated once per input.
-func lenientDecode(inputs int) []decodePolicy {
-	return slices.Repeat([]decodePolicy{{
-		rejectUnknown:     false,
-		rejectMisspelled:  false,
-		rejectInvalidUTF8: false,
-		rejectMissing:     false,
-	}}, inputs)
-}
-
-// unmarshalAll decodes every raw profile under its own policy, given one per
-// input. A member the profile type has no field for, such as a misspelled
-// key, silently drops the rule it was meant to carry; a member whose name
-// matches a field only ignoring case is read differently by different
-// parsers; and a byte that is not
-// valid UTF-8 is replaced with U+FFFD, which makes profiles that differ in
-// their bytes decode to the same rules; and a required member left out
-// decodes as a value of its own, such as port 0 for a Landlock network rule.
-// Each is an error when that input's policy rejects it and a warning on
-// stderr otherwise. A member repeated within one object is always an error
-// (see decodePolicy).
-func unmarshalAll[T any](
-	inputs []profileInput, policies []decodePolicy, stderr io.Writer,
-) ([]*T, error) {
+// unmarshalAll decodes every raw profile that report holds no failure for,
+// given whether each input is decoded strictly, and returns the profiles,
+// nil for an input that failed. A member the profile type has no field for,
+// such as a misspelled key, silently drops the rule it was meant to carry; a
+// member whose name matches a field only ignoring case is read differently
+// by different parsers; a byte that is not valid UTF-8 is replaced with
+// U+FFFD, which makes profiles that differ in their bytes decode to the same
+// rules; and a required member left out decodes as a value of its own, such
+// as port 0 for a Landlock network rule. Each is an error for an input
+// decoded strictly and a warning otherwise, recorded in report. A member
+// repeated within one object is an error for every input (see rejects).
+//
+// Every input is decoded, so that one run names every input that cannot be
+// read, and the inputs that can be are still checked.
+func unmarshalAll[T any](inputs []profileInput, strict []bool, report *inputReport) []*T {
 	profiles := make([]*T, len(inputs))
 
-	// The seccomp package's required members are passed for a seccomp
-	// profile only, as seccomp.UnmarshalStrict passes them.
-	var required *strictjson.Required
-	if _, seccompProfile := any(new(T)).(*specs.LinuxSeccomp); seccompProfile {
-		required = seccompjson.Required
-	}
-
-	for idx, input := range inputs {
-		policy := policies[idx]
-		profile := new(T)
-
-		hint, err := strictjson.Decode(input.data, profile)
-		if err != nil {
-			return nil, decodeError(input.name, err)
+	for idx := range inputs {
+		if report.failedAt(idx) {
+			continue
 		}
 
-		// null decodes into a struct as nothing at all; every other value
-		// but an object failed above.
-		err = strictjson.RequireObject(input.data)
+		profile, err := unmarshalOne[T](&inputs[idx], strict[idx], func(warning error) {
+			report.warn(idx, warning)
+		})
 		if err != nil {
-			return nil, fmt.Errorf("parsing %s: %w", merge.SafeName(input.name), err)
-		}
+			report.fail(idx, err)
 
-		for finding := range strictjson.Findings(input.data, profile, hint, required) {
-			if policy.rejects(finding.Kind) {
-				return nil, fmt.Errorf("parsing %s: %w", merge.SafeName(input.name), finding.Err)
-			}
-
-			_, _ = fmt.Fprintf(stderr, "warning: %s: %v\n", merge.SafeName(input.name), finding.Err)
+			continue
 		}
 
 		profiles[idx] = profile
 	}
 
-	return profiles, nil
+	return profiles
 }
 
-// rejects reports whether the policy rejects a finding of the given kind
-// (see strictjson.Finding) rather than warning about it.
-func (policy decodePolicy) rejects(kind error) bool {
-	switch {
-	case errors.Is(kind, spm.ErrDuplicateKey):
+// unmarshalOne decodes one input as unmarshalAll describes, passing the
+// warnings it finds to warn and returning the failure, if any.
+func unmarshalOne[T any](input *profileInput, strict bool, warn func(error)) (*T, error) {
+	profile := new(T)
+
+	hint, err := strictjson.Decode(input.data, profile)
+	if err != nil {
+		return nil, decodeError(input, err)
+	}
+
+	// null decodes into a struct as nothing at all; every other value but
+	// an object failed above.
+	err = strictjson.RequireObject(input.data)
+	if err != nil {
+		return nil, err
+	}
+
+	for finding := range strictjson.Findings(input.data, profile, hint, requiredOf[T]()) {
+		if rejects(strict, finding.Kind) {
+			return nil, finding.Err
+		}
+
+		warn(finding.Err)
+	}
+
+	return profile, nil
+}
+
+// requiredOf returns the members the profile type requires besides those
+// its tags mark: the seccomp package's, for a seccomp profile only, as
+// seccomp.UnmarshalStrict passes them.
+func requiredOf[T any]() *strictjson.Required {
+	if _, seccompProfile := any(new(T)).(*specs.LinuxSeccomp); seccompProfile {
+		return seccompjson.Required
+	}
+
+	return nil
+}
+
+// rejects reports whether a finding of the given kind (see
+// strictjson.Finding) is an error rather than a warning: a member repeated
+// within one object always is, and every other kind is for an input decoded
+// strictly and for no other. encoding/json merges a repeated member into the
+// earlier one, an object field by field, so that
+// {"network":{"allowRaw":true},"network":{"allowedProtocols":{"allowTcp":true}}}
+// decodes as a profile allowing both, which neither reading of the document
+// grants, and other parsers keep the first or the last member instead.
+func rejects(strict bool, kind error) bool {
+	if errors.Is(kind, spm.ErrDuplicateKey) {
 		return true
-	case errors.Is(kind, spm.ErrUnknownField):
-		return policy.rejectUnknown
-	case errors.Is(kind, spm.ErrMisspelledField):
-		return policy.rejectMisspelled
-	case errors.Is(kind, spm.ErrMissingField):
-		return policy.rejectMissing
-	case errors.Is(kind, spm.ErrInvalidUTF8):
-		return policy.rejectInvalidUTF8
-	default:
-		// A kind this policy does not know is refused rather than waved
-		// through: it is something strictjson found wrong.
-		return true
+	}
+
+	for _, known := range []error{
+		spm.ErrUnknownField, spm.ErrMisspelledField, spm.ErrMissingField, spm.ErrInvalidUTF8,
+	} {
+		if errors.Is(kind, known) {
+			return strict
+		}
+	}
+
+	// A kind this command does not know is refused rather than waved
+	// through: it is something strictjson found wrong.
+	return true
+}
+
+// inputReport collects the warnings and errors about the inputs of a run,
+// which reads and checks them in several passes, so that they are written
+// in the order of the inputs, each line naming its input (see reportInput),
+// and so that a later pass knows which inputs failed an earlier one.
+type inputReport struct {
+	inputs []profileInput
+	lines  [][]reportLine
+	failed []bool
+}
+
+// reportLine is one failure or warning of an inputReport.
+type reportLine struct {
+	level string
+	err   error
+}
+
+func newInputReport(inputs []profileInput) *inputReport {
+	return &inputReport{
+		inputs: inputs,
+		lines:  make([][]reportLine, len(inputs)),
+		failed: make([]bool, len(inputs)),
 	}
 }
 
-// decodeError reports a decoder failure against the input it came from. The
-// decoder quotes the offending literal in several of its messages, and an
-// artifact chooses how long that literal is: a nine-megabyte number reaches
-// a runtime's log as nine megabytes unless the text is bounded here, which
-// is the same reason the library bounds every value it reports.
-func decodeError(name string, err error) error {
-	return fmt.Errorf(
-		"parsing %s: %w: %s",
-		merge.SafeName(name), errDecode, merge.BoundedText(err.Error()),
-	)
+// warn records a warning about the input at idx.
+func (r *inputReport) warn(idx int, err error) {
+	r.lines[idx] = append(r.lines[idx], reportLine{level: "warning", err: err})
 }
+
+// fail records a failure of the input at idx.
+func (r *inputReport) fail(idx int, err error) {
+	r.lines[idx] = append(r.lines[idx], reportLine{level: "error", err: err})
+	r.failed[idx] = true
+}
+
+// failedAt reports whether the input at idx failed.
+func (r *inputReport) failedAt(idx int) bool {
+	return r.failed[idx]
+}
+
+// anyFailed reports whether an input failed.
+func (r *inputReport) anyFailed() bool {
+	return slices.Contains(r.failed, true)
+}
+
+// flush writes what was recorded, in the order of the inputs, and forgets
+// it, keeping which inputs failed.
+func (r *inputReport) flush(stderr io.Writer) {
+	for idx, lines := range r.lines {
+		for _, line := range lines {
+			reportInput(stderr, line.level, r.inputs[idx].name, line.err)
+		}
+
+		r.lines[idx] = nil
+	}
+}
+
+// reportInput writes a failure about the named input to stderr, one line
+// per line of its message, each starting with the level and the name: a
+// validator reports every problem it found on a line of its own, and a
+// reader filtering the output by input must see the name on each of them.
+func reportInput(stderr io.Writer, level, name string, err error) {
+	prefix := level + ": " + merge.SafeName(name) + ": "
+
+	for line := range strings.SplitSeq(err.Error(), "\n") {
+		_, _ = fmt.Fprintf(stderr, "%s%s\n", prefix, line)
+	}
+}
+
+// decodeError describes a decoder failure in the terms of the document
+// rather than of the Go types it was decoded into. A syntax error and a
+// value of the wrong type are reported at the line and column they sit at,
+// and a value of the wrong type by the JSON path of the member, such as
+// "syscalls[0].action: want a string, got number", where encoding/json
+// names a Go struct field and type.
+//
+// The decoder quotes the offending literal in several of its messages, and
+// an artifact chooses how long that literal is: a nine-megabyte number
+// reaches a runtime's log as nine megabytes unless the text is bounded
+// here, which is the same reason the library bounds every value it reports.
+func decodeError(input *profileInput, err error) error {
+	var (
+		syntaxErr *json.SyntaxError
+		typeErr   *json.UnmarshalTypeError
+	)
+
+	switch {
+	case errors.As(err, &syntaxErr):
+		// The offset is just past the byte the decoder refused. A document
+		// that ends too early has none: it is reported just past its last
+		// byte that is not whitespace, on a line an editor shows.
+		at := syntaxErr.Offset - 1
+		if syntaxErr.Offset >= int64(len(input.data)) {
+			at = int64(len(bytes.TrimRight(input.data, " \t\r\n")))
+		}
+
+		return &documentError{text: input.position(at) + ": " + syntaxErr.Error(), err: err}
+	case errors.As(err, &typeErr):
+		return typeError(input, typeErr)
+	default:
+		return merge.BoundedError(err)
+	}
+}
+
+// documentError is a decoder failure described in the terms of the
+// document. errors.As still finds the decoder's own error behind it.
+type documentError struct {
+	text string
+	err  error
+}
+
+func (f *documentError) Error() string { return merge.BoundedText(f.text) }
+
+func (f *documentError) Unwrap() error { return f.err }
+
+// typeError describes a value of the wrong type by the JSON path of the
+// member it sits at and the type the member takes, at the position the
+// value starts at. The path is read from the document rather than from the
+// error, whose Field spells it differently from one Go release to the next:
+// without list indices, and with the names of embedded structs, before Go
+// 1.25.
+func typeError(input *profileInput, typeErr *json.UnmarshalTypeError) error {
+	text := "want " + describeType(typeErr.Type) + ", got " + typeErr.Value
+
+	path, start := strictjson.PathAt(input.data, typeErr.Offset)
+	if start < 0 {
+		start = typeErr.Offset - 1
+	}
+
+	if path != "" {
+		text = path + ": " + text
+	}
+
+	return &documentError{text: input.position(start) + ": " + text, err: typeErr}
+}
+
+// describeType names the JSON value a Go type decodes from.
+func describeType(typ reflect.Type) string {
+	if typ == nil {
+		return otherValue
+	}
+
+	for typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+
+	zero := reflect.Zero(typ)
+
+	switch {
+	case zero.CanInt():
+		limit := uint64(1) << (typ.Bits() - 1)
+
+		return fmt.Sprintf("an integer from -%d to %d", limit, limit-1)
+	case zero.CanUint():
+		return fmt.Sprintf("an integer from 0 to %d", ^uint64(0)>>(uint64Bits-typ.Bits()))
+	case zero.CanFloat():
+		return "a number"
+	}
+
+	name, known := map[reflect.Kind]string{
+		reflect.String: "a string",
+		reflect.Bool:   "true or false",
+		reflect.Slice:  "an array",
+		reflect.Array:  "an array",
+		reflect.Struct: "an object",
+		reflect.Map:    "an object",
+	}[typ.Kind()]
+	if !known {
+		return otherValue
+	}
+
+	return name
+}
+
+// otherValue is how describeType names what a type it does not know of
+// decodes from.
+const otherValue = "another value"
+
+// uint64Bits is the size of a uint64 in bits.
+const uint64Bits = 64

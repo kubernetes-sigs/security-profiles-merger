@@ -137,21 +137,21 @@ func TestValidateRejects(t *testing.T) {
 			"read-only and write-only", apparmor.Validate,
 			validationProfile([3][]string{{pathEtcConfig}, {pathEtcConfig}, nil}, [2][]string{}, nil),
 			[]error{apparmor.ErrDuplicatePath},
-			[]string{"in both ReadOnlyPaths and WriteOnlyPaths"},
+			[]string{"filesystem.writeOnlyPaths[0]", "(also at filesystem.readOnlyPaths[0])"},
 			nil,
 		},
 		{
 			"read-only and read-write", apparmor.Validate,
 			validationProfile([3][]string{{pathEtcConfig}, nil, {pathEtcConfig}}, [2][]string{}, nil),
 			[]error{apparmor.ErrDuplicatePath},
-			[]string{"in both ReadOnlyPaths and ReadWritePaths"},
+			[]string{"filesystem.readWritePaths[0]", "(also at filesystem.readOnlyPaths[0])"},
 			nil,
 		},
 		{
 			"write-only and read-write", apparmor.Validate,
 			validationProfile([3][]string{nil, {pathTmp}, {pathTmp}}, [2][]string{}, nil),
 			[]error{apparmor.ErrDuplicatePath},
-			[]string{"in both WriteOnlyPaths and ReadWritePaths"},
+			[]string{"filesystem.readWritePaths[0]", "(also at filesystem.writeOnlyPaths[0])"},
 			nil,
 		},
 		{
@@ -162,7 +162,7 @@ func TestValidateRejects(t *testing.T) {
 				[3][]string{{`///\x2fetc/config`}, nil, {pathEtcConfig}}, [2][]string{}, nil,
 			),
 			[]error{apparmor.ErrDuplicatePath},
-			[]string{"in both ReadOnlyPaths and ReadWritePaths"},
+			[]string{"filesystem.readWritePaths[0]", "(also at filesystem.readOnlyPaths[0])"},
 			nil,
 		},
 		{
@@ -173,8 +173,10 @@ func TestValidateRejects(t *testing.T) {
 			),
 			[]error{apparmor.ErrDuplicatePath},
 			[]string{
-				strconv.Quote(pathEtcConfig) + " in both ReadOnlyPaths and WriteOnlyPaths",
-				strconv.Quote(pathTmp) + " in both ReadOnlyPaths and ReadWritePaths",
+				"filesystem.writeOnlyPaths[0]: " + strconv.Quote(pathEtcConfig),
+				"(also at filesystem.readOnlyPaths[0])",
+				"filesystem.readWritePaths[0]: " + strconv.Quote(pathTmp),
+				"(also at filesystem.readOnlyPaths[1])",
 			},
 			nil,
 		},
@@ -182,7 +184,7 @@ func TestValidateRejects(t *testing.T) {
 			"empty read-only path", apparmor.Validate,
 			validationProfile([3][]string{{""}, nil, nil}, [2][]string{}, nil),
 			[]error{apparmor.ErrEmptyPath},
-			[]string{"ReadOnlyPaths[0]"},
+			[]string{"filesystem.readOnlyPaths[0]"},
 			nil,
 		},
 		{
@@ -191,14 +193,14 @@ func TestValidateRejects(t *testing.T) {
 			"empty path reported once", apparmor.ValidateArtifact,
 			validationProfile([3][]string{{""}, nil, nil}, [2][]string{}, nil),
 			[]error{apparmor.ErrEmptyPath},
-			[]string{"ReadOnlyPaths[0]"},
+			[]string{"filesystem.readOnlyPaths[0]"},
 			apparmor.ErrUnquotablePath,
 		},
 		{
 			"empty executable", apparmor.Validate,
 			validationProfile([3][]string{}, [2][]string{{pathBinShell, ""}, nil}, nil),
 			[]error{apparmor.ErrEmptyPath},
-			[]string{"AllowedExecutables[1]"},
+			[]string{"executable.allowedExecutables[1]"},
 			nil,
 		},
 		{
@@ -206,56 +208,56 @@ func TestValidateRejects(t *testing.T) {
 			"read-only twice", apparmor.Validate,
 			validationProfile([3][]string{{pathEtcConfig, pathEtcConfig}, nil, nil}, [2][]string{}, nil),
 			[]error{apparmor.ErrDuplicatePathInCategory},
-			[]string{"ReadOnlyPaths[1]"},
+			[]string{"filesystem.readOnlyPaths[1]"},
 			apparmor.ErrDuplicatePath,
 		},
 		{
 			"write-only twice", apparmor.Validate,
 			validationProfile([3][]string{nil, {pathTmp, pathTmp}, nil}, [2][]string{}, nil),
 			[]error{apparmor.ErrDuplicatePathInCategory},
-			[]string{"WriteOnlyPaths[1]"},
+			[]string{"filesystem.writeOnlyPaths[1]"},
 			apparmor.ErrDuplicatePath,
 		},
 		{
 			"read-write twice", apparmor.Validate,
 			validationProfile([3][]string{nil, nil, {pathVarLog, pathVarLog}}, [2][]string{}, nil),
 			[]error{apparmor.ErrDuplicatePathInCategory},
-			[]string{"ReadWritePaths[1]"},
+			[]string{"filesystem.readWritePaths[1]"},
 			apparmor.ErrDuplicatePath,
 		},
 		{
 			"empty capability", apparmor.Validate,
 			validationProfile([3][]string{}, [2][]string{}, []string{capNetAdmin, ""}),
 			[]error{apparmor.ErrEmptyCapability},
-			[]string{"AllowedCapabilities[1]"},
+			[]string{"capability.allowedCapabilities[1]"},
 			nil,
 		},
 		{
 			"capability twice", apparmor.Validate,
 			validationProfile([3][]string{}, [2][]string{}, []string{capNetAdmin, capSysTime, capNetAdmin}),
 			[]error{apparmor.ErrDuplicateCapability},
-			[]string{"AllowedCapabilities[2]: " + strconv.Quote(capNetAdmin)},
+			[]string{"capability.allowedCapabilities[2]: " + strconv.Quote(capNetAdmin)},
 			nil,
 		},
 		{
 			"capability twice in two cases", apparmor.Validate,
 			validationProfile([3][]string{}, [2][]string{}, []string{"NET_ADMIN", "net_admin"}),
 			[]error{apparmor.ErrDuplicateCapability},
-			[]string{`AllowedCapabilities[1]: "net_admin"`},
+			[]string{`capability.allowedCapabilities[1]: "net_admin"`},
 			nil,
 		},
 		{
 			"executable twice", apparmor.ValidateStrict,
 			validationProfile([3][]string{}, [2][]string{{pathBinShell, pathBinSh, pathBinShell}, nil}, nil),
 			[]error{apparmor.ErrDuplicateExecutablePath},
-			[]string{"AllowedExecutables[2]: " + strconv.Quote(pathBinShell)},
+			[]string{"executable.allowedExecutables[2]: " + strconv.Quote(pathBinShell)},
 			nil,
 		},
 		{
 			"library twice", apparmor.ValidateStrict,
 			validationProfile([3][]string{}, [2][]string{nil, {pathLibCStd, pathLibCStd}}, nil),
 			[]error{apparmor.ErrDuplicateExecutablePath},
-			[]string{"AllowedLibraries[1]: " + strconv.Quote(pathLibCStd)},
+			[]string{"executable.allowedLibraries[1]: " + strconv.Quote(pathLibCStd)},
 			nil,
 		},
 		{
@@ -264,7 +266,7 @@ func TestValidateRejects(t *testing.T) {
 				[3][]string{}, [2][]string{{pathBinShell, pathBinShell}, {pathLibCStd, pathLibCStd}}, nil,
 			),
 			[]error{apparmor.ErrDuplicateExecutablePath},
-			[]string{"AllowedExecutables[1]", "AllowedLibraries[1]"},
+			[]string{"executable.allowedExecutables[1]", "executable.allowedLibraries[1]"},
 			nil,
 		},
 		{
@@ -276,7 +278,10 @@ func TestValidateRejects(t *testing.T) {
 				[2][]string{{pathBinShell, pathBinShell}, nil}, nil,
 			),
 			[]error{apparmor.ErrDuplicatePath, apparmor.ErrDuplicateExecutablePath},
-			[]string{"in both ReadOnlyPaths and WriteOnlyPaths", "AllowedExecutables[1]"},
+			[]string{
+				"filesystem.writeOnlyPaths[0]", "(also at filesystem.readOnlyPaths[0])",
+				"executable.allowedExecutables[1]",
+			},
 			nil,
 		},
 		{
@@ -288,14 +293,14 @@ func TestValidateRejects(t *testing.T) {
 				[2][]string{{pathBinShell, "/bin//bash"}, nil}, nil,
 			),
 			[]error{apparmor.ErrPathTooLong, apparmor.ErrDuplicateExecutablePath},
-			[]string{"ReadOnlyPaths[0]", `AllowedExecutables[1]: "/bin//bash"`},
+			[]string{"filesystem.readOnlyPaths[0]", `executable.allowedExecutables[1]: "/bin//bash"`},
 			nil,
 		},
 		{
 			"unknown capability", apparmor.ValidateStrict,
 			validationProfile([3][]string{}, [2][]string{}, []string{capNetAdmin, "BOGUS_CAP"}),
 			[]error{apparmor.ErrUnknownCapability},
-			[]string{`AllowedCapabilities[1]: "BOGUS_CAP"`},
+			[]string{`capability.allowedCapabilities[1]: "BOGUS_CAP"`},
 			nil,
 		},
 	} {
@@ -397,7 +402,7 @@ func TestValidateStrictGlobTooComplex(t *testing.T) {
 		t.Fatalf("expected ErrGlobTooComplex, got: %v", err)
 	}
 
-	for _, want := range []string{"AllowedExecutables[0]", "ReadOnlyPaths[1]"} {
+	for _, want := range []string{"executable.allowedExecutables[0]", "filesystem.readOnlyPaths[1]"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q should mention %s", err, want)
 		}
@@ -440,7 +445,7 @@ func TestValidateRejectsVariables(t *testing.T) {
 		t.Fatalf("expected ErrUnsupportedVariable, got: %v", err)
 	}
 
-	for _, want := range []string{"AllowedExecutables[0]", "ReadOnlyPaths[1]"} {
+	for _, want := range []string{"executable.allowedExecutables[0]", "filesystem.readOnlyPaths[1]"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not name %s", err, want)
 		}
@@ -514,17 +519,17 @@ func TestValidateStrictRejectsRelativePaths(t *testing.T) {
 	// leading alternation is relative too, and paths are reported as
 	// written rather than cleaned.
 	for _, want := range []string{
-		`AllowedExecutables[0]: "bin/sh"`,
-		`ReadOnlyPaths[0]: "etc/**"`,
-		`ReadOnlyPaths[2]: "{/usr,/opt}/**"`,
-		`ReadOnlyPaths[3]: "./etc/x"`,
+		`executable.allowedExecutables[0]: "bin/sh"`,
+		`filesystem.readOnlyPaths[0]: "etc/**"`,
+		`filesystem.readOnlyPaths[2]: "{/usr,/opt}/**"`,
+		`filesystem.readOnlyPaths[3]: "./etc/x"`,
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error %q does not name %s", msg, want)
 		}
 	}
 
-	for _, unwanted := range []string{`"/bin/sh"`, "ReadOnlyPaths[1]"} {
+	for _, unwanted := range []string{`"/bin/sh"`, "filesystem.readOnlyPaths[1]"} {
 		if strings.Contains(msg, unwanted) {
 			t.Errorf("error %q must not flag absolute path %s", msg, unwanted)
 		}
@@ -706,5 +711,71 @@ func TestValidateDoesNotNormalizeExecutables(t *testing.T) {
 	few, many := allocations(10), allocations(1000)
 	if many > few {
 		t.Errorf("Validate allocated %v times for 1000 executables, %v for 10", many, few)
+	}
+}
+
+// TestValidateMessages pins the shape of the failures: the JSON path of the
+// entry, the value, and the sentinel, with the entry a duplicate repeats in
+// parentheses.
+func TestValidateMessages(t *testing.T) {
+	t.Parallel()
+
+	long := "/" + strings.Repeat("a", apparmor.MaxPathLen)
+
+	err := apparmor.Validate(&apparmor.Profile{
+		Executable: nil,
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths:  []string{"/etc", "/etc"},
+			WriteOnlyPaths: nil,
+			ReadWritePaths: []string{"/srv", "/etc"},
+		},
+		Network: nil,
+		Capabilities: &apparmor.CapabilityRules{
+			AllowedCapabilities: []string{"CHOWN", "chown"},
+		},
+	})
+
+	want := strings.Join([]string{
+		`filesystem.readWritePaths[1]: "/etc": duplicate path across filesystem categories ` +
+			`(also at filesystem.readOnlyPaths[1])`,
+		`filesystem.readOnlyPaths[1]: "/etc": duplicate path within category ` +
+			`(also at filesystem.readOnlyPaths[0])`,
+		`capability.allowedCapabilities[1]: "chown": duplicate capability ` +
+			`(also at capability.allowedCapabilities[0])`,
+	}, "\n")
+	if err == nil || err.Error() != want {
+		t.Errorf("Validate =\n%v\nwant\n%s", err, want)
+	}
+
+	err = apparmor.Validate(&apparmor.Profile{
+		Executable: &apparmor.ExecutableRules{
+			AllowedExecutables: []string{long},
+			AllowedLibraries:   nil,
+		},
+		Filesystem:   nil,
+		Network:      nil,
+		Capabilities: nil,
+	})
+
+	want = "executable.allowedExecutables[0]: 4096 bytes: path exceeds 4095 bytes"
+	if err == nil || err.Error() != want {
+		t.Errorf("Validate of a long path = %v, want %s", err, want)
+	}
+
+	err = apparmor.ValidateArtifact(&apparmor.Profile{
+		Executable: nil,
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths:  make([]string, apparmor.MaxArtifactPaths+1),
+			WriteOnlyPaths: nil,
+			ReadWritePaths: nil,
+		},
+		Network:      nil,
+		Capabilities: nil,
+	})
+
+	want = fmt.Sprintf("executable, filesystem: %d paths: too many paths (max %d)",
+		apparmor.MaxArtifactPaths+1, apparmor.MaxArtifactPaths)
+	if err == nil || err.Error() != want {
+		t.Errorf("ValidateArtifact of too many paths = %v, want %s", err, want)
 	}
 }

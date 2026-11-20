@@ -30,11 +30,15 @@ Validate one or more security profiles.
 Reads from stdin when no files are provided: a single profile, or a JSON
 array of profiles. A file argument of - reads stdin beside the files.
 Flags must precede file arguments, and -- ends them.
-Exit status: 0 when every profile is valid, 1 when one is invalid or cannot
-be read or the output cannot be written, 2 on a usage error.
-Writes the validated profiles on success; --quiet writes no profile and
-notes no auto-detected profile type, and --no-detect-note drops that note
-while still writing the profiles. Errors and warnings always go to stderr.
+Exit status: 0 when every profile is valid, 1 when one is invalid, of
+another type, or cannot be read, or the output cannot be written, 2 on a
+usage error; 1 when a usage error comes up after a profile was found
+invalid.
+Writes the validated profiles on success, in the shape they came in: a
+single profile as an object, and several, or a JSON array on stdin even of
+one element, as an array. --quiet writes no profile and notes no
+auto-detected profile type, and --no-detect-note drops that note while
+still writing the profiles. Errors and warnings always go to stderr.
 --quiet cannot be combined with --output or --format, nor --strict with
 --artifact.
 
@@ -134,7 +138,7 @@ func validateInputs(
 ) int {
 	// --quiet promises a silent stderr on success, so it implies
 	// --no-detect-note.
-	kind, code := resolveKind(
+	kind, report, code := resolveKind(
 		opts.profileType, inputs, 1, opts.quiet || opts.noDetectNote, stderr,
 	)
 	if code != 0 {
@@ -143,7 +147,7 @@ func validateInputs(
 
 	var out bytes.Buffer
 
-	code = kind.validate(inputs, opts.mode(), arch, opts.format, &out, stderr)
+	code = kind.validate(inputs, report, opts.mode(), arch, opts.format, &out, stderr)
 	if code != 0 {
 		return code
 	}
@@ -232,37 +236,49 @@ func checkModeFlags(opts *validateOptions, archNamed bool, stderr io.Writer) int
 	return 0
 }
 
-// validateProfiles decodes and checks every profile. The policy selects
-// which JSON ambiguities, such as members the profile type does not know,
-// are errors rather than warnings.
+// validateProfiles decodes and checks every profile that report holds no
+// failure for, and writes them when none failed, the ones report holds
+// included. strict makes the JSON ambiguities unmarshalAll looks for, such
+// as members the profile type does not know, errors rather than warnings.
 func validateProfiles[T any](
 	inputs []profileInput,
+	report *inputReport,
 	check func(*T) error,
-	policy decodePolicy,
+	strict bool,
 	format string,
 	formatFn func(*T) string,
 	stdout, stderr io.Writer,
 ) int {
-	profiles, err := unmarshalAll[T](
-		inputs, slices.Repeat([]decodePolicy{policy}, len(inputs)), stderr,
+	profiles := unmarshalAll[T](inputs, slices.Repeat([]bool{strict}, len(inputs)), report)
+
+	checkInputs(profiles, check, report)
+	report.flush(stderr)
+
+	if report.anyFailed() {
+		return 1
+	}
+
+	return writeValidated(
+		profiles, formatAll(profiles, formatFn), asArray(inputs), format, stdout, stderr,
 	)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
-
-		return 1
-	}
-
-	if checkInputs(profiles, func(int) func(*T) error { return check }, inputs, stderr) {
-		return 1
-	}
-
-	return writeValidated(profiles, formatAll(profiles, formatFn), format, stdout, stderr)
 }
 
+// asArray reports whether validate writes the profiles of the inputs as an
+// array rather than as one object. The output mirrors the input: a single
+// profile read whole is written as an object, and anything else as an
+// array, a JSON array on stdin included however many elements it holds, so
+// that a pipeline reading the output need not count what went in.
+func asArray(inputs []profileInput) bool {
+	return len(inputs) != 1 || inputs[0].inArray
+}
+
+// writeValidated writes the validated profiles, as one object or, with
+// array, as an array (see asArray). The human format has no array: it
+// writes the profiles one after the other, separated by "---" lines.
 func writeValidated[T any](
-	profiles []*T, humanStrs []string, format string, stdout, stderr io.Writer,
+	profiles []*T, humanStrs []string, array bool, format string, stdout, stderr io.Writer,
 ) int {
-	if len(profiles) == 1 {
+	if !array {
 		return writeOutput(profiles[0], humanStrs[0], format, stdout, stderr)
 	}
 
@@ -296,4 +312,19 @@ func formatAll[T any](profiles []*T, formatFn func(*T) string) []string {
 	}
 
 	return result
+}
+
+// checkInputs runs check on every profile that decoded, recording each
+// failure in report, so that one run names every problem.
+func checkInputs[T any](profiles []*T, check func(*T) error, report *inputReport) {
+	for idx, profile := range profiles {
+		if profile == nil {
+			continue
+		}
+
+		err := check(profile)
+		if err != nil {
+			report.fail(idx, err)
+		}
+	}
 }

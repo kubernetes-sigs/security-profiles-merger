@@ -532,8 +532,8 @@ func (s *absentSettler) settle() error {
 		if !s.m.intersect || len(remaining) == len(listed) ||
 			len(remaining) == 0 && s.m.native == "" {
 			return fmt.Errorf(
-				"%w: %s would test %s first, which it lacks",
-				ErrLostRules, arch, offending[0],
+				"%s: %w (it would test %s first, which it lacks)",
+				arch, ErrLostRules, offending[0],
 			)
 		}
 

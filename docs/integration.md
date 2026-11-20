@@ -191,7 +191,9 @@ the merge taking anything away.
    alone (see [seccomp: the listener](#seccomp-the-listener)). Every input
    must be non-nil, so the pod spec's profile is only passed when the
    pod sets one. A failure is an `spm.InputError` whose `Index` names the
-   input: 0 is the baseline, any other index rejects the workload. The few
+   input: 0 is the baseline, any other index rejects the workload. When
+   several inputs fail, each is reported, and `errors.As` finds the first,
+   so a bad baseline is seen even when the artifact is bad as well. The few
    errors that name no input are listed under
    [Errors outside an InputError](#errors-outside-an-inputerror).
 
@@ -324,9 +326,15 @@ the error matches `ErrMoreProblems` instead of listing the rest, so
 of `ErrMoreProblems` as "and possibly others" before dispatching on another
 sentinel, and do not branch on the absence of one.
 
-A merge wraps the report of the input that failed in an `spm.InputError`,
-whose `Index` is that input's position among the arguments; `errors.Is` sees
-through it to the sentinels, so the same dispatch works on a merge failure.
+A merge checks every input and wraps the report of each one that fails in
+an `spm.InputError`, whose `Index` is that input's position among the
+arguments; `errors.Is` sees through it to the sentinels, so the same
+dispatch works on a merge failure. One failing input gives its InputError
+as the error. Several give the InputErrors joined in input order, which
+`errors.As` searches from the first, and which `Unwrap() []error` lists,
+bounded like the failures of one validator: past 32 failing inputs the
+error matches `ErrMoreProblems`. A caller that names inputs, as `spm`
+does, walks that list.
 
 Every value a message quotes from a profile is bounded in length and escaped,
 so an error is safe to log as it is. A report holding more than one failure

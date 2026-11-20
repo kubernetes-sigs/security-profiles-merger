@@ -1,0 +1,1 @@
+error: testdata/seccomp_syntax_error.json: line 4, column 24: invalid character '"' after object key:value pair

@@ -1769,8 +1769,8 @@ func TestMergeErrorsNameInputIndices(t *testing.T) {
 		msg := err.Error()
 		for _, want := range []string{
 			`profile 1: `,
-			`PathRules[2]: "/b/../c": path contains a ".." component`,
-			`PathRules[2]: unknown access right "bogus"`,
+			`pathRules[2].path: "/b/../c": path contains a ".." component`,
+			`pathRules[2].accessFs[0]: "bogus": unknown access right`,
 		} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("%s error %q does not contain %q", name, msg, want)
@@ -1908,6 +1908,45 @@ func TestMergeReturnsNilForEmptySets(t *testing.T) {
 				result.Scoped != nil || result.PathRules != nil || result.NetRules != nil {
 				t.Errorf("%s of %d empty profiles = %#v, want all nil", name, len(inputs), result)
 			}
+		}
+	}
+}
+
+// TestMergesReportEveryBadInput covers inputs failing Validate: every one is
+// reported as an InputError, joined in input order.
+func TestMergesReportEveryBadInput(t *testing.T) {
+	t.Parallel()
+
+	read := []landlock.FSAccessRight{landlock.FSAccessReadFile}
+	good := fsProfile(read, landlock.PathRule{Path: pathEtc, AccessFS: read})
+	parent := fsProfile(read, landlock.PathRule{Path: "/a/../b", AccessFS: read})
+	unknown := fsProfile([]landlock.FSAccessRight{"fly"})
+
+	for name, mergeFn := range map[string]func(...*landlock.Profile) (*landlock.Profile, error){
+		"Intersect": landlock.Intersect,
+		"Union":     landlock.Union,
+	} {
+		_, err := mergeFn(parent, good, unknown)
+
+		var first *landlock.InputError
+		if !errors.As(err, &first) || first.Index != 0 ||
+			!errors.Is(first, landlock.ErrParentPath) {
+			t.Fatalf("%s: errors.As = %v, want the InputError of input 0", name, err)
+		}
+
+		joined, ok := err.(interface{ Unwrap() []error })
+		if !ok || len(joined.Unwrap()) != 2 {
+			t.Fatalf("%s: %v does not join two errors", name, err)
+		}
+
+		var second *landlock.InputError
+		if !errors.As(joined.Unwrap()[1], &second) || second.Index != 2 ||
+			!errors.Is(second, landlock.ErrUnknownRight) {
+			t.Errorf(
+				"%s: second error = %v, want input 2 with an unknown right",
+				name,
+				joined.Unwrap()[1],
+			)
 		}
 	}
 }

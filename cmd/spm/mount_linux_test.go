@@ -77,3 +77,41 @@ func TestIsMountedFileOfAnOrdinaryFile(t *testing.T) {
 		t.Skip("/proc/self/fdinfo names no mount here")
 	}
 }
+
+// TestMountedFileComparesTheMounts covers the answer for a file mounted over
+// its path, which sits on another mount than its directory, with the mounts
+// read by a stand-in: a test cannot mount one.
+func TestMountedFileComparesTheMounts(t *testing.T) {
+	t.Parallel()
+
+	target := filepath.Join(t.TempDir(), "out.json")
+
+	err := os.WriteFile(target, []byte("{}"), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The directory sits on mount 1, and the file on the mount given.
+	mountsOf := func(fileMount int, known bool) func(*os.File) (int, bool) {
+		return func(file *os.File) (int, bool) {
+			info, err := file.Stat()
+			if err != nil || info.IsDir() {
+				return 1, err == nil
+			}
+
+			return fileMount, known
+		}
+	}
+
+	if !mountedFileWith(target, mountsOf(2, true)) {
+		t.Error("a file on another mount than its directory is not taken for a mount point")
+	}
+
+	if mountedFileWith(target, mountsOf(1, true)) {
+		t.Error("a file on the mount of its directory is taken for a mount point")
+	}
+
+	if mountedFileWith(target, mountsOf(2, false)) {
+		t.Error("a file whose mount cannot be read is taken for a mount point")
+	}
+}

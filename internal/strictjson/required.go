@@ -73,26 +73,58 @@ func (required *Required) has(owner reflect.Type, field *reflect.StructField) bo
 		slices.Contains(required.orTags().fields[owner], field.Name)
 }
 
-// MissingFieldsOf reports the required fields of T that raw names no value
+// missingFieldsOf reports the required fields of T that raw names no value
 // for: the member is left out or null, or the object that would hold it is.
 // encoding/json decodes the zero value in each case. decoded is what raw
 // decoded into, and required marks fields besides the tags. The members
 // are found by reading the document's tokens (see scanDocument), which
 // Unmarshal does once for the repeated members and this check together.
 //
-// A member read as null and one left out are both reported, but one the
-// document repeats with a value and with null is not: encoding/json keeps
-// the value then.
+// A document that repeats a member is read otherwise (see missingIn).
 //
 // It only reads the document for a type that has required fields at all
 // and a decoded value that left one of them zero.
-func MissingFieldsOf[T any](raw []byte, decoded *T, required *Required) ([]string, int) {
+func missingFieldsOf[T any](raw []byte, decoded *T, required *Required) ([]string, int) {
 	target := missingTarget(decoded, required)
 	if target == nil || !json.Valid(raw) {
 		return nil, 0
 	}
 
-	return scanDocument(raw, target, required).missing.result()
+	return missingIn(scanDocument(raw, target, required), raw, decoded, required)
+}
+
+// missingIn returns the required members the scan of raw found missing.
+// Where raw repeats a member, the scan, which reads each occurrence on its
+// own, is not what encoding/json reads: it decodes every occurrence in turn
+// into the same value, reusing the elements of a list, so a member an
+// earlier occurrence names fills the profile where a later one leaves it
+// out. The document is then read with every occurrence at once instead,
+// as the decoder reads it (see Required.walkMissing); a document without a
+// repeated member, the common case, costs no second read.
+func missingIn[T any](
+	scan *documentScan,
+	raw []byte,
+	decoded *T,
+	required *Required,
+) ([]string, int) {
+	if len(scan.duplicates.paths) == 0 || missingTarget(decoded, required) == nil {
+		return scan.missing.result()
+	}
+
+	document, err := decodeDocument(raw)
+	if err != nil {
+		if json.Valid(raw) {
+			return []string{unreadableDocument}, 0
+		}
+
+		return nil, 0
+	}
+
+	var found pathCollector
+
+	required.orTags().walkMissing([]any{document}, reflect.ValueOf(decoded), "", &found)
+
+	return found.result()
 }
 
 // missingTarget returns the type a document is checked against for missing

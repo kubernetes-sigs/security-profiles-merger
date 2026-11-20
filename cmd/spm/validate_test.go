@@ -70,6 +70,23 @@ func TestValidateErrors(t *testing.T) {
 			wantStderr: "--quiet cannot be combined with --output",
 		},
 		{
+			// --format shapes the profile --quiet leaves out, even when it
+			// names the default.
+			name:       "quiet with format",
+			args:       []string{cmdValidate, "--quiet", flagFormat, formatJSON, invalidFile},
+			stdin:      nil,
+			wantCode:   exitUsage,
+			wantStderr: "error: --quiet cannot be combined with --format\n",
+		},
+		{
+			// Both elements are reported, not only the first.
+			name:       "array of numbers names every element",
+			args:       []string{cmdValidate},
+			stdin:      strings.NewReader("[1,2]"),
+			wantCode:   1,
+			wantStderr: parsingError(stdinName+"[1]") + "not a JSON object",
+		},
+		{
 			name:       "no type no input",
 			args:       []string{cmdValidate},
 			stdin:      nil,
@@ -80,7 +97,7 @@ func TestValidateErrors(t *testing.T) {
 			name:       "undetectable type",
 			args:       []string{cmdValidate},
 			stdin:      strings.NewReader("{}"),
-			wantCode:   exitUsage,
+			wantCode:   1,
 			wantStderr: "could not detect",
 		},
 		{
@@ -664,7 +681,7 @@ func TestValidateStrictRejectsUnknownFields(t *testing.T) {
 		t.Fatalf("exit code = %d, want 1: %s", code, stderr)
 	}
 
-	if !strings.Contains(stderr, `error: parsing `+file+`: unknown field "syscalls[0].arg"`) {
+	if !strings.Contains(stderr, `error: `+file+`: unknown field "syscalls[0].arg"`) {
 		t.Errorf("stderr = %q, want the unknown field named", stderr)
 	}
 }
@@ -902,7 +919,7 @@ func TestArtifactRejectsUnknownFields(t *testing.T) {
 		},
 	} {
 		code, stdout, stderr := runCapture(t, args, nil)
-		if code != 1 || stdout != "" || !strings.Contains(stderr, `error: parsing `+misspelled+
+		if code != 1 || stdout != "" || !strings.Contains(stderr, `error: `+misspelled+
 			`: unknown field "syscals"`) {
 			t.Errorf("%v: exit code = %d, stdout = %q, stderr = %q, want 1 and the field",
 				args, code, stdout, stderr)
@@ -915,5 +932,189 @@ func TestArtifactRejectsUnknownFields(t *testing.T) {
 	}, nil)
 	if code != 0 || !strings.Contains(stderr, `warning: `+misspelled+`: unknown field "syscals"`) {
 		t.Errorf("baseline: exit code = %d, stderr = %q, want 0 and a warning", code, stderr)
+	}
+}
+
+// TestValidateQuietWritesNothing covers the --quiet contract in full: no
+// profile on stdout and nothing at all on stderr, the auto-detect note
+// included. It deliberately omits --type, which is the only case in which
+// there is a note to suppress.
+func TestValidateQuietWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	file := writeTemp(t, marshal(t, &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+	}))
+
+	code, stdout, stderr := runCapture(t, []string{
+		cmdValidate, "--quiet", file,
+	}, nil)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0: %s", code, stderr)
+	}
+
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing", stdout)
+	}
+
+	if stderr != "" {
+		t.Errorf("stderr = %q, want nothing on a quiet success", stderr)
+	}
+}
+
+// TestValidateNoDetectNote covers --no-detect-note, which keeps the profile
+// on stdout while dropping the note that --quiet also drops, so that a
+// pipeline can redirect stdout and leave a clean stderr in its log.
+func TestValidateNoDetectNote(t *testing.T) {
+	t.Parallel()
+
+	file := writeTemp(t, marshal(t, &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno,
+	}))
+
+	code, stdout, stderr := runCapture(t, []string{
+		cmdValidate, flagNoDetectNote, file,
+	}, nil)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0: %s", code, stderr)
+	}
+
+	if !strings.Contains(stdout, string(specs.ActErrno)) {
+		t.Errorf("stdout = %q, want the validated profile", stdout)
+	}
+
+	if stderr != "" {
+		t.Errorf("stderr = %q, want no auto-detect note", stderr)
+	}
+
+	// Without the flag the note is there, so the test above is not passing
+	// for want of anything to suppress.
+	_, _, stderr = runCapture(t, []string{cmdValidate, file}, nil)
+	if !strings.Contains(stderr, "auto-detected profile type: "+typeSeccomp) {
+		t.Errorf("stderr = %q, want the auto-detect note", stderr)
+	}
+}
+
+func TestValidateQuietStillReportsErrors(t *testing.T) {
+	t.Parallel()
+
+	file := writeTemp(t, `{"defaultAction":"SCMP_ACT_BOGUS"}`)
+
+	code, stdout, stderr := runCapture(t, []string{
+		cmdValidate, flagType, typeSeccomp, "--quiet", file,
+	}, nil)
+
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing", stdout)
+	}
+
+	if !strings.Contains(stderr, "unknown seccomp action") {
+		t.Errorf("stderr = %q, want the validation error", stderr)
+	}
+}
+
+// TestValidateOutputMirrorsInput covers the shape of what validate writes:
+// a profile read whole comes back as an object, and a JSON array on stdin
+// comes back as an array even when it holds one element, as several inputs
+// do, so that a pipeline reading the output need not count what went in.
+func TestValidateOutputMirrorsInput(t *testing.T) {
+	t.Parallel()
+
+	profile := seccompJSON(t, testSyscallRead)
+	file := writeTemp(t, profile)
+
+	for _, test := range []struct {
+		name  string
+		args  []string
+		stdin string
+		array bool
+	}{
+		{"one file", []string{file}, "", false},
+		{"one object on stdin", nil, profile, false},
+		{"an array of one on stdin", nil, "[" + profile + "]", true},
+		{"two files", []string{file, file}, "", true},
+		{"a file and an object on stdin", []string{file, stdinArg}, profile, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var stdin io.Reader
+			if test.stdin != "" {
+				stdin = strings.NewReader(test.stdin)
+			}
+
+			args := append([]string{cmdValidate, flagNoDetectNote}, test.args...)
+
+			code, stdout, stderr := runCapture(t, args, stdin)
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0: %s", code, stderr)
+			}
+
+			if got := strings.HasPrefix(stdout, "["); got != test.array {
+				t.Errorf("stdout = %q, want an array: %v", stdout, test.array)
+			}
+		})
+	}
+}
+
+// TestUsageErrorsAfterABadInput covers a usage error that comes up after an
+// input has failed: what was found is still written, in input order, and
+// the run exits 1, as it would for the bad input alone, rather than with
+// the usage exit code a good input would have got.
+func TestUsageErrorsAfterABadInput(t *testing.T) {
+	t.Parallel()
+
+	bad := writeTemp(t, `{"defaultAction":`)
+	empty := writeTemp(t, `{}`)
+	landlockProfile := writeTemp(t, `{"handledAccessFs":["read_file"]}`)
+
+	parseError := "error: " + bad + ": line 1, column 18: unexpected end of JSON input\n"
+
+	for _, test := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "a profile type no input reveals",
+			args: []string{cmdValidate, bad, empty},
+			want: parseError +
+				"error: " + empty + ": could not detect profile type, use --type\n",
+		},
+		{
+			name: "--arch for a type without architectures",
+			args: []string{cmdValidate, flagStrict, flagArch, "SCMP_ARCH_X86_64", bad, landlockProfile},
+			want: "auto-detected profile type: landlock\n" + parseError +
+				"error: --arch only applies to seccomp profiles\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			code, stdout, stderr := runCapture(t, test.args, nil)
+			if code != 1 || stdout != "" || stderr != test.want {
+				t.Errorf("exit code = %d, stdout = %q, stderr = %q, want 1, nothing and %q",
+					code, stdout, stderr, test.want)
+			}
+		})
+	}
+
+	// Without the bad input, a refused --arch is a usage error, while an
+	// input whose type cannot be detected still fails as an input.
+	code, _, _ := runCapture(t,
+		[]string{cmdValidate, flagStrict, flagArch, "SCMP_ARCH_X86_64", landlockProfile}, nil)
+	if code != exitUsage {
+		t.Errorf("refused --arch alone: exit code = %d, want %d", code, exitUsage)
+	}
+
+	code, _, _ = runCapture(t, []string{cmdValidate, empty}, nil)
+	if code != 1 {
+		t.Errorf("undetectable type alone: exit code = %d, want 1", code)
 	}
 }

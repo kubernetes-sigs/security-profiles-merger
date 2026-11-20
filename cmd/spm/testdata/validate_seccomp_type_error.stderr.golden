@@ -1,0 +1,1 @@
+error: testdata/seccomp_type_error.json: line 4, column 35: syscalls[0].action: want a string, got number

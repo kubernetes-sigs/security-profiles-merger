@@ -1,0 +1,4 @@
+warning: testdata/landlock_invalid.json: misspelled field "handledAccessFS" (want "handledAccessFs")
+error: testdata/landlock_invalid.json: handledAccessNet[1]: "fly_tcp": unknown access right
+error: testdata/landlock_invalid.json: pathRules[0].accessFs[1]: "fly": unknown access right
+error: testdata/landlock_invalid.json: pathRules[1].path: "/srv/../etc": path contains a ".." component

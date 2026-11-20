@@ -88,8 +88,9 @@ type InputError = spm.InputError
 // layers; see the Lowered rule paths section.
 //
 // Each input is checked with Validate, which lets duplicate rules and
-// rights pass; the merge folds them. A failure is returned as an InputError
-// naming the input.
+// rights pass; the merge folds them. Every input that fails is reported as
+// an InputError naming the input: the error is that InputError for one, and
+// the InputErrors joined in input order for several.
 //
 // The merge takes memory in proportion to the size of the inputs, and time
 // in proportion to the number of rules times the depth of their paths times
@@ -157,16 +158,20 @@ func foldProfiles(
 	// the inputs; the budget then bounds the merge.
 	cleaned := make([][]string, len(profiles))
 
-	for idx, profile := range profiles {
+	// Every input is checked, and each that fails reported (see
+	// merge.CheckInputs); the budget, which is no input's fault, is checked
+	// only once all of them passed, and so stays outside an InputError.
+	err := merge.CheckInputs(profiles, func(idx int, profile *Profile) error {
 		paths, err := validateProfile(profile, tierMerge)
-		if err != nil {
-			return nil, &spm.InputError{Index: idx, Err: err}
-		}
-
 		cleaned[idx] = paths
+
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	err := checkMergeBudget(profiles)
+	err = checkMergeBudget(profiles)
 	if err != nil {
 		return nil, err
 	}
@@ -207,8 +212,8 @@ func checkMergeBudget(profiles []*Profile) error {
 
 	_, exceeded := mergeLookups(profiles, maxMergeWork/inputs)
 	if exceeded {
-		return fmt.Errorf("merge: %d inputs need more than %d ancestor lookups: %w",
-			inputs, maxMergeWork, ErrBudgetExceeded)
+		return fmt.Errorf("merge: %d inputs: %w (more than %d ancestor lookups)",
+			inputs, ErrBudgetExceeded, maxMergeWork)
 	}
 
 	return nil

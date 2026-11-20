@@ -83,8 +83,9 @@ func (opts *commonOptions) check(stderr io.Writer) int {
 // and exits 0. A parse error is reported on stderr, followed by the usage,
 // and exits with the usage code. The error quotes the argument it is about,
 // which the caller chose, so it is written the way every other argument is
-// (see merge.SafeName). The first result reports whether the command should
-// stop with the second.
+// (see merge.SafeName), and with the dashes the caller wrote (see
+// flagAsWritten). The first result reports whether the command should stop
+// with the second.
 func parseFlags(
 	flags *flag.FlagSet, usageText string, args []string, stdout, stderr io.Writer,
 ) (bool, int) {
@@ -97,30 +98,72 @@ func parseFlags(
 		return true, printHelp(usageWithFlags(flags, usageText), stdout, stderr)
 	}
 
-	_, _ = fmt.Fprintln(stderr, merge.SafeName(twoDashes(err.Error())))
+	_, _ = fmt.Fprintln(stderr, "error: "+merge.SafeName(flagAsWritten(err.Error(), args)))
 
 	printUsage(flags, usageText, stderr)
 
 	return true, exitUsage
 }
 
-// twoDashes rewrites the flag an error of the flag package names from the
-// one dash that package prints to the two the usage and the documentation
-// spell a flag with. The name follows one of a few phrases; the last one in
-// the message is taken, since a value the error quotes comes before it.
-func twoDashes(message string) string {
-	for _, phrase := range []string{
-		" for flag -", " for -",
-		"flag provided but not defined: -", "flag needs an argument: -",
-	} {
-		if at := strings.LastIndex(message, phrase); at >= 0 {
-			end := at + len(phrase)
+// flagAsWritten rewrites the flag an error of the flag package names, which
+// that package prints with one dash however it was given, to the argument
+// that named it: "-real.json", which the caller may have meant as a file,
+// must not read as "--real.json". A flag the arguments do not show is
+// written with the two dashes the usage and the documentation spell a flag
+// with. The name follows one of a few phrases; the last of them in the
+// message is taken, since a value the error quotes comes before it.
+func flagAsWritten(message string, args []string) string {
+	found, start, last := -1, 0, false
 
-			return message[:end] + "-" + message[end:]
+	for _, phrase := range []struct {
+		text string
+		// last reports a phrase the name ends the message after; after
+		// the others, a reason follows it, separated by ": ".
+		last bool
+	}{
+		{" for flag -", false},
+		{" for -", false},
+		{"flag provided but not defined: -", true},
+		{"flag needs an argument: -", true},
+	} {
+		at := strings.LastIndex(message, phrase.text)
+		if at > found {
+			found, start, last = at, at+len(phrase.text)-1, phrase.last
 		}
 	}
 
-	return message
+	if found < 0 {
+		return message
+	}
+
+	name := message[start+1:]
+	if !last {
+		name, _, _ = strings.Cut(name, ": ")
+	}
+
+	return message[:start] + writtenFlag(name, args) + message[start+1+len(name):]
+}
+
+// writtenFlag returns the flag of the given name as the arguments spell it,
+// with one dash or two, or with two when they do not show it.
+func writtenFlag(name string, args []string) string {
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+
+		dashes := "-"
+		if strings.HasPrefix(arg, "--") {
+			dashes = "--"
+		}
+
+		spelled, _, _ := strings.Cut(strings.TrimPrefix(arg, dashes), "=")
+		if strings.HasPrefix(arg, "-") && spelled == name {
+			return dashes + name
+		}
+	}
+
+	return "--" + name
 }
 
 // printHelp writes help the caller asked for to stdout. A write failure is

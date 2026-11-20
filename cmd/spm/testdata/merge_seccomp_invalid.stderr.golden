@@ -1,0 +1,7 @@
+error: testdata/seccomp_invalid.json: architectures[1]: "SCMP_ARCH_BOGUS": unknown architecture
+error: testdata/seccomp_invalid.json: syscalls[0].names[1]: empty syscall name
+error: testdata/seccomp_invalid.json: syscalls[0].action: "SCMP_ACT_BOGUS": unknown seccomp action
+error: testdata/seccomp_invalid.json: syscalls[1].args[0].op: "SCMP_CMP_BOGUS": unknown seccomp operator
+error: testdata/seccomp_invalid.json: syscalls[1].args[0].index: 9: syscall arg index out of range (max 5)
+error: testdata/seccomp_invalid.json: syscalls[2].names: syscall entry has no names
+error: testdata/invalid_action.json: defaultAction: "SCMP_ACT_BOGUS": unknown seccomp action

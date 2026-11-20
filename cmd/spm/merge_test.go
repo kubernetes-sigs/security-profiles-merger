@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -33,10 +34,8 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
-	"sigs.k8s.io/security-profiles-merger/internal/strictjson"
 	"sigs.k8s.io/security-profiles-merger/landlock"
 	"sigs.k8s.io/security-profiles-merger/seccomp"
-	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 func TestMergeErrors(t *testing.T) {
@@ -788,6 +787,52 @@ func TestMergeOutputRefusesASymlink(t *testing.T) {
 	assertFilePerm(t, target, 0o644)
 }
 
+// TestMergeOutputFollowsASymlinkWhereNotRefused covers --output aimed at a
+// symbolic link on a platform without O_NOFOLLOW, such as Windows, where the
+// link is followed: the file it leads to is replaced and the link is left
+// as it is. Elsewhere the link is refused, which the test above covers, and
+// where a link cannot be created without privileges this is skipped.
+func TestMergeOutputFollowsASymlinkWhereNotRefused(t *testing.T) {
+	t.Parallel()
+
+	if refuseSymlinks {
+		t.Skip("symbolic links at --output are refused here")
+	}
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.json")
+	link := filepath.Join(dir, "link.json")
+
+	err := os.WriteFile(target, []byte("old"), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = os.Symlink(target, link)
+	if err != nil {
+		t.Skipf("creating a symbolic link: %v", err)
+	}
+
+	code, stderr := mergeToOutputFile(t, link)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0: %s", code, stderr)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(string(data), testSyscallRead) {
+		t.Errorf("link target = %q, want the merged profile", data)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil || info.Mode()&fs.ModeSymlink == 0 {
+		t.Errorf("link = %v, %v, want it left a symbolic link", info, err)
+	}
+}
+
 func assertFilePerm(t *testing.T, path string, want os.FileMode) {
 	t.Helper()
 
@@ -945,8 +990,8 @@ func TestMergeAutoDetectAmbiguousProfile(t *testing.T) {
 				cmdMerge, flagStrategy, strategyIntersect, file, file,
 			}, nil)
 
-			if code != exitUsage {
-				t.Fatalf("exit code = %d, want %d: %s", code, exitUsage, stderr)
+			if code != 1 {
+				t.Fatalf("exit code = %d, want 1: %s", code, stderr)
 			}
 
 			if stdout != "" {
@@ -999,8 +1044,9 @@ func TestValidateArtifactAmbiguousProfile(t *testing.T) {
 	} {
 		code, stdout, stderr := runCapture(t, args, nil)
 
-		if code != exitUsage {
-			t.Errorf("%v: exit code = %d, want %d: %s", args, code, exitUsage, stderr)
+		// The input is what fails, which exits as a bad profile does.
+		if code != 1 {
+			t.Errorf("%v: exit code = %d, want 1: %s", args, code, stderr)
 		}
 
 		if stdout != "" {
@@ -1148,13 +1194,11 @@ func TestUnmarshalAllReportsEveryUnknownField(t *testing.T) {
 	raw := `{"defaultAction":"SCMP_ACT_ERRNO","comment":"x","syscalls":[` +
 		`{"names":["read"],"action":"SCMP_ACT_ALLOW","Args":[],"arg":[{"index":0}]}]}`
 
-	var stderr bytes.Buffer
-
 	inputs := rawInputs(raw)
 
-	profiles, err := unmarshalAll[specs.LinuxSeccomp](inputs, lenientDecode(1), &stderr)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	profiles, decoded, stderr := decodeInputs(inputs, false)
+	if !decoded {
+		t.Fatalf("unexpected error: %s", stderr)
 	}
 
 	if len(profiles) != 1 || profiles[0].DefaultAction != specs.ActErrno {
@@ -1164,27 +1208,43 @@ func TestUnmarshalAllReportsEveryUnknownField(t *testing.T) {
 	// "Args" matches the "args" field case-insensitively, as encoding/json
 	// decodes it, so only the two real strangers are reported.
 	want := `warning: ` + inputs[0].name + `: unknown fields "comment", "syscalls[0].arg"`
-	if !strings.Contains(stderr.String(), want) {
-		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	if !strings.Contains(stderr, want) {
+		t.Errorf("stderr = %q, want %q", stderr, want)
 	}
 
-	_, err = unmarshalAll[specs.LinuxSeccomp](
-		inputs, []decodePolicy{modeStrict.decodePolicy()}, &bytes.Buffer{},
-	)
-	if !errors.Is(err, spm.ErrUnknownField) {
-		t.Errorf("expected spm.ErrUnknownField when rejecting, got: %v", err)
+	_, decoded, stderr = decodeInputs(inputs, modeStrict.strictDecode())
+
+	want = `error: ` + inputs[0].name + `: unknown fields "comment", "syscalls[0].arg"`
+	if decoded || !strings.Contains(stderr, want) {
+		t.Errorf("strict decode = %v, stderr = %q, want a failure and %q", decoded, stderr, want)
 	}
+}
+
+// decodeInputs decodes seccomp inputs as the commands do, all of them
+// strictly or none, and returns the profiles, whether all of them decoded,
+// and what was reported.
+func decodeInputs(inputs []profileInput, strict bool) ([]*specs.LinuxSeccomp, bool, string) {
+	report := newInputReport(inputs)
+
+	profiles := unmarshalAll[specs.LinuxSeccomp](
+		inputs, slices.Repeat([]bool{strict}, len(inputs)), report,
+	)
+
+	var stderr bytes.Buffer
+
+	report.flush(&stderr)
+
+	return profiles, !report.anyFailed(), stderr.String()
 }
 
 func TestUnmarshalAllRejectsTrailingData(t *testing.T) {
 	t.Parallel()
 
-	_, err := unmarshalAll[specs.LinuxSeccomp](
-		rawInputs(`{"defaultAction":"SCMP_ACT_ERRNO"} trailing`),
-		lenientDecode(1), &bytes.Buffer{},
+	_, decoded, stderr := decodeInputs(
+		rawInputs(`{"defaultAction":"SCMP_ACT_ERRNO"} trailing`), false,
 	)
-	if err == nil || !strings.Contains(err.Error(), "after top-level value") {
-		t.Errorf("expected a trailing data error, got: %v", err)
+	if decoded || !strings.Contains(stderr, "after top-level value") {
+		t.Errorf("expected a trailing data error, got: %s", stderr)
 	}
 }
 
@@ -1241,14 +1301,16 @@ func defaultMergeRequest[T any](
 	}
 
 	return mergeRequest[T]{
-		inputs:    inputs,
-		strategy:  strategy,
-		format:    formatJSON,
-		checks:    checks,
-		policies:  lenientDecode(len(inputs)),
-		intersect: intersect,
-		union:     union,
-		formatFn:  formatFn,
+		inputs:     inputs,
+		report:     newInputReport(inputs),
+		strategy:   strategy,
+		format:     formatJSON,
+		checks:     checks,
+		strict:     make([]bool, len(inputs)),
+		inputCheck: nil,
+		intersect:  intersect,
+		union:      union,
+		formatFn:   formatFn,
 	}
 }
 
@@ -1288,13 +1350,13 @@ func TestMergeValidateModes(t *testing.T) {
 		{
 			name:     "artifact rejects the pulled profile",
 			validate: modeNameArtifact, files: []string{baseline, artifact},
-			wantCode: 1, wantErr: artifact + ": syscall entry 0 action",
+			wantCode: 1, wantErr: artifact + ": syscalls[0].action",
 		},
 		{
 			name:     "one mode per input checks each its own way",
 			validate: modeNameStrict + "," + modeNameArtifact,
 			files:    []string{baseline, artifact},
-			wantCode: 1, wantErr: artifact + ": syscall entry 0 action",
+			wantCode: 1, wantErr: artifact + ": syscalls[0].action",
 		},
 		{
 			// --validate is how the KEP-6061 flow is spelled, and a value
@@ -1302,13 +1364,13 @@ func TestMergeValidateModes(t *testing.T) {
 			name:     "spaces around the mode names are ignored",
 			validate: modeNameStrict + ", " + modeNameArtifact,
 			files:    []string{baseline, artifact},
-			wantCode: 1, wantErr: artifact + ": syscall entry 0 action",
+			wantCode: 1, wantErr: artifact + ": syscalls[0].action",
 		},
 		{
 			name:     " a single mode may carry spaces too",
 			validate: " " + modeNameArtifact + " ",
 			files:    []string{baseline, artifact},
-			wantCode: 1, wantErr: artifact + ": syscall entry 0 action",
+			wantCode: 1, wantErr: artifact + ": syscalls[0].action",
 		},
 		{
 			name:     "the baseline passes the strict half",
@@ -1398,7 +1460,7 @@ func TestMergeNamesTheInputItRejected(t *testing.T) {
 	t.Parallel()
 
 	invalid := writeTemp(t, `{"defaultAction":"SCMP_ACT_BOGUS"}`)
-	want := "error: " + invalid + ": default action:"
+	want := "error: " + invalid + ": defaultAction:"
 
 	for _, args := range [][]string{
 		{cmdMerge, flagStrategy, strategyIntersect, invalid},
@@ -1431,7 +1493,7 @@ func TestMergeNamesTheInputItRejected(t *testing.T) {
 		t.Fatalf("exit code = %d, want 1 (stderr: %s)", code, stderr)
 	}
 
-	if !strings.Contains(stderr, "error: stdin[1]: default action:") {
+	if !strings.Contains(stderr, "error: stdin[1]: defaultAction:") {
 		t.Errorf("stderr = %q, want the element named", stderr)
 	}
 }
@@ -1545,46 +1607,6 @@ func assertUTF8Rejected(t *testing.T, invocations [][]string) {
 		if !strings.Contains(stderr, "invalid UTF-8") {
 			t.Errorf("%v: stderr = %q, want the UTF-8 error", args, stderr)
 		}
-	}
-}
-
-// TestInvalidUTF8Error pins the offset the check reports, which is what
-// points at the crafted bytes in a profile too long to eyeball.
-func TestInvalidUTF8Error(t *testing.T) {
-	t.Parallel()
-
-	for _, testCase := range []struct {
-		name string
-		raw  string
-		want string
-	}{
-		{"plain ASCII", `{"a":1}`, ""},
-		{"multi-byte", `{"a":"é"}`, ""},
-		{"a lone continuation byte", "{\"a\":\"\x80\"}", "first at byte 6"},
-		{"a truncated sequence", "{\"a\":\"\xc3\"}", "first at byte 6"},
-		{"invalid after valid", "{\"aé\":\"\xff\"}", "first at byte 8"},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-
-			err := strictjson.InvalidUTF8([]byte(testCase.raw))
-
-			if testCase.want == "" {
-				if err != nil {
-					t.Fatalf("error = %v, want none", err)
-				}
-
-				return
-			}
-
-			if !errors.Is(err, spm.ErrInvalidUTF8) {
-				t.Fatalf("error = %v, want one wrapping %v", err, spm.ErrInvalidUTF8)
-			}
-
-			if !strings.Contains(err.Error(), testCase.want) {
-				t.Errorf("error = %q, want it to contain %q", err, testCase.want)
-			}
-		})
 	}
 }
 
@@ -1992,5 +2014,102 @@ func TestMergeNamesListenerConflictInputs(t *testing.T) {
 		!strings.Contains(stderr, seccomp.ErrConflictingListener.Error()) {
 		t.Errorf("exit code = %d, stderr = %q, want 1 and the conflict named after %q",
 			code, stderr, artifact)
+	}
+}
+
+// TestMergeReportsEveryBadInputAcrossModes covers --validate with a mode per
+// input where both fail: the input with a check of its own stops the merge,
+// and the one left to the merge's own checks is checked all the same, so
+// that one run names both, in the order of the inputs. AppArmor exports no
+// check of its own that the merge runs, so it is checked by a merge of the
+// one input.
+func TestMergeReportsEveryBadInputAcrossModes(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name, profileType, modes, defaultBad, checkedBad, wantDefault, wantChecked string
+	}{
+		{
+			name:        "seccomp",
+			profileType: typeSeccomp,
+			modes:       "default,artifact",
+			defaultBad: `{"defaultAction":"SCMP_ACT_ERRNO",` +
+				`"syscalls":[{"names":[],"action":"SCMP_ACT_ALLOW"}]}`,
+			checkedBad:  `{"defaultAction":"SCMP_ACT_ERRNO","listenerMetadata":"x"}`,
+			wantDefault: "syscalls[0].names: syscall entry has no names",
+			wantChecked: "listenerMetadata: listener settings are not allowed",
+		},
+		{
+			name:        "apparmor",
+			profileType: typeAppArmor,
+			modes:       "default,strict",
+			defaultBad:  `{"capability":{"allowedCapabilities":[""]}}`,
+			checkedBad:  `{"capability":{"allowedCapabilities":["FLY"]}}`,
+			wantDefault: "capability.allowedCapabilities[0]: empty capability",
+			wantChecked: `capability.allowedCapabilities[0]: "FLY": unknown capability`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			first := writeTemp(t, test.defaultBad)
+			second := writeTemp(t, test.checkedBad)
+
+			code, stdout, stderr := runCapture(t, []string{
+				cmdMerge, flagType, test.profileType, flagStrategy, strategyIntersect,
+				"--validate", test.modes, first, second,
+			}, nil)
+
+			want := "error: " + first + ": " + test.wantDefault + "\n" +
+				"error: " + second + ": " + test.wantChecked + "\n"
+			if code != 1 || stdout != "" || stderr != want {
+				t.Errorf("exit code = %d, stdout = %q, stderr = %q, want 1, nothing and %q",
+					code, stdout, stderr, want)
+			}
+		})
+	}
+}
+
+// TestMergeReportsTheBadInputsItLeftOut covers more bad inputs than the merge
+// reports one by one: the ones it reports are named, and the rest counted.
+func TestMergeReportsTheBadInputsItLeftOut(t *testing.T) {
+	t.Parallel()
+
+	bad := `{"defaultAction":"SCMP_ACT_BOGUS"}`
+	stdin := "[" + strings.TrimSuffix(strings.Repeat(bad+",", 34), ",") + "]"
+
+	code, stdout, stderr := runCapture(t, []string{
+		cmdMerge, flagType, typeSeccomp, flagStrategy, strategyUnion,
+	}, strings.NewReader(stdin))
+
+	lines := strings.Split(strings.TrimSuffix(stderr, "\n"), "\n")
+	if code != 1 || stdout != "" || len(lines) != 33 ||
+		!strings.HasPrefix(lines[31], "error: stdin[31]: defaultAction:") ||
+		lines[32] != "error: 2 more problems omitted" {
+		t.Errorf("exit code = %d, stdout = %q, stderr = %q, want 1, nothing, "+
+			"32 inputs named and 2 more counted", code, stdout, stderr)
+	}
+}
+
+// TestMergeChecksLeftInputsAlone covers the inputs left to the merge's own
+// checks once another input has failed: each is checked on its own, so a
+// conflict between two of them, which only a merge would meet, is not
+// blamed on either.
+func TestMergeChecksLeftInputsAlone(t *testing.T) {
+	t.Parallel()
+
+	artifact := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO","listenerMetadata":"x"}`)
+	first := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO","listenerPath":"/run/a.sock"}`)
+	second := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO","listenerPath":"/run/b.sock"}`)
+
+	code, stdout, stderr := runCapture(t, []string{
+		cmdMerge, flagType, typeSeccomp, flagStrategy, strategyUnion,
+		"--validate", "artifact,default,default", artifact, first, second,
+	}, nil)
+
+	want := "error: " + artifact + ": listenerMetadata: listener settings are not allowed\n"
+	if code != 1 || stdout != "" || stderr != want {
+		t.Errorf("exit code = %d, stdout = %q, stderr = %q, want 1, nothing and %q",
+			code, stdout, stderr, want)
 	}
 }

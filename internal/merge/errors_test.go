@@ -397,3 +397,63 @@ func TestCollectorDoesNotAllocatePastTheLimit(t *testing.T) {
 		t.Errorf("Report past the limit allocated %v times, want 0", allocs)
 	}
 }
+
+// errBuilt is the failure TestReportDuplicates builds.
+var errBuilt = errors.New("built")
+
+func TestReportDuplicates(t *testing.T) {
+	t.Parallel()
+
+	items := []string{"a", "b", "", "a", "c", "b", "a", ""}
+
+	var report merge.Collector
+
+	merge.ReportDuplicates(
+		&report,
+		len(items),
+		func(idx int) (string, bool) { return items[idx], items[idx] != "" },
+		func(idx, first int) error { return fmt.Errorf("[%d] repeats [%d]: %w", idx, first, errBuilt) },
+	)
+
+	want := "[3] repeats [0]: built\n[5] repeats [1]: built\n[6] repeats [0]: built"
+
+	err := report.Err()
+	if err == nil || err.Error() != want {
+		t.Errorf("report = %v, want %q", err, want)
+	}
+
+	var clean merge.Collector
+
+	merge.ReportDuplicates(&clean, len(items),
+		func(int) (string, bool) { return "", false },
+		func(int, int) error { return errBuilt })
+
+	err = clean.Err()
+	if err != nil {
+		t.Errorf("report without keys = %v, want nil", err)
+	}
+}
+
+// TestCheckInputsBoundsTheReport covers more failing profiles than a report
+// keeps: the first MaxJoinedErrors are kept, in order, and the rest counted.
+func TestCheckInputsBoundsTheReport(t *testing.T) {
+	t.Parallel()
+
+	profiles := make([]*int, merge.MaxJoinedErrors+3)
+
+	err := merge.CheckInputs(profiles, func(int, *int) error { return errBuilt })
+	if !errors.Is(err, spm.ErrMoreProblems) ||
+		!strings.HasSuffix(err.Error(), "3 more problems omitted") {
+		t.Errorf("CheckInputs = %v, want the omitted count", err)
+	}
+
+	err = merge.CheckInputs(profiles[:1], func(int, *int) error { return errBuilt })
+	if err == nil || err.Error() != "profile 0: built" {
+		t.Errorf("CheckInputs of one failure = %v, want its InputError", err)
+	}
+
+	err = merge.CheckInputs(profiles, func(int, *int) error { return nil })
+	if err != nil {
+		t.Errorf("CheckInputs without failures = %v, want nil", err)
+	}
+}

@@ -86,7 +86,7 @@ func ExampleValidate() {
 	fmt.Println(err)
 
 	// Output:
-	// HandledAccessFS: unknown access right "bogus_right"
+	// handledAccessFs[0]: "bogus_right": unknown access right
 }
 
 func ExampleValidateStrict() {
@@ -110,7 +110,7 @@ func ExampleValidateStrict() {
 	fmt.Println(err)
 
 	// Output:
-	// PathRules[0]: right "write_file": rule grants unhandled access right
+	// pathRules[0].accessFs[1]: "write_file": rule grants unhandled access right
 }
 
 func ExampleFormatProfile() {

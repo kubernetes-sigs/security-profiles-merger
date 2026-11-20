@@ -53,19 +53,21 @@ func FuzzDetectProfileType(f *testing.F) {
 	f.Fuzz(func(t *testing.T, raw string) {
 		families := checkDetectedFamilies(t, raw)
 
-		detected, conflict := detectProfileType(rawInputs(raw))
+		detected, conflicts := detectProfileType(rawInputs(raw), nil)
 
 		// One input conflicts with itself exactly when it carries the
 		// members of more than one type.
-		if (conflict != nil) != (len(families) > 1) {
+		if (len(conflicts) > 0) != (len(families) > 1) {
 			t.Errorf(
-				"detectProfileType(%q) conflict = %v, families = %v",
-				raw, conflict, families,
+				"detectProfileType(%q) conflicts = %v, families = %v",
+				raw, conflicts, families,
 			)
 		}
 
-		if conflict != nil {
-			checkConflict(t, conflict)
+		if len(conflicts) > 0 {
+			for idx := range conflicts {
+				checkConflict(t, &conflicts[idx])
+			}
 
 			return
 		}
@@ -80,11 +82,11 @@ func FuzzDetectProfileType(f *testing.F) {
 
 		// Detection is per input, so repeating an unambiguous one never
 		// conflicts.
-		again, conflict := detectProfileType(rawInputs(raw, raw))
-		if conflict != nil || again != detected {
+		again, conflicts := detectProfileType(rawInputs(raw, raw), nil)
+		if len(conflicts) > 0 || again != detected {
 			t.Errorf(
 				"detectProfileType of a repeated input = (%q, %v), want (%q, nil)",
-				again, conflict, detected,
+				again, conflicts, detected,
 			)
 		}
 	})
@@ -115,7 +117,7 @@ func checkDetectedFamilies(t *testing.T, raw string) []string {
 func checkConflict(t *testing.T, conflict *typeConflict) {
 	t.Helper()
 
-	if conflict.input == "" {
+	if conflict.input == "" || conflict.index != 0 {
 		t.Errorf("a conflict within one input must name it: %+v", conflict)
 	}
 

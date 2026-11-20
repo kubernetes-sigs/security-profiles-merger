@@ -85,7 +85,7 @@ func TestCRIODefaultNeedsRestating(t *testing.T) {
 	}
 
 	for _, name := range []string{"setns", "clone", "socket"} {
-		if !strings.Contains(err.Error(), "for "+strconv.Quote(name)) {
+		if !strings.Contains(err.Error(), strconv.Quote(name)+": conflicting entries") {
 			t.Errorf("expected %s to be named, got %v", name, err)
 		}
 	}
@@ -179,7 +179,7 @@ func TestDefaultsRepeatSyscalls(t *testing.T) {
 			}
 
 			for _, name := range test.repeated {
-				if !strings.Contains(err.Error(), "syscall "+strconv.Quote(name)+" in entries") {
+				if !strings.Contains(err.Error(), strconv.Quote(name)+": duplicate syscall name") {
 					t.Errorf("expected %s to be named, got %v", name, err)
 				}
 			}

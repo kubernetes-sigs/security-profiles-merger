@@ -2026,12 +2026,12 @@ func TestMergeErrorsNameTheCallersEntry(t *testing.T) {
 		{
 			name:    "after a folded duplicate path",
 			profile: readOnly("/a", "/a", "/b", "@{HOME}/x"),
-			want:    `ReadOnlyPaths[3]: "@{HOME}/x"`,
+			want:    `filesystem.readOnlyPaths[3]: "@{HOME}/x"`,
 		},
 		{
 			name:    "after folded aliases",
 			profile: readOnly(`/\x61`, "/a", "/b//c", `/b//@{x}`),
-			want:    `ReadOnlyPaths[3]: "/b//@{x}"`,
+			want:    `filesystem.readOnlyPaths[3]: "/b//@{x}"`,
 		},
 		{
 			name: "after a folded duplicate capability",
@@ -2041,7 +2041,7 @@ func TestMergeErrorsNameTheCallersEntry(t *testing.T) {
 					AllowedCapabilities: []string{"chown", "CHOWN", ""},
 				},
 			},
-			want: "AllowedCapabilities[2]",
+			want: "capability.allowedCapabilities[2]",
 		},
 		{
 			name: "a path in two categories as written",
@@ -2050,7 +2050,8 @@ func TestMergeErrorsNameTheCallersEntry(t *testing.T) {
 				WriteOnlyPaths: nil,
 				ReadWritePaths: []string{`/etc/\passwd`},
 			}),
-			want: `path "/etc/\\passwd" in both`,
+			want: `filesystem.readWritePaths[0]: "/etc/\\passwd": ` +
+				`duplicate path across filesystem categories (also at filesystem.readOnlyPaths[0])`,
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -2161,5 +2162,51 @@ func TestProfileClone(t *testing.T) {
 		!*original.Network.Protocols.AllowTCP ||
 		original.Capabilities.AllowedCapabilities[0] != "CHOWN" {
 		t.Errorf("changing the clone changed the original to %+v", original)
+	}
+}
+
+// TestMergesReportEveryBadInput covers inputs failing the checks of the
+// merge: every one is reported as an InputError, joined in input order.
+func TestMergesReportEveryBadInput(t *testing.T) {
+	t.Parallel()
+
+	emptyCapability := &apparmor.Profile{
+		Executable: nil, Filesystem: nil, Network: nil,
+		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{""}},
+	}
+	variable := &apparmor.Profile{
+		Executable: nil,
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths: []string{"@{HOME}/x"}, WriteOnlyPaths: nil, ReadWritePaths: nil,
+		},
+		Network: nil, Capabilities: nil,
+	}
+	good := &apparmor.Profile{Executable: nil, Filesystem: nil, Network: nil, Capabilities: nil}
+
+	for name, mergeFn := range map[string]func(...*apparmor.Profile) (*apparmor.Profile, error){
+		"Intersect": apparmor.Intersect,
+		"Union":     apparmor.Union,
+	} {
+		_, err := mergeFn(good, emptyCapability, variable)
+
+		var first *apparmor.InputError
+		if !errors.As(err, &first) || first.Index != 1 {
+			t.Fatalf("%s: errors.As = %v, want the InputError of input 1", name, err)
+		}
+
+		joined, ok := err.(interface{ Unwrap() []error })
+		if !ok || len(joined.Unwrap()) != 2 {
+			t.Fatalf("%s: %v does not join two errors", name, err)
+		}
+
+		var second *apparmor.InputError
+		if !errors.As(joined.Unwrap()[1], &second) || second.Index != 2 ||
+			!errors.Is(second, apparmor.ErrUnsupportedVariable) {
+			t.Errorf(
+				"%s: second error = %v, want input 2 with a variable",
+				name,
+				joined.Unwrap()[1],
+			)
+		}
 	}
 }

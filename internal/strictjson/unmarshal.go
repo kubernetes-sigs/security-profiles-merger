@@ -52,7 +52,7 @@ const jsonSpace = " \t\r\n"
 // only written once every check has passed, so a caller that goes on after
 // an error does not hold what the document said.
 func Unmarshal[T any](data []byte, target *T, required *Required) error {
-	err := InvalidUTF8(data)
+	err := invalidUTF8(data)
 	if err != nil {
 		return err
 	}
@@ -217,7 +217,7 @@ func findings[T any](
 		scan := scanDocument(data, missingTarget(decoded, required), required)
 
 		for kind := findDuplicate; kind <= last; kind++ {
-			err := find[T](kind, data, hint, scan)
+			err := find(kind, data, decoded, hint, required, scan)
 			if err != nil && !yield(Finding{Kind: kind.sentinel(), Err: err}) {
 				return
 			}
@@ -258,24 +258,27 @@ func (kind findingKind) sentinel() error {
 // decoded, and returns them as one error, or nil when there are none.
 // scan holds the repeated and the missing members, which one read of the
 // document finds.
-func find[T any](kind findingKind, data []byte, hint Hint, scan *documentScan) error {
+func find[T any](
+	kind findingKind, data []byte, decoded *T, hint Hint, required *Required,
+	scan *documentScan,
+) error {
 	var (
-		paths   []string
-		omitted int
+		paths, wants []string
+		omitted      int
 	)
 
 	switch kind {
 	case findDuplicate:
 		paths, omitted = scan.duplicates.result()
 	case findUnknown:
-		paths, omitted = UnknownFieldsFound[T](data, hint)
+		paths, omitted = unknownFieldsFound[T](data, hint)
 	case findMisspelled:
-		paths, omitted = MisspelledFieldsOf[T](data)
+		paths, wants, omitted = misspelledFieldsOf[T](data)
 	case findMissing:
-		paths, omitted = scan.missing.result()
+		paths, omitted = missingIn(scan, data, decoded, required)
 	case findInvalidUTF8:
-		return InvalidUTF8(data)
+		return invalidUTF8(data)
 	}
 
-	return PathsError(kind.sentinel(), paths, omitted)
+	return pathsError(kind.sentinel(), paths, wants, omitted)
 }

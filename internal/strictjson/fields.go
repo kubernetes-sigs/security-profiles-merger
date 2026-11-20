@@ -34,23 +34,24 @@ import (
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
-// PathsError wraps kind with the given field paths, or returns nil when
-// there are none.
-func PathsError(kind error, paths []string, omitted int) error {
+// pathsError wraps kind with the given field paths, or returns nil when
+// there are none. wants is nil, or holds for each path the spelling of the
+// field the member at that path stands for, which the message names.
+func pathsError(kind error, paths, wants []string, omitted int) error {
 	if len(paths) == 0 {
 		return nil
 	}
 
-	return fieldPathsError(kind, paths, omitted)
+	return fieldPathsError(kind, paths, wants, omitted)
 }
 
-// InvalidUTF8 reports the first byte of raw that does not start a valid
+// invalidUTF8 reports the first byte of raw that does not start a valid
 // UTF-8 sequence, or the first \u escape that spells half a surrogate pair,
 // or nil when there is neither. encoding/json replaces both with U+FFFD, so
 // two profiles whose syscall names differ only in them decode to the same
 // name and merge into one rule; in an artifact, a name spelled that way is a
 // sign the bytes were crafted.
-func InvalidUTF8(raw []byte) error {
+func invalidUTF8(raw []byte) error {
 	if utf8.Valid(raw) {
 		offset := loneSurrogateEscape(raw)
 		if offset < 0 {
@@ -125,19 +126,20 @@ func unicodeEscape(raw []byte) (rune, bool) {
 	return rune(value), true
 }
 
-// UnknownFieldsFound reports the members of raw that T has no field for,
+// unknownFieldsFound reports the members of raw that T has no field for,
 // given the hint Decode returned for raw.
 //
-// Enumerating them needs the document decoded into interface values, which
-// costs more memory than the profile itself, so it runs only when the
-// decoder named an unknown member on its way through, which spares a
-// document that has none a second decode of the whole document.
-func UnknownFieldsFound[T any](raw []byte, hint Hint) ([]string, int) {
+// Enumerating them needs the document decoded a second time (see
+// decodeDocument), which costs more memory than the profile itself, so it
+// runs only when the decoder named an unknown member on its way through,
+// which spares a document that has none a second decode of the whole
+// document.
+func unknownFieldsFound[T any](raw []byte, hint Hint) ([]string, int) {
 	if !hint.found {
 		return nil, 0
 	}
 
-	paths, omitted := UnknownFields(raw, reflect.TypeFor[T]())
+	paths, omitted := unknownFields(raw, reflect.TypeFor[T]())
 
 	// The walk matches members to fields the way encoding/json does. Should
 	// the two ever disagree, the decoder's own finding is reported rather
@@ -170,34 +172,41 @@ func decoderFieldName(err error) (string, bool) {
 	return name, true
 }
 
-// UnknownFields returns the members of a JSON document that the target type
+// unknownFields returns the members of a JSON document that the target type
 // has no field for, as paths such as "syscalls[0].arg", in document order
 // with object keys sorted. encoding/json stops at the first unknown member
 // when asked to reject them, so the document is walked here instead to
 // report every one. Members are matched to fields the way encoding/json
 // does: by the exact JSON name first, case-insensitively otherwise.
-func UnknownFields(raw []byte, target reflect.Type) ([]string, int) {
+func unknownFields(raw []byte, target reflect.Type) ([]string, int) {
 	found, _ := walkFields(raw, target)
 
 	return found.unknown.paths, found.unknown.omitted
 }
 
-// MisspelledFieldsOf reports the members of raw whose name matches a field
+// misspelledFieldsOf reports the members of raw whose name matches a field
 // of T only ignoring case, such as "Syscalls" or "\u017fyscalls" for
 // "syscalls". encoding/json fills the field from such a member, while a
 // reader that compares names exactly, as a C runtime does, drops it: the
 // two read different rules from one document. Neither DisallowUnknownFields
-// nor UnknownFieldsFound objects to one, since the decoder knows the field.
+// nor unknownFieldsFound objects to one, since the decoder knows the field.
 //
-// Enumerating them costs what UnknownFieldsFound's walk costs, so a scan of
+// It returns the paths of the members, and for each the spelling of the
+// field it stands for, which may be empty when the walk could not say.
+//
+// Enumerating them costs what unknownFieldsFound's walk costs, so a scan of
 // the member names runs first and the walk only follows when a name could
-// be a misspelling of some field of T.
-func MisspelledFieldsOf[T any](raw []byte) ([]string, int) {
+// be a misspelling of some field of T. The walk reads every occurrence of a
+// member the document repeats, as the decoder does, so a misspelling in an
+// occurrence that a later one replaces is still reported.
+func misspelledFieldsOf[T any](raw []byte) ([]string, []string, int) {
 	target := reflect.TypeFor[T]()
 
-	candidate, may := mayMisspell(raw, fieldSpellings(target))
+	spellings := fieldSpellings(target)
+
+	candidate, may := mayMisspell(raw, spellings)
 	if !may {
-		return nil, 0
+		return nil, nil, 0
 	}
 
 	found, ok := walkFields(raw, target)
@@ -206,10 +215,257 @@ func MisspelledFieldsOf[T any](raw []byte) ([]string, int) {
 	// one: the name that made the scan suspicious is reported instead. An
 	// invalid one is the decoder's to refuse, and says nothing here.
 	if !ok && json.Valid(raw) {
-		return []string{candidate}, 0
+		want := ""
+		if spelling := spellings[foldName(candidate)]; !spelling.several {
+			want = spelling.name
+		}
+
+		return []string{candidate}, []string{want}, 0
 	}
 
-	return found.misspelled.paths, found.misspelled.omitted
+	return found.misspelled.paths, found.misspelled.wants, found.misspelled.omitted
+}
+
+// walkMissing walks a decoded value next to the values the document holds
+// for it, one per occurrence (see decodeDocument), and collects the
+// required fields none of them names a value for. A value is nil where the
+// document holds null for decoded, which leaves every member of a struct
+// there unnamed, and so does a decoded value the document holds nothing
+// for.
+func (required *Required) walkMissing(
+	values []any, decoded reflect.Value, prefix string, found *pathCollector,
+) {
+	kind := decoded.Kind()
+
+	if kind == reflect.Pointer || kind == reflect.Interface {
+		if !decoded.IsNil() {
+			required.walkMissing(values, decoded.Elem(), prefix, found)
+		}
+
+		return
+	}
+
+	if kind == reflect.Slice || kind == reflect.Array {
+		required.walkMissingItems(values, decoded, prefix, found)
+	}
+
+	if kind == reflect.Map {
+		required.walkMissingValues(values, decoded, prefix, found)
+	}
+
+	if kind == reflect.Struct {
+		required.walkMissingFields(values, decoded, prefix, found)
+	}
+}
+
+// walkMissingItems is walkMissing for a slice or an array. The decoder
+// fills element i from element i of every occurrence of the list, so those
+// are the values of the element.
+func (required *Required) walkMissingItems(
+	values []any, decoded reflect.Value, prefix string, found *pathCollector,
+) {
+	elem := decoded.Type().Elem()
+	array := decoded.Kind() == reflect.Array
+
+	for idx := range decoded.Len() {
+		required.walkMissing(
+			settled(itemsAt(values, idx, array), elem), decoded.Index(idx),
+			prefix+"["+strconv.Itoa(idx)+"]", found,
+		)
+	}
+}
+
+// itemsAt returns element idx of every list among values that has one, the
+// elements encoding/json decodes in turn into element idx of what it decodes
+// the lists into. A slice keeps an element a shorter list leaves out, within
+// its capacity, and reuses it for a later list that is long enough; an
+// array zeroes it, so for an array, given as array, only the lists after
+// the last one too short to hold idx count.
+func itemsAt(values []any, idx int, array bool) []any {
+	// A list the document holds once, the common case, needs no slice of
+	// its own per element.
+	if len(values) == 1 {
+		if items, ok := values[0].([]any); ok && idx < len(items) {
+			return items[idx : idx+1]
+		}
+
+		return nil
+	}
+
+	var held []any
+
+	for _, value := range values {
+		items, ok := value.([]any)
+
+		switch {
+		case ok && idx < len(items):
+			held = append(held, items[idx])
+		case ok && array:
+			held = held[:0]
+		}
+	}
+
+	return held
+}
+
+// walkMissingValues is walkMissing for a map with string keys, the only
+// kind a document's members decode into.
+func (required *Required) walkMissingValues(
+	values []any, decoded reflect.Value, prefix string, found *pathCollector,
+) {
+	if decoded.Type().Key().Kind() != reflect.String {
+		return
+	}
+
+	// encoding/json keeps a map across the occurrences of the member that
+	// fills it, but decodes the value of a key afresh for each of its
+	// occurrences, so the last one is all the value holds.
+	members := map[string]any{}
+
+	for _, value := range values {
+		if held, ok := value.(object); ok {
+			for key, member := range held {
+				members[key] = lastOccurrence(member)
+			}
+		}
+	}
+
+	for _, key := range slices.Sorted(maps.Keys(members)) {
+		held := decoded.MapIndex(reflect.ValueOf(key).Convert(decoded.Type().Key()))
+		if held.IsValid() {
+			required.walkMissing([]any{members[key]}, held, joinFieldPath(prefix, key), found)
+		}
+	}
+}
+
+// walkMissingFields is walkMissing for a struct, whose members the objects
+// among values hold. A struct embedded in it reads its members from the
+// same objects.
+func (required *Required) walkMissingFields(
+	values []any, decoded reflect.Value, prefix string, found *pathCollector,
+) {
+	members, spellings := foldedMembers(values)
+
+	for idx := range decoded.NumField() {
+		field := decoded.Type().Field(idx)
+
+		name, embedded, visible := memberName(&field)
+		if !visible {
+			continue
+		}
+
+		if embedded {
+			required.walkMissing(values, decoded.Field(idx), prefix, found)
+
+			continue
+		}
+
+		// The order of members spelled differently is unknown (see
+		// foldedMembers), so a null among them is not taken to reset the
+		// ones it may come before.
+		resets := field.Type
+		if spellings[foldName(name)] {
+			resets = nil
+		}
+
+		held := settled(members[foldName(name)], resets)
+		path := joinFieldPath(prefix, name)
+
+		if required.has(decoded.Type(), &field) && len(held) == 0 && decoded.Field(idx).IsZero() {
+			found.add(path)
+		}
+
+		required.walkMissing(held, decoded.Field(idx), path, found)
+	}
+}
+
+// foldedMembers maps the folded name of every member of the objects among
+// values to the values of all its occurrences, in the order of the objects.
+// A field is filled from every member whose name is the field's ignoring
+// case, as encoding/json matches them, in turn, so those are the values the
+// field holds. A decoded object does not record the order of its members,
+// so the members one object spells differently, such as "inner" and
+// "Inner", are taken in the order of their names; the second result holds
+// the folded names some object spells so, whose order is therefore
+// unknown. Recording the order of every member would cost every document a
+// slice per object for what only a document repeating a member, which is
+// reported as such, can hold.
+func foldedMembers(values []any) (map[string][]any, map[string]bool) {
+	members := map[string][]any{}
+	spellings := map[string]bool{}
+
+	for _, value := range values {
+		held, ok := value.(object)
+		if !ok {
+			continue
+		}
+
+		spelled := map[string]bool{}
+
+		for _, key := range slices.Sorted(maps.Keys(held)) {
+			folded := foldName(key)
+			members[folded] = appendOccurrences(members[folded], held[key])
+
+			if spelled[folded] {
+				spellings[folded] = true
+			}
+
+			spelled[folded] = true
+		}
+	}
+
+	return members, spellings
+}
+
+// settled returns the occurrences of a member that decide what encoding/json
+// decodes into a value of the type, which decodes each occurrence in turn
+// into the value the ones before it left: a null sets a pointer, slice, map
+// or interface to nil, and an empty array sets a slice to a new empty one or
+// zeroes an array, discarding the occurrences before; any other null is
+// skipped, and every other occurrence decodes into what is there, so a
+// pointer, slice or map keeps what came before. For a nil type, every
+// occurrence but the nulls counts.
+func settled(values []any, typ reflect.Type) []any {
+	kind := reflect.Invalid
+	if typ != nil {
+		kind = typ.Kind()
+	}
+
+	last := -1
+
+	for idx, value := range values {
+		if resets(value, kind) {
+			last = idx
+		}
+	}
+
+	values = values[last+1:]
+	if !slices.ContainsFunc(values, isNull) {
+		return values
+	}
+
+	return slices.DeleteFunc(slices.Clone(values), isNull)
+}
+
+// resets reports whether decoding value discards what earlier occurrences
+// decoded into a value of the kind (see settled).
+func resets(value any, kind reflect.Kind) bool {
+	if value == nil {
+		return nullResetKinds&(1<<kind) != 0
+	}
+
+	items, isList := value.([]any)
+
+	return isList && len(items) == 0 && (kind == reflect.Slice || kind == reflect.Array)
+}
+
+// nullResetKinds holds a bit for each kind of value a null sets to nil.
+const nullResetKinds = 1<<reflect.Pointer | 1<<reflect.Slice | 1<<reflect.Map |
+	1<<reflect.Interface
+
+// isNull reports whether a member holds null.
+func isNull(member any) bool {
+	return member == nil
 }
 
 // HasField reports whether a member of the given name fills a field of the
@@ -238,7 +494,7 @@ type fieldFindings struct {
 }
 
 // unreadableDocument is the path reported when a walk or a scan cannot read
-// a document the decoder read, so that the check fails closed. Numbers are
+// document the decoder read, so that the check fails closed. Numbers are
 // kept as text, so this takes a document past what encoding/json reads at
 // all, which the decoder refuses first.
 const unreadableDocument = "(document)"
@@ -246,13 +502,82 @@ const unreadableDocument = "(document)"
 // errInvalidJSON reports a document that is not valid JSON.
 var errInvalidJSON = errors.New("invalid JSON")
 
-// decodeGeneric decodes a document into interface values. Numbers are kept
-// as text: they are never inspected, and one past the float64 range, which
-// a member the type does not know may carry without the typed decode
-// objecting, must not stop the walk and leave its findings unreported.
-func decodeGeneric(raw []byte) (any, error) {
+// object is a JSON object as decodeDocument reads it: each member name
+// mapped to its value, or, for a member the object repeats, to the values
+// of all its occurrences in document order, as repeated. A member that
+// occurs once, as nearly every member does, costs no more than in a decode
+// into interface values.
+type object map[string]any
+
+// repeated holds the values of all occurrences of a repeated member.
+type repeated []any
+
+// add records an occurrence of a member.
+func (members object) add(name string, value any) {
+	held, exists := members[name]
+
+	switch {
+	case !exists:
+		members[name] = value
+	case isRepeated(held):
+		members[name] = append(held.(repeated), value) //nolint:forcetypeassert // checked above
+	default:
+		members[name] = repeated{held, value}
+	}
+}
+
+// isRepeated reports whether a member's value holds several occurrences.
+func isRepeated(value any) bool {
+	_, ok := value.(repeated)
+
+	return ok
+}
+
+// appendOccurrences appends the occurrences a member's value holds.
+func appendOccurrences(occurrences []any, value any) []any {
+	if several, ok := value.(repeated); ok {
+		return append(occurrences, several...)
+	}
+
+	return append(occurrences, value)
+}
+
+// lastOccurrence returns the value of the last occurrence of a member.
+func lastOccurrence(value any) any {
+	if several, ok := value.(repeated); ok {
+		return several[len(several)-1]
+	}
+
+	return value
+}
+
+// memberValue returns the value of a member that fills a value of the type,
+// with the occurrences of a repeated one merged (see merged).
+func memberValue(value any, typ reflect.Type) any {
+	if several, ok := value.(repeated); ok {
+		return merged(several, typ)
+	}
+
+	return value
+}
+
+// decodeDocument decodes a document into interface values, an object as an
+// object, an array as []any, and every other value as json.Decoder.Token
+// returns it. Numbers are kept as text: they are never inspected, and one
+// past the float64 range, which a member the type does not know may carry
+// without the typed decode objecting, must not stop the walk and leave its
+// findings unreported.
+//
+// A member repeated within one object keeps every occurrence. encoding/json
+// decodes each of them in turn into the same field, and reuses the elements
+// of a list it decodes into again, so a member of an earlier occurrence can
+// fill the profile while a later occurrence replaces it in a decode into
+// interface values: a walk of that would miss what the decoder read.
+func decodeDocument(raw []byte) (any, error) {
 	// A decoder stops at the end of the first value, where json.Unmarshal
-	// refuses a document with anything but whitespace behind it.
+	// refuses a document with anything but whitespace behind it. A valid
+	// document nests no deeper than encoding/json allows, which bounds the
+	// recursion of readValue.
 	if !json.Valid(raw) {
 		return nil, errInvalidJSON
 	}
@@ -260,14 +585,159 @@ func decodeGeneric(raw []byte) (any, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 
-	var document any
+	return readValue(decoder)
+}
 
-	err := decoder.Decode(&document)
+// readValue reads the next value of the decoder, as decodeDocument
+// describes.
+func readValue(decoder *json.Decoder) (any, error) {
+	token, err := decoder.Token()
 	if err != nil {
 		return nil, err //nolint:wrapcheck // the callers only test for it
 	}
 
-	return document, nil
+	delim, isDelim := token.(json.Delim)
+	if !isDelim {
+		return token, nil
+	}
+
+	if delim == '{' {
+		members := object{}
+
+		for decoder.More() {
+			key, err := decoder.Token()
+			if err != nil {
+				return nil, err //nolint:wrapcheck // the callers only test for it
+			}
+
+			name, _ := key.(string)
+
+			value, err := readValue(decoder)
+			if err != nil {
+				return nil, err
+			}
+
+			members.add(name, value)
+		}
+
+		_, err = decoder.Token()
+
+		return members, err //nolint:wrapcheck // the callers only test for it
+	}
+
+	items := []any{}
+
+	for decoder.More() {
+		item, err := readValue(decoder)
+		if err != nil {
+			return nil, err
+		}
+
+		items = append(items, item)
+	}
+
+	_, err = decoder.Token()
+
+	return items, err //nolint:wrapcheck // the callers only test for it
+}
+
+// merged returns the occurrences of a repeated member that fills a value of
+// the type as one value holding every member and element any of them holds
+// that the decoder kept: objects are merged member by member, and lists
+// element by element, as the decoder reuses the elements of a list. Only
+// the occurrences that decide the value count (see settled), so those
+// before a null that resets the value are left out. Values of other kinds,
+// or of different kinds, are not merged; the last one stands for them.
+func merged(values []any, typ reflect.Type) any {
+	values = settled(values, typ)
+
+	switch {
+	case len(values) == 0:
+		return nil
+	case len(values) == 1:
+		return values[0]
+	}
+
+	switch values[len(values)-1].(type) {
+	case object:
+		return mergedObjects(values)
+	case []any:
+		return mergedLists(values, typ)
+	default:
+		return values[len(values)-1]
+	}
+}
+
+// mergedObjects is merged for objects, which keep every occurrence of every
+// member. The last value stands for values that are not all objects.
+func mergedObjects(values []any) any {
+	members := object{}
+
+	for _, value := range values {
+		held, ok := value.(object)
+		if !ok {
+			return values[len(values)-1]
+		}
+
+		for key, member := range held {
+			for _, occurrence := range appendOccurrences(nil, member) {
+				members.add(key, occurrence)
+			}
+		}
+	}
+
+	return members
+}
+
+// mergedLists is merged for lists of the type, merged element by element.
+// The last value stands for values that are not all lists.
+func mergedLists(values []any, typ reflect.Type) any {
+	elem, array := listElem(typ)
+
+	var elements [][]any
+
+	for _, value := range values {
+		items, ok := value.([]any)
+		if !ok {
+			return values[len(values)-1]
+		}
+
+		// An array zeroes the elements a shorter list leaves out (see
+		// itemsAt).
+		for idx := len(items); array && idx < len(elements); idx++ {
+			elements[idx] = elements[idx][:0]
+		}
+
+		for idx, item := range items {
+			if idx == len(elements) {
+				elements = append(elements, nil)
+			}
+
+			elements[idx] = append(elements[idx], item)
+		}
+	}
+
+	items := make([]any, len(elements))
+	for idx, occurrences := range elements {
+		items[idx] = merged(occurrences, elem)
+	}
+
+	return items
+}
+
+// listElem returns the element type of a list type, behind any pointers,
+// or nil for a type that is no list or for nil, and whether the type is an
+// array rather than a slice.
+func listElem(typ reflect.Type) (reflect.Type, bool) {
+	for typ != nil && typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+
+	if typ == nil || typ.Kind() != reflect.Slice && typ.Kind() != reflect.Array {
+		return nil, false
+	}
+
+	return typ.Elem(), typ.Kind() == reflect.Array
 }
 
 // walkFields walks a document against the target type. It reports false
@@ -277,7 +747,7 @@ func decodeGeneric(raw []byte) (any, error) {
 func walkFields(raw []byte, target reflect.Type) (*fieldFindings, bool) {
 	var found fieldFindings
 
-	document, err := decodeGeneric(raw)
+	document, err := decodeDocument(raw)
 	if err != nil {
 		return &found, false
 	}
@@ -324,26 +794,34 @@ func walkSliceItems(value any, typ reflect.Type, prefix string, found *fieldFind
 }
 
 func walkMapValues(value any, typ reflect.Type, prefix string, found *fieldFindings) {
-	object, ok := value.(map[string]any)
+	members, ok := value.(object)
 	if !ok {
 		return
 	}
 
-	for _, key := range slices.Sorted(maps.Keys(object)) {
-		walkUnknownFields(object[key], typ.Elem(), joinFieldPath(prefix, key), found)
+	// The value of a key is decoded afresh for each of its occurrences, so
+	// the last one is what the map holds.
+	for _, key := range slices.Sorted(maps.Keys(members)) {
+		walkUnknownFields(
+			lastOccurrence(members[key]), typ.Elem(), joinFieldPath(prefix, key), found,
+		)
 	}
 }
 
+// walkStructFields walks the members of an object against a struct type.
+// A member the object repeats is walked once, with its occurrences merged,
+// so that it is reported once however often it occurs, and so is every
+// member of every occurrence of it.
 func walkStructFields(value any, typ reflect.Type, prefix string, found *fieldFindings) {
-	object, ok := value.(map[string]any)
+	members, ok := value.(object)
 	if !ok {
 		return
 	}
 
 	fields := fieldsOf(typ)
 
-	for _, key := range slices.Sorted(maps.Keys(object)) {
-		fieldType, known, exact := fields.lookup(key)
+	for _, key := range slices.Sorted(maps.Keys(members)) {
+		field, known, exact := fields.lookup(key)
 		if !known {
 			found.unknown.addLazily(func() string { return joinFieldPath(prefix, key) })
 
@@ -353,10 +831,12 @@ func walkStructFields(value any, typ reflect.Type, prefix string, found *fieldFi
 		// The decoder reads the member, so what it holds is walked like
 		// any other; the name itself is what another reader drops.
 		if !exact {
-			found.misspelled.add(joinFieldPath(prefix, key))
+			found.misspelled.addWant(joinFieldPath(prefix, key), field.name)
 		}
 
-		walkUnknownFields(object[key], fieldType, joinFieldPath(prefix, key), found)
+		walkUnknownFields(
+			memberValue(members[key], field.typ), field.typ, joinFieldPath(prefix, key), found,
+		)
 	}
 }
 
@@ -496,19 +976,27 @@ func plainFieldName(name string) bool {
 // drops for a known one.
 type fieldSet struct {
 	exact  map[string]reflect.Type
-	folded map[string]reflect.Type
+	folded map[string]jsonField
 }
 
-// lookup returns the type of the field a member fills, whether one does,
-// and whether the member names it exactly rather than only ignoring case.
-func (set fieldSet) lookup(key string) (reflect.Type, bool, bool) {
+// jsonField is a field of a struct as a member name matches it.
+type jsonField struct {
+	// name is the JSON name of the field.
+	name string
+	// typ is the type of the field.
+	typ reflect.Type
+}
+
+// lookup returns the field a member fills, whether one does, and whether
+// the member names it exactly rather than only ignoring case.
+func (set fieldSet) lookup(key string) (jsonField, bool, bool) {
 	if fieldType, ok := set.exact[key]; ok {
-		return fieldType, true, true
+		return jsonField{name: key, typ: fieldType}, true, true
 	}
 
-	fieldType, ok := set.folded[foldName(key)]
+	field, ok := set.folded[foldName(key)]
 
-	return fieldType, ok, false
+	return field, ok, false
 }
 
 // fieldSets holds the field set of every struct type asked for, by type. A
@@ -538,7 +1026,7 @@ func fieldsOf(typ reflect.Type) fieldSet {
 // struct itself wins over a promoted field of the same name, so promoted
 // fields are added last.
 func jsonFields(typ reflect.Type) fieldSet {
-	set := fieldSet{exact: map[string]reflect.Type{}, folded: map[string]reflect.Type{}}
+	set := fieldSet{exact: map[string]reflect.Type{}, folded: map[string]jsonField{}}
 
 	var embedded []reflect.Type
 
@@ -576,7 +1064,7 @@ func (set fieldSet) add(name string, fieldType reflect.Type) {
 	}
 
 	set.exact[name] = fieldType
-	set.folded[foldName(name)] = fieldType
+	set.folded[foldName(name)] = jsonField{name: name, typ: fieldType}
 }
 
 func (set fieldSet) addPromoted(embedded reflect.Type) {

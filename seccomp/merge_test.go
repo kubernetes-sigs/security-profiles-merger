@@ -3710,3 +3710,56 @@ func TestIntersectCommutesForEquivalentSpellings(t *testing.T) {
 	checkMergeSafety(t, intersectSafety(), left, right, true)
 	checkMergeSafety(t, unionSafety(), left, right, true)
 }
+
+// TestMergesReportEveryBadInput covers inputs failing Validate: the merges
+// check every input and report each that fails as an InputError, joined in
+// input order, so errors.As finds the first and unwrapping reaches all.
+func TestMergesReportEveryBadInput(t *testing.T) {
+	t.Parallel()
+
+	good := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
+	badAction := &specs.LinuxSeccomp{DefaultAction: "SCMP_ACT_BOGUS"}
+	badArch := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActErrno, Architectures: []specs.Arch{"SCMP_ARCH_BOGUS"},
+	}
+
+	for name, mergeFn := range map[string]func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error){
+		"Intersect": seccomp.Intersect,
+		"Union":     seccomp.Union,
+	} {
+		_, err := mergeFn(badAction, good, badArch, nil)
+
+		checkInputErrors(t, name, err, []int{0, 2, 3},
+			[]error{seccomp.ErrUnknownAction, seccomp.ErrUnknownArch, seccomp.ErrNilProfile})
+	}
+}
+
+// checkInputErrors checks that err joins one InputError per index, in that
+// order, each matching its sentinel, and that errors.As finds the first.
+func checkInputErrors(t *testing.T, name string, err error, indices []int, sentinels []error) {
+	t.Helper()
+
+	var first *seccomp.InputError
+	if !errors.As(err, &first) || first.Index != indices[0] {
+		t.Fatalf("%s: errors.As = %v, want the InputError of input %d", name, err, indices[0])
+	}
+
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		t.Fatalf("%s: %v joins no errors", name, err)
+	}
+
+	errs := joined.Unwrap()
+	if len(errs) != len(indices) {
+		t.Fatalf("%s: %d errors, want %d: %v", name, len(errs), len(indices), err)
+	}
+
+	for idx, each := range errs {
+		var inputErr *seccomp.InputError
+		if !errors.As(each, &inputErr) || inputErr.Index != indices[idx] ||
+			!errors.Is(inputErr, sentinels[idx]) {
+			t.Errorf("%s: error %d = %v, want input %d with %v",
+				name, idx, each, indices[idx], sentinels[idx])
+		}
+	}
+}

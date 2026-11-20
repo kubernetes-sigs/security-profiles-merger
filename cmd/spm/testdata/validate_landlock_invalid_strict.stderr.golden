@@ -1,0 +1,6 @@
+error: testdata/landlock_invalid_strict.json: handledAccessFs[1]: "read_file": duplicate access right (also at handledAccessFs[0])
+error: testdata/landlock_invalid_strict.json: pathRules[2].path: "//etc": duplicate rule (also at pathRules[0].path)
+error: testdata/landlock_invalid_strict.json: pathRules[1].path: "bin/sh": relative path (must be absolute)
+error: testdata/landlock_invalid_strict.json: pathRules[1].accessFs[0]: "write_file": rule grants unhandled access right
+error: testdata/landlock_invalid_strict.json: pathRules[2].accessFs: rule grants no access right (path "//etc")
+error: testdata/landlock_invalid_strict.json: netRules[0].accessNet[0]: "connect_tcp": rule grants unhandled access right
