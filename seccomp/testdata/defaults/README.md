@@ -81,3 +81,26 @@ rule as a masked comparison.
 masked `clone` clause alone, `setns` left to its first unconditional entry,
 and one `socket` clause allowing every address family but AF_VSOCK in place
 of the four `socket` entries. Every other entry is unchanged.
+
+### Why socket is restated this way
+
+The restatement drops two `ERRNO` rules of the CRI-O default. AF_VSOCK then
+gets the default's errno (ENOSYS) instead of EPERM, and AF_NETLINK with
+NETLINK_AUDIT is allowed instead of failing with EINVAL. That EINVAL rule
+was for compatibility: it lets libaudit treat audit as absent instead of
+failing later with EPERM.
+[containers/common#421](https://github.com/containers/common/pull/421)
+found that an unconditional `ALLOW` had hidden it for years, so dropping it
+changes little.
+
+The complement pair `ERRNO a0 == AF_VSOCK` plus `ALLOW a0 != AF_VSOCK`,
+which would keep EPERM for AF_VSOCK, is a safe shape on x86_64 and aarch64
+but not where `socket` goes through `socketcall`: libseccomp copies both
+rules to the multiplexer with the same filter and different results and
+refuses the second, so `ValidateArtifact` reports the pair where the
+profile covers such an architecture, and `Intersect` drops x86 from the
+list of an x86_64 node and denies `socket` on ppc64le and s390x.
+
+The Moby and containerd defaults state their `socket` rules as one range
+and single-value equalities on the first argument, all `ALLOW`, which pass
+as they are.

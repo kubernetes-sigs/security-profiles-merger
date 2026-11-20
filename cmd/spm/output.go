@@ -419,31 +419,35 @@ type tempFile interface {
 // writeTempFile sets the mode of the new file, writes and syncs content,
 // and closes the file, which it does whether or not anything failed.
 func writeTempFile(temp tempFile, content []byte) error {
+	err := fillTempFile(temp, content)
+	closeErr := temp.Close()
+
+	switch {
+	case err != nil:
+		return err
+	case closeErr != nil:
+		return fmt.Errorf("close: %w", bareFileError(closeErr))
+	default:
+		return nil
+	}
+}
+
+// fillTempFile is writeTempFile up to closing the file.
+func fillTempFile(temp tempFile, content []byte) error {
 	err := chmodOutput(temp)
 	if err != nil {
-		_ = temp.Close()
-
 		return fmt.Errorf("setting permissions: %w", err)
 	}
 
 	_, err = temp.Write(content)
 	if err != nil {
-		_ = temp.Close()
-
 		return fmt.Errorf("write: %w", bareFileError(err))
 	}
 
 	// The rename must not become visible before the data it points at.
 	err = temp.Sync()
 	if err != nil {
-		_ = temp.Close()
-
 		return fmt.Errorf("sync: %w", bareFileError(err))
-	}
-
-	err = temp.Close()
-	if err != nil {
-		return fmt.Errorf("close: %w", bareFileError(err))
 	}
 
 	return nil

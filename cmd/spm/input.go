@@ -28,6 +28,7 @@ import (
 	"strconv"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/internal/strictjson"
 )
 
 const (
@@ -49,37 +50,39 @@ var (
 	errNoWriter       = errors.New("FIFO has no writer (nothing was written)")
 )
 
-// The inputs past the limits (see limitError).
+// The inputs past the limits (see inputLimitError).
 var (
-	errTooManyFiles  = newLimitError("too many input files (max %d)", maxInputFiles)
-	errTooManyStdin  = newLimitError("too many profiles on stdin (max %d)", maxInputFiles)
-	errTooManyInputs = newLimitError(
+	errTooManyFiles  = newInputLimitError("too many input files (max %d)", maxInputFiles)
+	errTooManyStdin  = newInputLimitError("too many profiles on stdin (max %d)", maxInputFiles)
+	errTooManyInputs = newInputLimitError(
 		"too many profiles (max %d, counting each element of a stdin array and each file)",
 		maxInputFiles,
 	)
-	errStdinTooLarge = newLimitError("stdin input exceeds %d bytes", maxInputSize)
-	errFileTooLarge  = newLimitError("file exceeds %d byte limit", maxInputSize)
-	errInputTooLarge = newLimitError("inputs exceed %d bytes in total", maxTotalInputSize)
+	errStdinTooLarge = newInputLimitError("stdin input exceeds %d bytes", maxInputSize)
+	errFileTooLarge  = newInputLimitError("file exceeds %d byte limit", maxInputSize)
+	errInputTooLarge = newInputLimitError("inputs exceed %d bytes in total", maxTotalInputSize)
 )
 
-// limitError is an input past the limits. Such an input ends the run before
-// any input is checked, and exits like every other usage error whatever the
-// other inputs hold, so that the exit code does not depend on which of them
-// were read before it: it was never read, so nothing about it is known to
-// be wrong, and reading on would hold more in memory than the limits allow.
-type limitError struct {
+// inputLimitError is an input past the limits of the command, distinct
+// from merge.LimitError, a profile past an artifact limit. Such an input
+// ends the run before any input is checked, and exits like every other
+// usage error whatever the other inputs hold, so that the exit code does
+// not depend on which of them were read before it: it was never read, so
+// nothing about it is known to be wrong, and reading on would hold more in
+// memory than the limits allow.
+type inputLimitError struct {
 	text string
 }
 
-func newLimitError(format string, bound int) *limitError {
-	return &limitError{text: fmt.Sprintf(format, bound)}
+func newInputLimitError(format string, bound int) *inputLimitError {
+	return &inputLimitError{text: fmt.Sprintf(format, bound)}
 }
 
-func (e *limitError) Error() string { return e.text }
+func (e *inputLimitError) Error() string { return e.text }
 
-// isLimitError reports whether err is an input past the limits.
-func isLimitError(err error) bool {
-	var limit *limitError
+// isInputLimitError reports whether err is an input past the limits.
+func isInputLimitError(err error) bool {
+	var limit *inputLimitError
 
 	return errors.As(err, &limit)
 }
@@ -168,7 +171,7 @@ func (input *profileInput) position(offset int64) string {
 // with its failure (see profileInput.err), and the others are still read.
 // Every error it returns is a usage error: file arguments that cannot be
 // meant, which are refused before anything is read (see checkPaths), or an
-// input past the limits (see limitError).
+// input past the limits (see inputLimitError).
 func readInputs(paths []string, stdin io.Reader) ([]profileInput, error) {
 	if len(paths) == 0 {
 		return readFromStdin(stdin)
@@ -248,7 +251,7 @@ func readFileInput(path string) (profileInput, error) {
 	data, err := readFileWithLimit(path)
 
 	switch {
-	case isLimitError(err):
+	case isInputLimitError(err):
 		return profileInput{}, fmt.Errorf("reading %s: %w", merge.SafeName(path), err)
 	case err != nil:
 		return failedInput(path, err), nil
@@ -385,9 +388,6 @@ func bareFileError(err error) error {
 	return err
 }
 
-// jsonSpace holds the bytes JSON allows between tokens.
-const jsonSpace = " \t\r\n"
-
 // readFromStdin reads the profiles on stdin: the elements of a JSON array,
 // or a single profile. Stdin that cannot be read, or holds nothing, or an
 // array that does not parse, is returned as the one input stdin brings,
@@ -414,7 +414,7 @@ func readFromStdin(reader io.Reader) ([]profileInput, error) {
 	// Anything that does not open an array is a single document. That
 	// includes null, which decodes into a slice as no elements at all and
 	// would otherwise read as no input rather than as the document it is.
-	if !bytes.HasPrefix(bytes.TrimLeft(data, jsonSpace), []byte("[")) {
+	if !bytes.HasPrefix(bytes.TrimLeft(data, strictjson.Space), []byte("[")) {
 		return []profileInput{newInput(stdinName, data)}, nil
 	}
 
@@ -457,110 +457,46 @@ func readStdinArray(data []byte) ([]profileInput, error) {
 
 // splitArray returns the elements of a JSON array that is known to be
 // valid, each as the bytes it spans in data, named by its index and placed
-// at its offset in the array. It walks the array once, following only
-// strings and nesting, and decodes nothing: the elements are decoded one by
-// one later, each as the profile it is. The count is checked before each
-// element is kept, so that an array of more elements than the bound is
-// refused without holding them.
+// at its offset in the array. The decoder walks each element without
+// building a value: the elements are decoded one by one later, each as the
+// profile it is. The count is checked before each element is read, so that
+// an array of more elements than the bound is refused without holding them.
 func splitArray(data []byte) ([]profileInput, error) {
-	split := arraySplitter{
-		data: data, result: nil, depth: 0, start: -1, inString: false, escaped: false,
+	decoder := json.NewDecoder(bytes.NewReader(data))
+
+	// The opening bracket.
+	_, err := decoder.Token()
+	if err != nil {
+		return nil, err
 	}
 
-	for idx, char := range data {
-		if split.inString {
-			split.inStringByte(char)
+	var (
+		result  []profileInput
+		element json.RawMessage
+	)
 
-			continue
+	for decoder.More() {
+		if len(result) == maxInputFiles {
+			return nil, errTooManyStdin
 		}
 
-		err := split.step(idx, char)
+		err = decoder.Decode(&element)
 		if err != nil {
 			return nil, err
 		}
+
+		end := int(decoder.InputOffset())
+		start := end - len(element)
+
+		result = append(result, profileInput{
+			name:    stdinName + "[" + strconv.Itoa(len(result)) + "]",
+			data:    data[start:end],
+			source:  data,
+			offset:  start,
+			inArray: true,
+			err:     nil,
+		})
 	}
 
-	return split.result, nil
-}
-
-// arraySplitter is where splitArray is in the array it walks.
-type arraySplitter struct {
-	data   []byte
-	result []profileInput
-	// depth counts the arrays and objects the walk is in, the array split
-	// included, and start is where the element being walked starts, or -1
-	// between elements.
-	depth int
-	start int
-	// inString reports a walk inside a string, and escaped one just past
-	// a backslash in it.
-	inString, escaped bool
-}
-
-// inStringByte follows a byte inside a string to the quote that ends it.
-func (split *arraySplitter) inStringByte(char byte) {
-	switch {
-	case split.escaped:
-		split.escaped = false
-	case char == '\\':
-		split.escaped = true
-	case char == '"':
-		split.inString = false
-	}
-}
-
-// step follows the byte at idx outside a string, keeping an element where a
-// comma of the array or its closing bracket ends one.
-func (split *arraySplitter) step(idx int, char byte) error {
-	switch char {
-	case ' ', '\t', '\r', '\n':
-		return nil
-	case '"':
-		split.inString = true
-	case '[', '{':
-		split.depth++
-		if split.depth == 1 {
-			// The bracket of the array itself.
-			return nil
-		}
-	case ']', '}':
-		split.depth--
-		if split.depth == 0 {
-			return split.keep(idx)
-		}
-	case ',':
-		if split.depth == 1 {
-			return split.keep(idx)
-		}
-	}
-
-	if split.start < 0 {
-		split.start = idx
-	}
-
-	return nil
-}
-
-// keep keeps the element that ends before end, if one started, after
-// checking the count.
-func (split *arraySplitter) keep(end int) error {
-	if split.start < 0 {
-		return nil
-	}
-
-	if len(split.result) == maxInputFiles {
-		return errTooManyStdin
-	}
-
-	split.result = append(split.result, profileInput{
-		name:    stdinName + "[" + strconv.Itoa(len(split.result)) + "]",
-		data:    bytes.TrimRight(split.data[split.start:end], jsonSpace),
-		source:  split.data,
-		offset:  split.start,
-		inArray: true,
-		err:     nil,
-	})
-	split.start = -1
-
-	return nil
+	return result, nil
 }

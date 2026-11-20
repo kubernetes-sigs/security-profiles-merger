@@ -1072,6 +1072,9 @@ func dropUnusablePaths(paths []string, matchers *matcherCache) []string {
 	unusable := func(path string) bool {
 		matcher := matchers.matcher(path)
 
+		// The merge validates its inputs first, which refuses a relative
+		// path, so this keeps every literal there. It stays as a defensive
+		// check: a relative literal names no file.
 		if matcher.kind == kindLiteral {
 			return matcher.relativeLiteral()
 		}

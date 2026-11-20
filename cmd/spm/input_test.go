@@ -165,6 +165,96 @@ func TestReadFromStdinArraySplitsAtItsOwnCommas(t *testing.T) {
 	}
 }
 
+// TestSplitArrayEdgeCases pins the elements splitArray returns, with the
+// offset of each in the array, for elements whose bytes a walk of the array
+// could misread: strings holding brackets, commas, escaped quotes and
+// escaped backslashes, whitespace of every kind, null, numbers, nested
+// values and bytes that are not valid UTF-8.
+func TestSplitArrayEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	type element struct {
+		data   string
+		offset int
+	}
+
+	for _, test := range []struct {
+		name  string
+		array string
+		want  []element
+	}{
+		{name: "empty", array: "[]", want: nil},
+		{name: "empty with space", array: " [ \t\r\n ] ", want: nil},
+		{name: "null", array: "[null]", want: []element{{"null", 1}}},
+		{
+			name:  "numbers",
+			array: "[0,-1.5e3 ,\t2E-2\n]",
+			want:  []element{{"0", 1}, {"-1.5e3", 3}, {"2E-2", 12}},
+		},
+		{
+			name:  "brackets and commas in strings",
+			array: `["]",",","[{","}"]`,
+			want:  []element{{`"]"`, 1}, {`","`, 5}, {`"[{"`, 9}, {`"}"`, 14}},
+		},
+		{
+			name:  "escaped quote and backslash",
+			array: `["\"]",  "\\", "\\\"]"]`,
+			want:  []element{{`"\"]"`, 1}, {`"\\"`, 9}, {`"\\\"]"`, 15}},
+		},
+		{
+			name:  "nested",
+			array: `[{"a":[1,{"b":"]"}]},[[],{}],{}]`,
+			want:  []element{{`{"a":[1,{"b":"]"}]}`, 1}, {`[[],{}]`, 21}, {`{}`, 29}},
+		},
+		{
+			name:  "invalid UTF-8",
+			array: "[\"\xff\xfe\", {\"\xc3\":\"]\"}]",
+			want:  []element{{"\"\xff\xfe\"", 1}, {"{\"\xc3\":\"]\"}", 7}},
+		},
+		{
+			name:  "space around elements",
+			array: "\n [\r\n{}\t,\n  {\"a\" : 1 } \n]\n",
+			want:  []element{{"{}", 5}, {`{"a" : 1 }`, 12}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			inputs, err := splitArray([]byte(test.array))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var got []element
+
+			for idx, input := range inputs {
+				if want := "stdin[" + strconv.Itoa(
+					idx,
+				) + "]"; input.name != want ||
+					!input.inArray {
+					t.Errorf(
+						"input %d = %q, inArray %v, want %q in the array",
+						idx,
+						input.name,
+						input.inArray,
+						want,
+					)
+				}
+
+				if string(input.source) != test.array {
+					t.Errorf("%s: source is not the array", input.name)
+				}
+
+				got = append(got, element{string(input.data), input.offset})
+			}
+
+			if !slices.Equal(got, test.want) {
+				t.Errorf("elements = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 // TestReadFromStdinArrayErrorOrder covers a stdin array past the bound that
 // also does not parse: the syntax is checked before anything is counted, so
 // the syntax error is reported wherever it sits, the same on either side of
@@ -505,7 +595,7 @@ func TestReadInputsCountsStdinArrayElements(t *testing.T) {
 		`{"defaultAction":"SCMP_ACT_ERRNO"}]`
 
 	_, err := readInputs([]string{stdinArg, file}, strings.NewReader(array))
-	if !errors.Is(err, errTooManyInputs) || !isLimitError(err) {
+	if !errors.Is(err, errTooManyInputs) || !isInputLimitError(err) {
 		t.Fatalf("error = %v, want %v, a limit", err, errTooManyInputs)
 	}
 

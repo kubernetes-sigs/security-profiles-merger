@@ -475,7 +475,8 @@ func TestProblems(t *testing.T) {
 }
 
 // foreignListError lists failures the way a report does, but is no type of
-// this module, so Problems keeps it whole.
+// this module, so Problems keeps it whole. FailureReport is a decoy: it is
+// the marker method reports once had, and Problems must not go by a method.
 type foreignListError struct{ errs []error }
 
 func (f foreignListError) Error() string   { return "foreign" }
@@ -638,6 +639,22 @@ func TestAppArmorValidateBaseline(t *testing.T) {
 	}
 }
 
+// decoded is what a DecodeArtifact returned: whether it gave a profile, and
+// its error.
+type decoded struct {
+	ok  bool
+	err error
+}
+
+// decodedBy adapts the DecodeArtifact of any package to one signature.
+func decodedBy[T any](decode func([]byte) (*T, error)) func(string) decoded {
+	return func(doc string) decoded {
+		profile, err := decode([]byte(doc))
+
+		return decoded{ok: profile != nil, err: err}
+	}
+}
+
 // TestDecodeArtifact checks the decode helper of each package: a document
 // that decodes and validates comes back as a profile, one UnmarshalStrict
 // refuses fails as it does, and one ValidateArtifact refuses fails as that
@@ -645,31 +662,10 @@ func TestAppArmorValidateBaseline(t *testing.T) {
 func TestDecodeArtifact(t *testing.T) {
 	t.Parallel()
 
-	type decoded struct {
-		ok  bool
-		err error
-	}
-
-	seccompDecode := func(doc string) decoded {
-		profile, err := seccomp.ForArch(specs.ArchX86_64).DecodeArtifact([]byte(doc))
-
-		return decoded{ok: profile != nil, err: err}
-	}
-	apparmorDecode := func(doc string) decoded {
-		profile, err := apparmor.DecodeArtifact([]byte(doc))
-
-		return decoded{ok: profile != nil, err: err}
-	}
-	landlockDecode := func(doc string) decoded {
-		profile, err := landlock.DecodeArtifact([]byte(doc))
-
-		return decoded{ok: profile != nil, err: err}
-	}
-	landlockV1Decode := func(doc string) decoded {
-		profile, err := landlock.Options{ABI: landlock.ABIV1}.DecodeArtifact([]byte(doc))
-
-		return decoded{ok: profile != nil, err: err}
-	}
+	seccompDecode := decodedBy(seccomp.ForArch(specs.ArchX86_64).DecodeArtifact)
+	apparmorDecode := decodedBy(apparmor.DecodeArtifact)
+	landlockDecode := decodedBy(landlock.DecodeArtifact)
+	landlockV1Decode := decodedBy(landlock.Options{ABI: landlock.ABIV1}.DecodeArtifact)
 
 	for _, testCase := range []struct {
 		name   string

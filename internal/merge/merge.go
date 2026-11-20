@@ -162,11 +162,7 @@ func IntersectSlice[T comparable](left, right []T) []T {
 		}
 	}
 
-	if len(result) == 0 {
-		return nil
-	}
-
-	return result
+	return NilIfEmpty(result)
 }
 
 // UnionSlice returns the elements of left and then of right, each once.

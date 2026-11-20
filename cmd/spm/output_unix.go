@@ -33,8 +33,10 @@ import (
 // where the platform has it.
 const oNoFollow = syscall.O_NOFOLLOW
 
-// oNonBlock makes opening an output file that should be a regular file
-// return at once where it has turned into a FIFO meanwhile.
+// oNonBlock makes opening a file return at once where it is a FIFO, which
+// would otherwise wait for its other end: an input, which is read only if a
+// writer has it open already (see setBlocking), and an output file that
+// should be a regular file but has turned into a FIFO meanwhile.
 const oNonBlock = syscall.O_NONBLOCK
 
 // refuseSymlinks is true where a symlink at the --output path is refused.

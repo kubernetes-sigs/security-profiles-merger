@@ -306,15 +306,11 @@ func reportMergeFailure(err error, count int, report *inputReport, stderr io.Wri
 // at its position among count, and reports whether it held one, and the
 // line saying how many failures the merge left out, if it left any out.
 func recordInputErrors(err error, count int, report *inputReport) (bool, string) {
-	errs := []error{err}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		errs = joined.Unwrap()
-	}
-
 	recorded, omitted := false, ""
 
-	for _, each := range errs {
-		if errors.Is(each, spm.ErrMoreProblems) && !isInputError(each) {
+	for _, each := range spm.Problems(err) {
+		//nolint:err113,errorlint // Problems lists the sentinel itself
+		if each == spm.ErrMoreProblems {
 			lines := strings.Split(err.Error(), "\n")
 			omitted = lines[len(lines)-1]
 
@@ -330,13 +326,6 @@ func recordInputErrors(err error, count int, report *inputReport) (bool, string)
 	}
 
 	return recorded, omitted
-}
-
-// isInputError reports whether err is an spm.InputError.
-func isInputError(err error) bool {
-	var inputErr *spm.InputError
-
-	return errors.As(err, &inputErr)
 }
 
 // inputFailure returns the index of the input a merge failure names and the

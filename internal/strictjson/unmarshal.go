@@ -29,8 +29,8 @@ import (
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
-// jsonSpace holds the bytes JSON allows between tokens.
-const jsonSpace = " \t\r\n"
+// Space holds the bytes JSON allows between tokens.
+const Space = " \t\r\n"
 
 // Unmarshal decodes one JSON document into target and refuses what
 // encoding/json accepts silently: a byte that is not valid UTF-8
@@ -171,7 +171,7 @@ func syntaxError(data []byte, err error) error {
 // json.Unmarshal and earlier releases count it, and PathAt reads the offset
 // as a position in data.
 func decodeFirst[T any](data []byte, target *T) (Hint, *json.Decoder, error) {
-	trimmed := bytes.TrimLeft(data, jsonSpace)
+	trimmed := bytes.TrimLeft(data, Space)
 	lead := int64(len(data) - len(trimmed))
 
 	decoder := json.NewDecoder(bytes.NewReader(trimmed))
@@ -222,7 +222,7 @@ func shiftOffset(err error, lead int64) error {
 // do; it asks for an object rather than against null, so that it holds
 // whatever the decoder accepted.
 func RequireObject(data []byte) error {
-	if !bytes.HasPrefix(bytes.TrimLeft(data, jsonSpace), []byte("{")) {
+	if !bytes.HasPrefix(bytes.TrimLeft(data, Space), []byte("{")) {
 		return spm.ErrNotAnObject
 	}
 

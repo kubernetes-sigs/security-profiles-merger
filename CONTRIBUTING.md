@@ -197,27 +197,28 @@ What `make help` does not say:
   as it is in CI.
 
 `make verify` runs `verify-coverage` (the test suite with the race detector,
-then the coverage floor), `lint`, `vet-arch` (`go vet` for the Linux
-architectures the tests run on besides amd64), `build`, `verify-go-floor`
-(go.mod's go line is exactly `GO_FLOOR`), `verify-tidy`, `verify-mdtoc`,
-`verify-golden`, `verify-syscalls`, `verify-dependencies`, `govulncheck` and
-`lint-actions` in one command, with the Go on your `PATH`. These CI jobs
-need something the Makefile does not install or a machine it does not have:
+then the coverage floor), `lint` (also for the files of `cmd/spm` for
+Windows, macOS and NetBSD), `vet-arch` (`go vet` for the Linux architectures
+the tests run on besides amd64, and for the BSDs), `build`,
+`verify-go-floor` (go.mod's go line is exactly `GO_FLOOR`), `verify-tidy`,
+`verify-mdtoc`, `verify-golden`, `verify-syscalls`, `verify-dependencies`,
+`govulncheck`, `lint-actions` and `test-api-check` in one command, with
+the Go on your `PATH`. These CI jobs need something the Makefile does not
+install or a machine it does not have:
 
 | CI job | Local equivalent | Needs |
 |--------|------------------|-------|
 | `verify` (typos step) | `typos` | [crate-ci/typos](https://github.com/crate-ci/typos) |
 | `snapshot` | `goreleaser release --snapshot --skip=sign --clean` | goreleaser and syft |
-| `lint` (second run) | `GOOS=windows golangci-lint run ./cmd/...` | nothing more; it lints the files of `cmd/spm` for hosts that are not Unix |
 | `test / macos-latest / floor go`, `test / macos-latest / release go`, `test / windows-latest / floor go`, `test / windows-latest / release go` | `go test -count=1 ./...` | a macOS or Windows machine, and for `release go` the Go in `.go-version` |
 | `test / linux-386` | `GOARCH=386 CGO_ENABLED=0 make test-wall-clock` | nothing more on amd64, and a machine that runs little else |
 | `test / linux-arm64` | `CGO_ENABLED=0 go test -count=1 ./...` | an arm64 machine |
-| `test / linux-<arch> (qemu)` | `GOARCH=<arch> CGO_ENABLED=0 go test -short -count=1 ./...` | qemu-user with binfmt_misc for s390x, ppc64le or arm |
-| `vet / <os>-<arch>` | `GOOS=<os> GOARCH=<arch> go vet ./...` | nothing more |
+| `test / linux-<arch> (qemu)` | `GOARCH=<arch> CGO_ENABLED=0 go test -count=1 ./...` | qemu-user with binfmt_misc for s390x, ppc64le or arm |
 | `test / release go` | `make test-wall-clock` (the suite one package at a time, with the wall-clock bounds on) | the Go in `.go-version`, and a machine that runs little else |
 | `fuzz / <target>` | `make fuzz` | time |
 | `test-libseccomp / <version>`, `test-libseccomp / 2.6.1 / <arch>` | `make test-libseccomp`, then `SPM_LIBSECCOMP_OPTIMIZE=2 make test-libseccomp` | cgo and that libseccomp version, built for arm64 or for 386 (`GOARCH=386 CC="gcc -m32"`) |
-| `api / gorelease` | `make api-report` | a clean working tree; the job only reports |
+| `test / runtime` | `make test-runtime` | Linux with Landlock, runc or crun, strace and unprivileged user namespaces; without them the tests skip |
+| `api / gorelease` | `make api-report` | a clean working tree; it fails on an incompatible change only from v1.0.0 on |
 | `apparmor-parser` | `go test -count=1 -tags apparmor_parser -run TestTranslationAgreesWithApparmorParser ./apparmor/` | `apparmor_parser` on `PATH` or named by `SPM_APPARMOR_PARSER` |
 
 ### Golden files
@@ -247,8 +248,8 @@ absolute paths, no output that depends on the architecture. The diff cases pass
 ## How the merge semantics are checked
 
 Every merge semantic rests on one claim: that a profile is loaded the way the
-runtime loads it. Three layers of test hold that claim up, and a change to the
-merge should keep all three passing:
+runtime loads it. Four layers of test hold that claim up, and a change to the
+merge should keep all four passing:
 
 - The per-package unit tests cover the documented behavior of each function,
   and the golden tests in `cmd/spm/golden_test.go` cover the CLI output.
@@ -283,6 +284,14 @@ merge should keep all three passing:
   native architecture that calls every syscall directly; the merge
   differentials run there as everywhere. libseccomp 2.5.2 is left out (see
   [below](#seccomp-architectures-and-libseccomp-releases)).
+- `make test-runtime` (`internal/runtimetest`, behind the `runtime` tag)
+  checks a handful of results against what is really loaded: Landlock
+  intersections applied by the kernel as one ruleset against their inputs
+  stacked as two, in a child process per case, including moves and links
+  across directories and a lowered rule path on a symlink, and seccomp
+  results run through runc and crun, including the flags each loads a
+  filter with when `"flags": []` is kept or dropped. Bind mounts are left
+  to the documentation.
 
 ### seccomp architectures and libseccomp releases
 

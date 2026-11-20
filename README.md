@@ -51,9 +51,11 @@ This library provides core operations on security profiles:
 | Audience | Start here |
 |----------|------------|
 | Runtime integrators | [docs/integration.md](docs/integration.md): who is trusted, the runtime flow, limits, errors, what each model leaves out |
+| Security Profiles Operator maintainers | [Combining recordings](docs/integration.md#combining-recordings-union): input order, the node's architecture, what can fail |
 | Security reviewers | [Guarantees and limits of the model](docs/integration.md#guarantees-and-limits-of-the-model) |
 | Go callers | [docs/api.md](docs/api.md), an index of each package, and the [Go documentation](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger), the source of truth for behavior |
 | Command-line users | [docs/cli.md](docs/cli.md) |
+| Callers upgrading from v0.7 | [docs/migration.md](docs/migration.md) |
 | Contributors | [CONTRIBUTING.md](CONTRIBUTING.md) and [RELEASE.md](RELEASE.md) |
 
 ## Installation
@@ -115,9 +117,9 @@ and `Diff` functions, and a `String` method on its diff type;
 packages' profile types have a `String` method. `ValidateArtifact` runs the
 checks a runtime applies to an artifact, a profile it did not author
 ([KEP-6061](https://github.com/kubernetes/enhancements/issues/6061)), and
-`DecodeArtifact` decodes one strictly and runs them in one call. `seccomp`
-and `apparmor` add `ValidateBaseline`, the check of a baseline at config
-load, and `apparmor.QuotePath` spells a path for a rendered rule.
+`DecodeArtifact` decodes one strictly and runs them in one call.
+`ValidateBaseline` is the check of a baseline at config load, and
+`apparmor.QuotePath` spells a path for a rendered rule.
 `seccomp.Options` and `landlock.Options` name the node a call is for: its
 native architecture and its Landlock ABI version.
 
@@ -142,7 +144,9 @@ confined to minor releases (`v0.X.0`) and called out in the release notes,
 and patch releases never break callers. A change to merge results, or one
 that rejects input an earlier release accepted, also makes the release a
 minor one, even when it corrects a semantic that was wrong about what a
-runtime loads. From v1.0.0 on:
+runtime loads; [docs/migration.md](docs/migration.md) lists the breaks since
+v0.7.1. From v1.0.0 on, CI refuses an incompatible Go API change within a
+major version ([RELEASE.md](RELEASE.md#compatibility-checks)), and:
 
 - **The Go API** (exported names, signatures, the JSON shape of `Profile`
   types) changes incompatibly only in a major release.
@@ -161,12 +165,18 @@ runtime loads. From v1.0.0 on:
   budgets may change in a minor release, raised or lowered. `MaxPathLen`
   follows the kernel and does not change.
 - **Error text** may change in any release. Dispatch on the sentinels with
-  `errors.Is` and on `InputError` with `errors.As`, which only a major
-  release removes or renames; a release may add sentinels, and an error may
-  match additional ones.
+  `errors.Is`, and on the typed errors, `InputError` and
+  `landlock.ResultError`, with `errors.As`, which only a major release
+  removes or renames; a release may add sentinels, and an error may match
+  additional ones.
 - **Diff JSON** keeps its field names and shape within a major release, and
   a minor release may add fields. `seccomp.FormatProfile` and the `String`
   methods are for people and may change in any release.
+- **The `spm` command** follows the Go API: its flags, exit codes and the
+  JSON it writes change incompatibly only in a major release, a minor
+  release may add flags and JSON fields, and its validation and merge
+  results change as the library's do. Its messages and `--format human`
+  output are for people and may change in any release.
 - **`landlock.LatestABIVersion`** rises in a minor release when the package
   learns the rights of a newer Landlock ABI, which adds rights `Validate`
   accepts and constants for them.
@@ -176,9 +186,10 @@ runtime loads. From v1.0.0 on:
   follows the Go releases the Go team supports.
 - **No `context.Context`.** No function takes one, since every merge is
   bounded by budgets of its own rather than by its caller. A cancellable
-  variant would be added beside the current functions, for example as
-  methods taking a context on the `Options` types, so adding it breaks no
-  caller. Until then, bound how long a caller waits as
+  variant would be added beside the current functions as methods taking a
+  context on the `Options` types: `seccomp.Options`, `landlock.Options`,
+  and an `apparmor.Options` added for it, since `apparmor` has none yet, so
+  adding it breaks no caller. Until then, bound how long a caller waits as
   [Limits](docs/integration.md#limits) describes.
 
 ## Usage
@@ -229,9 +240,13 @@ has to as well (see
 
 <!-- go-snippet
 var recording1, recording2, recording3 *specs.LinuxSeccomp
+var nodeArch specs.Arch
 -->
 ```go
-combined, err := seccomp.Union(recording1, recording2, recording3)
+// The operator may run on another architecture than the nodes it merges
+// for, and the result depends on the native one, so name the nodes'
+// architecture (or use seccomp.ForAnyArch where it is not known).
+combined, err := seccomp.ForArch(nodeArch).Union(recording1, recording2, recording3)
 if err != nil {
     return err
 }
@@ -240,7 +255,8 @@ log.Print(seccomp.FormatProfile(combined))
 ```
 
 Input order decides tie-breaks such as errno values; see
-[Combining recordings](docs/integration.md#combining-recordings-union).
+[Combining recordings](docs/integration.md#combining-recordings-union),
+which also says what to do about `ErrLostRules`.
 
 ### AppArmor profile merge
 

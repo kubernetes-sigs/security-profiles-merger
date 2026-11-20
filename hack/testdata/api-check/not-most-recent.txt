@@ -1,0 +1,8 @@
+# sigs.k8s.io/security-profiles-merger/seccomp
+## compatible changes
+Marshal: added
+
+# summary
+Base version: v1.2.0 (v1.2.0)
+Cannot suggest a release version.
+Can only suggest a release version when compared against the most recent version of this major: v1.4.0.

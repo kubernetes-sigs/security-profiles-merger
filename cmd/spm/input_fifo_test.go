@@ -1,4 +1,4 @@
-//go:build linux || darwin || freebsd || netbsd || openbsd || dragonfly
+//go:build linux || darwin
 
 /*
 Copyright The Kubernetes Authors.
@@ -21,7 +21,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -69,12 +68,6 @@ func runGuarded(t *testing.T, args []string) (int, string, string) {
 // regular file is followed.
 func TestInputThatIsNoFileOrPipe(t *testing.T) {
 	t.Parallel()
-
-	// A FIFO without a writer reads end of file at once on Linux and
-	// darwin; on FreeBSD it may wait for a writer instead.
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skipf("a FIFO without a writer may wait for one on %s", runtime.GOOS)
-	}
 
 	dir := t.TempDir()
 	fifo := filepath.Join(dir, "planted.json")
@@ -137,26 +130,7 @@ func TestInputFromAPipe(t *testing.T) {
 		t.Skipf("no %s: %v", path, err)
 	}
 
-	document := `{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[` +
-		`{"names":["read"],"action":"SCMP_ACT_ALLOW"}]}`
-	half := len(document) / 2
-
-	go func() {
-		defer func() { _ = writer.Close() }()
-
-		_, _ = writer.WriteString(document[:half])
-
-		// A pause the reader must not take for the end of the document.
-		time.Sleep(100 * time.Millisecond)
-
-		_, _ = writer.WriteString(document[half:])
-	}()
-
-	code, stdout, stderr := runGuarded(t, []string{cmdValidate, flagType, typeSeccomp, path})
-	if code != 0 || stderr != "" || !strings.Contains(stdout, `"names": [`) {
-		t.Errorf("exit code = %d, stdout = %q, stderr = %q, want 0, the profile and nothing",
-			code, stdout, stderr)
-	}
+	validateSlowWrite(t, writer, path)
 }
 
 // TestInputFromANamedFIFO covers a FIFO whose writer has it open before the
@@ -189,6 +163,16 @@ func TestInputFromANamedFIFO(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	validateSlowWrite(t, writer, fifo)
+}
+
+// validateSlowWrite validates path while writer writes a profile to it in
+// two pieces, each after a pause the reader must neither fail on nor take
+// for the end of the document, and then closes writer. The command must
+// read the whole document and print the profile.
+func validateSlowWrite(t *testing.T, writer *os.File, path string) {
+	t.Helper()
+
 	document := `{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[` +
 		`{"names":["read"],"action":"SCMP_ACT_ALLOW"}]}`
 	half := len(document) / 2
@@ -196,7 +180,6 @@ func TestInputFromANamedFIFO(t *testing.T) {
 	go func() {
 		defer func() { _ = writer.Close() }()
 
-		// Pauses the reader must neither fail on nor take for the end.
 		time.Sleep(50 * time.Millisecond)
 
 		_, _ = writer.WriteString(document[:half])
@@ -206,7 +189,7 @@ func TestInputFromANamedFIFO(t *testing.T) {
 		_, _ = writer.WriteString(document[half:])
 	}()
 
-	code, stdout, stderr := runGuarded(t, []string{cmdValidate, flagType, typeSeccomp, fifo})
+	code, stdout, stderr := runGuarded(t, []string{cmdValidate, flagType, typeSeccomp, path})
 	if code != 0 || stderr != "" || !strings.Contains(stdout, `"names": [`) {
 		t.Errorf("exit code = %d, stdout = %q, stderr = %q, want 0, the profile and nothing",
 			code, stdout, stderr)

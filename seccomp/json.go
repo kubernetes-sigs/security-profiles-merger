@@ -50,33 +50,25 @@ var (
 // error messages are bounded in length, however long the literals the
 // document quotes.
 //
-// Each loses something a reader of an untrusted profile must not lose. A
-// misspelled or unknown member drops the rule it was meant to carry. A
-// repeated member is decoded by json.Unmarshal into what its earlier
-// occurrence filled, so a later scalar or array replaces the earlier one
-// while a later object merges into it, keeping the members of both; other
-// parsers keep the first or the last occurrence, so a scanner and the
-// runtime can read one document as two profiles, and the merged reading
-// can allow more than either. A byte that is not valid UTF-8 is replaced
-// with U+FFFD, so names that differ only there decode alike and merge into
-// one rule. A condition without its index or op decodes as a condition on
-// argument 0 or without an operator, which the document never named:
+// Each of these lets a scanner that approved an artifact and the runtime
+// that loads it read two different profiles; the spm sentinels these errors
+// are, such as [spm.ErrDuplicateKey], say how. Here a condition
+// without its index or op decodes as a condition on argument 0 or without
+// an operator, which the document never named:
 // {"value":5,"op":"SCMP_CMP_EQ"} reads as a0 == 5. Its value and valueTwo
 // may be left out, as producers writing them with omitempty do, since 0 is
-// what they would say. Use this
-// instead of json.Unmarshal for an artifact, and validate the result with
-// ValidateArtifact afterwards.
+// what they would say. Use this instead of json.Unmarshal for an artifact,
+// and validate the result with ValidateArtifact afterwards.
 //
 // The document is decoded into a fresh profile, which replaces the one
 // given only when decoding succeeds: a member the document omits is zero in
 // the result, whatever the given profile held, and an error leaves it as it
 // was.
 //
-// Decoding holds many times the size of data in heap, so bound the size of
-// an untrusted document before passing it here; the Limits section of
+// Bound the size of an untrusted document first: decoding holds many times
+// that in heap, as the Limits section of
 // https://github.com/kubernetes-sigs/security-profiles-merger/blob/main/docs/integration.md#limits
-// gives the figures. DecodeArtifact decodes and validates an artifact in
-// one call.
+// says. DecodeArtifact decodes and validates an artifact in one call.
 func UnmarshalStrict(data []byte, profile *specs.LinuxSeccomp) error {
 	if profile == nil {
 		return ErrNilProfile

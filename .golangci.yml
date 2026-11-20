@@ -9,6 +9,7 @@ run:
   build-tags:
     - apparmor_parser
     - libseccomp
+    - runtime
 linters:
   # Every linter, so that one a new release adds is enabled by the bump
   # rather than by someone remembering to list it. exhaustruct, gomodguard

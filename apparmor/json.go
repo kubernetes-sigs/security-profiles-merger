@@ -43,18 +43,12 @@ var (
 // that are not valid UTF-8, and data behind the profile. A document that is
 // not a JSON object, such as null, is rejected too ([ErrNotAnObject]).
 //
-// Each loses something a reader of an artifact must not lose. A misspelled
-// or unknown member drops the rule it was meant to carry: a member such as
-// "Filesystem" or "readonlyPaths" names a field only ignoring case, so
-// encoding/json fills the field from it while a reader comparing names
-// exactly drops it. A repeated member is decoded by json.Unmarshal into
-// what its earlier occurrence filled, so a later scalar or array replaces
-// the earlier one while a later object merges into it, keeping the members
-// of both; other parsers keep the first or the last occurrence, so a scanner
-// and the runtime can read one document as two profiles, and the merged
-// reading can allow more than either. A byte that is not valid UTF-8 is
-// replaced with U+FFFD, so names that differ only there decode alike and
-// merge into one rule. Use this instead of json.Unmarshal to decode an
+// Each of these lets a scanner that approved an artifact and the runtime
+// that loads it read two different profiles; the spm sentinels these errors
+// are, such as [spm.ErrDuplicateKey], say how. Here a member
+// such as "Filesystem" or "readonlyPaths" names a field only ignoring
+// case, so encoding/json fills the field from it while a reader comparing
+// names exactly drops it. Use this instead of json.Unmarshal to decode an
 // artifact, and validate the result with ValidateArtifact afterwards.
 //
 // Unlike json.Unmarshal, the document is decoded into a fresh Profile that
@@ -62,11 +56,10 @@ var (
 // omits is left at its zero value whatever *profile held, and *profile is
 // left untouched when an error is returned.
 //
-// Decoding holds many times the size of data in heap, so bound the size of
-// an untrusted document before passing it here; the Limits section of
+// Bound the size of an untrusted document first: decoding holds many times
+// that in heap, as the Limits section of
 // https://github.com/kubernetes-sigs/security-profiles-merger/blob/main/docs/integration.md#limits
-// gives the figures. DecodeArtifact decodes and validates an artifact in
-// one call.
+// says. DecodeArtifact decodes and validates an artifact in one call.
 func UnmarshalStrict(data []byte, profile *Profile) error {
 	if profile == nil {
 		return ErrNilProfile
@@ -81,17 +74,5 @@ func UnmarshalStrict(data []byte, profile *Profile) error {
 // error of the first that fails otherwise, either of which rejects the
 // artifact. Bound the size of data first, as UnmarshalStrict says.
 func DecodeArtifact(data []byte) (*Profile, error) {
-	var artifact Profile
-
-	err := UnmarshalStrict(data, &artifact)
-	if err != nil {
-		return nil, err
-	}
-
-	err = ValidateArtifact(&artifact)
-	if err != nil {
-		return nil, err
-	}
-
-	return &artifact, nil
+	return strictjson.DecodeValidated(data, UnmarshalStrict, ValidateArtifact)
 }

@@ -61,18 +61,12 @@ depends on the node, and the zero value of each is an error, so an
 - `seccomp.Options` names the native architecture and comes from a
   constructor: `ForArch` for a named node, `ForHost` for the one the
   program runs on, which is what the plain functions assume, or
-  `ForAnyArch` for a node whose architecture is not known, read as possibly
-  any architecture a runtime can be native on, the ones only crun runs on
-  natively (x32, MIPS n32, ppc, s390, sh, m68k, parisc) included. Each of
-  those lacks syscalls the others have, so a narrow denylist may be
-  refused with `ErrLostRules` where the node may be one of them; name the
-  node's architecture with `ForArch` where it is known. For an unknown
-  node `Intersect`, `ValidateBaseline` and the stricter validators refuse
-  only a list mixing the two byte orders (`ErrMixedByteOrder`). Its
-  methods are the three validators, `ValidateBaseline`, `DecodeArtifact`,
-  the merges and `Diff`; the zero value, and a `ForArch` architecture the
-  package does not know, are `ErrInvalidOptions`
-  ([Options](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#Options)).
+  `ForAnyArch` for a node whose architecture is not known, with the
+  caveats its
+  [documentation](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#Options)
+  lists. Its methods are the three validators, `ValidateBaseline`,
+  `DecodeArtifact`, the merges and `Diff`; the zero value, and a `ForArch`
+  architecture the package does not know, are `ErrInvalidOptions`.
 - `landlock.Options` names a kernel ABI version: its validators and
   `DecodeArtifact` add that version's check to each level, and `Downgrade`
   drops the rights the version does not know. The merges, `Diff` and
@@ -127,15 +121,17 @@ import "sigs.k8s.io/security-profiles-merger/spm"
 ```
 
 Nothing needs to import it: each package re-exports `SliceDiff`,
-`InputError` and every shared sentinel it returns under its own name, so
-`seccomp.SliceDiff`, `apparmor.SliceDiff` and `landlock.SliceDiff` all name
-`spm.SliceDiff`, and every sentinel below is the same variable in each
-package that exports it. Import it to match a sentinel without picking
-one of the three packages arbitrarily.
+`InputError` and every shared sentinel it returns under its own name, and
+`seccomp` and `apparmor` also `ValueDiff`, so `seccomp.SliceDiff`,
+`apparmor.SliceDiff` and `landlock.SliceDiff` all name `spm.SliceDiff`, and
+every sentinel below is the same variable in each package that exports it.
+Import it to match a sentinel without picking one of the three packages
+arbitrarily.
 
 | Name | Description |
 |------|-------------|
 | `SliceDiff[T]` | Added and removed items in a set-like slice, each sorted; a diff field of this type is nil when the lists are equal |
+| `ValueDiff[T]` | The left and right value of a changed field, in `seccomp` and `apparmor` diffs; a diff field of this type is nil when the values are equal |
 | `Problems` | The failures an error reports: those of a validator's report, of the joined `InputError`s of a merge or of an `errors.Join`, a report or join among them listed in turn, with `ErrMoreProblems` once and last; the error itself otherwise. One failure that matches several sentinels stays one problem, and it does not look inside an `InputError`: call it on the `InputError`'s `Err` |
 | `InputError` | Names the one input profile an error is about: each input of a merge that is nil or fails validation, a nil profile given to `Diff`, each input of `landlock.LoweredRulePaths` that is nil or fails validation, and an error a package documents as brought by one input, such as `seccomp.ErrConflictingListener`. When several fail, a merge or `LoweredRulePaths` joins them in input order, while `Diff` reports only the first nil one. `Index` is the position among the inputs: for `LoweredRulePaths`, `inputs[i]` is `i`, as `Intersect` numbers it, and a bad result is a `landlock.ResultError` instead; `Err` is what was wrong with it. Match it with `errors.As`, which finds the first; `errors.Is` sees through it to the sentinels. See [reading a validation error](integration.md#reading-a-validation-error) and [Errors outside an InputError](integration.md#errors-outside-an-inputerror) |
 | `MaxPathLen` | 4095, the longest path `apparmor` and `landlock` accept: `PATH_MAX` less its terminating NUL |
@@ -155,7 +151,7 @@ from any of the three packages.
 | `ErrEmptyPath` | `apparmor`, `landlock`: every validator and merge | A path is the empty string, or for `landlock` one that cleans to `.`, such as `.` or `./` |
 | `ErrNulInPath` | `apparmor`: `ValidateArtifact` and `ValidateStrict`; `landlock`: every validator and merge | A path holds a NUL byte, or in `apparmor` an escape denoting one |
 | `ErrRelativePath` | `apparmor`: every validator and merge, and `QuotePath`; `landlock`: `ValidateBaseline`, `ValidateArtifact` and `ValidateStrict` | A path does not start with `/`, for `apparmor` as written, so an escape spelling the first `/` is relative too |
-| `ErrPathTooLong` | `apparmor`, `landlock`: every validator and merge | A path is longer than `MaxPathLen`. It is checked before the path is scanned, and only the count limits of `ValidateArtifact` and `ValidateStrict` run before it. `apparmor` checks every path's length first and, when one is too long, skips the other checks of `Validate` |
+| `ErrPathTooLong` | `apparmor`, `landlock`: every validator and merge | A path is longer than `MaxPathLen`. It is checked before the path is scanned, and only the count limits of `ValidateArtifact` and `ValidateStrict`, and in `landlock` the empty-path check, run before it. `apparmor` checks every path's length first and, when one is too long, skips the other checks of `Validate` |
 | `ErrDuplicateKey`, `ErrUnknownField`, `ErrMisspelledField`, `ErrInvalidUTF8`, `ErrUnexpectedData`, `ErrNotAnObject` | `UnmarshalStrict` of every package | See [Strict decoding](#strict-decoding) |
 | `ErrMissingField` | `seccomp.UnmarshalStrict` and `landlock.UnmarshalStrict` | See [Strict decoding](#strict-decoding) |
 

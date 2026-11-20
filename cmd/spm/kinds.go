@@ -197,7 +197,7 @@ func checkEachAlone(inv *invocation) {
 			continue
 		}
 
-		types := detectOneProfileType(inv.inputs[idx].data)
+		types, _ := detectMembers(inv.inputs[idx].data)
 		if len(types) != 1 {
 			continue
 		}
@@ -307,12 +307,7 @@ func (ops kindOps[T, D]) checker(mode validateMode) func(*T) error {
 
 // knownType reports whether a profile type of the given name exists.
 func knownType(name string) bool {
-	switch name {
-	case typeSeccomp, typeAppArmor, typeLandlock:
-		return true
-	default:
-		return false
-	}
+	return slices.Contains([]string{typeSeccomp, typeAppArmor, typeLandlock}, name)
 }
 
 // useKind sets the profile kind the run uses to the one registered under
@@ -610,7 +605,7 @@ func detectProfileType(inputs []profileInput, report *inputReport) (string, []ty
 			continue
 		}
 
-		current := detectOneProfileType(input.data)
+		current, _ := detectMembers(input.data)
 
 		switch {
 		case len(current) > 1:
@@ -668,8 +663,9 @@ var detectTypes = []struct {
 	{typeAppArmor, reflect.TypeFor[apparmor.Profile]()},
 }
 
-// detectOneProfileType returns every profile type whose members the document
-// carries, in detectTypes order. More than one means the document is
+// detectMembers returns every profile type whose members the document
+// carries, in detectTypes order, and how many top-level members the
+// document holds. More than one means the document is
 // ambiguous: returning only the first would silently drop the members of the
 // others, so the caller reports it instead.
 //
@@ -677,14 +673,6 @@ var detectTypes = []struct {
 // matches it, ignoring case: "Syscalls" fills the seccomp field, so a
 // document holding it is a seccomp profile whatever else it is. The types
 // share no member names, so a member reveals at most one of them.
-func detectOneProfileType(raw []byte) []string {
-	found, _ := detectMembers(raw)
-
-	return found
-}
-
-// detectMembers is detectOneProfileType, and also returns how many
-// top-level members the document holds.
 func detectMembers(raw []byte) ([]string, int) {
 	var fields map[string]json.RawMessage
 

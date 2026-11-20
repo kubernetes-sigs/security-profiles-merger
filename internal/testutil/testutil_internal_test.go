@@ -43,8 +43,12 @@ func TestWallClockBoundsAreOnWhereAsked(t *testing.T) {
 	}
 }
 
-// recorder is a reporter that keeps what it is asked to report.
+// recorder is a test that keeps what it is asked to report. WallClock
+// calls only Helper and Errorf; the embedded testing.TB, which is nil,
+// stands for the rest.
 type recorder struct {
+	testing.TB
+
 	reports []string
 }
 
