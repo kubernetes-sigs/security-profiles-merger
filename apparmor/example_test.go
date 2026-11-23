@@ -78,8 +78,8 @@ func ExampleValidate_emptyCapability() {
 
 func ExampleValidateStrict() {
 	profile := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: []string{"/bin/sh", "/bin/sh"},
+		Capabilities: &apparmor.CapabilityRules{
+			AllowedCapabilities: []string{"chown", "made_up"},
 		},
 	}
 
@@ -87,7 +87,7 @@ func ExampleValidateStrict() {
 	fmt.Println(err)
 
 	// Output:
-	// executable.allowedExecutables[1]: "/bin/sh": duplicate executable path (also at executable.allowedExecutables[0])
+	// capability.allowedCapabilities[1]: "made_up": unknown capability
 }
 
 func ExampleProfile_String() {

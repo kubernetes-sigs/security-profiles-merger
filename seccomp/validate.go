@@ -125,7 +125,8 @@ var (
 	// ErrValueTooWide is returned by ValidateArtifact and ValidateStrict for
 	// a condition whose value or mask (valueTwo only within the mask of a
 	// SCMP_CMP_MASKED_EQ) is above 32 bits while the filter covers a 32-bit
-	// architecture, listed or native.
+	// architecture, listed or native, in an entry that loads a rule: one
+	// equal to the default loads none.
 	ErrValueTooWide = errors.New("argument value above 32 bits on a 32-bit architecture")
 	// ErrMixedByteOrder is returned by ValidateArtifact and ValidateStrict,
 	// and by Intersect in an InputError, for an architecture of another byte
@@ -485,13 +486,21 @@ func quoteArchs(archs []specs.Arch) string {
 // validateValueWidth reports conditions against a value above 32 bits when
 // the filter covers a 32-bit architecture (see ErrValueTooWide). Values are
 // read as libseccomp reads them, so a valueTwo it ignores or masks away does
-// not count. native is the architecture the runtime adds to the filter.
+// not count, and so is an entry that loads no rule, such as one equal to
+// the default, which runtimes skip, as loadsWideValue skips it. native is
+// the architecture the runtime adds to the filter.
 func validateValueWidth(errs *merge.Collector, profile *specs.LinuxSeccomp, native specs.Arch) {
 	if !coversAny(profile.Architectures, narrowArchitectures, native) {
 		return
 	}
 
+	def := defaultClause(profile)
+
 	for idx := range profile.Syscalls {
+		if !loadsRule(&profile.Syscalls[idx], def) {
+			continue
+		}
+
 		for argIdx, arg := range profile.Syscalls[idx].Args {
 			if wideArg(canonicalArg(arg)) {
 				errs.Report(func() error {

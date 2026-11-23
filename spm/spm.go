@@ -68,7 +68,8 @@ limitations under the License.
 // fills a field from a member that matches it only ignoring case
 // ([ErrMisspelledField]), which a reader comparing names exactly drops;
 // decodes a missing member as its zero value ([ErrMissingField]), which for
-// a seccomp condition is argument 0 and for a Landlock network rule port 0;
+// a seccomp condition is argument 0, for a Landlock network rule port 0,
+// and for a null seccomp syscall entry an entry without names or action;
 // replaces invalid UTF-8 with U+FFFD ([ErrInvalidUTF8]), so distinct
 // documents decode alike; drops a second value behind the profile
 // ([ErrUnexpectedData]); and decodes null as an empty profile
@@ -153,8 +154,10 @@ var (
 
 	// ErrDuplicateKey is returned by UnmarshalStrict of every package when
 	// a member occurs more than once in one JSON object, compared ignoring
-	// case as encoding/json matches members to fields. See the Strict
-	// decoding section for why these documents are refused.
+	// case in an object decoding into a struct, as encoding/json matches
+	// members to fields, and exactly in any other, such as one inside a
+	// member no field reads. See the Strict decoding section for why these
+	// documents are refused.
 	ErrDuplicateKey = errors.New("duplicate key")
 	// ErrUnknownField is returned by UnmarshalStrict of every package when
 	// the document holds a member the profile type has no field for.
@@ -165,8 +168,10 @@ var (
 	ErrMisspelledField = errors.New("misspelled field")
 	// ErrMissingField is returned by seccomp.UnmarshalStrict and
 	// landlock.UnmarshalStrict when the document leaves out, or sets to
-	// null, a member with no value for its absence: the index or op of a
-	// seccomp argument condition, or the path or port of a Landlock rule.
+	// null, a member with no value for its absence: the names or action of
+	// a seccomp syscall entry, the index or op of a seccomp argument
+	// condition, or the path or port of a Landlock rule, also by a null
+	// entry, condition or rule.
 	ErrMissingField = errors.New("missing field")
 	// ErrInvalidUTF8 is returned by UnmarshalStrict of every package when
 	// the document holds a byte that is not valid UTF-8, or a \u escape

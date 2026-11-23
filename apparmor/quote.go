@@ -42,24 +42,74 @@ import (
 // It returns ErrEmptyPath for an empty path and ErrRelativePath for one that
 // does not start with "/", as the validators do, and ErrUnquotablePath
 // where no spelling means what the path means: an empty alternative such as
-// "{a,,b}", and a pattern apparmor_parser rejects. It checks only the
+// "{a,,b}", and a pattern apparmor_parser rejects or loads as something
+// other than it spells, such as "/a/{", "/a/[*]" or "/etc/[a-]", which the
+// merge reads as matching nothing and ValidateArtifact refuses, whether or
+// not it needs escaping. The error for such a pattern matches
+// [ErrInvalidGlob] as well and says so, since the pattern may hold no
+// character that needs escaping. A class opened by an escaped "^", such as
+// `/a/[\^x]`, loads as the negated class the merge reads it as, so it is
+// returned, though ValidateArtifact refuses it as well. It checks only the
 // spelling, so validate a result with ValidateArtifact before rendering it
 // where the other checks matter.
 func QuotePath(path string) (string, error) {
+	analysis, err := quotableAnalysis(path)
+	if err != nil {
+		return "", err
+	}
+
+	// A pattern the port refuses, or one whose translation libapparmor_re
+	// would fail to parse, matches nothing to the merge, which no spelling
+	// renders, as ValidateArtifact reports both (see globStatus).
+	if analysis.kind == kindInvalid || analysis.status == globInvalid {
+		return "", &invalidPatternError{path: path}
+	}
+
+	return spellPath(path, analysis)
+}
+
+// invalidPatternError is the error QuotePath returns for a pattern
+// apparmor_parser rejects or loads as something other than it spells. It
+// matches ErrInvalidGlob, which says what is wrong with the pattern, and
+// ErrUnquotablePath, which QuotePath returns wherever no spelling means
+// what the path means.
+type invalidPatternError struct {
+	path string
+}
+
+func (e *invalidPatternError) Error() string {
+	return merge.QuoteBounded(e.path) + ": " + ErrInvalidGlob.Error() +
+		", which no spelling renders as the merge reads it"
+}
+
+func (e *invalidPatternError) Unwrap() []error {
+	return []error{ErrInvalidGlob, ErrUnquotablePath}
+}
+
+// quotableAnalysis refuses an empty or relative path as QuotePath does, and
+// returns the analysis of any other that identifies it (see keyAnalysis).
+func quotableAnalysis(path string) (*globMatcher, error) {
 	if path == "" {
-		return "", ErrEmptyPath
+		return nil, ErrEmptyPath
 	}
 
 	if relativePath(path) {
-		return "", fmt.Errorf("%s: %w", merge.QuoteBounded(path), ErrRelativePath)
+		return nil, fmt.Errorf("%s: %w", merge.QuoteBounded(path), ErrRelativePath)
 	}
 
+	return keyAnalysis(path), nil
+}
+
+// spellPath is QuotePath for an absolute path, given its analysis, without
+// refusing a pattern apparmor_parser rejects where it needs no escaping:
+// ValidateBaseline reports such a pattern as ErrInvalidGlob instead.
+func spellPath(path string, analysis *globMatcher) (string, error) {
 	if !hasUnquotableChar(path) {
 		return path, nil
 	}
 
 	quoted := respellPath(path)
-	if hasUnquotableChar(quoted) || quotedKey(quoted, path) != matcherKey(path, keyAnalysis(path)) {
+	if hasUnquotableChar(quoted) || quotedKey(quoted, path) != matcherKey(path, analysis) {
 		return "", fmt.Errorf("%s: %w", merge.QuoteBounded(path), ErrUnquotablePath)
 	}
 

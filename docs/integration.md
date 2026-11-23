@@ -172,7 +172,11 @@ it, since the kernel denies `refer` there anyway, so a baseline listing
    first, with `ErrRelativePath`) and every capability name apparmor_parser
    does not load, such as `CAP_CHOWN` (`ErrInvalidCapabilityName`), which
    would otherwise reach every merge result and fail each workload instead
-   of the node, and glob patterns longer in total than twice
+   of the node, every path `ValidateArtifact` refuses for what it loads as,
+   such as `/a/[\^x]`, which grants every byte but `x`, `/` included, or a
+   `..` component, which matches nothing (`ErrInvalidGlob`,
+   `ErrGlobTooComplex`, `ErrDotComponent`, `ErrNulInPath`), and glob
+   patterns longer in total than twice
    `MaxArtifactPatternBytes` (`ErrBudgetExceeded`), past which an
    intersection with an artifact holding patterns fails. It does not
    detect a baseline with many literal paths in directories its patterns
@@ -372,7 +376,8 @@ bounds the cost of the merge.
   and length of their paths, so its cost grows with the square of the number
   of inputs. Both merges refuse inputs past a budget weighed that way with
   `ErrBudgetExceeded`, which admits about 300 recordings of 50 rules on
-  paths of five components each, but not 500; see
+  paths of five components each, but not 500, and for `Union` about 115
+  where every recording grants `refer` on a directory they share; see
   [Cost bounds](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#hdr-Cost_bounds).
   `Validate` does not bound the rules of one input, so `MaxArtifactRules`
   of `ValidateArtifact` is what keeps an artifact small.
@@ -715,8 +720,9 @@ few properties of the result matter:
 - **Landlock bounds the number of recordings.** The cost of a Landlock
   merge grows with the square of the number of inputs, and `Union` refuses
   more than its budget admits with `ErrBudgetExceeded`, about 300 recordings
-  of 50 rules on paths of five components each; see [Limits](#limits). Leave
-  identical recordings out before merging, which changes no union.
+  of 50 rules on paths of five components each, or about 115 where every
+  recording grants `refer` on a directory they share; see [Limits](#limits).
+  Leave identical recordings out before merging, which changes no union.
 - **The loosest input wins.** A seccomp recording whose default action is
   `SCMP_ACT_ALLOW` makes the result allow everything that recording does not
   restrict itself. A Landlock profile that does not handle a right makes the

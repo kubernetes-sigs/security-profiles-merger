@@ -95,21 +95,43 @@ func Union(profiles ...*Profile) (*Profile, error) {
 // failure of the first step that fails:
 //
 //   - Validate, with its failures as Validate returns them;
-//   - QuotePath of every path (ErrUnquotablePath) and the spelling of every
-//     capability name (ErrInvalidCapabilityName), in one bounded report
-//     naming list and index; a relative path is reported only by Validate,
-//     and an unknown capability name is accepted;
+//   - in one bounded report naming list and index: QuotePath of every path
+//     (ErrUnquotablePath), what ValidateArtifact refuses a path for besides
+//     the characters QuotePath escapes (ErrInvalidGlob, ErrGlobTooComplex,
+//     ErrDotComponent, ErrNulInPath; see the Paths the validators reject
+//     section), and the spelling of every capability name
+//     (ErrInvalidCapabilityName). A pattern apparmor_parser rejects is
+//     reported as ErrInvalidGlob alone unless it needs escaping too, a
+//     relative path is reported only by Validate, and an unknown capability
+//     name is accepted. The paths reported here load as something other
+//     than they say, as `/a/[\^x]` grants every byte but x, "/" included,
+//     or match nothing, as "/etc/../passwd" does, and would carry into
+//     merge results ValidateArtifact refuses;
 //   - the total length of its patterns, counted once each as the merge
 //     normalizes them, which past 2*MaxArtifactPatternBytes is refused
 //     with ErrBudgetExceeded and the byte count, not wrapped in an
 //     InputError, since it leaves too little of a merge's compile budget
 //     for an artifact's patterns;
+//   - with every pattern compiled, which the budget the previous step
+//     checks admits, a pattern the matcher fails to compile
+//     (ErrGlobTooComplex), naming list and index as ValidateArtifact does:
+//     the second step identifies patterns without compiling them, and such
+//     a pattern matches no name, so that an intersection alone keeps it
+//     word for word, which the last step cannot tell, while one with an
+//     artifact keeps it only where the artifact spells it alike, and may
+//     fail with ErrBudgetExceeded;
 //   - Intersect of the baseline alone, whose errors are not wrapped in an
 //     InputError;
 //   - Diff of the baseline against that intersection, where an unequal
 //     diff is reported with ErrInexactBaseline and the diff in the message:
-//     it names what every merge with this baseline takes away, such as a
-//     pattern apparmor_parser rejects.
+//     it names what every merge with this baseline takes away. It is a
+//     guard: the patterns an intersection drops, those that match nothing,
+//     are reported by the second step already, and no baseline the steps
+//     before it accept is known to reach it. It stays because it checks
+//     directly what a runtime relies on, that every merge reads the
+//     baseline as written, so that a gap in the steps before it or a
+//     change to the merge fails at config load rather than in every
+//     merge.
 //
 // It does not detect a baseline with many literal paths in directories its
 // patterns cover, which can make the literal pass of an intersection fall
@@ -139,6 +161,11 @@ func ValidateBaseline(baseline *Profile) error {
 		)
 	}
 
+	err = baselineCompiles(baseline)
+	if err != nil {
+		return err
+	}
+
 	settled, err := Intersect(baseline)
 	if err != nil {
 		return merge.SoleInputError(err)
@@ -149,6 +176,8 @@ func ValidateBaseline(baseline *Profile) error {
 		return err
 	}
 
+	// No baseline the steps above accept is known to differ from its own
+	// intersection; this guards against one they miss (see above).
 	if !diff.Equal {
 		return fmt.Errorf("%w: %s", ErrInexactBaseline, diff)
 	}
@@ -156,21 +185,53 @@ func ValidateBaseline(baseline *Profile) error {
 	return nil
 }
 
+// baselineCompiles reports, in one bounded report, the patterns of a
+// baseline the matcher fails to compile, which match no name. It
+// compiles every pattern, within the compile budget of one call, which the
+// baseline's patterns fit once baselinePatternBytes has admitted them, so a
+// pattern left uncompiled is one the regexp package refused rather than one
+// past the budget. Every other failure globStatus reports has been reported
+// by baselineRendering already. What it compiles goes to the shared cache,
+// where the intersection that follows finds it.
+func baselineCompiles(baseline *Profile) error {
+	check := newValidator(newMatcherCache())
+
+	for list, paths := range pathLists(normalizeProfile(baseline)) {
+		check.globStatus(list, *paths)
+	}
+
+	return check.report.Err()
+}
+
 // baselineRendering reports, in one bounded report, the paths of a
-// baseline QuotePath refuses and the capability names apparmor_parser does
-// not load, which a runtime could render into no merge result.
+// baseline QuotePath refuses, the paths ValidateArtifact refuses for what
+// they load as (see loadablePaths), and the capability names
+// apparmor_parser does not load, which a runtime could render into no merge
+// result or only into one granting other than what the baseline says. A
+// pattern apparmor_parser rejects, which QuotePath refuses as unquotable
+// as well, is reported as an invalid glob only, as ValidateArtifact reports
+// it, unless it needs escaping too. Validate has passed, so no path is
+// oversized, empty or relative.
 func baselineRendering(baseline *Profile) error {
-	// The checks here identify no path, so the validator needs no cache.
-	check := newValidator(nil)
+	// The checks identify patterns without matching any, so the validator
+	// compiles nothing: an uncompiled pattern is not reported as past the
+	// compile budget there (see globStatus).
+	check := newValidator(newKeyCache())
 
 	for list, paths := range pathLists(baseline) {
 		for idx, path := range *paths {
-			_, err := QuotePath(path)
+			analysis, err := quotableAnalysis(path)
+			if err == nil {
+				_, err = spellPath(path, analysis)
+			}
+
 			if err != nil {
 				check.report.Reportf("%s[%d]: %w", list, idx, err)
 			}
 		}
 	}
+
+	check.loadablePaths(baseline, normalizeProfile(baseline), false)
 
 	if baseline.Capabilities != nil {
 		check.capabilitySpelling(baseline.Capabilities.AllowedCapabilities)

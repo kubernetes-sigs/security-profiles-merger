@@ -241,11 +241,20 @@ limitations under the License.
 // [Intersect] and [Union] validate their inputs, then count the number of
 // inputs times the ancestors of all their cleaned rule paths (a network
 // rule counting one) and refuse more than their budget with
-// [ErrBudgetExceeded] before merging anything. The budget admits three
-// inputs of [MaxArtifactRules] rules on the deepest paths MaxPathLen
-// allows, or a few hundred recordings of a few dozen rules each; the cost
-// grows with the square of the number of inputs, and leaving duplicate
-// inputs out changes no union. The budget may change in a minor release.
+// [ErrBudgetExceeded] before merging anything. Union also counts the work
+// of asking directories about moves at every ABI version (see Refer): for
+// each input, every rule path of every input at or beneath a path that
+// input grants refer on, and its parent, each costing some 40 lookups. The
+// budget admits three inputs of [MaxArtifactRules] rules on the deepest
+// paths MaxPathLen allows to Intersect, and to Union where no grant of
+// refer of one input lies above the rule paths of the others; where they
+// share one, such as a grant on "/", Union admits two. It admits about 300
+// recordings of 50 rules on paths of five components, also to Union where
+// each grants refer on a path of its own, and to Union about 115 such
+// recordings where each grants refer on a directory they share, which puts
+// every rule path beneath the grant of every input. The cost grows with the
+// square of the number of inputs, and leaving duplicate inputs out changes
+// no union. The budget may change in a minor release.
 // Validate counts no rules, so [ValidateArtifact] keeps an artifact small.
 //
 // # Concurrency

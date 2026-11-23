@@ -39,14 +39,13 @@ limitations under the License.
 //
 //   - [Validate] reports what makes a profile ill-formed: empty, oversized
 //     or relative paths, AppArmor variables, and paths or capabilities
-//     listed twice.
+//     listed twice, in any list.
 //   - [ValidateArtifact] adds what a runtime checks on an artifact: the size
 //     limits, the patterns apparmor_parser rejects, and the paths and
 //     capability names a consumer rendering the profile would turn into
 //     rules of the author's choosing.
-//   - [ValidateStrict] adds unknown capability names and duplicate
-//     executable or library paths, worth reporting in a profile a person
-//     wrote.
+//   - [ValidateStrict] adds unknown capability names, worth reporting in a
+//     profile a person wrote.
 //
 // [Intersect] and [Union] run the checks of Validate on each input as the
 // caller wrote it, except for a path or capability listed twice within one
@@ -187,7 +186,9 @@ limitations under the License.
 //
 // ValidateArtifact and ValidateStrict also report what follows, which
 // Validate accepts and the merge treats as opaque text or as a pattern
-// matching nothing.
+// matching nothing. [ValidateBaseline] reports it too, except that it
+// refuses only the paths [QuotePath] cannot spell where the others report
+// ErrUnquotablePath.
 //
 // [ErrInvalidGlob] reports a pattern apparmor_parser rejects: an unclosed
 // "{" or "[", a "}" or "]" without its opening counterpart (in "[]a]" the

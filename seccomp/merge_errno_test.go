@@ -262,3 +262,51 @@ func TestErrnoOnlyDifferenceKeepsTheFilters(t *testing.T) {
 		t.Errorf("ValidateArtifact = %v, want ErrConflictingEntries", err)
 	}
 }
+
+// TestEquivalentFiltersWithDifferentErrno covers two inputs that deny read
+// where a0 is 0, spelled "a0 < 1" with EPERM and "a0 == 0" with ENOENT. The
+// two clauses are one spelled twice, so the merges keep one, with the errno
+// of the leftmost input, as for any errno tie. Kept both, the set was in no
+// safe shape and collapsed: under default SCMP_ACT_ALLOW the union allowed
+// every read, read(0) included, which both inputs deny, and the
+// intersection denied every read.
+func TestEquivalentFiltersWithDifferentErrno(t *testing.T) {
+	t.Parallel()
+
+	for _, def := range []specs.LinuxSeccompAction{specs.ActAllow, specs.ActKill} {
+		eperm := profileOf(def,
+			withErrno(filtered(syscallRead, specs.ActErrno, arg(0, specs.OpLessThan, 1)), 1))
+		enoent := profileOf(def,
+			withErrno(filtered(syscallRead, specs.ActErrno, arg(0, specs.OpEqualTo, 0)), 2))
+
+		for name, merge := range bothMerges {
+			for _, test := range []struct {
+				inputs []*specs.LinuxSeccomp
+				want   string
+			}{
+				{
+					[]*specs.LinuxSeccomp{eperm, enoent},
+					"read([0]SCMP_CMP_LT:1)->SCMP_ACT_ERRNO}",
+				},
+				{
+					[]*specs.LinuxSeccomp{enoent, eperm},
+					"read([0]SCMP_CMP_EQ:0)->SCMP_ACT_ERRNO(errno:2)}",
+				},
+			} {
+				got, err := merge(test.inputs...)
+				if err != nil {
+					t.Fatalf("%s: %v", name, err)
+				}
+
+				want := "Profile{default:" + string(def) + " " + test.want
+				if formatted := seccomp.FormatProfile(got); formatted != want {
+					t.Errorf("%s with %s first = %s, want %s", name,
+						seccomp.FormatProfile(test.inputs[0]), formatted, want)
+				}
+			}
+		}
+
+		checkMergeSafety(t, intersectSafety(), eperm, enoent, false)
+		checkMergeSafety(t, unionSafety(), eperm, enoent, false)
+	}
+}

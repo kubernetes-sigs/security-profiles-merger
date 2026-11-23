@@ -86,6 +86,80 @@ func TestGlobRegexCacheEviction(t *testing.T) {
 	}
 }
 
+// TestEscapedLiteralsStayOutOfTheSharedCache covers an artifact of 1024
+// literal paths of 4000 bytes, each escaping a space: no limit on patterns
+// counts them, so ValidateArtifact accepts the profile, and stored in the
+// shared cache their analyses would take half of it, evicting the compiled
+// patterns other calls rely on. Only analyses a compile was attempted on
+// are shared, so validating and merging the profile stores none of them,
+// while a pattern is still stored.
+func TestEscapedLiteralsStayOutOfTheSharedCache(t *testing.T) {
+	swapGlobCache(t)
+
+	paths := make([]string, 0, MaxArtifactPaths)
+	for idx := range MaxArtifactPaths {
+		name := fmt.Sprintf(`/home/My\ Documents/%04d-`, idx)
+		paths = append(paths, name+strings.Repeat("x", 4000-len(name)))
+	}
+
+	profile := &Profile{Filesystem: &FilesystemRules{ReadOnlyPaths: paths}}
+
+	err := ValidateArtifact(profile)
+	if err != nil {
+		t.Fatalf("ValidateArtifact = %v, want nil", err)
+	}
+
+	_, err = Intersect(profile, profile)
+	if err != nil {
+		t.Fatalf("Intersect = %v, want nil", err)
+	}
+
+	if count, bytes := cacheState(); count != 0 || bytes != 0 {
+		t.Errorf("the shared cache holds %d entries of %d bytes, want none", count, bytes)
+	}
+
+	callMatcher("/home/*")
+
+	if count, _ := cacheState(); count != 1 {
+		t.Errorf("the shared cache holds %d entries after a pattern, want 1", count)
+	}
+}
+
+// TestValidateBaselineReportsAPatternThatFailsToCompile covers a pattern
+// the matcher models but the regexp package refuses to compile, which
+// matches no name: ValidateBaseline reports it as ValidateArtifact does, as
+// ErrGlobTooComplex naming list and index, where it accepted it, since the
+// intersection of the baseline alone keeps such a pattern word for word and
+// the diff finds nothing. No pattern within MaxPathLen is known to fail to
+// compile, so the test stores the analysis a failed compile leaves in the
+// shared cache, where every call reads it, as it would after one.
+func TestValidateBaselineReportsAPatternThatFailsToCompile(t *testing.T) {
+	swapGlobCache(t)
+
+	const refused = "/etc/a*b"
+
+	analysis := analyzePattern(refused)
+	if analysis.status != globUncompiled {
+		t.Fatalf("analysis of %q has status %d, want it to compile next", refused, analysis.status)
+	}
+
+	storeSharedMatcher(refused, analysis)
+
+	profile := &Profile{
+		Filesystem: &FilesystemRules{ReadOnlyPaths: []string{"/etc/hosts", refused}},
+	}
+
+	err := ValidateBaseline(profile)
+	if !errors.Is(err, ErrGlobTooComplex) || errors.Is(err, ErrInexactBaseline) ||
+		!strings.Contains(err.Error(), "filesystem.readOnlyPaths[1]") {
+		t.Errorf("ValidateBaseline = %v, want ErrGlobTooComplex naming readOnlyPaths[1]", err)
+	}
+
+	if !errors.Is(ValidateArtifact(profile), ErrGlobTooComplex) {
+		t.Errorf("ValidateArtifact does not report %q as too complex", refused)
+	}
+}
+
 // TestGlobRegexCacheByteEviction covers the byte bound: few enough patterns
 // to stay under the entry count, but long enough to exceed what the cache
 // may retain.
@@ -1352,7 +1426,7 @@ func TestLoadablePathsWithoutAPairedCopy(t *testing.T) {
 
 	report := func(normalized *Profile) string {
 		check := newValidator(newMatcherCache())
-		check.loadablePaths(profile, normalized)
+		check.loadablePaths(profile, normalized, true)
 
 		err := check.report.Err()
 		if err == nil {

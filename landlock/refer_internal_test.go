@@ -225,9 +225,9 @@ func TestMoveConflictsScaleLinearly(t *testing.T) {
 	measure := func(count int) (int, int) {
 		left, right := hostileUnionInputs(count)
 		result := unionTwo(left, right)
-		resultMasks := pathRuleMasks(result.PathRules)
+		results := newResultSplits(pathRuleMasks(result.PathRules))
 		paths := inputRulePaths([]*Profile{left, right})
-		full := moveSides(left, resultMasks, paths, referLevels[len(referLevels)-1:])[0]
+		full := moveSides(left, results, paths, referLevels[len(referLevels)-1:])[0]
 		comparisons := len(full.withRoot.destinations)*len(full.withRoot.sources) +
 			len(full.withoutRoot.destinations)*len(full.withoutRoot.sources)
 
@@ -290,5 +290,88 @@ func TestFSBitsFitAMask(t *testing.T) {
 
 	if got := fsBits.mask([]FSAccessRight{"unknown"}); got != 0 {
 		t.Errorf("mask of an unknown right = %#b, want 0", got)
+	}
+}
+
+// TestPathsBeneathFindsTheSortedRange covers how moveSides finds the paths
+// at or beneath a grant of refer: a root and the paths it prefixes followed
+// by a "/", which sort together, but not a sibling whose name only starts
+// like the root's, such as "/a-b" or "/ab" for "/a", which sorts between
+// the two; "/" holds every absolute path and no relative one.
+func TestPathsBeneathFindsTheSortedRange(t *testing.T) {
+	t.Parallel()
+
+	paths := []string{"/a", "/a-b", "/a/b", "/a/c/d", "/ab", "/b", "rel", "rel/x"}
+	slices.Sort(paths)
+
+	for _, test := range []struct {
+		roots []string
+		want  []string
+	}{
+		{[]string{"/a"}, []string{"/a", "/a/b", "/a/c/d"}},
+		{[]string{"/"}, []string{"/a", "/a-b", "/a/b", "/a/c/d", "/ab", "/b"}},
+		{[]string{"rel"}, []string{"rel", "rel/x"}},
+		{[]string{"/a/b", "/b"}, []string{"/a/b", "/b"}},
+		{[]string{"/a/c"}, []string{"/a/c/d"}},
+		{[]string{"/zz"}, nil},
+	} {
+		got := pathsBeneath(paths, test.roots)
+		slices.Sort(got)
+
+		if !slices.Equal(got, test.want) {
+			t.Errorf("pathsBeneath(%v) = %v, want %v", test.roots, got, test.want)
+		}
+	}
+}
+
+// TestMoveSettlingWorkCountsEveryUpdate checks the budget of a union against
+// what moveSides does for an input granting refer on "/" with 1000 rules on
+// "/g/x<i>/f": the updates for each rule path as a destination and source,
+// those for each parent as a source, which counting the rule paths alone
+// missed, and the walks up from each parent among the input's and the
+// union's rules besides the walk from each rule path the lookups count.
+func TestMoveSettlingWorkCountsEveryUpdate(t *testing.T) {
+	t.Parallel()
+
+	rules := make([]PathRule, 0, 1001)
+	rules = append(rules, PathRule{Path: rootPath, AccessFS: []FSAccessRight{FSAccessRefer}})
+
+	for idx := range 1000 {
+		rules = append(rules, PathRule{
+			Path: fmt.Sprintf("/g/x%d/f", idx), AccessFS: []FSAccessRight{FSAccessReadFile},
+		})
+	}
+
+	input := &Profile{
+		HandledAccessFS: []FSAccessRight{FSAccessReadFile, FSAccessRefer},
+		PathRules:       rules,
+	}
+	beneath := pathsBeneath(inputRulePaths([]*Profile{input}), referRoots(rules))
+	parents := make(map[string]struct{})
+
+	walks := 0
+
+	for _, path := range beneath {
+		for range ancestors(path) {
+			walks++ // the union's rights at the path
+		}
+
+		if parent, ok := parentPath(path); ok {
+			parents[parent] = struct{}{}
+		}
+	}
+
+	for parent := range parents {
+		for range ancestors(parent) {
+			walks += 2 // the input's and the union's rights at the parent
+		}
+	}
+
+	levels := len(referLevels)
+	done := uint64(len(beneath)*4*levels + len(parents)*2*levels + walks)
+
+	counted := moveSettlingWork([]*Profile{input}, [][]string{cleanPaths(rules)})
+	if counted < done {
+		t.Errorf("moveSettlingWork = %d, want at least the %d units moveSides takes", counted, done)
 	}
 }

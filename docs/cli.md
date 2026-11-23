@@ -288,7 +288,7 @@ except that `merge --validate default` leaves the checks to the merge (see
 | Member repeated within one object | reject | reject | reject |
 | Member spelled only in another case | warn | reject | reject |
 | Byte that is not valid UTF-8 | warn | reject | reject |
-| Required member left out: a seccomp condition's `index` or `op`, a Landlock rule's `path` or `port` | warn | reject | reject |
+| Required member left out: a seccomp syscall entry's `names` or `action`, a seccomp condition's `index` or `op`, a Landlock rule's `path` or `port`, or a null entry, condition or rule | warn | reject | reject |
 | Member the profile type has no field for | warn | reject | reject |
 | Data after the profile, or a document that is not an object | reject | reject | reject |
 
@@ -314,9 +314,10 @@ away, such as a condition on a value above 32 bits where the node covers
 a 32-bit architecture. The CRI-O default seccomp profile passes the default
 checks but fails here, since the merge rewrites its masked `clone` and its
 `socket` clauses; restated as the integration guide describes, it passes.
-The AppArmor check also refuses a path `QuotePath` cannot render, which a
-merge followed by a diff would not find. For Landlock it runs
-`landlock.ValidateBaseline`, or `landlock.Options.ValidateBaseline` for
+The AppArmor check also refuses a path `QuotePath` cannot render, and one
+`ValidateArtifact` refuses for what it loads as, such as `/a/[\^x]` or a
+`..` component, which a merge followed by a diff would not find. For
+Landlock it runs `landlock.ValidateBaseline`, or `landlock.Options.ValidateBaseline` for
 the version `--abi` names: every check of `ValidateArtifact` but its
 bound on the number of rules, such as a relative path or a rule granting
 a right the baseline does not handle, which the default checks accept

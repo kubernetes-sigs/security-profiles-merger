@@ -223,6 +223,37 @@ func TestMergeArgs(t *testing.T) {
 			}(),
 			want: "Profile{default:SCMP_ACT_ALLOW socket->SCMP_ACT_ERRNO}",
 		},
+		{
+			// "a0 < 1" and "a0 == 0" match the same calls, and the least
+			// restrictive matching clause decides, so the trap never
+			// decides a call and goes; keeping both left a clause set in
+			// no safe shape, which collapsed to an unconditional allow.
+			name:  "union drops the stricter of two equivalent filters",
+			merge: seccomp.Union,
+			profiles: []*specs.LinuxSeccomp{
+				profileOf(specs.ActErrno,
+					filtered(syscallRead, specs.ActAllow, arg(0, specs.OpLessThan, 1))),
+				profileOf(specs.ActErrno,
+					filtered(syscallRead, specs.ActTrap, arg(0, specs.OpEqualTo, 0))),
+			},
+			want:     "Profile{default:SCMP_ACT_ERRNO read([0]SCMP_CMP_LT:1)->SCMP_ACT_ALLOW}",
+			commutes: true,
+		},
+		{
+			// The intersection of the same inputs lowers each clause by
+			// the other side's, so the two agree on the trap and are one
+			// clause spelled twice, of which one goes.
+			name:  "intersect lowers two equivalent filters to the stricter as one clause",
+			merge: seccomp.Intersect,
+			profiles: []*specs.LinuxSeccomp{
+				profileOf(specs.ActErrno,
+					filtered(syscallRead, specs.ActAllow, arg(0, specs.OpLessThan, 1))),
+				profileOf(specs.ActErrno,
+					filtered(syscallRead, specs.ActTrap, arg(0, specs.OpEqualTo, 0))),
+			},
+			want:     "Profile{default:SCMP_ACT_ERRNO read([0]SCMP_CMP_EQ:0)->SCMP_ACT_TRAP}",
+			commutes: true,
+		},
 	})
 }
 

@@ -211,6 +211,13 @@ func entryClauseCount(entry *specs.LinuxSyscall, def *clause) uint64 {
 	return 1
 }
 
+// loadsRule reports whether an entry loads any rule: whether it names a
+// syscall and differs from the profile default, which runtimes skip an
+// entry for.
+func loadsRule(entry *specs.LinuxSyscall, def *clause) bool {
+	return len(entry.Names) > 0 && entryClauseCount(entry, def) > 0
+}
+
 // totalClauses returns how many clauses the entries load in total, so that a
 // caller can bound the expansion before paying for it.
 //
@@ -1112,19 +1119,24 @@ func (m ruleMerger) collapseClauses(clauses []clause, fallback *clause) []clause
 // working model: a clause whose filter another clause's filter covers (see
 // argsCover) matches only calls the other matches too, and since the least
 // restrictive matching clause wins, it is dead unless it is less restrictive
-// than that other clause. Clauses with the same result also collapse into
-// the wider one.
+// than that other clause, also where the two filters cover each other (see
+// dominates). Clauses with the same result also collapse into the wider
+// one.
 //
-// Two clauses with the same result whose filters cover each other, such as
+// Two clauses with the same action whose filters cover each other, such as
 // "a0 < 1" and "a0 <= 0", are one clause spelled twice: a merge spells a
 // conjoined condition after one input, so the same clause can arrive in two
-// spellings, which would be no safe shape together. Such twins live or die
-// together, since argsCover may see a wider filter cover one spelling and
-// not the other, and of two live twins the one with the greater key goes.
-// Neither depends on the order of the clauses, so a union of two inputs is
-// the same whichever comes first. Three or more merge pairwise, and their
-// order can still change how tight a result is (see the Union section of
-// the package documentation).
+// spellings, which would be no safe shape together, and the set would
+// collapse to an unconditional clause that may permit what both inputs
+// deny. Such twins live or die together, since argsCover may see a wider
+// filter cover one spelling and not the other, and of live twins one stays:
+// of those with the same errno, the one with the smallest key, so that a
+// union of two inputs is the same whichever comes first, and of those whose
+// errno values differ, one with the errno the earliest clause gives, as the
+// leftmost input decides an errno where actions tie (see the Errno values
+// section of the package documentation). The clauses come in the order of
+// their inputs. Three or more inputs merge pairwise, and their order can
+// still change how tight a result is (see the Union section).
 //
 // It compares every clause against every other one, so past maxPruneClauses
 // it is skipped. Pruning only removes clauses that never decide a call, so
@@ -1143,10 +1155,20 @@ func pruneDominated(clauses []keyedClause) []keyedClause {
 		})
 	}
 
+	// The rank of a clause is the index of the first clause with its result,
+	// which orders the errno values of twins by input.
+	rank := make([]int, len(clauses))
+
+	for idx, current := range clauses {
+		rank[idx] = slices.IndexFunc(clauses, func(other keyedClause) bool {
+			return other.clause.sameResult(current.clause)
+		})
+	}
+
 	kept := make([]keyedClause, 0, len(clauses))
 
 	for idx, current := range clauses {
-		if !dead[idx] && !twinGoes(clauses, dead, idx) {
+		if !dead[idx] && !twinGoes(clauses, dead, rank, idx) {
 			kept = append(kept, current)
 		}
 	}
@@ -1155,13 +1177,19 @@ func pruneDominated(clauses []keyedClause) []keyedClause {
 }
 
 // twinGoes reports whether the clause at idx goes for a twin (see twins):
-// one that is dead, or one with a smaller key.
-func twinGoes(clauses []keyedClause, dead []bool, idx int) bool {
+// one that is dead, or one that comes first by rank, the input order of its
+// errno, and then by key, which is a total order, so that one of live twins
+// stays.
+func twinGoes(clauses []keyedClause, dead []bool, rank []int, idx int) bool {
 	current := clauses[idx]
 
 	for otherIdx, other := range clauses {
-		if otherIdx != idx && twins(other.clause, current.clause) &&
-			(dead[otherIdx] || other.key < current.key) {
+		if otherIdx == idx || !twins(other.clause, current.clause) {
+			continue
+		}
+
+		if dead[otherIdx] || rank[otherIdx] < rank[idx] ||
+			rank[otherIdx] == rank[idx] && other.key < current.key {
 			return true
 		}
 	}
@@ -1170,21 +1198,39 @@ func twinGoes(clauses []keyedClause, dead []bool, idx int) bool {
 }
 
 // dominates reports whether the clause other makes current dead: other
-// strictly covers current and is less restrictive or has the same result.
-// Two equivalent filters with different results are both kept: they are a
-// conflict to libseccomp, and the clause set collapses as one.
+// covers current and is less restrictive, or strictly covers it with the
+// same result, which twins leaves to twinGoes.
+//
+// Of two clauses whose filters cover each other, such as "a0 < 1" and
+// "a0 == 0", the stricter one never decides a call, as groupByArgs keeps
+// the looser of two clauses spelled alike. Kept, the pair is a conflict to
+// libseccomp, which made the clause set collapse as one, to an
+// unconditional clause: a union of "read ALLOW a0 < 1" and "read TRAP a0
+// == 0" allowed every read. Dropping it is as sound for an intersection,
+// where every clause is at least as restrictive as both inputs on its
+// region (see adjustClauses), so the looser one is too, and it matches the
+// same calls. That case is defensive: adjustClauses lowers each of two
+// such clauses of an intersection to the stricter action of the pair, so
+// they arrive as twins (see twins), and no intersection is known to keep
+// two with different results. Of two such clauses whose actions differ only
+// in errno neither is stricter, and twinGoes picks one.
 func dominates(other, current clause) bool {
-	if !argsCover(other.args, current.args) || argsCover(current.args, other.args) {
+	if !argsCover(other.args, current.args) {
 		return false
+	}
+
+	if argsCover(current.args, other.args) {
+		return stricter(current, other)
 	}
 
 	return current.sameResult(other) || stricter(current, other)
 }
 
-// twins reports whether two clauses have the same result and filters that
-// cover each other, so that they are one clause spelled twice.
+// twins reports whether two clauses have the same action, whatever their
+// errno values, and filters that cover each other, so that they are one
+// clause spelled twice.
 func twins(first, second clause) bool {
-	return first.sameResult(second) &&
+	return actionsEquivalent(first.action, second.action) &&
 		argsCover(first.args, second.args) && argsCover(second.args, first.args)
 }
 

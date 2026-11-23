@@ -18,6 +18,8 @@ package landlock
 
 import (
 	"slices"
+	"sort"
+	"strings"
 )
 
 // dropUnsafeRefer removes FSAccessRefer from the result rules wherever the
@@ -224,14 +226,14 @@ func referRulePaths(inputs []*Profile) map[string]struct{} {
 // outside it, inside a mount other than the root mount, which the input
 // granting refer on "/" allows.
 func unhandleMoveConflicts(result *Profile, inputs []*Profile) {
-	resultMasks := pathRuleMasks(result.PathRules)
+	results := newResultSplits(pathRuleMasks(result.PathRules))
 	paths := inputRulePaths(inputs)
-	_, rootRule := resultMasks[rootPath]
+	_, rootRule := results.masks[rootPath]
 
 	var conflicting uint32
 
 	for _, input := range inputs {
-		conflicting |= moveConflicts(input, resultMasks, paths, rootRule)
+		conflicting |= moveConflicts(input, results, paths, rootRule)
 	}
 
 	conflicting &= fsBits.mask(result.HandledAccessFS) &^ fsBits.of(FSAccessRefer)
@@ -373,38 +375,104 @@ func (s moveSets) add(side moveSide, destination bool) {
 // unless it grants that right at the source too. Over all the sources of the
 // buckets that pass, that leaves the rights the union misses on at least one
 // of them, which are the ones missing from the rights it grants on all.
+//
+// What the buckets answer depends on a destination only through the file
+// rights it grants, a subset of the six, so the answer for every subset is
+// computed once, folding each bucket into the subsets of its key one right
+// at a time: some 500 steps for a set of buckets, whatever the number of
+// destinations, each of which then reads its answer. Comparing every
+// destination with every bucket cost up to 64 times the destinations,
+// which a profile granting each of many shallow rule paths another set of
+// rights reaches, far past the work the merge budget counts for them.
 func (s moveSets) conflicts() uint32 {
+	if len(s.destinations) == 0 {
+		return 0
+	}
+
+	positions := bitPositions(s.files)
+	size := 1 << len(positions)
+
+	// common holds, for each subset of the file rights, the rights the
+	// union grants on every source of a bucket whose key holds the subset,
+	// and passed whether any bucket does.
+	common := make([]uint32, size)
+	passed := make([]bool, size)
+
+	for idx := range common {
+		common[idx] = ^uint32(0)
+	}
+
+	for key, granted := range s.sources {
+		idx := compactBits(key, positions)
+		common[idx] &= granted
+		passed[idx] = true
+	}
+
+	for bit := range positions {
+		for idx := range size {
+			if idx&(1<<bit) == 0 {
+				common[idx] &= common[idx|1<<bit]
+				passed[idx] = passed[idx] || passed[idx|1<<bit]
+			}
+		}
+	}
+
 	var conflicting uint32
 
 	for dst := range s.destinations {
-		needed := dst.input & s.files
-		common, passed := ^uint32(0), false
-
-		for key, granted := range s.sources {
-			if needed&^key == 0 {
-				common &= granted
-				passed = true
-			}
-		}
-
-		if passed {
-			conflicting |= dst.result &^ dst.input &^ common
+		idx := compactBits(dst.input&s.files, positions)
+		if passed[idx] {
+			conflicting |= dst.result &^ dst.input &^ common[idx]
 		}
 	}
 
 	return conflicting
 }
 
+// bitPositions returns the positions of the bits set in a mask, lowest
+// first.
+func bitPositions(mask uint32) []int {
+	var positions []int
+
+	for bit := range 32 {
+		if mask&(1<<bit) != 0 {
+			positions = append(positions, bit)
+		}
+	}
+
+	return positions
+}
+
+// compactBits returns the bits of value at the given positions packed into
+// the lowest bits, in order: the index of a subset of the masked rights.
+func compactBits(value uint32, positions []int) int {
+	idx := 0
+
+	for packed, bit := range positions {
+		if value&(1<<bit) != 0 {
+			idx |= 1 << packed
+		}
+	}
+
+	return idx
+}
+
 // moveConflicts returns the rights through which the union could deny a
 // move or link the input allows, at any version of referLevels: comparing
 // the directories with the rights of the rules on "/" and, when belowRoot
-// is set, without them as well.
+// is set, without them as well. An input whose rules grant refer nowhere
+// allows no move or link through a directory, so it has none, and its
+// directories are not asked (see moveSides).
 func moveConflicts(
-	input *Profile, resultMasks map[string]uint32, paths []string, belowRoot bool,
+	input *Profile, results *resultSplits, paths []string, belowRoot bool,
 ) uint32 {
+	if !rulesGrantRefer(input.PathRules) {
+		return 0
+	}
+
 	var conflicting uint32
 
-	for _, level := range moveSides(input, resultMasks, paths, referLevels) {
+	for _, level := range moveSides(input, results, paths, referLevels) {
 		conflicting |= level.withRoot.conflicts()
 		if belowRoot {
 			conflicting |= level.withoutRoot.conflicts()
@@ -427,16 +495,24 @@ type moveLevel struct{ withRoot, withoutRoot moveSets }
 // rule paths are asked as well. Each path is looked up once, whatever the
 // number of masks.
 //
+// Only the paths at or beneath a path the input grants refer on are asked,
+// found in the sorted paths without reading the others: no other path or
+// parent grants refer in the input, and a parent of one of the others is
+// not beneath such a path either, or its child would be. A union of many
+// inputs each granting refer on a path of its own asks each about a few
+// paths rather than about every path of every input.
+//
 // Whether a directory grants refer is read with the rules on "/" in both
 // cases, since the kernel counts them for the grant either way, and refer
 // is known at every version of referLevels.
 func moveSides(
-	input *Profile, resultMasks map[string]uint32, paths []string, levels []uint32,
+	input *Profile, results *resultSplits, paths []string, levels []uint32,
 ) []moveLevel {
 	inputMasks := pathRuleMasks(input.PathRules)
+	beneath := pathsBeneath(paths, referRoots(input.PathRules))
 	children := make(map[string]uint32)
 
-	for _, path := range paths {
+	for _, path := range beneath {
 		if parent, ok := parentPath(path); ok {
 			children[parent] |= inputMasks[path]
 		}
@@ -457,7 +533,7 @@ func moveSides(
 			return
 		}
 
-		resultBelow, resultRoot := maskAt(path, resultMasks)
+		resultBelow, resultRoot := results.at(path)
 
 		for idx, known := range levels {
 			sets[idx].withRoot.add(moveSide{
@@ -473,7 +549,7 @@ func moveSides(
 		}
 	}
 
-	for _, path := range paths {
+	for _, path := range beneath {
 		add(path, true)
 	}
 
@@ -482,6 +558,79 @@ func moveSides(
 	}
 
 	return sets
+}
+
+// referRoots returns the paths of the rules granting refer that lie beneath
+// no other such rule, so that no path is beneath two of them.
+func referRoots(rules []PathRule) []string {
+	granted := make(map[string]struct{})
+
+	for _, rule := range rules {
+		if slices.Contains(rule.AccessFS, FSAccessRefer) {
+			granted[rule.Path] = struct{}{}
+		}
+	}
+
+	roots := make([]string, 0, len(granted))
+
+	for path := range granted {
+		if !beneathAny(path, granted) {
+			roots = append(roots, path)
+		}
+	}
+
+	return roots
+}
+
+// pathsBeneath returns the paths of the sorted, distinct paths that are one
+// of the roots or beneath one, none twice where no root is beneath another.
+// The paths beneath a root are the ones it prefixes followed by a "/", which
+// sorting keeps together, so each root costs two binary searches and the
+// paths it yields.
+func pathsBeneath(paths, roots []string) []string {
+	var beneath []string
+
+	for _, root := range roots {
+		prefix := root + "/"
+
+		if root == rootPath {
+			prefix = rootPath
+		} else if idx, found := slices.BinarySearch(paths, root); found {
+			beneath = append(beneath, paths[idx])
+		}
+
+		start, _ := slices.BinarySearch(paths, prefix)
+		end := start + sort.Search(len(paths)-start, func(offset int) bool {
+			return !strings.HasPrefix(paths[start+offset], prefix)
+		})
+		beneath = append(beneath, paths[start:end]...)
+	}
+
+	return beneath
+}
+
+// resultSplits holds the rights the rules of a union grant, by path, and
+// what maskAt returns for each path asked so far. Every input asks about
+// the same paths, so each is walked up once rather than once per input.
+type resultSplits struct {
+	masks map[string]uint32
+	split map[string][2]uint32
+}
+
+func newResultSplits(masks map[string]uint32) *resultSplits {
+	return &resultSplits{masks: masks, split: make(map[string][2]uint32)}
+}
+
+// at returns what maskAt returns for the path and the rules of the union.
+func (r *resultSplits) at(path string) (uint32, uint32) {
+	if split, ok := r.split[path]; ok {
+		return split[0], split[1]
+	}
+
+	below, root := maskAt(path, r.masks)
+	r.split[path] = [2]uint32{below, root}
+
+	return below, root
 }
 
 // maskAt returns the rights the rules grant for a path, as effectiveFSAccess

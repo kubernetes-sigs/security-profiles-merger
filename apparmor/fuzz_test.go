@@ -731,7 +731,7 @@ func FuzzAppArmorValidateArtifact(f *testing.F) {
 
 		err := apparmor.ValidateArtifact(profile)
 		testutil.StrictOrdering(t, err, apparmor.ValidateStrict(profile),
-			apparmor.ErrUnknownCapability, apparmor.ErrDuplicateExecutablePath)
+			apparmor.ErrUnknownCapability)
 
 		// Validate checks relative paths itself, so it agrees with
 		// ValidateArtifact on them, and the merges refuse what neither

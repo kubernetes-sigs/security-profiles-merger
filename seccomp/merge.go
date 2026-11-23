@@ -371,7 +371,7 @@ func loadsWideValue(profile *specs.LinuxSeccomp) bool {
 
 	for idx := range profile.Syscalls {
 		entry := &profile.Syscalls[idx]
-		if len(entry.Names) == 0 || entryClauseCount(entry, def) == 0 {
+		if !loadsRule(entry, def) {
 			continue
 		}
 

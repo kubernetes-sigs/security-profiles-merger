@@ -47,15 +47,16 @@ import (
 // finding is reported.
 type scanFrame struct {
 	// keys holds the names of the members seen so far in an object, folded
-	// unless the object decodes into a map (see addKey), mapped to whether
-	// they were already reported as repeated. It is made at the second
-	// member: most objects of a profile hold one member or none, and the
-	// name of the first is kept in first until then.
+	// where the object decodes into a struct (see addKey), mapped to
+	// whether they were already reported as repeated. It is made at the
+	// second member: most objects of a profile hold one member or none, and
+	// the name of the first is kept in first until then.
 	keys map[string]bool
 	// first is the name of the first member of an object, as keys holds it.
 	first string
 	// member is the name of the object member whose value comes next, and
-	// folded the same name folded.
+	// folded the same name folded, for an object decoding into a struct,
+	// or "" for any other.
 	member, folded string
 	// index is the index of the next array element, and for an object the
 	// count of its members so far.
@@ -89,9 +90,6 @@ type documentScan struct {
 	duplicates, unknown, misspelled, missing pathCollector
 	// failed reports a syntax error before the end of the document.
 	failed bool
-	// divergent reports a member of a struct type whose fields decoders
-	// resolve differently (see jsonFields), which unknown holds then.
-	divergent bool
 }
 
 // scanDocument reads a document token by token, once, following the type
@@ -103,8 +101,10 @@ type documentScan struct {
 // Repeated members are compared the way encoding/json matches names to struct
 // fields, ignoring case, because a case-sensitive parser reads
 // "defaultAction" and "DefaultAction" as different members where
-// encoding/json fills one field from both. The keys of an object decoding
-// into a map are compared as written, as encoding/json keeps them.
+// encoding/json fills one field from both. The keys of every other object,
+// one decoding into a map, as encoding/json keeps them, or one nothing
+// decodes into, are compared as written, since encoding/json folds case for
+// struct fields alone.
 // encoding/json decodes each occurrence into what the one before it filled,
 // so a later scalar or array replaces the earlier one while a later object
 // merges into it field by field, and other parsers keep the first or the last
@@ -196,7 +196,6 @@ func newScanState(
 			misspelled: pathCollector{paths: nil, wants: nil, omitted: 0},
 			missing:    pathCollector{paths: nil, wants: nil, omitted: 0},
 			failed:     false,
-			divergent:  false,
 		},
 	}
 }
@@ -299,8 +298,9 @@ func (state *scanState) member(frame *scanFrame, key string) {
 	case frame.typ.Kind() == reflect.Struct:
 		// addKey folded the name already.
 		fields := fieldsOf(frame.typ)
+		// A set whose fields decoders resolve differently knows no member,
+		// so every member of it is reported as unknown (see jsonFields).
 		field, known, exact := fields.lookupFolded(key, frame.folded)
-		state.scan.divergent = state.scan.divergent || fields.divergent
 
 		switch {
 		case !known:
@@ -443,18 +443,25 @@ func (frame *scanFrame) expectsKey() bool {
 }
 
 // addKey records a member name and reports whether this is the first time
-// the name repeats, which is when its path is collected. Names repeat when
-// they fold alike, as encoding/json matches them to struct fields, except
-// in an object decoding into a map, which keeps each key as written.
+// the name repeats, which is when its path is collected. In an object
+// decoding into a struct, names repeat when they fold alike, as
+// encoding/json matches them to struct fields, so that "Name" and "name"
+// fill one field. Every other object, one decoding into a map, which keeps
+// each key as written, or one nothing decodes into, such as an object
+// inside a member no field reads, repeats a name only when it repeats it
+// exactly: encoding/json folds case for struct fields alone, and there
+// "Name" and "name" are two members, of which the member holding them is
+// reported as unknown.
 func (frame *scanFrame) addKey(key string) bool {
 	frame.member = key
 	frame.wantKey = false
-	frame.folded = foldName(key)
+	frame.folded = ""
 	frame.index++
 
-	name := frame.folded
-	if frame.typ != nil && frame.typ.Kind() == reflect.Map {
-		name = key
+	name := key
+	if frame.typ != nil && frame.typ.Kind() == reflect.Struct {
+		frame.folded = foldName(key)
+		name = frame.folded
 	}
 
 	switch {
