@@ -67,8 +67,9 @@ limitations under the License.
 // SCMP_CMP_GT and SCMP_CMP_GE) or a different mask keep the order they were
 // added in instead: under default SCMP_ACT_ERRNO, KILL if a0 < 5 and LOG if
 // a0 <= 5 decide read(3) by whichever comes first in the profile. libseccomp
-// also compiles some clause sets to programs that match none of the clauses,
-// refuses some with EEXIST and never returns from adding others. The package
+// refuses some clause sets with EEXIST, and releases before 2.6.2 compile
+// some to programs that match none of the clauses (GHSA-35x7-vh54-jvqf) and
+// never return from adding others (GHSA-qxh5-4cq9-6mjx). The package
 // therefore relies on the compiled program only for clause sets in a safe
 // shape:
 //
@@ -150,7 +151,7 @@ limitations under the License.
 // expressible in OCI terms, such as two conditions on one argument of which
 // neither implies the other, the affected calls fall back to the more
 // restrictive surrounding action. The result never permits a call that any
-// input denies, as libseccomp 2.5.4 to 2.6.1 evaluates the inputs and the
+// input denies, as libseccomp 2.5.4 to 2.6.2 evaluates the inputs and the
 // result. The lost-rules check knows the syscalls of those releases; a rule
 // on a syscall only a later release knows is not checked (see the
 // Architectures section).
@@ -175,7 +176,7 @@ limitations under the License.
 // raised to the least restrictive action any input applies to calls matching
 // its filter. Where the exact union is not expressible, or would not form a
 // safe shape, the result over-approximates in the permissive direction. It
-// never denies a call that any input permits, as libseccomp 2.5.4 to 2.6.1
+// never denies a call that any input permits, as libseccomp 2.5.4 to 2.6.2
 // evaluates them, with the same limit of the lost-rules check as Intersect.
 //
 // Both directions are conservative where filters interact. Intersecting
@@ -257,7 +258,7 @@ limitations under the License.
 // below are read for each architecture a profile lists and for the native
 // architecture, which the merges and [Diff] take to be the one of the
 // running program (see [NativeArchitecture]) unless [Options] names another.
-// The merges are sound for a node linking libseccomp 2.5.4 to 2.6.1, the
+// The merges are sound for a node linking libseccomp 2.5.4 to 2.6.2, the
 // releases checked; 2.5.2 evaluates some rule sets differently and is not
 // supported. The lost-rules check below knows the syscalls of those
 // releases, and Validate accepts names it does not know, so a rule on a
@@ -288,6 +289,8 @@ limitations under the License.
 // whichever is native, so the merge is refused more often.
 // [ValidateArtifact] and [ValidateStrict] report the shape as written
 // (ErrLostRules); the merges settle the rules first and may accept it.
+// libseccomp 2.6.2 no longer loses the rules (GHSA-q75f-27j4-2h7j), and the
+// merges guard against it for the earlier releases they support.
 //
 // 32-bit values: on a 32-bit architecture (x86, x32, arm, 32-bit and n32
 // MIPS, ppc, s390, parisc, m68k, sh), libseccomp compares only the lower 32

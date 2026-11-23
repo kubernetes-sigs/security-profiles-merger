@@ -31,9 +31,10 @@ import (
 // architecture lacks, which libseccomp keeps in the block under a number it
 // makes up. Every rule of the block then compares against a value that is no
 // syscall number, and every call of the architecture gets the default
-// action. The merges keep their results out of that shape (see
-// settleAbsentSyscalls and the Architectures section of the package
-// documentation).
+// action. 2.6.2 loads the number in the first block it emits
+// (GHSA-q75f-27j4-2h7j). The merges keep their results out of that shape
+// for the earlier releases (see settleAbsentSyscalls and the Architectures
+// section of the package documentation).
 //
 // A block tests its syscalls in the order of how many comparisons their
 // rules compile to, fewest first, and a syscall the architecture has wins a
@@ -61,8 +62,8 @@ import (
 // it lacks; a multiplexing one keeps only a multiplexed syscall it has no
 // number for and drops the rest when the rule is added.
 //
-// syscallPlacements combines libseccomp 2.5.2, 2.5.4, 2.5.5, 2.6.0 and
-// 2.6.1, the releases runtimes link, which disagree where one knows a
+// syscallPlacements combines libseccomp 2.5.2, 2.5.4, 2.5.5, 2.6.0, 2.6.1
+// and 2.6.2, the releases runtimes link, which disagree where one knows a
 // syscall or a number another does not. Each decision reads the combination
 // that errs safe for all of them:
 //

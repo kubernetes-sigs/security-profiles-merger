@@ -19,8 +19,8 @@ limitations under the License.
 package seccomp
 
 // syscallPlacements maps every syscall name libseccomp 2.5.2, 2.5.4, 2.5.5,
-// 2.6.0 or 2.6.1 knows to where those releases place a rule on it, per
-// architecture (see syscallPlacement). Regenerate it with make
+// 2.6.0, 2.6.1 or 2.6.2 knows to where those releases place a rule on it,
+// per architecture (see syscallPlacement). Regenerate it with make
 // verify-syscalls.
 var syscallPlacements = map[string]syscallPlacement{
 	"_llseek":                      {direct: 0x00717929, kept: 0x000e06d6, viaMux: 0x00000000, reach: 0x00737929},

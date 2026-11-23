@@ -90,7 +90,7 @@ type InputError = spm.InputError
 // ([Options.Intersect] names another node). It passes Validate but often
 // not ValidateStrict, equal inputs give equal output, and it shares no
 // memory with the inputs, a single input included. The guarantee holds for
-// libseccomp 2.5.4 to 2.6.1 and the syscalls they know (see the
+// libseccomp 2.5.4 to 2.6.2 and the syscalls they know (see the
 // Intersection section). See the Evaluation model, Intersection, Errno
 // values, Architectures, Flags, Listener, Single profiles and Cost bounds
 // sections.

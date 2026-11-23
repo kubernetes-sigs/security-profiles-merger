@@ -699,12 +699,12 @@ func TestModelMatchesLibseccompOnOtherArchitectures(t *testing.T) {
 
 // TestLibseccompLosesRulesBehindAnAbsentSyscall pins a defect of libseccomp
 // that the model does not follow and the package documentation warns about,
-// present in 2.5.2, 2.5.4, 2.5.5, 2.6.0 and 2.6.1 alike. libseccomp emits the
-// instruction that loads the syscall number in the block of the syscall it
-// tests first, and leaves that block out when the syscall does not exist on
-// the architecture. Every other rule of the architecture then compares
-// against a value that is no syscall number, and every call gets the
-// default action.
+// present in 2.5.2, 2.5.4, 2.5.5, 2.6.0 and 2.6.1 alike and fixed in 2.6.2
+// (GHSA-q75f-27j4-2h7j). libseccomp emits the instruction that loads the
+// syscall number in the block of the syscall it tests first, and leaves that
+// block out when the syscall does not exist on the architecture. Every other
+// rule of the architecture then compares against a value that is no syscall
+// number, and every call gets the default action.
 //
 // The syscall tested first is the one with the highest priority, which is a
 // rule without conditions. Here that is socketcall, which x86_64 does not
@@ -716,8 +716,9 @@ func TestModelMatchesLibseccompOnOtherArchitectures(t *testing.T) {
 // rule on a syscall they lack when it is added, and x86_64 alone loads the
 // number before any syscall is tested.
 //
-// The test fails when a libseccomp that is checked here stops doing this,
-// so that the guard against it (see settleAbsentSyscalls) can go.
+// The test fails when a release before 2.6.2 stops doing this, or a later
+// one starts again. The guard against it (see settleAbsentSyscalls) can go
+// once the oldest supported release has the fix.
 func TestLibseccompLosesRulesBehindAnAbsentSyscall(t *testing.T) {
 	t.Parallel()
 
@@ -736,7 +737,8 @@ func TestLibseccompLosesRulesBehindAnAbsentSyscall(t *testing.T) {
 	)
 	profile.Architectures = []specs.Arch{specs.ArchX86_64, specs.ArchX86, specs.ArchX32}
 
-	checkRulesLostOn(t, profile, specs.ArchX86_64, "socket", []uint64{40})
+	lost := !libseccompFixed(t, "2.6.2")
+	checkRulesLostOn(t, profile, specs.ArchX86_64, "socket", []uint64{40}, lost)
 
 	// Without x32 the filter of x86_64 stands alone, and the number is
 	// loaded before any syscall is tested.
@@ -757,14 +759,18 @@ func TestLibseccompLosesRulesBehindAnAbsentSyscall(t *testing.T) {
 	// aarch64 has no socketcall either and stores the rule on it, so its
 	// block loses the socket rule the same way.
 	profile.Architectures = []specs.Arch{specs.ArchAARCH64}
-	checkRulesLostOn(t, profile, specs.ArchAARCH64, "socket", []uint64{40})
+	checkRulesLostOn(t, profile, specs.ArchAARCH64, "socket", []uint64{40}, lost)
 }
 
 // checkRulesLostOn compiles the profile and checks that the program answers
 // the call on the architecture with the default without reading the syscall
-// number, as the defect has it do.
+// number, as the defect has it do, or, where lost is false, that it reads
+// the number and applies the action of the profile's entry for the syscall,
+// whose rule the call matches. A libseccomp with the fix backported, or a
+// build from git that reports no release, fails here on the first count.
 func checkRulesLostOn(
 	t *testing.T, profile *specs.LinuxSeccomp, arch specs.Arch, name string, args []uint64,
+	lost bool,
 ) {
 	t.Helper()
 
@@ -783,12 +789,34 @@ func checkRulesLostOn(
 		t.Fatalf("resolve %s on %s: %v", name, arch, err)
 	}
 
+	rule := entryAction(t, profile, name)
 	got, _, read := runProgramTraced(t, prog, audit, number, args)
-	if got != profile.DefaultAction || read {
+
+	switch {
+	case lost && (got != profile.DefaultAction || read):
 		t.Errorf("libseccomp %s applies the rule on %s on %s (%s, number read: %v): "+
-			"the defect is gone there, and so can the warning in the package documentation",
+			"the defect is gone there, although only 2.6.2 fixed it "+
+			"(is the fix backported?)",
 			libseccomp.Version(), name, arch, got, read)
+	case !lost && (got != rule || !read):
+		t.Errorf("libseccomp %s answers %s on %s with %s (number read: %v), want %s: "+
+			"2.6.2 fixed the defect that loses the rule",
+			libseccomp.Version(), name, arch, got, read, rule)
 	}
+}
+
+// entryAction returns the action of the profile's entry for the syscall.
+func entryAction(t *testing.T, profile *specs.LinuxSeccomp, name string) specs.LinuxSeccompAction {
+	t.Helper()
+
+	idx := slices.IndexFunc(profile.Syscalls, func(entry specs.LinuxSyscall) bool {
+		return slices.Contains(entry.Names, name)
+	})
+	if idx < 0 {
+		t.Fatalf("the profile has no entry for %s", name)
+	}
+
+	return profile.Syscalls[idx].Action
 }
 
 // TestModelMatchesLibseccompForArchitectureFindings merges the pairs that

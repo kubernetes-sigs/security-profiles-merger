@@ -234,7 +234,8 @@ SYSCALL_CSVS = 2.5.2:3c59487fdb6cb9b0356ea0cf26f0f495d78c31e327ecb13655c484f62d5
 	2.5.4:6932eb079e5c497dd52ad0b5184f8fc7f868949891388ba2c26e99d56a3cf3d7 \
 	2.5.5:1a268ddf08313e5982dd7ecfff52c6718cc5a24b97a87b8465ce0dfe6c5f1c72 \
 	2.6.0:3fc607fffc9c3b0aca77fd6ffc3aa0f86c61b90dc255baedfc396e9a5e102fdc \
-	2.6.1:ab64e55719254d44bc279d967845568ab9940e81ed7800e9d1066f664a9f5231
+	2.6.1:ab64e55719254d44bc279d967845568ab9940e81ed7800e9d1066f664a9f5231 \
+	2.6.2:ab64e55719254d44bc279d967845568ab9940e81ed7800e9d1066f664a9f5231
 
 .PHONY: verify-syscalls
 verify-syscalls: ## Regenerate seccomp/syscalls.go from libseccomp's syscalls.csv and verify it is unchanged (needs network)

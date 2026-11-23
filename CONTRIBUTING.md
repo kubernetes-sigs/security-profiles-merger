@@ -216,7 +216,7 @@ install or a machine it does not have:
 | `test / linux-<arch> (qemu)` | `GOARCH=<arch> CGO_ENABLED=0 go test -count=1 ./...` | qemu-user with binfmt_misc for s390x, ppc64le or arm |
 | `test / release go` | `make test-wall-clock` (the suite one package at a time, with the wall-clock bounds on) | the Go in `.go-version`, and a machine that runs little else |
 | `fuzz / <target>` | `make fuzz` | time |
-| `test-libseccomp / <version>`, `test-libseccomp / 2.6.1 / <arch>` | `make test-libseccomp`, then `SPM_LIBSECCOMP_OPTIMIZE=2 make test-libseccomp` | cgo and that libseccomp version, built for arm64 or for 386 (`GOARCH=386 CC="gcc -m32"`) |
+| `test-libseccomp / <version>`, `test-libseccomp / <version> / <arch>` | `make test-libseccomp`, then `SPM_LIBSECCOMP_OPTIMIZE=2 make test-libseccomp` | cgo and that libseccomp version, built for arm64 or for 386 (`GOARCH=386 CC="gcc -m32"`) |
 | `test / runtime` | `make test-runtime` | Linux with Landlock, runc or crun, strace and unprivileged user namespaces; without them the tests skip |
 | `api / gorelease` | `make api-report` | a clean working tree; it fails on an incompatible change only from v1.0.0 on |
 | `apparmor-parser` | `go test -count=1 -tags apparmor_parser -run TestTranslationAgreesWithApparmorParser ./apparmor/` | `apparmor_parser` on `PATH` or named by `SPM_APPARMOR_PARSER` |
@@ -275,11 +275,12 @@ merge should keep all four passing:
   permits more than an input libseccomp loads, and `Union` never less. An
   evaluator written from a mistaken reading of libseccomp would agree with the
   merge and still be wrong; this is what catches that. CI runs these tests
-  against libseccomp 2.5.4, 2.5.5, 2.6.0 and 2.6.1 on amd64, and against
-  2.6.1 on arm64 and 386 as well, each built from a checksum-pinned release
-  tarball, and `TestLibseccompVersion` reads the version out of the loaded
-  library and fails unless it is the one that was built, so a run always
-  names the version that answered. On a 386 build the tests whose
+  against libseccomp 2.5.4, 2.5.5, 2.6.0, 2.6.1 and 2.6.2 on amd64, and
+  against 2.6.1, the newest release that loses rules, and 2.6.2 on arm64
+  and 386 as well, each built from a checksum-pinned release tarball, and
+  `TestLibseccompVersion` reads the version out of the loaded library and
+  fails unless it is the one that was built, so a run always names the
+  version that answered. On a 386 build the tests whose
   expectations come from the evaluator skip, since it models a 64-bit
   native architecture that calls every syscall directly; the merge
   differentials run there as everywhere. libseccomp 2.5.2 is left out (see
@@ -309,11 +310,11 @@ those statements were established, which a change to them has to redo:
   ppc64, s390, s390x, m68k, sheb) are big-endian, which libseccomp does not
   combine with a little-endian architecture in one filter, so they are
   inferred from the probed ones.
-- The evaluation model is checked against libseccomp 2.5.4, 2.5.5, 2.6.0
-  and 2.6.1. libseccomp 2.5.2 compiles some rule sets into a binary tree
-  that evaluates differently from those releases, so a merge result can
-  permit more (intersection) or less (union) than an input there, which is
-  why releases older than 2.5.4 are not supported. The table of where each
+- The evaluation model is checked against libseccomp 2.5.4, 2.5.5, 2.6.0,
+  2.6.1 and 2.6.2. libseccomp 2.5.2 compiles some rule sets into a binary
+  tree that evaluates differently from those releases, so a merge result
+  can permit more (intersection) or less (union) than an input there, which
+  is why releases older than 2.5.4 are not supported. The table of where each
   release places a syscall also covers 2.5.2, which only makes the check
   for lost rules more cautious.
 - The defect: libseccomp 2.5.2, 2.5.4, 2.5.5, 2.6.0 and 2.6.1 load the
@@ -331,10 +332,17 @@ those statements were established, which a change to them has to redo:
   with "set_thread_area", loses the rules of the other block as well, even
   when it holds no rule of its own to lose. It does not happen where
   libseccomp sorts into a binary tree, which runc asks for above 32 syscall
-  names and crun never does.
+  names and crun never does. libseccomp 2.6.2 fixed it
+  ([GHSA-q75f-27j4-2h7j](https://github.com/seccomp/libseccomp/security/advisories/GHSA-q75f-27j4-2h7j)),
+  which `TestLibseccompLosesRulesBehindAnAbsentSyscall` checks as well, so
+  the guard can go once 2.6.2 is the oldest supported release. The fix for
+  [GHSA-35x7-vh54-jvqf](https://github.com/seccomp/libseccomp/security/advisories/GHSA-35x7-vh54-jvqf)
+  in the same release, applied alone to 2.6.1, removes the defect too, so a
+  distribution backporting either one no longer has it.
 - The placement table, `seccomp/syscalls.go`, is generated from the
-  syscall tables of libseccomp 2.5.2, 2.5.4, 2.5.5, 2.6.0 and 2.6.1 and
-  combined so that it errs safe for all of them (see `make verify-syscalls`).
+  syscall tables of libseccomp 2.5.2, 2.5.4, 2.5.5, 2.6.0, 2.6.1 and 2.6.2
+  and combined so that it errs safe for all of them (see
+  `make verify-syscalls`).
 - A node whose native architecture is not known may be any architecture
   libseccomp resolves as native, not only those Go runs on: crun is written
   in C and runs natively on x32, MIPS n32, ppc, s390, sh, m68k and parisc.

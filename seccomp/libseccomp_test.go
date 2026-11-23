@@ -544,7 +544,8 @@ func differentialProfiles() []*specs.LinuxSeccomp {
 			filtered("read", specs.ActAllow,
 				arg(0, specs.OpNotEqual, 3), arg(1, specs.OpEqualTo, 2)),
 		),
-		// libseccomp allows read(2, 5), which matches neither entry.
+		// libseccomp before 2.6.2 allows read(2, 5), which matches neither
+		// entry (GHSA-35x7-vh54-jvqf).
 		profileOf(specs.ActErrno,
 			filtered("read", specs.ActAllow,
 				arg(0, specs.OpLessThan, 3), arg(1, specs.OpEqualTo, 2)),
@@ -594,7 +595,8 @@ func differentialProfiles() []*specs.LinuxSeccomp {
 			filtered("close", specs.ActAllow, arg(0, specs.OpLessEqual, 4)),
 			filtered("close", specs.ActAllow, arg(1, specs.OpGreaterEqual, wide)),
 		),
-		// Entries libseccomp never finishes adding.
+		// Entries libseccomp before 2.6.2 never finishes adding
+		// (GHSA-qxh5-4cq9-6mjx).
 		profileOf(specs.ActErrno,
 			filtered("socket", specs.ActAllow,
 				arg(0, specs.OpLessThan, 3), arg(1, specs.OpLessThan, 3)),
@@ -652,6 +654,29 @@ func TestLibseccompVersion(t *testing.T) {
 			got, want,
 		)
 	}
+}
+
+// libseccompFixed reports whether the libseccomp that answers is the given
+// release or a later one. A test that pins a defect of libseccomp checks
+// that the releases before the fix still have it and that the fixed ones do
+// not, so that neither side changes unnoticed.
+func libseccompFixed(t *testing.T, release string) bool {
+	t.Helper()
+
+	parse := func(version string) [3]int {
+		var parts [3]int
+
+		_, err := fmt.Sscanf(version, "%d.%d.%d", &parts[0], &parts[1], &parts[2])
+		if err != nil {
+			t.Fatalf("parse libseccomp version %q: %v", version, err)
+		}
+
+		return parts
+	}
+
+	got, fixed := parse(libseccomp.Version()), parse(release)
+
+	return slices.Compare(got[:], fixed[:]) >= 0
 }
 
 // TestModelMatchesLibseccomp is the differential check of the evaluator:
@@ -1568,7 +1593,10 @@ func TestModelMatchesLibseccompForFindings(t *testing.T) {
 // TestModelMatchesLibseccompForUnmatchedCall pins the miscompile the package
 // documentation cites: under default ERRNO, ALLOW for a0 < 3 && a1 == 2 and
 // ALLOW for a0 > 3 compile to a program that allows read(2, 5), which
-// matches neither entry.
+// matches neither entry. libseccomp 2.6.2 compiles it correctly: it reloads
+// a0 before the second comparison instead of comparing a1 again
+// (GHSA-35x7-vh54-jvqf). The package keeps reading the shape conservatively
+// for the earlier releases it supports.
 func TestModelMatchesLibseccompForUnmatchedCall(t *testing.T) {
 	t.Parallel()
 	requireNativeArch(t)
@@ -1590,10 +1618,53 @@ func TestModelMatchesLibseccompForUnmatchedCall(t *testing.T) {
 
 	number := syscallNumbers(t, []string{"read"})["read"]
 
+	want := specs.ActAllow
+	if libseccompFixed(t, "2.6.2") {
+		want = profile.DefaultAction
+	}
+
 	got, _ := runProgram(t, prog, number, []uint64{2, 5})
-	if got != specs.ActAllow {
-		t.Errorf("read(2, 5): libseccomp says %s, want %s\n%s",
-			got, specs.ActAllow, pfc(t, profile))
+	if got != want {
+		t.Errorf("read(2, 5): libseccomp %s says %s, want %s, "+
+			"as 2.6.2 fixed it (is the fix backported?)\n%s",
+			libseccomp.Version(), got, want, pfc(t, profile))
+	}
+}
+
+// TestLibseccompHangsOnSharedFirstComparison pins the hang the package
+// documentation cites: libseccomp before 2.6.2 never returns from adding two
+// rules for one syscall that share their first range comparison and differ
+// in the next (GHSA-qxh5-4cq9-6mjx). The merges never emit such rules, and
+// the libseccomp tests leave out an input that hangs. 2.6.2 adds the rules.
+// The hang needs the two 32-bit comparisons a range test on a 64-bit
+// architecture compiles to: on a 32-bit native, such as a 386 build, the
+// earlier releases add the rules as well.
+func TestLibseccompHangsOnSharedFirstComparison(t *testing.T) {
+	t.Parallel()
+
+	native, _ := seccomp.NativeArchitecture()
+	narrow := seccomp.NarrowArchitecture(native)
+
+	profile := profileOf(specs.ActErrno,
+		filtered("socket", specs.ActAllow,
+			arg(0, specs.OpLessThan, 3), arg(1, specs.OpLessThan, 3)),
+		filtered("socket", specs.ActAllow,
+			arg(0, specs.OpLessThan, 3), arg(1, specs.OpNotEqual, 3)),
+	)
+
+	_, err := compilers.compile(profile)
+
+	switch fixed := libseccompFixed(t, "2.6.2"); {
+	case fixed && err != nil:
+		t.Errorf("libseccomp %s does not add the rules of %s, as 2.6.2 does: %v",
+			libseccomp.Version(), seccomp.FormatProfile(profile), err)
+	case !fixed && narrow && err != nil:
+		t.Errorf("libseccomp %s does not add the rules of %s on the 32-bit native %s: %v",
+			libseccomp.Version(), seccomp.FormatProfile(profile), native, err)
+	case !fixed && !narrow && !errors.Is(err, errCompileHang):
+		t.Errorf("libseccomp %s returns from adding the rules of %s (%v), "+
+			"although only 2.6.2 fixed the hang (is the fix backported?)",
+			libseccomp.Version(), seccomp.FormatProfile(profile), err)
 	}
 }
 
