@@ -42,7 +42,7 @@ const MaxFormattedBytes = 64 << 10
 
 // TruncationMarker ends the output of a formatter that reached
 // MaxFormattedBytes, in place of what did not fit. It holds a space and a
-// parenthesis, which SafeText quotes in a value, so no value of a profile
+// parenthesis, which safeText quotes in a value, so no value of a profile
 // renders as the marker.
 const TruncationMarker = "... (output truncated)"
 
@@ -88,13 +88,13 @@ func (b *Builder) WriteString(text string) {
 	}
 }
 
-// WriteText writes a value of the profile as SafeText renders it. SafeText
+// WriteText writes a value of the profile as safeText renders it. safeText
 // never returns fewer bytes than it is given, so a value longer than the
 // room left is dropped without being quoted: quoting it would cost as much
 // as the value is long, which is the cost the bound is there to cap.
 func (b *Builder) WriteText(value string) {
 	if b.fits(len(value)) {
-		b.WriteString(SafeText(value))
+		b.WriteString(safeText(value))
 	}
 }
 
@@ -177,7 +177,7 @@ func WriteTexts[T ~string](out *Builder, values []T, sep string) {
 // removed items with a "-" and then the added items with a "+", as in
 // "caps:-CHOWN,+KILL", and writes nothing for a nil diff, which stands for
 // an equal list (see NewSliceDiff). An item holding bytes that are not safe
-// to print is quoted (see SafeText): a diff is computed over profiles
+// to print is quoted (see safeText): a diff is computed over profiles
 // nothing validated, and its rendering is what a runtime logs.
 func WriteSliceDiff[T ~string](out *Builder, parts *Joiner, prefix string, diff *spm.SliceDiff[T]) {
 	if diff == nil {

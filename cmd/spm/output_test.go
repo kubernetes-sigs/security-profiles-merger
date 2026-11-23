@@ -84,3 +84,35 @@ func TestWriteTempFileReportsEachStep(t *testing.T) {
 		t.Errorf("writeTempFile = %v, closed = %v, want nil and closed", err, file.closed)
 	}
 }
+
+// errNoSpace stands for the reason os gives a write to a full disk.
+var errNoSpace = errors.New("no space left on device")
+
+// fullStdout fails every write as os fails one to a full disk on stdout,
+// naming the path it takes stdout for.
+type fullStdout struct{}
+
+func (fullStdout) Write([]byte) (int, error) {
+	return 0, &fs.PathError{Op: "write", Path: "/dev/stdout", Err: errNoSpace}
+}
+
+// TestStdoutWriteFailureReadsAsAFileOne covers a failure to write stdout,
+// which is reported as one to write an output file is ("writing /dev/full:
+// write: no space left on device"), without the path and the operation os
+// spells it with.
+func TestStdoutWriteFailureReadsAsAFileOne(t *testing.T) {
+	t.Parallel()
+
+	for _, args := range [][]string{
+		{cmdValidate, flagType, typeSeccomp, testdataSeccompA},
+		{cmdVersion},
+		{cmdHelp},
+	} {
+		code, stderr := runCaptureTo(t, args, nil, fullStdout{})
+
+		want := "error: writing to stdout: write: " + errNoSpace.Error() + "\n"
+		if code != 1 || stderr != want {
+			t.Errorf("%v: exit code = %d, stderr = %q, want 1 and %q", args, code, stderr, want)
+		}
+	}
+}

@@ -202,7 +202,7 @@ func TestProfileTypesShareNoMemberNames(t *testing.T) {
 
 	owners := map[string]string{}
 
-	for _, candidate := range detectTypes {
+	for _, candidate := range profileTypes {
 		for idx := range candidate.target.NumField() {
 			field := candidate.target.Field(idx)
 
@@ -213,19 +213,19 @@ func TestProfileTypesShareNoMemberNames(t *testing.T) {
 
 			folded := strings.ToLower(name)
 			if owner, taken := owners[folded]; taken {
-				t.Errorf("%s names a field of both %s and %s", name, owner, candidate.profileType)
+				t.Errorf("%s names a field of both %s and %s", name, owner, candidate.name)
 			}
 
-			owners[folded] = candidate.profileType
+			owners[folded] = candidate.name
 
-			for _, other := range detectTypes {
-				if other.profileType != candidate.profileType &&
+			for _, other := range profileTypes {
+				if other.name != candidate.name &&
 					strictjson.HasField(other.target, name) {
 					t.Errorf(
 						"%s of %s also fills %s",
 						name,
-						candidate.profileType,
-						other.profileType,
+						candidate.name,
+						other.name,
 					)
 				}
 			}
@@ -288,7 +288,7 @@ func TestMixedTypesNameEveryType(t *testing.T) {
 
 	code, _, stderr = runCapture(t, []string{cmdValidate, all}, nil)
 
-	want = "error: " + all + ": mixes profile types (seccomp, landlock and apparmor), use --type\n"
+	want = "error: " + all + ": mixes profile types (seccomp, apparmor and landlock), use --type\n"
 	if code != 1 || stderr != want {
 		t.Errorf("exit code = %d, stderr = %q, want 1 and %q", code, stderr, want)
 	}

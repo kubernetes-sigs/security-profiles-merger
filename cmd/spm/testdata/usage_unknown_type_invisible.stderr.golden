@@ -1,1 +1,2 @@
 error: unknown type "seccomp\u3164" (use seccomp, apparmor, or landlock)
+Run 'spm validate --help' for usage.

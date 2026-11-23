@@ -515,13 +515,13 @@ type profileCheck func(profile *specs.LinuxSeccomp) error
 // bounds the per-syscall limits, Validate and every check, collecting all
 // failures into one error. The per-syscall limits come first, so that the
 // bound on the report does not leave them all out and a profile past one
-// always matches ErrArtifactTooLarge. The checks in loadable run only when
-// Validate passes: they expand entries the way a runtime loads them, which
-// assumes known operators and argument indices in range, so that an entry
-// without a repeated index carries at most one condition per index.
-func validateWith(
-	profile *specs.LinuxSeccomp, checks []profileCheck, loadable ...profileCheck,
-) error {
+// always matches ErrArtifactTooLarge. The rule checks for a node with the
+// given native architecture (validateSyscallRules and validateLostRules)
+// run only when Validate passes: they expand entries the way a runtime
+// loads them, which assumes known operators and argument indices in range,
+// so that an entry without a repeated index carries at most one condition
+// per index.
+func validateWith(profile *specs.LinuxSeccomp, native specs.Arch, checks []profileCheck) error {
 	if profile == nil {
 		return ErrNilProfile
 	}
@@ -531,10 +531,14 @@ func validateWith(
 		return err
 	}
 
+	// The profile loads at most MaxArtifactRules rules, so the counts hold
+	// at most that many names.
+	counts := clauseCounts(profile.Syscalls, defaultClause(profile))
+
 	var errs merge.Collector
 
 	errs.Add(validateEntryCount(profile))
-	errs.Add(validateRuleCount(profile))
+	errs.Add(validateRuleCount(counts))
 
 	err = Validate(profile)
 	errs.Add(err)
@@ -544,9 +548,8 @@ func validateWith(
 	}
 
 	if err == nil {
-		for _, check := range loadable {
-			errs.Add(check(profile))
-		}
+		errs.Add(validateSyscallRules(profile, native, counts))
+		errs.Add(validateLostRules(profile, native))
 	}
 
 	return errs.Err()

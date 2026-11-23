@@ -201,69 +201,50 @@ func TestMergeErrors(t *testing.T) {
 	}
 }
 
-func TestMergeSeccompInvalidStrategy(t *testing.T) {
+// TestMergeChecksALandlockInputItDoesNotMerge covers a Landlock input the
+// merge does not get to, because another input failed or the inputs mix
+// types: it is checked as the merge checks it, so it is reported exactly as
+// a merge of it alone reports it, which is as validate reports it.
+func TestMergeChecksALandlockInputItDoesNotMerge(t *testing.T) {
 	t.Parallel()
 
-	data := rawInputs(seccompJSON(t, testSyscallRead))
+	_, _, want := runCapture(t, []string{
+		cmdValidate, flagType, typeLandlock, "--quiet", testdataLandlockInvalid,
+	}, nil)
+	if want == "" {
+		t.Fatalf("validate accepts %s", testdataLandlockInvalid)
+	}
 
-	code := mergeKind(t, typeSeccomp, data, testBogus)
+	unparsable := writeTemp(t, "not json")
 
-	if code != exitUsage {
-		t.Fatalf("exit code = %d, want %d", code, exitUsage)
+	for _, args := range [][]string{
+		{cmdMerge, flagType, typeLandlock, flagStrategy, strategyUnion, testdataLandlockInvalid},
+		{
+			cmdMerge, flagType, typeLandlock, flagStrategy, strategyUnion,
+			testdataLandlockInvalid, unparsable,
+		},
+		{cmdMerge, flagStrategy, strategyIntersect, testdataSeccompA, testdataLandlockInvalid},
+	} {
+		code, _, stderr := runCapture(t, args, nil)
+		if code != 1 || !strings.HasPrefix(stderr, want) {
+			t.Errorf("%v: exit code = %d, stderr = %q, want 1 and to start with %q",
+				args, code, stderr, want)
+		}
 	}
 }
 
-func TestMergeSeccompNoProfiles(t *testing.T) {
+// TestMergeNoProfiles covers a merge of no profiles at all, which fails
+// for every profile type and either strategy.
+func TestMergeNoProfiles(t *testing.T) {
 	t.Parallel()
 
-	code := mergeKind(t, typeSeccomp, nil, strategyIntersect)
-
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1", code)
-	}
-}
-
-func TestMergeAppArmorInvalidStrategy(t *testing.T) {
-	t.Parallel()
-
-	data := rawInputs(apparmorJSON(t, "NET_ADMIN"))
-
-	code := mergeKind(t, typeAppArmor, data, testBogus)
-
-	if code != exitUsage {
-		t.Fatalf("exit code = %d, want %d", code, exitUsage)
-	}
-}
-
-func TestMergeAppArmorNoProfiles(t *testing.T) {
-	t.Parallel()
-
-	code := mergeKind(t, typeAppArmor, nil, strategyIntersect)
-
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1", code)
-	}
-}
-
-func TestMergeLandlockInvalidStrategy(t *testing.T) {
-	t.Parallel()
-
-	data := rawInputs(landlockJSON(t, "read_file"))
-
-	code := mergeKind(t, typeLandlock, data, testBogus)
-
-	if code != exitUsage {
-		t.Fatalf("exit code = %d, want %d", code, exitUsage)
-	}
-}
-
-func TestMergeLandlockNoProfiles(t *testing.T) {
-	t.Parallel()
-
-	code := mergeKind(t, typeLandlock, nil, strategyUnion)
-
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1", code)
+	for _, profileType := range typeNames() {
+		for _, strategy := range []string{strategyIntersect, strategyUnion} {
+			code := mergeKind(t, profileType, nil, strategy)
+			if code != 1 {
+				t.Errorf("%s %s: exit code = %d, want 1", profileType, strategy, code)
+			}
+		}
 	}
 }
 
@@ -754,9 +735,9 @@ func TestMergeAutoDetectAmbiguousProfile(t *testing.T) {
 		{
 			// Neither of these two is the other's fallback: a document
 			// carrying both is ambiguous whichever block is checked first.
-			name:      "landlock and apparmor",
+			name:      "apparmor and landlock",
 			profile:   `{"pathRules":[],"network":{"allowRaw":true}}`,
-			wantTypes: "(" + typeLandlock + " and " + typeAppArmor + ")",
+			wantTypes: "(" + typeAppArmor + " and " + typeLandlock + ")",
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {

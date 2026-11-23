@@ -1,1 +1,2 @@
 error: invalid Landlock ABI version "9223372036854775808" (too large)
+Run 'spm validate --help' for usage.

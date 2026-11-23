@@ -95,9 +95,9 @@ type documentScan struct {
 
 // scanDocument reads a document token by token, once, following the type
 // target each value decodes into, and collects what documentScan holds. The
-// required members, marked by their tag or by required, are only looked for
-// where checkMissing is set. A nil target follows no type and finds only
-// repeated members.
+// required members, marked by their tag or by requiredFields, are only
+// looked for where checkMissing is set. A nil target follows no type and
+// finds only repeated members.
 //
 // Repeated members are compared the way encoding/json matches names to
 // struct fields, ignoring case, because a case-sensitive parser reads
@@ -115,9 +115,9 @@ type documentScan struct {
 // the decoder reads while a reader that compares names exactly, as a C
 // runtime does, drops it. The scan stops at the first syntax error.
 func scanDocument(
-	raw []byte, target reflect.Type, required *Required, checkMissing bool,
+	raw []byte, target reflect.Type, checkMissing bool,
 ) *documentScan {
-	state := newScanState(target, required, checkMissing, nil)
+	state := newScanState(target, checkMissing, nil)
 	state.run(raw)
 
 	return &state.scan
@@ -136,7 +136,7 @@ func scanDocument(
 func PathAt(raw []byte, offset int64) (string, int64) {
 	path, start := "", int64(-1)
 
-	state := newScanState(nil, nil, false, func(stack []*scanFrame, after, end int64) bool {
+	state := newScanState(nil, false, func(stack []*scanFrame, after, end int64) bool {
 		if end < offset {
 			return true
 		}
@@ -162,12 +162,10 @@ func valueStart(raw []byte, offset int64) int64 {
 }
 
 // scanState is scanDocument under way: the open objects and arrays, the
-// type the document decodes into, the table of required fields, and what
-// it found so far.
+// type the document decodes into, and what it found so far.
 type scanState struct {
-	stack    []*scanFrame
-	target   reflect.Type
-	required *Required
+	stack  []*scanFrame
+	target reflect.Type
 	// checkMissing reports whether the scan looks for missing members.
 	checkMissing bool
 	// onValue, where it is not nil, is passed every token that starts a
@@ -182,13 +180,12 @@ type scanState struct {
 // scanDocument), passing every token that starts a value to onValue, where
 // it is not nil (see scanState).
 func newScanState(
-	target reflect.Type, required *Required, checkMissing bool,
+	target reflect.Type, checkMissing bool,
 	onValue func(stack []*scanFrame, after, end int64) bool,
 ) *scanState {
 	return &scanState{
 		stack:        nil,
 		target:       target,
-		required:     required,
 		checkMissing: checkMissing,
 		onValue:      onValue,
 		scan: documentScan{
@@ -344,10 +341,10 @@ func (state *scanState) closed(frame *scanFrame) {
 
 	switch {
 	case frame.named != nil:
-		state.required.reportMissing(frame.typ, path, frame.named, &state.scan.missing)
+		reportMissing(frame.typ, path, frame.named, &state.scan.missing)
 	case state.checkMissing && frame.typ != nil && frame.typ.Kind() == reflect.Array &&
 		frame.index < frame.typ.Len():
-		state.required.reportZeroElements(frame.typ, frame.index, path, &state.scan.missing)
+		reportZeroElements(frame.typ, frame.index, path, &state.scan.missing)
 	}
 }
 
@@ -364,7 +361,7 @@ func (state *scanState) scalar(top *scanFrame, token json.Token) {
 	case top == nil || top.named == nil:
 		// encoding/json leaves a value set to null where nothing else
 		// names it, as an element of a list or a value of a map, as it was.
-		state.required.reportZero(
+		reportZero(
 			child, func() (string, bool) { return memberPath(state.stack) }, &state.scan.missing,
 		)
 	default:
@@ -396,7 +393,7 @@ func (state *scanState) newFrame(object bool, typ reflect.Type) *scanFrame {
 	frame.typ = typ
 
 	if state.checkMissing && object && typ.Kind() == reflect.Struct &&
-		state.required.requiresFields(typ) {
+		requiresFields(typ) {
 		frame.named = map[string]bool{}
 	}
 

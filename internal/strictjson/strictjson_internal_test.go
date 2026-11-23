@@ -37,14 +37,14 @@ import (
 // duplicateKeys returns the members raw repeats within one object, as
 // scanDocument finds them.
 func duplicateKeys(raw []byte) ([]string, int) {
-	scan := scanDocument(raw, nil, nil, false)
+	scan := scanDocument(raw, nil, false)
 
 	return scan.duplicates.paths, scan.duplicates.omitted
 }
 
 // unknownFields returns the members of raw no field of target reads.
 func unknownFields(raw []byte, target reflect.Type) ([]string, int) {
-	scan := scanDocument(raw, target, nil, false)
+	scan := scanDocument(raw, target, false)
 
 	return scan.unknown.paths, scan.unknown.omitted
 }
@@ -52,15 +52,15 @@ func unknownFields(raw []byte, target reflect.Type) ([]string, int) {
 // misspelledFieldsOf returns the members of raw a field of T reads only
 // ignoring case, and the spelling of each such field.
 func misspelledFieldsOf[T any](raw []byte) ([]string, []string, int) {
-	scan := scanDocument(raw, reflect.TypeFor[T](), nil, false)
+	scan := scanDocument(raw, reflect.TypeFor[T](), false)
 
 	return scan.misspelled.paths, scan.misspelled.wants, scan.misspelled.omitted
 }
 
 // missingFieldsOf returns the required members raw leaves out or sets to
 // null, as Findings looks for them.
-func missingFieldsOf[T any](raw []byte, decoded *T, required *Required) ([]string, int) {
-	scan := scanDocument(raw, reflect.TypeFor[T](), required, checksMissing(decoded, required))
+func missingFieldsOf[T any](raw []byte, decoded *T) ([]string, int) {
+	scan := scanDocument(raw, reflect.TypeFor[T](), checksMissing(decoded))
 
 	return scan.missing.paths, scan.missing.omitted
 }
@@ -152,7 +152,7 @@ func TestBracketedPathsAreQuotedOnce(t *testing.T) {
 	}
 
 	// The paths a document holds, end to end.
-	err := Unmarshal([]byte(`{"a.b":1,"c, d":2}`), new(walkEmbedded), nil)
+	err := Unmarshal([]byte(`{"a.b":1,"c, d":2}`), new(walkEmbedded))
 	if want := `unknown fields ["a.b"], "c, d"`; err == nil || err.Error() != want {
 		t.Errorf("Unmarshal = %v, want %s", err, want)
 	}
@@ -645,7 +645,7 @@ func TestMissingFieldsOf(t *testing.T) {
 			t.Fatalf("%s: %v", test.raw, err)
 		}
 
-		got, omitted := missingFieldsOf([]byte(test.raw), &decoded, nil)
+		got, omitted := missingFieldsOf([]byte(test.raw), &decoded)
 		if !slices.Equal(got, test.want) || omitted != 0 {
 			t.Errorf("%s: missingFieldsOf = %v (%d omitted), want %v",
 				test.raw, got, omitted, test.want)
@@ -653,59 +653,68 @@ func TestMissingFieldsOf(t *testing.T) {
 	}
 
 	// A type without a required field is never walked for one.
-	var profile specs.LinuxSeccomp
+	var plain []unrequiredRule
 
-	if got, omitted := missingFieldsOf([]byte(`{}`), &profile, nil); got != nil || omitted != 0 {
+	if got, omitted := missingFieldsOf([]byte(`[{}]`), &plain); got != nil || omitted != 0 {
 		t.Errorf("a type without required fields: missingFieldsOf = %v (%d omitted)", got, omitted)
 	}
 
-	if !(*Required)(nil).requiresFields(reflect.TypeFor[requiredOuter]()) {
+	if !requiresFields(reflect.TypeFor[requiredOuter]()) {
 		t.Error("a required field of an embedded struct is not seen")
 	}
 }
 
-// TestMissingFieldsOfWithATable covers fields a Required table marks, for a
-// type whose declaration carries no tag: they are reported as a tagged
-// field is, and a type the table does not name is not walked for one.
-func TestMissingFieldsOfWithATable(t *testing.T) {
-	t.Parallel()
+// tableTarget holds a type requiredFields marks, whose declaration
+// carries no tag, next to one whose tag marks its field.
+type tableTarget struct {
+	Args  []specs.LinuxSeccompArg `json:"args"`
+	Rules []requiredRule          `json:"rules"`
+}
 
-	table := NewRequired(map[reflect.Type][]string{reflect.TypeFor[unrequiredRule](): {"Port"}})
+// TestMissingFieldsOfWithTheTable covers the fields requiredFields marks:
+// they are reported as a tagged field is, next to the tagged ones, and a
+// type it does not name is not walked for one.
+func TestMissingFieldsOfWithTheTable(t *testing.T) {
+	t.Parallel()
 
 	for _, test := range []struct {
 		raw  string
 		want []string
 	}{
-		{`{"plain":[{"port":0}]}`, nil},
-		{`{"plain":[{}]}`, []string{"plain[0].port"}},
-		{`{"plain":[null]}`, []string{"plain[0].port"}},
+		{`{"args":[{"index":0,"op":"SCMP_CMP_EQ"}]}`, nil},
+		{`{"args":[{"op":"SCMP_CMP_EQ","value":5}]}`, []string{"args[0].index"}},
+		{`{"args":[null]}`, []string{"args[0].index", "args[0].op"}},
 		// The tags still count next to the table.
-		{`{"rules":[{}],"plain":[{"port":1}]}`, []string{"rules[0].port"}},
+		{`{"rules":[{}],"args":[{"index":1,"op":"SCMP_CMP_EQ"}]}`, []string{"rules[0].port"}},
 	} {
-		var decoded requiredTarget
+		var decoded tableTarget
 
 		err := json.Unmarshal([]byte(test.raw), &decoded)
 		if err != nil {
 			t.Fatalf("%s: %v", test.raw, err)
 		}
 
-		got, omitted := missingFieldsOf([]byte(test.raw), &decoded, table)
+		got, omitted := missingFieldsOf([]byte(test.raw), &decoded)
 		if !slices.Equal(got, test.want) || omitted != 0 {
 			t.Errorf("%s: missingFieldsOf = %v (%d omitted), want %v",
 				test.raw, got, omitted, test.want)
 		}
 	}
 
+	var args struct {
+		Args []specs.LinuxSeccompArg `json:"args"`
+	}
+
+	if !requiresFields(reflect.TypeOf(args)) {
+		t.Error("a field the table marks is not seen")
+	}
+
 	var plain struct {
 		Plain []unrequiredRule `json:"plain"`
 	}
 
-	if !table.requiresFields(reflect.TypeOf(plain)) {
-		t.Error("a field the table marks is not seen")
-	}
-
-	if (*Required)(nil).requiresFields(reflect.TypeOf(plain)) {
-		t.Error("a field only the table marks is seen without it")
+	if requiresFields(reflect.TypeOf(plain)) {
+		t.Error("a type neither the table nor a tag marks is seen")
 	}
 }
 
@@ -727,14 +736,7 @@ func TestOutOfRangeNumberKeepsChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, _ := missingFieldsOf(
-		raw,
-		&decoded,
-		nil,
-	); !slices.Equal(
-		got,
-		[]string{"rules[0].port"},
-	) {
+	if got, _ := missingFieldsOf(raw, &decoded); !slices.Equal(got, []string{"rules[0].port"}) {
 		t.Errorf("missingFieldsOf = %v, want the port", got)
 	}
 
@@ -812,7 +814,7 @@ func TestErrorOffsetsCountLeadingWhitespace(t *testing.T) {
 		}
 
 		_, decodeErr := Decode([]byte(test.raw), new(requiredTarget))
-		unmarshalErr := Unmarshal([]byte(test.raw), new(requiredTarget), nil)
+		unmarshalErr := Unmarshal([]byte(test.raw), new(requiredTarget))
 
 		for name, err := range map[string]error{"Decode": decodeErr, "Unmarshal": unmarshalErr} {
 			var got *json.UnmarshalTypeError
@@ -839,7 +841,7 @@ func TestErrorOffsetsCountLeadingWhitespace(t *testing.T) {
 
 	var got *json.SyntaxError
 
-	err := Unmarshal([]byte(raw), new(requiredTarget), nil)
+	err := Unmarshal([]byte(raw), new(requiredTarget))
 	if !errors.As(err, &got) || got.Offset != want.Offset {
 		t.Errorf("Unmarshal(%q) = %v, want a syntax error at offset %d", raw, err, want.Offset)
 	}
@@ -913,7 +915,7 @@ func TestMissingFieldsOfInMaps(t *testing.T) {
 			t.Fatalf("%s: %v", test.raw, err)
 		}
 
-		got, omitted := missingFieldsOf([]byte(test.raw), &decoded, nil)
+		got, omitted := missingFieldsOf([]byte(test.raw), &decoded)
 		if !slices.Equal(got, test.want) || omitted != 0 {
 			t.Errorf("%s: missingFieldsOf = %v (%d omitted), want %v",
 				test.raw, got, omitted, test.want)
@@ -938,7 +940,7 @@ func checkMissingCases[T any](t *testing.T, cases []struct {
 			t.Fatalf("%s: %v", test.raw, err)
 		}
 
-		got, omitted := missingFieldsOf([]byte(test.raw), &decoded, nil)
+		got, omitted := missingFieldsOf([]byte(test.raw), &decoded)
 		if !slices.Equal(got, test.want) || omitted != 0 {
 			t.Errorf("%T %s: missingFieldsOf = %v (%d omitted), want %v",
 				decoded, test.raw, got, omitted, test.want)
@@ -971,7 +973,7 @@ func TestMissingFieldsOfFoldedTwins(t *testing.T) {
 
 	var decoded foldedTwins
 
-	err := Unmarshal([]byte(`{"a":"x"}`), &decoded, nil)
+	err := Unmarshal([]byte(`{"a":"x"}`), &decoded)
 	if !errors.Is(err, spm.ErrMissingField) || err.Error() != `missing field "A"` {
 		t.Errorf("Unmarshal = %v, want missing field \"A\"", err)
 	}
@@ -1083,14 +1085,14 @@ func TestMissingFieldsOfArrays(t *testing.T) {
 	// A member left out is reported, bounded as any other report.
 	var decoded requiredArrays
 
-	got, omitted := missingFieldsOf([]byte(`{}`), &decoded, nil)
+	got, omitted := missingFieldsOf([]byte(`{}`), &decoded)
 	if len(got) != maxReportedPaths || got[0] != "pair[0].port" ||
 		got[2] != "wide[0].port" || omitted != 42-maxReportedPaths {
 		t.Errorf("missingFieldsOf({}) = %v (%d omitted), want the first %d of 42",
 			got, omitted, maxReportedPaths)
 	}
 
-	err := Unmarshal([]byte(`{"pair":[{"port":1}],`+full+`}`), &decoded, nil)
+	err := Unmarshal([]byte(`{"pair":[{"port":1}],`+full+`}`), &decoded)
 	if !errors.Is(err, spm.ErrMissingField) || err.Error() != `missing field "pair[1].port"` {
 		t.Errorf("Unmarshal = %v, want missing field \"pair[1].port\"", err)
 	}
@@ -1167,7 +1169,7 @@ func TestRepeatedMemberComesAlone(t *testing.T) {
 
 	var messages []string
 
-	for finding := range Findings(raw, &decoded, hint, nil) {
+	for finding := range Findings(raw, &decoded, hint) {
 		messages = append(messages, finding.Err.Error())
 	}
 

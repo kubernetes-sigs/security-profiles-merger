@@ -53,7 +53,7 @@ func FuzzDetectProfileType(f *testing.F) {
 	f.Fuzz(func(t *testing.T, raw string) {
 		families := checkDetectedFamilies(t, raw)
 
-		detected, conflicts := detectProfileType(rawInputs(raw), nil)
+		detected, conflicts := detectProfileType(parsedInputs(raw), nil)
 
 		// One input conflicts with itself exactly when it carries the
 		// members of more than one type.
@@ -82,7 +82,7 @@ func FuzzDetectProfileType(f *testing.F) {
 
 		// Detection is per input, so repeating an unambiguous one never
 		// conflicts.
-		again, conflicts := detectProfileType(rawInputs(raw, raw), nil)
+		again, conflicts := detectProfileType(parsedInputs(raw, raw), nil)
 		if len(conflicts) > 0 || again != detected {
 			t.Errorf(
 				"detectProfileType of a repeated input = (%q, %v), want (%q, nil)",
@@ -97,7 +97,7 @@ func FuzzDetectProfileType(f *testing.F) {
 func checkDetectedFamilies(t *testing.T, raw string) []string {
 	t.Helper()
 
-	families, _ := detectMembers([]byte(raw))
+	families := detectMembers(parsedInputs(raw)[0].members)
 
 	for _, family := range families {
 		if !knownType(family) {
@@ -105,7 +105,7 @@ func checkDetectedFamilies(t *testing.T, raw string) []string {
 		}
 	}
 
-	if again, _ := detectMembers([]byte(raw)); !slices.Equal(families, again) {
+	if again := detectMembers(parsedInputs(raw)[0].members); !slices.Equal(families, again) {
 		t.Errorf("detectMembers(%q) is not reproducible", raw)
 	}
 

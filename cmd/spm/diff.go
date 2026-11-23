@@ -49,6 +49,11 @@ this program runs on, so the same two profiles can compare differently on
 another machine; pass --arch none for a comparison that does not depend on
 where it runs, or a name such as SCMP_ARCH_X86_64 for the target node.
 
+--abi names the Landlock ABI version of the kernel that loads the profiles:
+the --validate checks then refuse every right that kernel does not know,
+which it would reject. The comparison does not depend on it, so it needs
+--validate.
+
 Options:
 `
 )
@@ -70,7 +75,13 @@ type diffOptions struct {
 func bindDiffFlags(flags *flag.FlagSet) *diffOptions {
 	opts := new(diffOptions)
 
-	opts.bind(flags, "the diff", "stdout", "implied on both sides")
+	opts.bind(flags, commonHelp{
+		result:        "the diff",
+		outputDefault: "stdout",
+		archFor:       "implied on both sides",
+		abiFor: "of the kernel that loads the profiles, such as 6; the --validate checks " +
+			"refuse the rights it does not know",
+	})
 	flags.StringVar(
 		&opts.validate, "validate", "",
 		"checks to run on the profiles before comparing them: default, strict, "+
@@ -82,7 +93,8 @@ func bindDiffFlags(flags *flag.FlagSet) *diffOptions {
 
 // checkFlags checks the diff flags (see commandOptions).
 func (opts *diffOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) int {
-	if flagNamed(flags, "validate") {
+	validate := flagNamed(flags, "validate")
+	if validate {
 		_, err := parseValidateModes(opts.validate, 1)
 		if errors.Is(err, errUnknownValidateMode) {
 			_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
@@ -91,8 +103,27 @@ func (opts *diffOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) int {
 		}
 	}
 
+	// The comparison itself does not depend on the ABI version, so --abi
+	// without the checks that do would be a flag that quietly does nothing,
+	// as validate refuses --arch without them. A value that names no
+	// version is reported first, so that adding --validate does not turn
+	// up a second error.
+	if !validate && flagNamed(flags, flagNameABI) {
+		_, err := parseABI(opts.abi, true)
+		if err == nil {
+			err = errABIWithoutValidate
+		}
+
+		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+
+		return exitUsage
+	}
+
 	return opts.check(stderr)
 }
+
+// errABIWithoutValidate reports diff --abi without --validate.
+var errABIWithoutValidate = errors.New("--abi only applies with --validate")
 
 func runDiff(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := newFlagSet(cmdDiff)
@@ -205,7 +236,7 @@ func (ops kindOps[T, D]) diffCommand(inv *invocation) int {
 		return exitUsage
 	}
 
-	if code := inv.write(result, ops.formatDiff(result)); code != 0 {
+	if code := inv.write(result, func() string { return ops.formatDiff(result) }); code != 0 {
 		return exitUsage
 	}
 

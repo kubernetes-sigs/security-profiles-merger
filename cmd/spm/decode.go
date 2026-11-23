@@ -27,10 +27,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	specs "github.com/opencontainers/runtime-spec/specs-go"
-
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
-	"sigs.k8s.io/security-profiles-merger/internal/seccompjson"
 	"sigs.k8s.io/security-profiles-merger/internal/strictjson"
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
@@ -89,7 +86,7 @@ func unmarshalOne[T any](input *profileInput, strict bool, warn func(error)) (*T
 		return nil, err
 	}
 
-	for finding := range strictjson.Findings(input.data, profile, hint, requiredOf[T]()) {
+	for finding := range strictjson.Findings(input.data, profile, hint) {
 		err = input.utf8InSource(finding.Err)
 		if rejects(strict, finding.Kind) {
 			return nil, err
@@ -112,17 +109,6 @@ func (input *profileInput) utf8InSource(err error) error {
 	}
 
 	return &strictjson.UTF8Error{Offset: utf8Err.Offset + input.offset, Escape: utf8Err.Escape}
-}
-
-// requiredOf returns the members the profile type requires besides those
-// its tags mark: the seccomp package's, for a seccomp profile only, as
-// seccomp.UnmarshalStrict passes them.
-func requiredOf[T any]() *strictjson.Required {
-	if _, seccompProfile := any(new(T)).(*specs.LinuxSeccomp); seccompProfile {
-		return seccompjson.Required
-	}
-
-	return nil
 }
 
 // rejects reports whether a finding of the given kind (see

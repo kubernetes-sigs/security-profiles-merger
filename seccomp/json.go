@@ -19,7 +19,6 @@ package seccomp
 import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
-	"sigs.k8s.io/security-profiles-merger/internal/seccompjson"
 	"sigs.k8s.io/security-profiles-merger/internal/strictjson"
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
@@ -60,7 +59,7 @@ func UnmarshalStrict(data []byte, profile *specs.LinuxSeccomp) error {
 		return ErrNilProfile
 	}
 
-	return strictjson.Unmarshal(data, profile, seccompjson.Required)
+	return strictjson.Unmarshal(data, profile)
 }
 
 // DecodeArtifact decodes an artifact with UnmarshalStrict and checks it with

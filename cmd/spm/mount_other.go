@@ -18,9 +18,11 @@ limitations under the License.
 
 package main
 
+import "os"
+
 // isMountedFile is always false where the mount of a file cannot be asked
 // for. A file that is a mount point then fails to be replaced, and is
 // written in place where the failure says why (see isMountPoint).
-func isMountedFile(_ string) bool {
+func isMountedFile(_ *os.File, _ string) bool {
 	return false
 }

@@ -38,11 +38,11 @@ const Space = " \t\r\n"
 // (spm.ErrDuplicateKey), a member the target type has no field for
 // (spm.ErrUnknownField), a member that names a field only ignoring case
 // (spm.ErrMisspelledField), a required member left out or null
-// (spm.ErrMissingField), required by its tag or by required, and anything
-// but whitespace behind the document
-// (spm.ErrUnexpectedData). A document that is not a JSON object is refused
-// too (spm.ErrNotAnObject): encoding/json decodes null into a struct as
-// nothing at all, which would make it an empty profile. A required member
+// (spm.ErrMissingField), required by its tag or by requiredFields, and
+// anything but whitespace behind the document (spm.ErrUnexpectedData). A
+// document that is not a JSON object is refused too (spm.ErrNotAnObject):
+// encoding/json decodes null into a struct as nothing at all, which would
+// make it an empty profile. A required member
 // is also missing in the elements of a Go array a document gives fewer
 // elements for, or none, and in a struct embedded through a pointer once
 // the document names any member of it, since the decoder fills both with
@@ -56,7 +56,7 @@ const Space = " \t\r\n"
 // fails one check is not one whose other findings can be trusted. target is
 // only written once every check has passed, so a caller that goes on after
 // an error does not hold what the document said.
-func Unmarshal[T any](data []byte, target *T, required *Required) error {
+func Unmarshal[T any](data []byte, target *T) error {
 	err := invalidUTF8(data)
 	if err != nil {
 		return err
@@ -97,7 +97,7 @@ func Unmarshal[T any](data []byte, target *T, required *Required) error {
 
 	// Only the first finding is reported. Invalid UTF-8 was ruled out
 	// before decoding.
-	for finding := range findings(data, &decoded, hint, required, false) {
+	for finding := range findings(data, &decoded, hint, false) {
 		return finding.Err
 	}
 
@@ -249,23 +249,18 @@ type Finding struct {
 // and invalid UTF-8. A document that repeats a member yields that alone
 // (see scanDocument). Unmarshal reports the first of them, except that it
 // rules out invalid UTF-8 before decoding. hint is what Decode returned for
-// the document, and required marks fields as Unmarshal takes it. One read
-// of the document's tokens finds all but invalid UTF-8, which is only
-// looked for once the caller asks for it.
-func Findings[T any](
-	data []byte, decoded *T, hint Hint, required *Required,
-) iter.Seq[Finding] {
-	return findings(data, decoded, hint, required, true)
+// the document. One read of the document's tokens finds all but invalid
+// UTF-8, which is only looked for once the caller asks for it.
+func Findings[T any](data []byte, decoded *T, hint Hint) iter.Seq[Finding] {
+	return findings(data, decoded, hint, true)
 }
 
 // findings is Findings, leaving out invalid UTF-8 unless withUTF8 is set,
 // for a caller that has checked it already and need not scan the document
 // a second time.
-func findings[T any](
-	data []byte, decoded *T, hint Hint, required *Required, withUTF8 bool,
-) iter.Seq[Finding] {
+func findings[T any](data []byte, decoded *T, hint Hint, withUTF8 bool) iter.Seq[Finding] {
 	return func(yield func(Finding) bool) {
-		scan := scanDocument(data, reflect.TypeFor[T](), required, checksMissing(decoded, required))
+		scan := scanDocument(data, reflect.TypeFor[T](), checksMissing(decoded))
 
 		err := scan.duplicates.err(spm.ErrDuplicateKey)
 		if err != nil {

@@ -1,1 +1,2 @@
 error: invalid Landlock ABI version "6\u3164" (use a whole number from 1 on)
+Run 'spm validate --help' for usage.

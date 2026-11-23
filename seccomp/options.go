@@ -150,7 +150,7 @@ func (o Options) ValidateArtifact(profile *specs.LinuxSeccomp) error {
 		return err
 	}
 
-	return validateWith(profile, artifactChecks(native), syscallRuleCheck(native))
+	return validateWith(profile, native, artifactChecks(native))
 }
 
 // ValidateStrict is ValidateStrict for the node the options name. It accepts
@@ -161,7 +161,7 @@ func (o Options) ValidateStrict(profile *specs.LinuxSeccomp) error {
 		return err
 	}
 
-	return validateWith(profile, strictChecks(native), syscallRuleCheck(native))
+	return validateWith(profile, native, strictChecks(native))
 }
 
 // ValidateBaseline is ValidateBaseline for the node the options name.

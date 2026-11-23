@@ -105,6 +105,18 @@ func rawInputs(docs ...string) []profileInput {
 	return inputs
 }
 
+// parsedInputs wraps raw documents as rawInputs does and parses each as
+// resolveKind does, which records the members of every one that is an
+// object for type detection to read.
+func parsedInputs(docs ...string) []profileInput {
+	inputs := rawInputs(docs...)
+	for idx := range inputs {
+		_ = parseObject(&inputs[idx])
+	}
+
+	return inputs
+}
+
 // testInvocation returns the invocation of a command run on inputs, with
 // the JSON format and both streams discarded.
 func testInvocation(inputs []profileInput) *invocation {

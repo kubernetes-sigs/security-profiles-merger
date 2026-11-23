@@ -24,7 +24,7 @@ import (
 	"unicode/utf8"
 )
 
-// SafeText returns a value taken from a profile as it can be printed. A
+// safeText returns a value taken from a profile as it can be printed. A
 // value holding a control character or a byte that is not valid UTF-8 is
 // quoted, which spells those bytes out, and so is one that holds whitespace
 // or the punctuation the formatters build their output from (see
@@ -46,7 +46,7 @@ import (
 // entries of a diff, and the AppArmor path "/etc/{a,b}" as the two paths
 // "/etc/{a" and "b}". An AppArmor alternation is therefore always quoted,
 // which is noisier than it needs to be but never ambiguous.
-func SafeText(value string) string {
+func safeText(value string) string {
 	if plainText(value) {
 		return value
 	}
@@ -55,7 +55,7 @@ func SafeText(value string) string {
 }
 
 // SafeName returns a name the command prints, such as a file argument, as
-// it can be written to a terminal. It quotes only what SafeText quotes for
+// it can be written to a terminal. It quotes only what safeText quotes for
 // being unprintable: a name is not joined with other values, so the
 // punctuation that makes a profile value ambiguous means nothing in it, and
 // quoting it would spell out every Windows path, whose drive letter and

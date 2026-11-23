@@ -567,7 +567,6 @@ func TestDiffCommandReportsFailures(t *testing.T) {
 			validateStrict:   nil,
 			validateArtifact: nil,
 			validateBaseline: nil,
-			inputCheck:       nil,
 			format:           nil,
 			diff:             diffFn,
 			formatDiff:       func(*unencodableDiff) string { return "" },
@@ -640,7 +639,8 @@ func TestDiffValidate(t *testing.T) {
 			name:     "an unknown mode",
 			args:     []string{"--validate", "baseline", testdataSeccompA, testdataSeccompB},
 			wantCode: exitUsage,
-			want:     `error: unknown validation mode "baseline" (use default, strict, or artifact)` + "\n",
+			want: `error: unknown validation mode "baseline" (use default, strict, or artifact)` + "\n" +
+				usageHintOf(cmdDiff),
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

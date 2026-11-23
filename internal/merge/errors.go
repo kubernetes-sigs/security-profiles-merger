@@ -65,22 +65,22 @@ func runeBoundary(text string, limit int) int {
 	return limit
 }
 
-// MaxMessageBytes bounds a message built from text the caller did not
+// maxMessageBytes bounds a message built from text the caller did not
 // write, such as the literal a JSON decoder quotes back from the document
 // it refused.
-const MaxMessageBytes = 512
+const maxMessageBytes = 512
 
-// BoundedText truncates text to MaxMessageBytes on a rune boundary, marking
+// BoundedText truncates text to maxMessageBytes on a rune boundary, marking
 // the elision so that it is never mistaken for the text. A decoder quotes
 // the literal it refused, and a document chooses how long that is: a
 // megabyte-long number otherwise reaches a runtime's log as a megabyte of
 // error.
 func BoundedText(text string) string {
-	if len(text) <= MaxMessageBytes {
+	if len(text) <= maxMessageBytes {
 		return text
 	}
 
-	return text[:runeBoundary(text, MaxMessageBytes)] + "..."
+	return text[:runeBoundary(text, maxMessageBytes)] + "..."
 }
 
 // BoundedError returns err with its message bounded by BoundedText. errors.Is

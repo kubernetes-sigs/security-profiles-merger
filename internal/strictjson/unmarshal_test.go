@@ -27,7 +27,6 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
-	"sigs.k8s.io/security-profiles-merger/internal/merge"
 	"sigs.k8s.io/security-profiles-merger/internal/strictjson"
 	"sigs.k8s.io/security-profiles-merger/landlock"
 	"sigs.k8s.io/security-profiles-merger/seccomp"
@@ -261,8 +260,12 @@ func TestUnmarshalStrictBoundsDecoderErrors(t *testing.T) {
 		t.Fatal("an out-of-range number = nil, want an error")
 	}
 
-	if len(err.Error()) > merge.MaxMessageBytes+64 {
-		t.Errorf("error is %d bytes, want at most %d", len(err.Error()), merge.MaxMessageBytes+64)
+	// A fixed ceiling, rather than one derived from merge.BoundedText, so
+	// that the test fails should the bound stop truncating: the quoted
+	// literal is bounded at 512 bytes, and the rest of the message is short.
+	const limit = 640
+	if len(err.Error()) > limit {
+		t.Errorf("error is %d bytes, want at most %d", len(err.Error()), limit)
 	}
 
 	var typeErr *json.UnmarshalTypeError
@@ -292,7 +295,7 @@ func TestFindingsComeInOrderAndOnDemand(t *testing.T) {
 
 		var kinds []error
 
-		for finding := range strictjson.Findings(raw, &decoded, hint, nil) {
+		for finding := range strictjson.Findings(raw, &decoded, hint) {
 			if !errors.Is(finding.Err, finding.Kind) {
 				t.Errorf("finding %v does not wrap its kind %v", finding.Err, finding.Kind)
 			}
@@ -319,7 +322,7 @@ func TestFindingsComeInOrderAndOnDemand(t *testing.T) {
 	var decoded specs.LinuxSeccomp
 
 	hint, _ := strictjson.Decode(raw, &decoded)
-	for finding := range strictjson.Findings(raw, &decoded, hint, nil) {
+	for finding := range strictjson.Findings(raw, &decoded, hint) {
 		if !errors.Is(finding.Kind, spm.ErrUnknownField) {
 			t.Errorf("first finding = %v, want the unknown member", finding.Kind)
 		}

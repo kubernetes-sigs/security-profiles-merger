@@ -78,30 +78,6 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
-func validateFormat(format string, stderr io.Writer) int {
-	if format != formatJSON && format != formatHuman {
-		_, _ = fmt.Fprintf(
-			stderr, "error: unknown format %s (use json or human)\n", merge.QuoteBounded(format),
-		)
-
-		return exitUsage
-	}
-
-	return 0
-}
-
-func validateProfileType(profileType string, stderr io.Writer) int {
-	if profileType == "" {
-		return 0
-	}
-
-	if !knownType(profileType) {
-		return unknownType(stderr, profileType)
-	}
-
-	return 0
-}
-
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		_, _ = fmt.Fprint(stderr, usage)
@@ -181,21 +157,12 @@ func runVersion(args []string, stdout, stderr io.Writer) int {
 	if flags.NArg() > 0 {
 		_, _ = fmt.Fprintf(stderr, "error: unexpected argument: %s\n", merge.SafeName(flags.Arg(0)))
 
-		printUsage(flags, versionUsage, stderr)
-
-		return exitUsage
+		return usageHint(flags, stderr)
 	}
 
-	// A write failure is reported like every other one, so that a full disk
-	// or a closed pipe does not look like a successful run.
-	_, err := fmt.Fprintf(stdout, "spm %s\n", resolveVersion(version, debug.ReadBuildInfo))
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "error: writing output: %v\n", err)
-
-		return 1
-	}
-
-	return 0
+	return writeStdout(
+		[]byte("spm "+resolveVersion(version, debug.ReadBuildInfo)+"\n"), stdout, stderr,
+	)
 }
 
 // resolveVersion returns the version set at build time. Without one, it

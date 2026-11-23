@@ -126,59 +126,44 @@ func Diff(left, right *Profile) (*ProfileDiff, error) {
 	normRight := canonicalProfile(right)
 
 	diff := &ProfileDiff{
-		Equal:            true,
-		HandledAccessFS:  nil,
-		HandledAccessNet: nil,
-		Scoped:           nil,
-		PathRules:        nil,
-		NetRules:         nil,
+		Equal:            false,
+		HandledAccessFS:  merge.NewSliceDiff(normLeft.HandledAccessFS, normRight.HandledAccessFS),
+		HandledAccessNet: merge.NewSliceDiff(normLeft.HandledAccessNet, normRight.HandledAccessNet),
+		Scoped:           merge.NewSliceDiff(normLeft.Scoped, normRight.Scoped),
+		PathRules:        diffPathRules(normLeft.PathRules, normRight.PathRules),
+		NetRules:         diffNetRules(normLeft.NetRules, normRight.NetRules),
 	}
+	// Every field but Equal is a pointer, set only where its section
+	// differs, so the profiles are equal where none is set.
+	var unchanged ProfileDiff
 
-	diff.HandledAccessFS = merge.NewSliceDiff(normLeft.HandledAccessFS, normRight.HandledAccessFS)
-	diff.HandledAccessNet = merge.NewSliceDiff(
-		normLeft.HandledAccessNet,
-		normRight.HandledAccessNet,
-	)
-	diff.Scoped = merge.NewSliceDiff(normLeft.Scoped, normRight.Scoped)
-
-	if diff.HandledAccessFS != nil || diff.HandledAccessNet != nil || diff.Scoped != nil {
-		diff.Equal = false
-	}
-
-	diffPathRules(diff, normLeft.PathRules, normRight.PathRules)
-	diffNetRules(diff, normLeft.NetRules, normRight.NetRules)
+	diff.Equal = *diff == unchanged
 
 	return diff, nil
 }
 
-func diffPathRules(diff *ProfileDiff, left, right []PathRule) {
+func diffPathRules(left, right []PathRule) *PathRulesDiff {
 	changes := diffRules(pathKind(), left, right,
 		func(path string, left, right []FSAccessRight) PathRuleChange {
 			return PathRuleChange{Path: path, Left: left, Right: right}
 		})
 	if changes.empty() {
-		return
+		return nil
 	}
 
-	diff.Equal = false
-	diff.PathRules = &PathRulesDiff{
-		Added: changes.added, Removed: changes.removed, Changed: changes.changed,
-	}
+	return &PathRulesDiff{Added: changes.added, Removed: changes.removed, Changed: changes.changed}
 }
 
-func diffNetRules(diff *ProfileDiff, left, right []NetRule) {
+func diffNetRules(left, right []NetRule) *NetRulesDiff {
 	changes := diffRules(netKind(), left, right,
 		func(port uint16, left, right []NetAccessRight) NetRuleChange {
 			return NetRuleChange{Port: port, Left: left, Right: right}
 		})
 	if changes.empty() {
-		return
+		return nil
 	}
 
-	diff.Equal = false
-	diff.NetRules = &NetRulesDiff{
-		Added: changes.added, Removed: changes.removed, Changed: changes.changed,
-	}
+	return &NetRulesDiff{Added: changes.added, Removed: changes.removed, Changed: changes.changed}
 }
 
 // ruleChanges is what diffRules found between two lists of rules of one

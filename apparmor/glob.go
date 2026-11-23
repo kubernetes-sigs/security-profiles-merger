@@ -525,8 +525,6 @@ func storeSharedMatcher(path string, analyzed *globMatcher) *globMatcher {
 // literalBudget, past which a literal is analyzed anew on every read, as
 // matcherFor does, so that a profile of many long literals costs the call
 // no more memory than it did before.
-//
-// A nil matcherCache reads the shared cache only, without a budget.
 type matcherCache struct {
 	entries map[string]*globMatcher
 	// compileBudget is what the call may still spend compiling, in pattern
@@ -595,7 +593,7 @@ func keyAnalysis(path string) *globMatcher {
 // analyzes them, since they are never compiled. A cache made by newKeyCache
 // returns keyAnalysis instead, which serves the identity of a path only.
 func (cache *matcherCache) matcher(path string) *globMatcher {
-	if cache == nil || len(path) > maxGlobPatternLen {
+	if len(path) > maxGlobPatternLen {
 		return matcherFor(path)
 	}
 

@@ -369,9 +369,9 @@ func TestNewSliceDiff(t *testing.T) {
 	}
 }
 
-// TestWriteSliceDiffOfDiffSlice checks that the results of DiffSlice land
-// on the right side of the formatted diff.
-func TestWriteSliceDiffOfDiffSlice(t *testing.T) {
+// TestWriteSliceDiffOfNewSliceDiff checks that the results of NewSliceDiff
+// land on the right side of the formatted diff.
+func TestWriteSliceDiffOfNewSliceDiff(t *testing.T) {
 	t.Parallel()
 
 	var out merge.Builder
@@ -390,7 +390,9 @@ func TestWriteSliceDiffOfDiffSlice(t *testing.T) {
 	}
 }
 
-func TestDiffSlice(t *testing.T) {
+// TestNewSliceDiffSides covers which side of the diff each element lands
+// on, and that duplicates are ignored.
+func TestNewSliceDiffSides(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -433,7 +435,11 @@ func TestDiffSlice(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			added, removed := merge.DiffSlice(test.left, test.right)
+			var added, removed []string
+			if diff := merge.NewSliceDiff(test.left, test.right); diff != nil {
+				added, removed = diff.Added, diff.Removed
+			}
+
 			if !slices.Equal(added, test.wantAdded) {
 				t.Errorf("added = %v, want %v", added, test.wantAdded)
 			}
@@ -617,13 +623,13 @@ func BenchmarkUnionSlice(b *testing.B) {
 	}
 }
 
-func BenchmarkDiffSlice(b *testing.B) {
+func BenchmarkNewSliceDiff(b *testing.B) {
 	for _, size := range []int{8, 20, 100} {
 		left, right := buildOverlappingSlices(size)
 
 		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
 			for range b.N {
-				_, _ = merge.DiffSlice(left, right)
+				_ = merge.NewSliceDiff(left, right)
 			}
 		})
 	}

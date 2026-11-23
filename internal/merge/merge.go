@@ -17,7 +17,7 @@ limitations under the License.
 // Package merge holds what the three profile packages and the command share
 // beyond the public spm package: the generic merge primitives (Fold and the
 // slice helpers), the bounds on error reports (Collector, BoundedError,
-// QuoteBounded), the quoting of profile values for output (SafeText,
+// QuoteBounded), the quoting of profile values for output (Builder.WriteText,
 // SafeName) and the bounded output of the formatters (Builder).
 package merge
 
@@ -66,29 +66,9 @@ func RequireNonNil[T any](profiles ...*T) error {
 	return nil
 }
 
-// DiffSlice compares two slices as sets and returns, in this order, the
-// elements only right has (added) and the elements only left has (removed).
-// Duplicates within a slice are ignored. Results are sorted, which is why T
-// must be ordered. Returns nil, nil when the sets are equal.
-func DiffSlice[T cmp.Ordered](left, right []T) ([]T, []T) {
-	leftSet := make(map[T]struct{}, len(left))
-	for _, item := range left {
-		leftSet[item] = struct{}{}
-	}
-
-	rightSet := make(map[T]struct{}, len(right))
-	for _, item := range right {
-		rightSet[item] = struct{}{}
-	}
-
-	added, removed, _ := SortedKeyDiff(leftSet, rightSet)
-
-	return added, removed
-}
-
 // SortedKeyDiff compares the keys of two maps and returns, in this order and
-// each sorted, the keys only right has (added), as DiffSlice does, those
-// only left has (removed) and those both have. A list without keys is nil.
+// each sorted, the keys only right has (added), those only left has
+// (removed) and those both have. A list without keys is nil.
 func SortedKeyDiff[K cmp.Ordered, V any](left, right map[K]V) ([]K, []K, []K) {
 	var added, removed, both []K
 
@@ -123,11 +103,23 @@ func NilIfEmpty[T any](items []T) []T {
 	return items
 }
 
-// NewSliceDiff compares two slices as sets, as DiffSlice does, and returns
-// the difference, or nil when the sets are equal, which is how every diff
-// of this module reports an unchanged list.
+// NewSliceDiff compares two slices as sets and returns the elements only
+// right has (added) and those only left has (removed), each sorted, which
+// is why T must be ordered. Duplicates within a slice are ignored. It
+// returns nil when the sets are equal, which is how every diff of this
+// module reports an unchanged list.
 func NewSliceDiff[T cmp.Ordered](left, right []T) *spm.SliceDiff[T] {
-	added, removed := DiffSlice(left, right)
+	leftSet := make(map[T]struct{}, len(left))
+	for _, item := range left {
+		leftSet[item] = struct{}{}
+	}
+
+	rightSet := make(map[T]struct{}, len(right))
+	for _, item := range right {
+		rightSet[item] = struct{}{}
+	}
+
+	added, removed, _ := SortedKeyDiff(leftSet, rightSet)
 	if len(added) == 0 && len(removed) == 0 {
 		return nil
 	}

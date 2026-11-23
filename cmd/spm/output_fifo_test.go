@@ -48,13 +48,9 @@ func TestOutputDoesNotWaitOnASwappedInFIFO(t *testing.T) {
 	}
 
 	// Without a reader the open fails at once.
-	err = checkWritable(fifo)
+	err = writeRegularFile(fifo, []byte("profile"))
 	if !errors.Is(err, errNotRegular) {
-		t.Errorf("checkWritable of a FIFO without a reader = %v, want %v", err, errNotRegular)
-	}
-
-	if isMountedFile(fifo) {
-		t.Error("a FIFO is taken for a mounted file")
+		t.Errorf("writeRegularFile of a FIFO without a reader = %v, want %v", err, errNotRegular)
 	}
 
 	// With a reader the open succeeds, and the FIFO is refused for not

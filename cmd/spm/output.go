@@ -33,14 +33,7 @@ import (
 // have succeeded, so a failed run never truncates an existing file.
 func flushOutput(path string, content []byte, stdout, stderr io.Writer) int {
 	if path == "" || path == stdinArg {
-		_, err := stdout.Write(content)
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "error: writing output: %v\n", err)
-
-			return 1
-		}
-
-		return 0
+		return writeStdout(content, stdout, stderr)
 	}
 
 	// The path is used as written, never cleaned: cleaning "link/../x"
@@ -52,6 +45,21 @@ func flushOutput(path string, content []byte, stdout, stderr io.Writer) int {
 	}
 
 	return reportWrite(path, err, stderr)
+}
+
+// writeStdout writes content to stdout. A failure is reported as one to
+// write an output file is (see reportWrite), so that a full disk or a
+// closed pipe does not look like a successful run, and without the path
+// and the operation os spells it with, which name /dev/stdout.
+func writeStdout(content []byte, stdout, stderr io.Writer) int {
+	_, err := stdout.Write(content)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "error: writing to stdout: write: %v\n", bareFileError(err))
+
+		return 1
+	}
+
+	return 0
 }
 
 // reportWrite reports how writing the output file path went and returns the
@@ -185,9 +193,15 @@ func writeOutputFile(path string, content []byte) error {
 }
 
 // writeRegularFile writes content to an existing regular file, which is
-// replaced unless it is a mount point.
+// replaced unless it is a mount point. It is opened for writing first, and
+// that one open is all it takes: replacing the file only needs write access
+// to its directory, so a file the caller cannot write, such as one made
+// read-only to keep it, is refused through the open as it was when it was
+// written in place. The open file is what is asked whether it is a mount
+// point, and what a mount point is then written through, so that a file put
+// at path in the meantime is neither asked about nor written.
 func writeRegularFile(path string, content []byte) error {
-	err := checkWritable(path)
+	file, err := openRegular(path, 0)
 	if err != nil {
 		return err
 	}
@@ -195,26 +209,25 @@ func writeRegularFile(path string, content []byte) error {
 	// A file mounted over this path cannot be replaced, and its directory
 	// often takes no new file either: the root of a container with a
 	// read-only root file system, or of one running as another user than
-	// root.
-	if isMountedFile(path) {
-		return writeInPlace(path, content, true)
+	// root. Any other file is closed before it is replaced, which Windows
+	// refuses for a file held open.
+	if !isMountedFile(file, path) {
+		err = file.Close()
+		if err != nil {
+			return bareFileError(err)
+		}
+
+		return replaceOutputFile(path, content)
 	}
 
-	return replaceOutputFile(path, content)
-}
-
-// checkWritable opens an existing output file for writing and closes it
-// again, without writing anything. Replacing the file only needs write
-// access to its directory, and a file the caller cannot write, such as one
-// made read-only to keep it, is refused as it was when it was written in
-// place.
-func checkWritable(path string) error {
-	file, err := openRegular(path, 0)
+	err = file.Truncate(0)
 	if err != nil {
-		return err
+		_ = file.Close()
+
+		return fmt.Errorf("truncate: %w", bareFileError(err))
 	}
 
-	return bareFileError(file.Close())
+	return writeAndClose(file, content)
 }
 
 // errNotRegular reports an output file that was a regular file when it was
@@ -475,7 +488,13 @@ func writeInPlace(path string, content []byte, regular bool) error {
 		return bareFileError(err)
 	}
 
-	_, err = file.Write(content)
+	return writeAndClose(file, content)
+}
+
+// writeAndClose writes content to a file opened for writing in place, and
+// closes it.
+func writeAndClose(file *os.File, content []byte) error {
+	_, err := file.Write(content)
 	if err != nil {
 		_ = file.Close()
 

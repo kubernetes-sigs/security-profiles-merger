@@ -226,7 +226,7 @@ func TestInvalidTagFailsClosed(t *testing.T) {
 
 	var tagged invalidTag
 
-	err := Unmarshal([]byte(`{"Quoted":"x"}`), &tagged, nil)
+	err := Unmarshal([]byte(`{"Quoted":"x"}`), &tagged)
 	if !errors.Is(err, spm.ErrUnknownField) {
 		t.Errorf("Unmarshal of a field with an invalid tag = %+v, %v, want ErrUnknownField",
 			tagged, err)
@@ -235,7 +235,7 @@ func TestInvalidTagFailsClosed(t *testing.T) {
 	var quoted quotedTag
 
 	for _, doc := range []string{`{"a":"x"}`, `{"N":"x"}`} {
-		err = Unmarshal([]byte(doc), &quoted, nil)
+		err = Unmarshal([]byte(doc), &quoted)
 		if !errors.Is(err, spm.ErrUnknownField) {
 			t.Errorf("Unmarshal(%s) of a field with a quoted tag = %+v, %v, want ErrUnknownField",
 				doc, quoted, err)
@@ -323,7 +323,7 @@ func TestDepthTwinsFailClosed(t *testing.T) {
 
 		var twins depthTwins
 
-		err := Unmarshal([]byte(`{"`+member+`":"x"}`), &twins, nil)
+		err := Unmarshal([]byte(`{"`+member+`":"x"}`), &twins)
 		if !errors.Is(err, spm.ErrUnknownField) {
 			t.Errorf("Unmarshal of %q = %+v, %v, want ErrUnknownField", member, twins, err)
 		}
@@ -358,7 +358,7 @@ func TestMissingFieldsFollowTheDecodersFields(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, omitted := missingFieldsOf(raw, &decoded, nil)
+	got, omitted := missingFieldsOf(raw, &decoded)
 	if len(got) != 0 || omitted != 0 {
 		t.Errorf("missingFieldsOf = %v (%d omitted), want none", got, omitted)
 	}
@@ -417,11 +417,11 @@ func TestMissingPathsAreBuiltLazily(t *testing.T) {
 
 		check := func(raw []byte) func() {
 			return func() {
-				_, _ = missingFieldsOf(raw, &decoded, nil)
+				_, _ = missingFieldsOf(raw, &decoded)
 			}
 		}
 
-		got, omitted := missingFieldsOf(deeper, &decoded, nil)
+		got, omitted := missingFieldsOf(deeper, &decoded)
 		// The paths are cut where a report would cut them.
 		if len(got) == 0 || !strings.HasPrefix(got[0], strings.Repeat("next.", 10)) {
 			t.Fatalf("%s: missingFieldsOf = %v (%d omitted), want rules of the innermost list",
@@ -446,7 +446,7 @@ func TestMissingPathsAreBuiltLazily(t *testing.T) {
 	// A close with nothing missing asks for no path at all.
 	asked := false
 
-	(*Required)(nil).reportMissing(
+	reportMissing(
 		reflect.TypeFor[requiredRule](),
 		func() (string, bool) {
 			asked = true
@@ -481,14 +481,14 @@ func TestSyntaxErrorBeatsTypeError(t *testing.T) {
 
 		var got *json.SyntaxError
 
-		err := Unmarshal([]byte(raw), new(specs.LinuxSeccomp), nil)
+		err := Unmarshal([]byte(raw), new(specs.LinuxSeccomp))
 		if !errors.As(err, &got) || got.Offset != want.Offset || got.Error() != want.Error() {
 			t.Errorf("Unmarshal(%q) = %v, want %v at offset %d", raw, err, want, want.Offset)
 		}
 	}
 
 	// A well-formed document keeps its type error.
-	err := Unmarshal([]byte(`{"defaultErrnoRet":"x"}`), new(specs.LinuxSeccomp), nil)
+	err := Unmarshal([]byte(`{"defaultErrnoRet":"x"}`), new(specs.LinuxSeccomp))
 
 	var typeErr *json.UnmarshalTypeError
 	if !errors.As(err, &typeErr) {

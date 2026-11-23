@@ -35,8 +35,8 @@ import (
 )
 
 // newFlagSet returns a flag set for a subcommand. The flag package prints
-// nothing of its own: parseFlags reports a parse error and prints the usage
-// itself, to stdout or stderr depending on why it is needed.
+// nothing of its own: parseFlags prints requested help to stdout, and
+// reports a parse error on stderr with a hint at that help (see usageHint).
 func newFlagSet(name string) *flag.FlagSet {
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -51,6 +51,7 @@ type commonOptions struct {
 	format       string
 	output       string
 	arch         string
+	abi          string
 	noDetectNote bool
 }
 
@@ -65,24 +66,35 @@ type commandOptions interface {
 
 func (opts *commonOptions) common() *commonOptions { return opts }
 
-// bind declares the common flags on the set. result names what the command
-// writes, which the help of --no-detect-note says still goes to stdout,
-// outputDefault what --output defaults to, as its help says it, and archFor
-// what the architecture --arch names is for.
-func (opts *commonOptions) bind(flags *flag.FlagSet, result, outputDefault, archFor string) {
-	bindArchFlag(flags, &opts.arch, archFor)
+// commonHelp is what the help of the common flags differs in between the
+// commands: result names what the command writes, which the help of
+// --no-detect-note says still goes to stdout, outputDefault what --output
+// defaults to, as its help says it, archFor what the architecture --arch
+// names is for (see bindArchFlag), and abiFor what the version --abi names
+// is for and which checks it changes (see bindABIFlag).
+type commonHelp struct {
+	result        string
+	outputDefault string
+	archFor       string
+	abiFor        string
+}
+
+// bind declares the common flags on the set.
+func (opts *commonOptions) bind(flags *flag.FlagSet, help commonHelp) {
+	bindArchFlag(flags, &opts.arch, help.archFor)
+	bindABIFlag(flags, &opts.abi, help.abiFor)
 	flags.StringVar(
 		&opts.profileType, "type", "",
-		"profile type: seccomp, apparmor, landlock (auto-detected if omitted)",
+		"profile type: "+strings.Join(typeNames(), ", ")+" (auto-detected if omitted)",
 	)
 	flags.StringVar(&opts.format, "format", formatJSON, "output format: json, human")
 	flags.StringVar(
 		&opts.output, "output", "",
-		"write output to file, or to stdout with - (default: "+outputDefault+")",
+		"write output to file, or to stdout with - (default: "+help.outputDefault+")",
 	)
 	flags.BoolVar(
 		&opts.noDetectNote, "no-detect-note", false,
-		"do not note an auto-detected profile type on stderr; "+result+
+		"do not note an auto-detected profile type on stderr; "+help.result+
 			", errors and warnings still go to their usual streams",
 	)
 }
@@ -112,20 +124,29 @@ func (opts *commonOptions) checkEmpty(flags *flag.FlagSet, stderr io.Writer) int
 
 // check reports a --format or --type value no command takes.
 func (opts *commonOptions) check(stderr io.Writer) int {
-	if code := validateFormat(opts.format, stderr); code != 0 {
-		return code
+	switch {
+	case opts.format != formatJSON && opts.format != formatHuman:
+		_, _ = fmt.Fprintf(
+			stderr,
+			"error: unknown format %s (use json or human)\n",
+			merge.QuoteBounded(opts.format),
+		)
+	case opts.profileType != "" && !knownType(opts.profileType):
+		_, _ = fmt.Fprintf(stderr, "error: %v\n", unknownTypeError(opts.profileType))
+	default:
+		return 0
 	}
 
-	return validateProfileType(opts.profileType, stderr)
+	return exitUsage
 }
 
 // parseFlags parses a subcommand's arguments. Requested help goes to stdout
-// and exits 0. A parse error is reported on stderr, followed by the usage,
-// and exits with the usage code. The error names the argument it is about,
-// which the caller chose, so that is written the way every other argument
-// is (see merge.SafeName), and with the dashes the caller wrote (see
-// flagAsWritten). The first result reports whether the command should stop
-// with the second.
+// and exits 0. A parse error is reported on stderr, followed by the hint at
+// the help (see usageHint), and exits with the usage code. The error names
+// the argument it is about, which the caller chose, so that is written the
+// way every other argument is (see merge.SafeName), and with the dashes the
+// caller wrote (see flagAsWritten). The first result reports whether the
+// command should stop with the second.
 func parseFlags(
 	flags *flag.FlagSet, usageText string, args []string, stdout, stderr io.Writer,
 ) (bool, int) {
@@ -140,9 +161,17 @@ func parseFlags(
 
 	_, _ = fmt.Fprintln(stderr, "error: "+flagAsWritten(err.Error(), args))
 
-	printUsage(flags, usageText, stderr)
+	return true, usageHint(flags, stderr)
+}
 
-	return true, exitUsage
+// usageHint follows the report of a usage error the arguments alone show
+// with where to find the usage, rather than with the usage itself, which
+// would bury the one line that says what went wrong, and returns the usage
+// exit code.
+func usageHint(flags *flag.FlagSet, stderr io.Writer) int {
+	_, _ = fmt.Fprintf(stderr, "Run 'spm %s --help' for usage.\n", flags.Name())
+
+	return exitUsage
 }
 
 // flagAsWritten rewrites the flag an error of the flag package names, which
@@ -222,24 +251,9 @@ func writtenFlag(name string, args []string) string {
 	return "--" + name
 }
 
-// printHelp writes help the caller asked for to stdout. A write failure is
-// reported like every other one, so that a full disk or a closed pipe does
-// not look like a successful run.
+// printHelp writes help the caller asked for to stdout (see writeStdout).
 func printHelp(text string, stdout, stderr io.Writer) int {
-	_, err := fmt.Fprint(stdout, text)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "error: writing output: %v\n", err)
-
-		return 1
-	}
-
-	return 0
-}
-
-// printUsage writes a subcommand's usage to out, next to the error that
-// called for it.
-func printUsage(flags *flag.FlagSet, usageText string, out io.Writer) {
-	_, _ = fmt.Fprint(out, usageWithFlags(flags, usageText))
+	return writeStdout([]byte(text), stdout, stderr)
 }
 
 // flagDefaultLine matches the start of a flag in what the flag package
@@ -363,16 +377,12 @@ func checkFlagOrder(args []string, separated bool, stderr io.Writer) int {
 
 // checkStdin rejects running without file arguments when stdin is a
 // terminal: input would come from stdin, which would block without a hint,
-// so the usage is printed instead. What is taken for a terminal differs
-// between the platforms (see isTerminal), and the error says what it was
-// (see terminalStdin).
-func checkStdin(
-	flags *flag.FlagSet, usageText string, stdin io.Reader, stderr io.Writer,
-) int {
+// so it is refused instead. What is taken for a terminal differs between
+// the platforms (see isTerminal), and the error says what it was (see
+// terminalStdin).
+func checkStdin(flags *flag.FlagSet, stdin io.Reader, stderr io.Writer) int {
 	if flags.NArg() == 0 && isInteractive(stdin) {
 		_, _ = fmt.Fprintln(stderr, "error: no input files given and "+terminalStdin)
-
-		printUsage(flags, usageText, stderr)
 
 		return exitUsage
 	}
@@ -406,7 +416,7 @@ type invocation struct {
 	// inputs disagree on the type needs before it has a kind.
 	checks *inputChecks
 	arch   archOption
-	// abi is the Landlock ABI version validate --abi names, or 0 for none.
+	// abi is the Landlock ABI version --abi names, or 0 for none.
 	abi    landlock.ABIVersion
 	format string
 	// out holds what the command writes on success, which flushOutput then
@@ -422,11 +432,10 @@ type invocation struct {
 }
 
 // startCommand runs the steps every command that reads profiles starts
-// with: it parses args into flags and opts, checks the flag order and then
-// the flag values, parses --arch, refuses a terminal on stdin and reads the
-// inputs, every failure of which is a usage error (see readInputs). It
-// returns the invocation to go on with, or nil and the exit code to stop
-// with.
+// with: it parses args into flags and opts, checks the command line (see
+// checkCommandLine) and reads the inputs, every failure of which is a usage
+// error (see readInputs). It returns the invocation to go on with, or nil
+// and the exit code to stop with.
 func startCommand(
 	flags *flag.FlagSet, opts commandOptions, usageText string, args []string,
 	stdin io.Reader, stdout, stderr io.Writer,
@@ -435,29 +444,9 @@ func startCommand(
 		return nil, code
 	}
 
-	// The flag order is checked first, so that a flag after the file
-	// arguments is reported as such, and then the flag values.
-	if code := checkFlagOrder(flags.Args(), argsSeparated(flags, args), stderr); code != 0 {
-		return nil, code
-	}
-
-	common := opts.common()
-
-	if code := common.checkEmpty(flags, stderr); code != 0 {
-		return nil, code
-	}
-
-	if code := opts.checkFlags(flags, stderr); code != 0 {
-		return nil, code
-	}
-
-	arch, code := parseArchFlag(flags, common.arch, stderr)
+	node, code := checkCommandLine(flags, opts, args, stdin, stderr)
 	if code != 0 {
-		return nil, code
-	}
-
-	if code := checkStdin(flags, usageText, stdin, stderr); code != 0 {
-		return nil, code
+		return nil, usageHint(flags, stderr)
 	}
 
 	inputs, err := readInputs(flags.Args(), stdin)
@@ -474,14 +463,60 @@ func startCommand(
 		report:      nil,
 		kind:        nil,
 		checks:      nil,
-		arch:        arch,
-		abi:         0,
-		format:      common.format,
+		arch:        node.arch,
+		abi:         node.abi,
+		format:      opts.common().format,
 		out:         bytes.Buffer{},
 		stdout:      stdout,
 		stderr:      stderr,
 		refusals:    nil,
 	}, 0
+}
+
+// nodeOptions is the node --arch and --abi describe.
+type nodeOptions struct {
+	arch archOption
+	abi  landlock.ABIVersion
+}
+
+// checkCommandLine checks what the arguments alone show: the flag order,
+// then the flag values, --arch and --abi among them, and then that stdin is
+// no terminal where it is read. The flag order comes first, so that a flag
+// after the file arguments is reported as such rather than as missing. It
+// returns the node the flags describe, or the usage exit code once it has
+// reported why not.
+func checkCommandLine(
+	flags *flag.FlagSet, opts commandOptions, args []string, stdin io.Reader, stderr io.Writer,
+) (nodeOptions, int) {
+	var node nodeOptions
+
+	if code := checkFlagOrder(flags.Args(), argsSeparated(flags, args), stderr); code != 0 {
+		return node, code
+	}
+
+	common := opts.common()
+
+	if code := common.checkEmpty(flags, stderr); code != 0 {
+		return node, code
+	}
+
+	if code := opts.checkFlags(flags, stderr); code != 0 {
+		return node, code
+	}
+
+	var code int
+
+	node.arch, code = parseArchFlag(flags, common.arch, stderr)
+	if code != 0 {
+		return node, code
+	}
+
+	node.abi, code = parseABIFlag(flags, common.abi, stderr)
+	if code != 0 {
+		return node, code
+	}
+
+	return node, checkStdin(flags, stdin, stderr)
 }
 
 // halted reports whether the run cannot go on: an input failed, or a usage
@@ -510,12 +545,14 @@ func (inv *invocation) stop(failedExit int) int {
 	return exitUsage
 }
 
-// write writes a command's result to out in the format --format names:
-// humanStr, the result as its String or FormatProfile writes it, for the
-// human one.
-func (inv *invocation) write(result any, humanStr string) int {
+// write writes a command's result to out in the format --format names: for
+// the human one, what human returns, the result as its String or
+// FormatProfile writes it, which no other format needs computed.
+func (inv *invocation) write(result any, human func() string) int {
 	switch inv.format {
 	case formatHuman:
+		humanStr := human()
+
 		_, _ = fmt.Fprintln(&inv.out, humanStr)
 
 		warnTruncated(inv.stderr, humanStr)

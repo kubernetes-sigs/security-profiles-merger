@@ -122,17 +122,17 @@ func Diff(left, right *Profile) (*ProfileDiff, error) {
 	populateEmpty(normRight)
 
 	diff := &ProfileDiff{
-		Equal:        true,
-		Executable:   nil,
-		Filesystem:   nil,
-		Network:      nil,
-		Capabilities: nil,
+		Equal:        false,
+		Executable:   diffExecutables(normLeft, normRight),
+		Filesystem:   diffFilesystem(normLeft, normRight),
+		Network:      diffNetwork(normLeft, normRight),
+		Capabilities: diffCapabilities(normLeft, normRight),
 	}
+	// Every field but Equal is a pointer, set only where its section
+	// differs, so the profiles are equal where none is set.
+	var unchanged ProfileDiff
 
-	diffExecutables(diff, normLeft, normRight)
-	diffFilesystem(diff, normLeft, normRight)
-	diffNetwork(diff, normLeft, normRight)
-	diffCapabilities(diff, normLeft, normRight)
+	diff.Equal = *diff == unchanged
 
 	return diff, nil
 }
@@ -140,48 +140,47 @@ func Diff(left, right *Profile) (*ProfileDiff, error) {
 // The comparisons below read sections and network booleans without checking
 // for nil: Diff runs them on profiles populateEmpty has made explicit.
 
-func diffExecutables(diff *ProfileDiff, left, right *Profile) {
+func diffExecutables(left, right *Profile) *ExecutableDiff {
 	execDiff := diffPaths(
 		left.Executable.AllowedExecutables, right.Executable.AllowedExecutables,
 	)
 	libDiff := diffPaths(left.Executable.AllowedLibraries, right.Executable.AllowedLibraries)
 
-	if execDiff != nil || libDiff != nil {
-		diff.Equal = false
-		diff.Executable = &ExecutableDiff{AllowedExecutables: execDiff, AllowedLibraries: libDiff}
+	if execDiff == nil && libDiff == nil {
+		return nil
 	}
+
+	return &ExecutableDiff{AllowedExecutables: execDiff, AllowedLibraries: libDiff}
 }
 
-func diffFilesystem(diff *ProfileDiff, left, right *Profile) {
+func diffFilesystem(left, right *Profile) *FilesystemDiff {
 	roDiff := diffPaths(left.Filesystem.ReadOnlyPaths, right.Filesystem.ReadOnlyPaths)
 	woDiff := diffPaths(left.Filesystem.WriteOnlyPaths, right.Filesystem.WriteOnlyPaths)
 	rwDiff := diffPaths(left.Filesystem.ReadWritePaths, right.Filesystem.ReadWritePaths)
 
-	if roDiff != nil || woDiff != nil || rwDiff != nil {
-		diff.Equal = false
-		diff.Filesystem = &FilesystemDiff{
-			ReadOnlyPaths:  roDiff,
-			WriteOnlyPaths: woDiff,
-			ReadWritePaths: rwDiff,
-		}
+	if roDiff == nil && woDiff == nil && rwDiff == nil {
+		return nil
 	}
+
+	return &FilesystemDiff{ReadOnlyPaths: roDiff, WriteOnlyPaths: woDiff, ReadWritePaths: rwDiff}
 }
 
-func diffNetwork(diff *ProfileDiff, left, right *Profile) {
+func diffNetwork(left, right *Profile) *NetworkDiff {
 	rawDiff := diffBool(left.Network.AllowRaw, right.Network.AllowRaw)
 	tcpDiff := diffBool(left.Network.Protocols.AllowTCP, right.Network.Protocols.AllowTCP)
 	udpDiff := diffBool(left.Network.Protocols.AllowUDP, right.Network.Protocols.AllowUDP)
 
 	if rawDiff == nil && tcpDiff == nil && udpDiff == nil {
-		return
+		return nil
 	}
 
-	diff.Equal = false
-	diff.Network = &NetworkDiff{AllowRaw: rawDiff, Protocols: nil}
+	network := &NetworkDiff{AllowRaw: rawDiff, Protocols: nil}
 
 	if tcpDiff != nil || udpDiff != nil {
-		diff.Network.Protocols = &AllowedProtocolsDiff{AllowTCP: tcpDiff, AllowUDP: udpDiff}
+		network.Protocols = &AllowedProtocolsDiff{AllowTCP: tcpDiff, AllowUDP: udpDiff}
 	}
+
+	return network
 }
 
 // diffBool compares two network booleans, which populateEmpty has set, and
@@ -194,14 +193,15 @@ func diffBool(left, right *bool) *ValueDiff[*bool] {
 	return &ValueDiff[*bool]{Left: merge.ClonePtr(left), Right: merge.ClonePtr(right)}
 }
 
-func diffCapabilities(diff *ProfileDiff, left, right *Profile) {
+func diffCapabilities(left, right *Profile) *CapabilityDiff {
 	capDiff := merge.NewSliceDiff(
 		left.Capabilities.AllowedCapabilities, right.Capabilities.AllowedCapabilities,
 	)
-	if capDiff != nil {
-		diff.Equal = false
-		diff.Capabilities = &CapabilityDiff{AllowedCapabilities: capDiff}
+	if capDiff == nil {
+		return nil
 	}
+
+	return &CapabilityDiff{AllowedCapabilities: capDiff}
 }
 
 // diffPaths compares two path lists by the rule each path spells rather than

@@ -59,6 +59,10 @@ differently on another machine; pass a name such as SCMP_ARCH_X86_64 for
 the target node, or --arch none for a node of unknown architecture, which
 settles the result for every architecture a runtime can be native on.
 
+--abi names the Landlock ABI version of the kernel that loads the result:
+the --validate checks then refuse every right of an input that kernel does
+not know, which it would reject.
+
 Options:
 `
 
@@ -75,7 +79,13 @@ type mergeOptions struct {
 func bindMergeFlags(flags *flag.FlagSet) *mergeOptions {
 	opts := new(mergeOptions)
 
-	opts.bind(flags, "the merged profile", "stdout", "of the node that loads the result")
+	opts.bind(flags, commonHelp{
+		result:        "the merged profile",
+		outputDefault: "stdout",
+		archFor:       "of the node that loads the result",
+		abiFor: "of the kernel that loads the result, such as 6; the input checks " +
+			"refuse the rights it does not know",
+	})
 	flags.StringVar(
 		&opts.strategy, "strategy", "", "merge strategy: intersect, union (required)",
 	)
@@ -180,7 +190,7 @@ func parseValidateModes(value string, inputs int) ([]validateMode, error) {
 }
 
 // checkFlags checks the merge flags (see commandOptions).
-func (opts *mergeOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) int {
+func (opts *mergeOptions) checkFlags(_ *flag.FlagSet, stderr io.Writer) int {
 	// The modes are parsed again once the inputs are known; this reports a
 	// misspelled one before anything is read.
 	_, err := parseValidateModes(opts.validate, 1)
@@ -193,7 +203,6 @@ func (opts *mergeOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) int 
 	strategy := opts.strategy
 	if strategy == "" {
 		_, _ = fmt.Fprintln(stderr, "error: --strategy is required")
-		printUsage(flags, mergeUsage, stderr)
 
 		return exitUsage
 	}
@@ -229,7 +238,7 @@ func (ops kindOps[T, D]) mergeProfiles(
 	})
 
 	if inv.halted() {
-		ops.checkLeftInputs(mergeFn, checks, profiles, report)
+		checkLeftInputs(mergeFn, checks, profiles, report)
 
 		return inv.stop(1)
 	}
@@ -243,7 +252,7 @@ func (ops kindOps[T, D]) mergeProfiles(
 
 	report.flush(inv.stderr)
 
-	return inv.write(result, ops.format(result))
+	return inv.write(result, func() string { return ops.format(result) })
 }
 
 // checkLeftInputs runs the check the merge runs on each input on the ones
@@ -253,11 +262,11 @@ func (ops kindOps[T, D]) mergeProfiles(
 // checked on its own, so that a failure between two inputs, such as a
 // conflict between their listeners, is neither reported nor blamed on
 // either: the merge was not going to run (see mergeInputCheck).
-func (ops kindOps[T, D]) checkLeftInputs(
+func checkLeftInputs[T any](
 	mergeFn func(...*T) (*T, error), checks []func(*T) error, profiles []*T,
 	report *inputReport,
 ) {
-	check := ops.mergeInputCheck(mergeFn)
+	check := mergeInputCheck(mergeFn)
 
 	checkInputs(profiles, report, func(idx int, profile *T) error {
 		if checks[idx] != nil {
@@ -269,14 +278,13 @@ func (ops kindOps[T, D]) checkLeftInputs(
 }
 
 // mergeInputCheck returns the check the merge functions run on one input on
-// its own: inputCheck, or where that is nil, a merge of the input alone
-// with mergeFn, of which only a failure it blames on the input
-// counts.
-func (ops kindOps[T, D]) mergeInputCheck(mergeFn func(...*T) (*T, error)) func(*T) error {
-	if ops.inputCheck != nil {
-		return ops.inputCheck
-	}
-
+// its own: a merge of the input alone with mergeFn, of which only a failure
+// it blames on the input counts. No exported validator runs exactly that
+// check for every kind: apparmor folds an entry repeated within one list,
+// which its Validate refuses, and a seccomp merge checks an input against
+// the node's architecture, which seccomp.Validate does not, refusing one of
+// another byte order.
+func mergeInputCheck[T any](mergeFn func(...*T) (*T, error)) func(*T) error {
 	return func(profile *T) error {
 		_, err := mergeFn(profile)
 		_, inputErr := inputFailure(err, 1)
