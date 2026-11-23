@@ -15,20 +15,10 @@ GO_FLOOR = 1.24
 # runs the tools below with.
 GO_VERSION := $(shell cat .go-version)
 
-# The other tools are pinned in their own module, hack/tools/go.mod, which
-# Dependabot keeps current and go.sum vouches for. A tool needs both a tool
-# directive there and an import in hack/tools/tools.go: the directive alone
-# leaves it an indirect requirement, which Dependabot does not update. The
-# module's go line can be newer than the floor in go.mod, since no consumer
-# builds it. The go command picks its toolchain from go.mod and not from
-# -modfile, so it would not switch to a Go new enough for that go line by
-# itself: GOTOOLCHAIN pins the Go in .go-version instead, which the go
-# command downloads when it is not the one on PATH. That also makes
-# govulncheck report on the standard library the release ships, wherever it
-# runs. It is spelled through env, since hack/api-check.sh splits the
-# command it is given into words, and a word that only looks like an
-# assignment is run as the command. A tools bump that raises that go line
-# has to raise .go-version as well.
+# The tools of hack/tools/go.mod, run with the Go in .go-version (see
+# "Tools and their Go" in CONTRIBUTING.md). GOTOOLCHAIN is spelled through
+# env, since hack/api-check.sh splits the command it is given into words,
+# and a word that only looks like an assignment is run as the command.
 TOOL = env GOTOOLCHAIN=go$(GO_VERSION) $(GO) tool -modfile=hack/tools/go.mod
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -187,16 +177,9 @@ VERIFY_STEPS := verify-coverage lint vet-arch build verify-go-floor verify-tidy 
 verify: ## Run the verifications CI runs (rewrites go.mod and the goldens in place)
 	$(MAKE) --no-print-directory -j1 $(VERIFY_STEPS)
 
-# Built from source rather than downloaded, so that the module checksum
-# database vouches for it the way it does for the tools in hack/tools. It
-# stays out of that module because golangci-lint asks not to be installed
-# as a dependency of another module, whose requirements would change it.
-# Its go.mod requires Go 1.26, newer than the floor in go.mod, so this needs
-# that Go on PATH or a GOTOOLCHAIN that lets the go command fetch it. The
-# lint job in ci.yml uses the release binary golangci-lint-action installs
-# instead, of the same version, which the action checks against the
-# checksums the release publishes, and hands it to lint-cmd-oses as
-# GOLANGCI_LINT, an absolute path.
+# Built from source with a Go newer than the floor (see "Tools and their
+# Go" in CONTRIBUTING.md). CI passes its own binary as GOLANGCI_LINT, an
+# absolute path.
 #
 # cmd/spm has files for other hosts, which a run for this one never loads,
 # so the command is also linted for each of LINT_OSES. Only the command,
@@ -227,7 +210,7 @@ lint-cmd-oses: $(GOLANGCI_LINT_INSTALL) ## Run golangci-lint on cmd/spm for each
 		GOOS=$$goos $(GOLANGCI_LINT) run ./cmd/...; \
 	done
 
-MDOCS := README.md docs/api.md docs/cli.md docs/integration.md docs/migration.md
+MDOCS := README.md docs/api.md docs/cli.md docs/integration.md $(wildcard docs/migration/*.md)
 
 # --dryrun fails when a table of contents is stale and writes nothing.
 .PHONY: verify-mdtoc

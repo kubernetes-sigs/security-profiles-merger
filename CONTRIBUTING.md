@@ -29,15 +29,10 @@ We have full documentation on how to get started contributing here:
   `make lint` and `make test-libseccomp`; see
   [Local Development](#local-development).
 - shellcheck, for `make lint-shell`, which `make verify` runs.
-- Nothing else for the Makefile: it installs the pinned golangci-lint into
-  `build/` with `go install` (which needs Go 1.26 or newer, see below), and
-  runs mdtoc, govulncheck, zeitgeist, actionlint and gorelease through
-  `go tool` from their own module, `hack/tools/go.mod`. That module's `go`
-  line can be newer than the one in `go.mod`, and the go command picks its
-  toolchain from `go.mod` alone, so the Makefile runs those tools with
-  `GOTOOLCHAIN` set to the Go in `.go-version`, which the go command
-  downloads when it is not the one on `PATH`. A tools update that raises
-  that module's `go` line has to raise `.go-version` too.
+- Nothing else for the Makefile: it installs the pinned golangci-lint,
+  which needs Go 1.26 or newer, and runs the other tools from their own
+  module, `hack/tools/go.mod`, with a newer Go than the floor (see
+  [Tools and their Go](#tools-and-their-go)).
 
 Fill in the `release-note` block of the pull request template in every pull
 request, with `NONE` if a consumer sees no change. The release notes are
@@ -143,19 +138,22 @@ Each fact has one home, and the others link to it:
 - README.md is an overview with short snippets and links.
 
 Write plain, direct prose that describes behavior as it is, without history
-such as "used to" or "before this change". Wrap markdown at 80 columns
-(tables and links excepted) and Go comments like the code around them. Run
-`make update-mdtoc` after changing a heading; `make verify-mdtoc` checks the
-tables of contents without writing them.
+such as "used to" or "before this change"; the migration guides in
+`docs/migration/` are the exception, since saying what changed is their
+job. Wrap markdown at 80 columns (tables and links excepted) and Go
+comments like the code around them. Run `make update-mdtoc` after changing
+a heading; `make verify-mdtoc` checks the tables of contents without
+writing them.
 
 The test in `internal/snippets/` type-checks every ` ```go ` block of
-README.md and `docs/*.md` against the module. A block that starts with
-`package` is checked as a file, one of top-level declarations (such as an
-import line) as a file of its own imports, and anything else as the body of
-a function returning `error`, with `errors`, `fmt`, `log`, `strings`,
-`specs`, `spm`, `seccomp`, `apparmor` and `landlock` imported. Declare the
-variables such a fragment takes as given in an HTML comment right above the
-fence, which a reader does not see:
+README.md, `docs/*.md` and `docs/migration/*.md` against the module. A
+block that starts with `package` is checked as a file, one of top-level
+declarations (such as an import line) as a file of its own imports, and
+anything else as the body of a function returning `error`, with
+`errors`, `fmt`, `log`, `strings`, `specs`, `spm`, `seccomp`, `apparmor`
+and `landlock` imported. Declare the variables such a fragment takes as
+given in an HTML comment right above the fence, which a reader does not
+see:
 
 ````markdown
 <!-- go-snippet
@@ -184,12 +182,8 @@ What `make help` does not say:
   `.golangci.yml` sets along with `apparmor_parser` and `runtime`, so any
   libseccomp headers do. The default `make` target and `make verify` run
   `lint`, so they need the headers too.
-- `make lint` builds golangci-lint from source with `go install` into
-  `build/golangci-lint-v<version>`, and its `go.mod` requires Go 1.26: it
-  needs that Go or a newer one on `PATH`, or a `GOTOOLCHAIN` that lets the
-  go command fetch it. It then lints `cmd/spm` once more for each of
-  `LINT_OSES` (`make lint-cmd-oses`). CI installs the release binary of the
-  same version instead and hands it to `make lint-cmd-oses`.
+- `make lint` lints `cmd/spm` once more for each of `LINT_OSES`
+  (`make lint-cmd-oses`).
 - `make verify-coverage` fails below 95% coverage by default; set
   `COVERAGE_THRESHOLD` to change it.
 - `make test-libseccomp` runs only the tests the `libseccomp` tag adds, and
@@ -229,6 +223,29 @@ does not install or a machine it does not have:
 | `test / runtime` | `make test-runtime` | Linux with Landlock, runc or crun, strace and unprivileged user namespaces; without them the tests skip |
 | `api / gorelease` | `make api-report` | a clean working tree; it fails on an incompatible change only from v1.0.0 on |
 | `apparmor-parser` | `make test-apparmor-parser` | `apparmor_parser` on `PATH` or named by `SPM_APPARMOR_PARSER`; without it the tests skip |
+
+### Tools and their Go
+
+golangci-lint is built from source with `go install` into
+`build/golangci-lint-v<version>`, so that the module checksum database
+vouches for it, and stays out of `hack/tools`, since it asks not to be
+installed as a dependency of another module. Its `go.mod` requires Go
+1.26, newer than the floor in `go.mod`, so `make lint` needs that Go or a
+newer one on `PATH`, or a `GOTOOLCHAIN` that lets the go command fetch it.
+CI installs the release binary of the same version instead and hands it to
+`make lint-cmd-oses` as `GOLANGCI_LINT`.
+
+mdtoc, govulncheck, zeitgeist, actionlint and gorelease run through
+`go tool` from their own module, `hack/tools/go.mod`, which Dependabot
+keeps current. A tool needs both a `tool` directive there and an import in
+`hack/tools/tools.go`: the directive alone leaves it an indirect
+requirement, which Dependabot does not update. That module's `go` line can
+be newer than the floor, since no consumer builds it, but the go command
+picks its toolchain from `go.mod` and not from `-modfile`, so the Makefile
+runs these tools with `GOTOOLCHAIN` set to the Go in `.go-version`, which
+the go command downloads when it is not the one on `PATH`. That also makes
+govulncheck report on the standard library the release ships. A tools
+update that raises that module's `go` line has to raise `.go-version` too.
 
 ### Golden files
 

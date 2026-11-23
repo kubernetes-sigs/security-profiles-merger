@@ -719,9 +719,8 @@ few properties of the result matter:
   An allowlist, the shape a recording usually has, is never affected.
 - **Landlock bounds the number of recordings.** The cost of a Landlock
   merge grows with the square of the number of inputs, and `Union` refuses
-  more than its budget admits with `ErrBudgetExceeded`, about 300 recordings
-  of 50 rules on paths of five components each, or about 115 where every
-  recording grants `refer` on a directory they share; see [Limits](#limits).
+  more than its budget admits with `ErrBudgetExceeded`; [Limits](#limits)
+  gives the figures.
   Leave identical recordings out before merging, which changes no union.
 - **The loosest input wins.** A seccomp recording whose default action is
   `SCMP_ACT_ALLOW` makes the result allow everything that recording does not

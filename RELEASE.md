@@ -8,9 +8,17 @@ as follows:
    requests are the source: they say what a change rejects, returns
    differently or adds, which a commit title does not. The version follows
    the [API stability](README.md#api-stability) policy (see
-   [Compatibility checks](#compatibility-checks)). A release that breaks
-   callers adds what they have to change to the
-   [migration guide](docs/migration.md).
+   [Compatibility checks](#compatibility-checks)). Every minor release
+   (`vX.Y.0`) adds a migration guide of its own, `docs/migration/vX.Y.md`,
+   such as [docs/migration/v0.8.md](docs/migration/v0.8.md), saying what
+   callers of the previous minor release have to change, or that nothing
+   breaks; patch releases share the guide of their minor release. Merge it
+   before the first tag of that minor version, a prerelease such as
+   `vX.Y.0-rc.1` included, and keep the `<!-- toc -->` markers of the
+   existing guides even in a short one, since `make verify-mdtoc` refuses
+   a guide without them. Earlier guides stay as they are, so links to them
+   keep working. The `release.header` of `.goreleaser.yml` links the guide
+   named after the tag, so a release whose guide is missing links nowhere.
 1. All [OWNERS](OWNERS) must LGTM this release.
 1. An OWNER runs `git tag -s $VERSION`, where `$VERSION` is a `v`-prefixed
    version such as `v0.4.2` (the release workflow only runs for tags matching
@@ -32,9 +40,11 @@ as follows:
    signature as the README tells users to, and only then publishes the
    release. A tag with a prerelease suffix, such as `v0.6.0-rc.1`, is
    published as a prerelease rather than as the latest release. GitHub
-   generates the release notes from the changes since the previous tag; an
-   OWNER puts the list from the release issue above them, which is what says
-   what a consumer has to do.
+   generates the release notes from the changes since the previous tag, and
+   goreleaser puts the header of `.goreleaser.yml` above them, which links
+   the migration guide at the tag, so the release says what a consumer has
+   to do from the moment it is published. An OWNER may add the list from
+   the release issue afterwards.
 1. The release issue is closed.
 
 The publishing job only runs in `kubernetes-sigs/security-profiles-merger`. A
