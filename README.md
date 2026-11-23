@@ -55,7 +55,7 @@ This library provides core operations on security profiles:
 | Security reviewers | [Guarantees and limits of the model](docs/integration.md#guarantees-and-limits-of-the-model) |
 | Go callers | [docs/api.md](docs/api.md), an index of each package, and the [Go documentation](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger), the source of truth for behavior |
 | Command-line users | [docs/cli.md](docs/cli.md) |
-| Callers upgrading from v0.7 | [docs/migration.md](docs/migration.md) |
+| Callers upgrading from an earlier release | [docs/migration](docs/migration), one guide per minor release, to follow in turn |
 | Contributors | [CONTRIBUTING.md](CONTRIBUTING.md) and [RELEASE.md](RELEASE.md) |
 
 ## Installation
@@ -144,9 +144,10 @@ confined to minor releases (`v0.X.0`) and called out in the release notes,
 and patch releases never break callers. A change to merge results, or one
 that rejects input an earlier release accepted, also makes the release a
 minor one, even when it corrects a semantic that was wrong about what a
-runtime loads; [docs/migration.md](docs/migration.md) lists the breaks since
-v0.7.1. From v1.0.0 on, CI refuses an incompatible Go API change within a
-major version ([RELEASE.md](RELEASE.md#compatibility-checks)), and:
+runtime loads; the guides in [docs/migration](docs/migration) list the
+breaks of each release since v0.7.1. From v1.0.0 on, CI refuses an
+incompatible Go API change within a major version
+([RELEASE.md](RELEASE.md#compatibility-checks)), and:
 
 - **The Go API** (exported names, signatures, the JSON shape of `Profile`
   types) changes incompatibly only in a major release.
@@ -178,8 +179,8 @@ major version ([RELEASE.md](RELEASE.md#compatibility-checks)), and:
   results change as the library's do. Its messages and `--format human`
   output are for people and may change in any release.
 - **`landlock.LatestABIVersion`** rises in a minor release when the package
-  learns the rights of a newer Landlock ABI, which adds rights `Validate`
-  accepts and constants for them.
+  learns a newer Landlock ABI, which adds an `ABIVersion` constant and may
+  add rights `Validate` accepts with constants for them.
 - **Dependencies.** A minor release may raise the required runtime-spec
   version, which can add fields `seccomp.Validate` then reads instead of
   rejecting (`ErrUnsupportedSpecField`), or the minimum Go version.

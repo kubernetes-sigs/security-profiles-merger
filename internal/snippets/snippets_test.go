@@ -37,11 +37,12 @@ import (
 )
 
 // The documents whose ```go blocks are checked, relative to this directory:
-// README.md and every markdown file in docs.
+// README.md and every markdown file in docs and in docs/migration.
 const (
-	readme   = "../../README.md"
-	docsGlob = "../../docs/*.md"
-	goMod    = "../../go.mod"
+	readme         = "../../README.md"
+	docsGlob       = "../../docs/*.md"
+	migrationsGlob = "../../docs/migration/*.md"
+	goMod          = "../../go.mod"
 )
 
 // The packages every snippet may use without importing them. A snippet that
@@ -97,9 +98,15 @@ type snippet struct {
 func TestSnippetsTypeCheck(t *testing.T) {
 	t.Parallel()
 
-	documents, err := filepath.Glob(docsGlob)
-	if err != nil || len(documents) == 0 {
-		t.Fatalf("no documents match %s: %v", docsGlob, err)
+	var documents []string
+
+	for _, glob := range []string{docsGlob, migrationsGlob} {
+		found, err := filepath.Glob(glob)
+		if err != nil || len(found) == 0 {
+			t.Fatalf("no documents match %s: %v", glob, err)
+		}
+
+		documents = append(documents, found...)
 	}
 
 	var snippets []snippet

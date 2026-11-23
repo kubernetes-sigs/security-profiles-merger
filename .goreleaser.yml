@@ -74,3 +74,16 @@ release:
   # next run must not add a second draft for the same tag that the publish
   # step might pick instead.
   replace_existing_draft: true
+  # release.yml publishes the release without anyone editing its notes, so
+  # the header is what tells a consumer what to change. It links the guide
+  # of the release's minor version, which every minor release and its
+  # prereleases add before they are tagged and every patch release shares
+  # (see RELEASE.md), so a missing guide shows as a broken link rather than
+  # as the previous one. Each guide covers one step, so the header points
+  # at the others for a longer one.
+  header: |
+    Callers upgrading from the previous minor release: the
+    [v{{ .Major }}.{{ .Minor }} migration guide](https://github.com/kubernetes-sigs/security-profiles-merger/blob/{{ .Tag }}/docs/migration/v{{ .Major }}.{{ .Minor }}.md)
+    lists what to change. Coming from an older release, follow each guide
+    in [docs/migration](https://github.com/kubernetes-sigs/security-profiles-merger/tree/{{ .Tag }}/docs/migration)
+    in turn.

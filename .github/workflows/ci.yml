@@ -322,27 +322,59 @@ jobs:
       # The 386 run builds libseccomp and the test binary for 32 bits on
       # the amd64 runner, which runs them natively. configure and cgo both
       # take the compiler from CC, so -m32 rides on it and configure keeps
-      # its default -g -O2. The next step installs gcc-multilib with the
-      # rest, so that the package lists are fetched once.
+      # its default -g -O2. cgo needs gcc-multilib even where the library
+      # comes from the cache, so a step below installs it.
       - name: Set up a 32-bit build
         if: matrix.arch == '386'
         run: |
           set -euo pipefail
           {
-            echo "APT_PACKAGES=gcc-multilib"
             echo "LIBSECCOMP_CONFIGURE=--host=i686-linux-gnu"
             echo "GOARCH=386"
             echo "CC=gcc -m32"
           } >> "$GITHUB_ENV"
+      # The installed library depends only on the tarball and on how it is
+      # built, which the version, its checksum and the arch axis decide; the
+      # optimization level only changes what the tests ask of it, so both
+      # levels share an entry. The runner image is in the key too, so that a
+      # build linked against one image's glibc is not restored on another
+      # while ubuntu-latest rolls over; ImageOS is in the runner's
+      # environment but not in the env context, so a step hands it over.
+      # The prefix lies in the workspace, whose path is the same in every
+      # run of this repository, which the pkg-config file and the libtool
+      # archives written into it rely on. Raise the number in the key when
+      # the build step changes what it installs. Restoring a stale build
+      # would not go unnoticed: TestLibseccompVersion fails when the library
+      # loaded is not the version the matrix names. Only main saves, as for
+      # the fuzz corpora below: what a pull request or a tag saves, nothing
+      # restores again.
+      - id: image
+        run: echo "os=$ImageOS" >> "$GITHUB_OUTPUT"
+      - id: libseccomp-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.LIBSECCOMP_PREFIX }}
+          key: libseccomp-1-${{ matrix.version }}-${{ matrix.arch }}-${{ steps.image.outputs.os }}-${{ runner.arch }}-${{ matrix.sha256 }}
+      # gperf is for the build alone, gcc-multilib for every 32-bit run.
+      - name: Install packages
+        if: matrix.arch == '386' || steps.libseccomp-cache.outputs.cache-hit != 'true'
+        env:
+          CACHE_HIT: ${{ steps.libseccomp-cache.outputs.cache-hit }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          packages=()
+          if [ "$CACHE_HIT" != true ]; then packages+=(gperf); fi
+          if [ "$ARCH" = 386 ]; then packages+=(gcc-multilib); fi
+          sudo apt-get update
+          sudo apt-get install -y "${packages[@]}"
       - name: Build libseccomp ${{ matrix.version }}
+        if: steps.libseccomp-cache.outputs.cache-hit != 'true'
         env:
           LIBSECCOMP_VERSION: ${{ matrix.version }}
           LIBSECCOMP_SHA256: ${{ matrix.sha256 }}
         run: |
           set -euo pipefail
-          read -ra packages <<<"${APT_PACKAGES:-}"
-          sudo apt-get update
-          sudo apt-get install -y gperf "${packages[@]}"
           curl -sSfL -o libseccomp.tar.gz \
             "https://github.com/seccomp/libseccomp/releases/download/v$LIBSECCOMP_VERSION/libseccomp-$LIBSECCOMP_VERSION.tar.gz"
           # The model is only worth as much as the library it is checked
@@ -368,6 +400,13 @@ jobs:
           PKG_CONFIG_PATH: ${{ env.LIBSECCOMP_PREFIX }}/lib/pkgconfig
           LD_LIBRARY_PATH: ${{ env.LIBSECCOMP_PREFIX }}/lib
         run: make test-libseccomp
+      # Saved only once the tests, TestLibseccompVersion among them, passed
+      # against it.
+      - if: github.ref == 'refs/heads/main' && steps.libseccomp-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.LIBSECCOMP_PREFIX }}
+          key: ${{ steps.libseccomp-cache.outputs.cache-primary-key }}
 
   # The apparmor package ports the stages apparmor_parser runs a path
   # through (apparmor/parser_port.go). This checks the port against the
