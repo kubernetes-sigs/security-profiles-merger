@@ -63,16 +63,16 @@ limitations under the License.
 // that loads it. encoding/json decodes a repeated member into what the one
 // before it filled, so a later object merges into the earlier one and a
 // later scalar or array replaces it ([ErrDuplicateKey]), while other
-// parsers keep the first or the last;
-// drops a member the type has no field for ([ErrUnknownField]), losing the
-// rule a misspelling meant to carry; fills a field from a member that
-// matches it only ignoring case ([ErrMisspelledField]), which a reader
-// comparing names exactly drops; decodes a missing member as its zero value
-// ([ErrMissingField]), which for a seccomp condition is argument 0 and for
-// a Landlock network rule port 0; replaces invalid UTF-8 with U+FFFD
-// ([ErrInvalidUTF8]), so distinct documents decode alike; drops a second
-// value behind the profile ([ErrUnexpectedData]); and decodes null as an
-// empty profile ([ErrNotAnObject]).
+// parsers keep the first or the last; drops a member the type has no field
+// for ([ErrUnknownField]), losing the rule a misspelling meant to carry;
+// fills a field from a member that matches it only ignoring case
+// ([ErrMisspelledField]), which a reader comparing names exactly drops;
+// decodes a missing member as its zero value ([ErrMissingField]), which for
+// a seccomp condition is argument 0 and for a Landlock network rule port 0;
+// replaces invalid UTF-8 with U+FFFD ([ErrInvalidUTF8]), so distinct
+// documents decode alike; drops a second value behind the profile
+// ([ErrUnexpectedData]); and decodes null as an empty profile
+// ([ErrNotAnObject]).
 //
 // UnmarshalStrict reports the first kind of problem it finds, naming every
 // member of that kind up to a bound. Invalid UTF-8 comes before anything

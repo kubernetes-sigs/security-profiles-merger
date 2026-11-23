@@ -11,16 +11,25 @@ GOLANGCI_LINT_VERSION = 2.15.0
 # dependencies.yaml keeps this copy in step with go.mod.
 GO_FLOOR = 1.24
 
+# The Go the release binaries are built with, which CI also tests with and
+# runs the tools below with.
+GO_VERSION := $(shell cat .go-version)
+
 # The other tools are pinned in their own module, hack/tools/go.mod, which
 # Dependabot keeps current and go.sum vouches for. A tool needs both a tool
 # directive there and an import in hack/tools/tools.go: the directive alone
 # leaves it an indirect requirement, which Dependabot does not update. The
 # module's go line can be newer than the floor in go.mod, since no consumer
 # builds it. The go command picks its toolchain from go.mod and not from
-# -modfile, so the targets that run these tools need a Go on PATH at least
-# as new as that go line. CI runs them with the Go in .go-version, so a
-# tools bump that raises that go line has to raise .go-version as well.
-TOOL = $(GO) tool -modfile=hack/tools/go.mod
+# -modfile, so it would not switch to a Go new enough for that go line by
+# itself: GOTOOLCHAIN pins the Go in .go-version instead, which the go
+# command downloads when it is not the one on PATH. That also makes
+# govulncheck report on the standard library the release ships, wherever it
+# runs. It is spelled through env, since hack/api-check.sh splits the
+# command it is given into words, and a word that only looks like an
+# assignment is run as the command. A tools bump that raises that go line
+# has to raise .go-version as well.
+TOOL = env GOTOOLCHAIN=go$(GO_VERSION) $(GO) tool -modfile=hack/tools/go.mod
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
@@ -88,6 +97,24 @@ test-libseccomp: ## Check the seccomp evaluation model against libseccomp itself
 	echo "CGO_ENABLED=1 $(GO) test -v -count=1 -tags libseccomp -run '^($$tests)$$' $(TESTFLAGS) ./seccomp/"; \
 	CGO_ENABLED=1 $(GO) test -v -count=1 -tags libseccomp -run "^($$tests)\$$" $(TESTFLAGS) ./seccomp/
 
+# The apparmor_parser tag adds tests that check the apparmor package's port
+# of the parser's path stages against apparmor_parser itself. As with
+# test-libseccomp, only the tests the tag adds run, and TESTFLAGS go to go
+# test after that selection. SPM_APPARMOR_PARSER names the binary, which is
+# otherwise looked up on PATH, and SPM_REQUIRE_APPARMOR_PARSER=1 turns a
+# missing one into a failure rather than a skip, as CI sets it.
+.PHONY: test-apparmor-parser
+test-apparmor-parser: ## Check the apparmor package's port of the parser against apparmor_parser (needs apparmor_parser)
+	@set -e; untagged=$$(mktemp); tagged=$$(mktemp); \
+	trap 'rm -f "$$untagged" "$$tagged"' EXIT; \
+	$(GO) test -list . ./apparmor/ > "$$untagged"; \
+	$(GO) test -tags apparmor_parser -list . ./apparmor/ > "$$tagged"; \
+	tests=$$(grep -E '^(Test|Example|Fuzz)' "$$tagged" | \
+		grep -vxF -f "$$untagged" | paste -sd '|' -); \
+	if [ -z "$$tests" ]; then echo "the apparmor_parser tag adds no tests"; exit 1; fi; \
+	echo "$(GO) test -v -count=1 -tags apparmor_parser -run '^($$tests)$$' $(TESTFLAGS) ./apparmor/"; \
+	$(GO) test -v -count=1 -tags apparmor_parser -run "^($$tests)\$$" $(TESTFLAGS) ./apparmor/
+
 .PHONY: fuzz
 fuzz: ## Run all fuzz tests (use FUZZTIME to adjust, default 30s)
 	@set -e; for pkg in $(PACKAGES); do \
@@ -144,14 +171,9 @@ verify-coverage: test ## Verify test coverage meets threshold
 # the libseccomp headers, because the golangci-lint config also analyzes
 # the cgo bridge behind the libseccomp tag.
 #
-# What it cannot reproduce is what needs another machine or a tool this
-# Makefile does not install: the typos scan, the release snapshot build,
-# the macOS and Windows runs, the 386 and arm64 tests, the s390x, ppc64le
-# and arm tests under qemu, the fuzz matrix,
-# the run with the wall-clock bounds on the Go the release is built with,
-# the API report, the libseccomp tests against each pinned release and the
-# check of the apparmor port against apparmor_parser. test-wall-clock,
-# test-libseccomp, fuzz and api-report run some of those locally.
+# What it cannot reproduce needs another machine or a tool this Makefile
+# does not install; the table of CI jobs in CONTRIBUTING.md lists those
+# with their local equivalents.
 #
 # verify-tidy and verify-golden rewrite files in place and then check that
 # nothing changed, which is why verify is not part of the default target.
@@ -159,7 +181,7 @@ verify-coverage: test ## Verify test coverage meets threshold
 # under make -j, go test could read a go.mod or a golden file halfway
 # through its rewrite. verify therefore runs its steps one after another in
 # a make of its own, whatever -j the outer make was given.
-VERIFY_STEPS := verify-coverage lint vet-arch build verify-go-floor verify-tidy verify-mdtoc verify-golden verify-syscalls verify-dependencies govulncheck lint-actions test-api-check
+VERIFY_STEPS := verify-coverage lint vet-arch build verify-go-floor verify-tidy verify-mdtoc verify-golden verify-syscalls verify-dependencies govulncheck lint-actions lint-shell test-api-check
 
 .PHONY: verify
 verify: ## Run the verifications CI runs (rewrites go.mod and the goldens in place)
@@ -173,23 +195,36 @@ verify: ## Run the verifications CI runs (rewrites go.mod and the goldens in pla
 # that Go on PATH or a GOTOOLCHAIN that lets the go command fetch it. The
 # lint job in ci.yml uses the release binary golangci-lint-action installs
 # instead, of the same version, which the action checks against the
-# checksums the release publishes.
+# checksums the release publishes, and hands it to lint-cmd-oses as
+# GOLANGCI_LINT, an absolute path.
 #
 # cmd/spm has files for other hosts, which a run for this one never loads,
 # so the command is also linted for each of LINT_OSES. Only the command,
 # since the libseccomp bridge the config pulls in does not build there.
 # It is installed into build/ rather than run with go run, which would
-# build it for the GOOS it is to lint for.
+# build it for the GOOS it is to lint for. go install runs every time: it
+# returns at once when the binary is current, and rebuilds one an older Go
+# built, which could not load the packages of the Go on PATH.
 LINT_OSES = windows darwin netbsd
 GOLANGCI_LINT_BIN := $(CURDIR)/build/golangci-lint-v$(GOLANGCI_LINT_VERSION)
+GOLANGCI_LINT ?= $(GOLANGCI_LINT_BIN)/golangci-lint
+# A GOLANGCI_LINT given from outside, as CI gives it, is used as it is.
+GOLANGCI_LINT_INSTALL := $(if $(filter $(GOLANGCI_LINT_BIN)/golangci-lint,$(GOLANGCI_LINT)),install-golangci-lint)
+
+.PHONY: install-golangci-lint
+install-golangci-lint:
+	GOBIN=$(GOLANGCI_LINT_BIN) $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(GOLANGCI_LINT_VERSION)
 
 .PHONY: lint
-lint: ## Run golangci-lint (needs the libseccomp headers; the config lints the cgo bridge too)
-	GOBIN=$(GOLANGCI_LINT_BIN) $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(GOLANGCI_LINT_VERSION)
-	$(GOLANGCI_LINT_BIN)/golangci-lint run
+lint: $(GOLANGCI_LINT_INSTALL) ## Run golangci-lint, then lint-cmd-oses (needs the libseccomp headers; the config lints the cgo bridge too)
+	$(GOLANGCI_LINT) run
+	@$(MAKE) --no-print-directory lint-cmd-oses
+
+.PHONY: lint-cmd-oses
+lint-cmd-oses: $(GOLANGCI_LINT_INSTALL) ## Run golangci-lint on cmd/spm for each of LINT_OSES
 	@set -e; for goos in $(LINT_OSES); do \
 		echo "GOOS=$$goos golangci-lint run ./cmd/..."; \
-		GOOS=$$goos $(GOLANGCI_LINT_BIN)/golangci-lint run ./cmd/...; \
+		GOOS=$$goos $(GOLANGCI_LINT) run ./cmd/...; \
 	done
 
 MDOCS := README.md docs/api.md docs/cli.md docs/integration.md docs/migration.md
@@ -208,6 +243,15 @@ update-mdtoc: ## Regenerate the table of contents in markdown files
 .PHONY: lint-actions
 lint-actions: ## Lint the GitHub workflows with actionlint
 	$(TOOL) github.com/rhysd/actionlint/cmd/actionlint
+
+# shellcheck is no Go program, so hack/tools cannot pin it: the CI runners
+# ship it, and a contributor needs it on PATH. hack/api-check.sh gates
+# releases from v1 on.
+SHELLCHECK ?= shellcheck
+
+.PHONY: lint-shell
+lint-shell: ## Lint the scripts in hack/ with shellcheck (needs shellcheck on PATH)
+	$(SHELLCHECK) hack/*.sh
 
 .PHONY: verify-dependencies
 verify-dependencies: ## Verify external dependencies

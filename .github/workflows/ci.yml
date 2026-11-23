@@ -70,25 +70,11 @@ jobs:
       # a constant only the Unix file used went unnoticed on Windows, and
       # blocking_darwin.go and nofollow_netbsd.go build nowhere else. Only
       # the command is linted this way, since the libseccomp bridge the
-      # config pulls in does not build for these hosts.
-      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
-        env:
-          GOOS: windows
-        with:
-          version: v2.15.0
-          args: ./cmd/...
-      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
-        env:
-          GOOS: darwin
-        with:
-          version: v2.15.0
-          args: ./cmd/...
-      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
-        env:
-          GOOS: netbsd
-        with:
-          version: v2.15.0
-          args: ./cmd/...
+      # config pulls in does not build for these hosts. The action puts the
+      # binary it installed on PATH, and the Makefile's LINT_OSES names the
+      # hosts. The action saves its cache after the job, so it holds these
+      # runs too.
+      - run: make lint-cmd-oses GOLANGCI_LINT="$(command -v golangci-lint)"
 
   test:
     runs-on: ubuntu-latest
@@ -399,9 +385,10 @@ jobs:
 
   # The apparmor package ports the stages apparmor_parser runs a path
   # through (apparmor/parser_port.go). This checks the port against the
-  # parser the distribution ships, over a table of patterns, behind a build
-  # tag since it needs the binary. The test fails rather than skips when the
-  # binary is missing, so a broken install cannot pass.
+  # parser the distribution ships, over a table of patterns and random ones
+  # from a fixed seed, behind a build tag since it needs the binary (make
+  # test-apparmor-parser). The tests fail rather than skip when the binary
+  # is missing, so a broken install cannot pass.
   apparmor-parser:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -419,7 +406,7 @@ jobs:
           sudo apt-get install -y apparmor
       - env:
           SPM_REQUIRE_APPARMOR_PARSER: "1"
-        run: go test -count=1 -tags apparmor_parser -run TestTranslationAgreesWithApparmorParser ./apparmor/
+        run: make test-apparmor-parser
 
   # The library handles Linux profile paths on every host and binaries are
   # released for these platforms, so the packages are tested there too, on
@@ -561,11 +548,10 @@ jobs:
   # that one run reports them all, but none on a Go setup-go failed to set
   # up, which would be the runner's.
   # They use the Go the release is built with: govulncheck reports standard
-  # library vulnerabilities for the Go it runs under, and the tools of
-  # hack/tools/go.mod need a Go at least as new as that module's go line,
-  # which the go command does not switch to by itself, since it picks its
-  # toolchain from go.mod even under -modfile. The cache is keyed on both
-  # go.sum files: hack/tools/go.sum holds the modules the tools build.
+  # library vulnerabilities for the Go it runs under, and the Makefile runs
+  # the tools of hack/tools/go.mod with GOTOOLCHAIN set to that Go, which
+  # setup-go installs here, so nothing is downloaded. The cache is keyed on
+  # both go.sum files: hack/tools/go.sum holds the modules the tools build.
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -588,19 +574,16 @@ jobs:
         run: make verify-tidy
       - if: (success() || failure()) && steps.go.outcome == 'success'
         run: make verify-mdtoc
-      # actionlint runs shellcheck on every run step, which the runner image
-      # provides.
+      # actionlint runs shellcheck on every run step, and lint-shell on the
+      # scripts in hack/, with the shellcheck the runner image provides.
       - if: (success() || failure()) && steps.go.outcome == 'success'
         run: make lint-actions
       - if: (success() || failure()) && steps.go.outcome == 'success'
+        run: make lint-shell
+      - if: (success() || failure()) && steps.go.outcome == 'success'
         run: make verify-dependencies
-      # local keeps go tool from switching to another toolchain, and so to
-      # another standard library, should hack/tools/go.mod ever require a
-      # newer one.
       - if: (success() || failure()) && steps.go.outcome == 'success'
         run: make govulncheck
-        env:
-          GOTOOLCHAIN: local
       # Nothing else runs make build, which goreleaser does not use, so a
       # broken version stamp or a binary that links cgo would go unnoticed.
       # The stamp is git describe, which the Makefile reads too.

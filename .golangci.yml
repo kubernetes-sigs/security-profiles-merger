@@ -3,9 +3,10 @@ version: "2"
 run:
   # The cgo bridge and the tests that check the model against libseccomp
   # itself sit behind the libseccomp tag, so without it roughly a fifth of
-  # the tree is never analyzed, and the check of the apparmor port against
-  # apparmor_parser behind its own. The exclusions below only apply under
-  # them too.
+  # the tree is never analyzed, the check of the apparmor port against
+  # apparmor_parser behind its own, and internal/runtimetest, which runs
+  # merge results through Landlock, runc and crun, behind the runtime tag.
+  # The exclusions below only apply under them too.
   build-tags:
     - apparmor_parser
     - libseccomp

@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - "v[0-9]*"
+  # A dry run of the signing, which a snapshot build in ci.yml skips: see
+  # the sign-dry-run job.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,12 +17,20 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# Pinned so that a release is reproducible; dependencies.yaml tracks them.
+# .go-version holds the stable Go the binaries are built with, the same one
+# ci.yml tests and scans with govulncheck; go.mod only sets the floor.
+env:
+  COSIGN_VERSION: v3.1.4
+  GORELEASER_VERSION: v2.20.3
+
 jobs:
   # A tag can be pushed at any commit, so this workflow runs the gate
   # itself rather than assuming the commit under it was ever green. The gate
   # is ci.yml, called whole, so that a tag cannot ship what a pull request
   # could not merge and the two cannot drift apart.
   verify:
+    if: github.event_name == 'push'
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
@@ -28,22 +39,15 @@ jobs:
     needs: [verify]
     # A fork carries the tags it forked, and pushing one must not start a
     # release under someone else's name.
-    if: github.repository == 'kubernetes-sigs/security-profiles-merger'
+    if: github.event_name == 'push' && github.repository == 'kubernetes-sigs/security-profiles-merger'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Only this job publishes, so only this job can write, mint an OIDC
-    # token for keyless signing, or attest.
+    # Only this job publishes, so only this job can write or attest. It and
+    # sign-dry-run mint an OIDC token for keyless signing.
     permissions:
       contents: write
       id-token: write
       attestations: write
-    # Pinned so that a release is reproducible; dependencies.yaml tracks them.
-    # .go-version holds the stable Go the binaries are built with, the same
-    # one ci.yml tests and scans with govulncheck; go.mod only sets the
-    # floor.
-    env:
-      COSIGN_VERSION: v3.1.4
-      GORELEASER_VERSION: v2.20.3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -95,3 +99,55 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"
+
+  # Signing only runs on a tag, so a change that breaks it, such as a cosign
+  # or goreleaser bump, would otherwise first fail a release. Run by hand
+  # from a branch, this builds a snapshot with the signs stanza of
+  # .goreleaser.yml, which a snapshot does not skip, and verifies the
+  # signature as the release job does, against this workflow's identity at
+  # the branch it ran from. A snapshot publishes nothing: no release is
+  # created or edited, and nothing is attested or uploaded. Keyless signing
+  # still records the signature in the public Rekor transparency log, under
+  # a branch identity that the verification README.md gives users rejects.
+  # A tag is refused, so that no dry run signs under a release's identity.
+  sign-dry-run:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref_type == 'branch' &&
+      github.repository == 'kubernetes-sigs/security-profiles-merger'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The OIDC token is what keyless signing needs; the job writes nothing.
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: .go-version
+          cache: false
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+      - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          syft-version: v1.57.2
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          distribution: goreleaser
+          version: ${{ env.GORELEASER_VERSION }}
+          args: release --snapshot --clean
+      # The issuer, repository and workflow the release job checks, at the
+      # branch this ran from rather than at a tag.
+      - name: Verify the checksums signature
+        run: |
+          set -euo pipefail
+          cosign verify-blob \
+            --bundle dist/checksums.txt.sigstore.json \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "https://github.com/kubernetes-sigs/security-profiles-merger/.github/workflows/release.yml@${GITHUB_REF}" \
+            dist/checksums.txt

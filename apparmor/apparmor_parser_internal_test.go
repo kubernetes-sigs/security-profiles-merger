@@ -23,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"regexp"
@@ -36,7 +37,7 @@ import (
 // built on it (glob.go) against apparmor_parser itself. It needs the binary,
 // so it sits behind the apparmor_parser build tag:
 //
-//	go test -count=1 -tags apparmor_parser -run TestTranslationAgreesWithApparmorParser ./apparmor/
+//	make test-apparmor-parser
 //
 // SPM_APPARMOR_PARSER names the binary; without it the test looks the
 // binary up in PATH, and skips when it finds none, unless
@@ -116,6 +117,11 @@ import (
 // The constructs the port deliberately refuses to model although the parser
 // loads them are listed in parserDeviations, which checks that the two
 // still disagree, so that a change on either side is noticed.
+//
+// TestRandomPatternsAgreeWithApparmorParser compares the first and the
+// third of these on random patterns from a fixed seed:
+//
+//	go test -count=1 -tags apparmor_parser -run TestRandomPatternsAgreeWithApparmorParser ./apparmor/
 
 // parserTimeout bounds every invocation of apparmor_parser. A rule takes a
 // few milliseconds; the bound is there so that a parser that does not return,
@@ -242,6 +248,11 @@ var parserCases = []parserCase{
 	}},
 	{pattern: "/etc/{a,*}", valid: true, names: []string{"/etc/", "/etc/a", "/etc/zz", "/etc/a/b"}},
 	{pattern: "/etc/{[bc],d*}", valid: true, names: []string{"/etc/b", "/etc/dzz", "/etc/a"}},
+	// The DFA of this one has a state whose default state has another
+	// label than its row, which the names after "/ab" walk through.
+	{pattern: "/{**,b}a[^a]", valid: true, names: []string{
+		"/ab", "/abab", "/ababx", "/aa", "/x/ab", "/bab", "/b",
+	}},
 	{pattern: nestedAlternation(maxAltDepth - 1), valid: true, names: []string{
 		"/etc/a", "/etc/", "/etc/aa",
 	}},
@@ -256,6 +267,8 @@ var parserCases = []parserCase{
 	{pattern: "/etc/[bc", valid: false, names: nil},
 	{pattern: "/etc/a}", valid: false, names: nil},
 	{pattern: "/etc/a]", valid: false, names: nil},
+	// An escaped "^" alone in a class is a lone "^" to the parser too.
+	{pattern: `/etc/[\^]`, valid: false, names: nil},
 	{pattern: "/x/}", valid: false, names: nil},
 	{pattern: "/etc/[]a]", valid: false, names: nil},
 	{pattern: `/etc/\[x]`, valid: false, names: nil},
@@ -311,12 +324,7 @@ func TestTranslationAgreesWithApparmorParser(t *testing.T) {
 	parser := findApparmorParser(t)
 	logParserVersion(t, parser)
 
-	features := t.TempDir() + "/features"
-
-	err := os.WriteFile(features, nil, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
+	features := emptyFeatures(t)
 
 	for _, entry := range parserCases {
 		checkParserCase(t, parser, features, entry)
@@ -335,6 +343,21 @@ func TestTranslationAgreesWithApparmorParser(t *testing.T) {
 				deviation.pattern, deviation.reason)
 		}
 	}
+}
+
+// emptyFeatures writes the empty feature file the parser is passed with -M
+// and returns its path.
+func emptyFeatures(t *testing.T) string {
+	t.Helper()
+
+	features := t.TempDir() + "/features"
+
+	err := os.WriteFile(features, nil, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return features
 }
 
 // findApparmorParser returns the apparmor_parser to test against, skipping
@@ -421,16 +444,24 @@ func checkParserCase(t *testing.T, parser, features string, entry parserCase) {
 	}
 
 	if matcher.kind == kindLiteral {
-		name, single := dfa.onlyName()
-		if !single || name != matcher.literal {
-			t.Errorf("%q: the DFA accepts %q (only one: %v), the port's literal is %q",
-				entry.pattern, name, single, matcher.literal)
-		}
+		checkLiteral(t, entry.pattern, matcher, dfa)
 
 		return
 	}
 
 	checkGlobNames(t, entry, matcher, dfa)
+}
+
+// checkLiteral checks that the DFA of a literal accepts exactly the name
+// the port says the path denotes.
+func checkLiteral(t *testing.T, pattern string, matcher *globMatcher, dfa *parserDFA) {
+	t.Helper()
+
+	name, single := dfa.onlyName()
+	if !single || name != matcher.literal {
+		t.Errorf("%q: the DFA accepts %q (only one: %v), the port's literal is %q",
+			pattern, name, single, matcher.literal)
+	}
 }
 
 // checkDumpedRegex compares the regex the parser converted the pattern into
@@ -560,23 +591,38 @@ func dumpedRegex(out string) (string, bool) {
 }
 
 // parserDFA holds the tables of a compressed DFA as compressed-dfa dumps
-// them: per state its accept permissions, default state and base, and per
-// position of the transition table its next and check states.
+// them: per state (a row of the state table) its accept permissions,
+// default state and base, and per position of the transition table its
+// next and check states, all as row numbers. The dump names states in
+// braces by a label of their own, not by their row, so the labels are kept
+// until resolveLabels translates them.
 type parserDFA struct {
 	accept, fallback, base []int
 	next, check            map[int]int
+	// labels holds the label of each row, and fallbackLabels the label of
+	// each row's default state.
+	labels, fallbackLabels []int
+	// nextLabels and checkLabels hold the labels of the next and check
+	// states of each position of the transition table.
+	nextLabels, checkLabels map[int]int
 }
 
 var (
 	// dfaStateLine matches a line of the state table:
-	// "<state>: (<accept>, <accept2 and default>, <base>) {<state>} -> {<default>}".
-	// Only the first number, the last one in the parentheses, and the default
-	// state are read, which keeps the match independent of how accept2 is
-	// printed.
-	dfaStateLine = regexp.MustCompile(`^(\d+): \((\d+), [^)]*?(\d+)\) \{\d+\} -> \{(\d+)\}`)
+	// "<row>: (<accept>, <accept2>, <base>) {<label>} -> {<default label>}".
+	// The braces hold state labels, not rows: in a dump of parser 5.0.2 for
+	// "/{**,b}a[^a]", "3: (0, 04, 2) {4} -> {5}" is row 3, labelled 4,
+	// whose default is row 4, labelled 5. Only the row, the first number
+	// and the last one in the parentheses, and the two labels are read,
+	// which keeps the match independent of how accept2 is printed (5.0
+	// prints the default row right after it with no separator, as "04"
+	// above, and 4.0 prints the default row in its place, as "4").
+	dfaStateLine = regexp.MustCompile(`^(\d+): \((\d+), [^)]*?(\d+)\) \{(\d+)\} -> \{(\d+)\}`)
 	// dfaTransLine matches a line of the transition table:
-	// "<position>: (<next>, <check>) {<check>} -> {<next>}: <char>".
-	dfaTransLine = regexp.MustCompile(`^(\d+): \((\d+), (\d+)\) \{\d+\} -> \{\d+\}`)
+	// "<position>: (<next row>, <check row>) {<check label>} -> {<next label>}: <char>".
+	// The parentheses hold rows and the braces the labels of the same
+	// states, which resolveLabels checks against each other.
+	dfaTransLine = regexp.MustCompile(`^(\d+): \((\d+), (\d+)\) \{(\d+)\} -> \{(\d+)\}`)
 )
 
 // errDFADump reports a compressed-dfa dump the test cannot read.
@@ -595,8 +641,10 @@ const (
 // parseCompressedDFA reads the tables of the one DFA the dump holds.
 func parseCompressedDFA(out string) (*parserDFA, error) {
 	dfa := &parserDFA{
-		next:  make(map[int]int),
-		check: make(map[int]int),
+		next:        make(map[int]int),
+		check:       make(map[int]int),
+		nextLabels:  make(map[int]int),
+		checkLabels: make(map[int]int),
 	}
 
 	var section string
@@ -634,12 +682,56 @@ func parseCompressedDFA(out string) (*parserDFA, error) {
 			errDFADump, headers[dfaStateHeader], headers[dfaTransHeader])
 	}
 
-	err := dfa.validate(states)
+	err := dfa.resolveLabels()
+	if err != nil {
+		return nil, err
+	}
+
+	err = dfa.validate(states)
 	if err != nil {
 		return nil, err
 	}
 
 	return dfa, nil
+}
+
+// resolveLabels sets the default state of each row to the row its default
+// label names, and checks that the labels of the transition table name the
+// rows it gives in parentheses.
+func (dfa *parserDFA) resolveLabels() error {
+	rows := make(map[int]int, len(dfa.labels))
+
+	for row, label := range dfa.labels {
+		if _, seen := rows[label]; seen {
+			return fmt.Errorf("%w: label %d names two states", errDFADump, label)
+		}
+
+		rows[label] = row
+	}
+
+	dfa.fallback = make([]int, len(dfa.fallbackLabels))
+
+	for row, label := range dfa.fallbackLabels {
+		fallback, found := rows[label]
+		if !found {
+			return fmt.Errorf("%w: state %d defaults to unknown label %d",
+				errDFADump, row, label)
+		}
+
+		dfa.fallback[row] = fallback
+	}
+
+	for pos, next := range dfa.next {
+		nextRow, nextFound := rows[dfa.nextLabels[pos]]
+		checkRow, checkFound := rows[dfa.checkLabels[pos]]
+
+		if !nextFound || !checkFound || nextRow != next || checkRow != dfa.check[pos] {
+			return fmt.Errorf("%w: transition %d labels disagree with its states",
+				errDFADump, pos)
+		}
+	}
+
+	return nil
 }
 
 // dfaTableSize reads the decimal size in the header of a table, which a
@@ -730,7 +822,8 @@ func (dfa *parserDFA) addState(line string) (string, error) {
 
 	dfa.accept = append(dfa.accept, nums[1])
 	dfa.base = append(dfa.base, nums[2]&dfaBaseMask)
-	dfa.fallback = append(dfa.fallback, nums[3])
+	dfa.labels = append(dfa.labels, nums[3])
+	dfa.fallbackLabels = append(dfa.fallbackLabels, nums[4])
 
 	return dfaStateHeader, nil
 }
@@ -750,6 +843,8 @@ func (dfa *parserDFA) addTransition(line string) (string, error) {
 
 	dfa.next[nums[0]] = nums[1]
 	dfa.check[nums[0]] = nums[2]
+	dfa.checkLabels[nums[0]] = nums[3]
+	dfa.nextLabels[nums[0]] = nums[4]
 
 	return dfaTransHeader, nil
 }
@@ -836,4 +931,404 @@ func (dfa *parserDFA) onlyName() (string, bool) {
 	}
 
 	return string(name), false
+}
+
+const (
+	// randomSeed and randomPatterns fix the patterns
+	// TestRandomPatternsAgreeWithApparmorParser draws, so that a failure
+	// reproduces. A pattern takes one parser run of a millisecond or two.
+	randomSeed     = 6061
+	randomPatterns = 3000
+	// maxRandomTokens bounds the tokens of a pattern or an alternative,
+	// counting a class or an alternation as one, maxRandomAlternatives the
+	// alternatives of an alternation, and maxRandomDepth their nesting.
+	maxRandomTokens       = 8
+	maxRandomAlternatives = 3
+	maxRandomDepth        = 2
+	// maxRandomMembers bounds the members of a class.
+	maxRandomMembers = 3
+	// randomWalks is the number of names drawn from the DFA of a pattern,
+	// and maxRandomName bounds their length and that of a made-up name.
+	randomWalks   = 6
+	maxRandomName = 24
+)
+
+// randomAtoms are the tokens of a random pattern other than classes and
+// alternations: literal characters, the characters the regex grammar
+// escapes, glob tokens, stray braces and brackets, and escapes. Every
+// escape is complete, so that none escapes the first character of the
+// token after it, and none denotes "," or NUL: an escaped "," inside a
+// class hangs apparmor_parser 5.0.2, and a profile cannot hold a NUL.
+// Neither a space nor an unescaped "!" appears, as the lexer ends a path
+// at them.
+var randomAtoms = []string{
+	"a", "b", "/", "//", ".", "+", "|", "(", ")", "$", "^", ",", "é",
+	"*", "**", "***", "?",
+	"{", "}", "[", "]",
+	`\x5c`, `\\`, `\^`, `\$`, `\*`, `\?`, `\[`, `\]`, `\{`, `\}`, `\!`,
+	`\x41`, `\101`, `\d065`, `\x2f`, `\x2a`, `\xe9`, `\n`, `\q`,
+}
+
+// randomClassMembers are the members of a random class, with the
+// restrictions of randomAtoms. An unescaped "*" or "?" is left out, as the
+// port refuses it inside a class (see parserDeviations); stray brackets
+// among the atoms still put one there now and then.
+var randomClassMembers = []string{
+	"a", "b", "z", "a-c", "z-a", "-", "/", "{", ",", "}", ".", "$", "^", "(", "|", "é",
+	`\]`, `\x5d`, `\*`, `\?`, `\-`, `\^`, `\x41-\x43`, `\x5c`,
+}
+
+// TestRandomPatternsAgreeWithApparmorParser compares the port with the
+// parser on random patterns built from the constructs parserCases covers:
+// whether the rule loads, and what it matches, as checkParserCase compares
+// them, on names drawn from walks of the DFA, those names with one byte
+// changed, and names made up from the bytes of the pattern. A pattern the
+// port refuses for a construct parserDeviations documents is skipped where
+// the parser loads it. The regex is not compared, since the port emits
+// another one for "***" (see regexDeviations). The seed is fixed, so a
+// failing pattern can be added to parserCases.
+func TestRandomPatternsAgreeWithApparmorParser(t *testing.T) {
+	t.Parallel()
+
+	parser := findApparmorParser(t)
+	features := emptyFeatures(t)
+	rnd := rand.New(rand.NewPCG(randomSeed, randomSeed))
+
+	var outcomes [randomOutcomes]int
+
+	for range randomPatterns {
+		outcomes[checkRandomPattern(t, parser, features, rnd, randomPattern(rnd))]++
+	}
+
+	t.Logf("%d random patterns: %d skipped, %d rejected by both, %d failed, "+
+		"%d literals, %d globs compared",
+		randomPatterns, outcomes[randomSkipped], outcomes[randomRejected],
+		outcomes[randomFailed], outcomes[randomLiteral], outcomes[randomGlob])
+}
+
+// randomOutcome is what checkRandomPattern did with a pattern.
+type randomOutcome int
+
+const (
+	// randomSkipped is a pattern past the matcher's limits, one QuotePath
+	// finds no spelling for, or a documented deviation.
+	randomSkipped randomOutcome = iota
+	// randomRejected is a pattern both the port and the parser reject.
+	randomRejected
+	// randomFailed is a pattern the two disagree on, or whose DFA dump
+	// could not be read, which the test has reported as a failure.
+	randomFailed
+	// randomLiteral and randomGlob are patterns both load, whose DFA was
+	// compared with the port.
+	randomLiteral
+	randomGlob
+	randomOutcomes
+)
+
+// checkRandomPattern compares the port with the parser on one random
+// pattern.
+func checkRandomPattern(
+	t *testing.T, parser, features string, rnd *rand.Rand, pattern string,
+) randomOutcome {
+	t.Helper()
+
+	matcher := matcherFor(pattern)
+	if matcher.status == globTooComplex {
+		return randomSkipped
+	}
+
+	spelling, spelled := randomSpelling(pattern)
+	if !spelled {
+		return randomSkipped
+	}
+
+	portValid := matcher.status == globUsable
+
+	out, accepted := runApparmorParser(t, parser, features, spelling, dumpCompressedDFA)
+	if accepted != portValid {
+		if !portValid && classDeviation(pattern) {
+			return randomSkipped
+		}
+
+		t.Errorf("%q (spelled %q): apparmor_parser accepts = %v, port status = %d; output:\n%s",
+			pattern, spelling, accepted, matcher.status, excerpt(out))
+
+		return randomFailed
+	}
+
+	if !accepted {
+		return randomRejected
+	}
+
+	return checkRandomDFA(t, rnd, pattern, matcher, out)
+}
+
+// randomSpelling returns the spelling a random pattern is compiled in: the
+// pattern itself, or, where the lexer would end the rule inside it, which
+// the validators report as unquotable, the spelling QuotePath gives it, as
+// a consumer renders it. It returns false where QuotePath finds none.
+func randomSpelling(pattern string) (string, bool) {
+	if !hasUnquotableChar(pattern) {
+		return pattern, true
+	}
+
+	quoted, err := QuotePath(pattern)
+
+	return quoted, err == nil
+}
+
+// checkRandomDFA compares the DFA the parser dumped for a random pattern
+// both load with the port: for a literal as checkLiteral does, and for a
+// glob on the names randomNames draws.
+func checkRandomDFA(
+	t *testing.T, rnd *rand.Rand, pattern string, matcher *globMatcher, out string,
+) randomOutcome {
+	t.Helper()
+
+	dfa, err := parseCompressedDFA(out)
+	if err != nil {
+		t.Errorf("%q: %v; output:\n%s", pattern, err, excerpt(out))
+
+		return randomFailed
+	}
+
+	if matcher.kind == kindLiteral {
+		checkLiteral(t, pattern, matcher, dfa)
+
+		return randomLiteral
+	}
+
+	for _, name := range randomNames(rnd, dfa, pattern) {
+		if got, want := matcher.matches(name), dfa.accepts(name); got != want {
+			t.Errorf("%q: matcher matches %q = %v, the DFA accepts it = %v",
+				pattern, name, got, want)
+
+			break
+		}
+	}
+
+	return randomGlob
+}
+
+// classDeviation reports whether a pattern holds a class of the kinds
+// parserDeviations lists: one holding an unescaped "*" or "?", or one
+// whose content is empty or a lone "^", escaped or not, read on the text
+// convertPattern reads.
+func classDeviation(pattern string) bool {
+	decoded := filterSlashes(decodeEscapes(pattern))
+
+	var class *classScan
+
+	for idx := 0; idx < len(decoded); idx++ {
+		literal := decoded[idx] == '\\' && idx+1 < len(decoded)
+		if literal {
+			idx++
+		}
+
+		char := decoded[idx]
+
+		if class == nil {
+			if char == '[' && !literal {
+				class = &classScan{members: 0, caret: false}
+			}
+
+			continue
+		}
+
+		deviates, closed := class.add(char, literal)
+		if deviates {
+			return true
+		}
+
+		if closed {
+			class = nil
+		}
+	}
+
+	return false
+}
+
+// classScan is what classDeviation has read of a class: how many members,
+// and whether the last one is "^".
+type classScan struct {
+	members int
+	caret   bool
+}
+
+// add reads the next character of a class, escaped where literal is set,
+// and reports whether it makes the class one parserDeviations lists and
+// whether it closes the class.
+func (class *classScan) add(char byte, literal bool) (bool, bool) {
+	if !literal {
+		switch char {
+		case '*', '?':
+			return true, false
+		case ']':
+			return class.members == 0 || (class.members == 1 && class.caret), true
+		}
+	}
+
+	class.members++
+	// An escaped "^" counts as well: the parser rejects "[\^]" as it
+	// rejects "[^]" (see parserCases), and a later bracket extends either.
+	class.caret = char == '^'
+
+	return false, false
+}
+
+// randomPattern returns an absolute pattern of up to maxRandomTokens
+// tokens.
+func randomPattern(rnd *rand.Rand) string {
+	var builder strings.Builder
+
+	builder.WriteByte('/')
+	writeRandomTokens(&builder, rnd, 1+rnd.IntN(maxRandomTokens), 0)
+
+	return builder.String()
+}
+
+// writeRandomTokens writes count tokens: mostly atoms, now and then a class
+// and, short of maxRandomDepth, an alternation, which with one alternative
+// is one the parser rejects.
+func writeRandomTokens(builder *strings.Builder, rnd *rand.Rand, count, depth int) {
+	const kinds = 8
+
+	for range count {
+		switch kind := rnd.IntN(kinds); {
+		case kind == 0:
+			writeRandomClass(builder, rnd)
+		case kind == 1 && depth < maxRandomDepth:
+			builder.WriteByte('{')
+
+			for alt := range 1 + rnd.IntN(maxRandomAlternatives) {
+				if alt > 0 {
+					builder.WriteByte(',')
+				}
+
+				writeRandomTokens(builder, rnd, rnd.IntN(maxRandomTokens/2), depth+1)
+			}
+
+			builder.WriteByte('}')
+		default:
+			builder.WriteString(randomAtoms[rnd.IntN(len(randomAtoms))])
+		}
+	}
+}
+
+// writeRandomClass writes a class of up to maxRandomMembers members, plain
+// or negated by "^" or by an escaped "^".
+func writeRandomClass(builder *strings.Builder, rnd *rand.Rand) {
+	const openings = 4
+
+	builder.WriteByte('[')
+
+	switch rnd.IntN(openings) {
+	case 0:
+		builder.WriteByte('^')
+	case 1:
+		builder.WriteString(`\^`)
+	}
+
+	for range 1 + rnd.IntN(maxRandomMembers) {
+		builder.WriteString(randomClassMembers[rnd.IntN(len(randomClassMembers))])
+	}
+
+	builder.WriteByte(']')
+}
+
+// randomNames returns the names a random pattern is compared on: names
+// drawn from walks of its DFA, each also with one byte changed, and names
+// made up from the bytes of the pattern.
+func randomNames(rnd *rand.Rand, dfa *parserDFA, pattern string) []string {
+	const perWalk = 3
+
+	alphabet := pattern + "/abx"
+	names := make([]string, 0, perWalk*randomWalks)
+
+	for range randomWalks {
+		name := dfa.randomWalk(rnd, alphabet)
+		names = append(names, name, mutateName(rnd, name, alphabet), madeUpName(rnd, alphabet))
+	}
+
+	return names
+}
+
+// randomWalk returns a name the DFA reads from the start state, one random
+// byte at a time among those that do not lead to the dead state, mostly
+// one of the alphabet where any is among them, stopping at random in an
+// accepting state, and where no byte leads on.
+func (dfa *parserDFA) randomWalk(rnd *rand.Rand, alphabet string) string {
+	const preferAlphabet = 4
+
+	var name []byte
+
+	state := dfaStartState
+	live := make([]byte, 0, byteValues)
+	preferred := make([]byte, 0, byteValues)
+
+	for range maxRandomName {
+		if dfa.accepting(state) && rnd.IntN(2) == 0 {
+			break
+		}
+
+		live, preferred = live[:0], preferred[:0]
+
+		for value := range byteValues {
+			char := byte(value)
+			if dfa.step(state, char) == 0 {
+				continue
+			}
+
+			live = append(live, char)
+			if strings.IndexByte(alphabet, char) >= 0 {
+				preferred = append(preferred, char)
+			}
+		}
+
+		if len(live) == 0 {
+			break
+		}
+
+		if len(preferred) > 0 && rnd.IntN(preferAlphabet) != 0 {
+			live = preferred
+		}
+
+		char := live[rnd.IntN(len(live))]
+		name = append(name, char)
+		state = dfa.step(state, char)
+	}
+
+	return string(name)
+}
+
+// mutateName returns the name with a byte of the alphabet inserted, or one
+// of its bytes dropped or replaced by one of the alphabet.
+func mutateName(rnd *rand.Rand, name, alphabet string) string {
+	const edits = 3
+
+	pos := rnd.IntN(len(name) + 1)
+	char := string(alphabet[rnd.IntN(len(alphabet))])
+
+	switch edit := rnd.IntN(edits); {
+	case pos == len(name) || edit == 0:
+		return name[:pos] + char + name[pos:]
+	case edit == 1:
+		return name[:pos] + name[pos+1:]
+	default:
+		return name[:pos] + char + name[pos+1:]
+	}
+}
+
+// madeUpName returns "/" followed by up to maxRandomName bytes of the
+// alphabet.
+func madeUpName(rnd *rand.Rand, alphabet string) string {
+	size := rnd.IntN(maxRandomName)
+	name := make([]byte, 0, 1+size)
+	name = append(name, '/')
+
+	for range size {
+		name = append(name, alphabet[rnd.IntN(len(alphabet))])
+	}
+
+	return string(name)
 }
