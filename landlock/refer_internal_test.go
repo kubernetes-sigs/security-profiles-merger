@@ -19,7 +19,6 @@ package landlock
 import (
 	"fmt"
 	"math/bits"
-	"math/rand/v2"
 	"slices"
 	"testing"
 )
@@ -74,8 +73,7 @@ func destinationSides(sources []moveSide, destination []bool) []moveSide {
 // every pair of directories over three bits, two of them file rights: one
 // recorded only as a source, the other as a destination and, as moveSides
 // records it, as a source too. That is where the skip test and the
-// subtraction meet; the randomized test below covers the AND over more
-// sources.
+// subtraction meet; the test below covers the AND over more sources.
 func TestMoveConflictsMatchPairwiseExhaustively(t *testing.T) {
 	t.Parallel()
 
@@ -110,54 +108,90 @@ func TestMoveConflictsMatchPairwiseExhaustively(t *testing.T) {
 	}
 }
 
-// TestMoveConflictsMatchPairwiseRandomly compares the two checks on random
-// sets of sides, with the file rights scattered over the mask as fsBits
-// numbers them.
-func TestMoveConflictsMatchPairwiseRandomly(t *testing.T) {
+// TestMoveConflictsMatchPairwiseOverManySides compares the two checks on
+// sets of more than two sides, with the file rights scattered over the mask
+// as fsBits numbers them: where several sources share a bucket and the AND
+// of their rights decides, where a destination passes some buckets and not
+// others, and where destinations share the file rights an answer is kept
+// for. The exhaustive test above covers a single source and destination.
+func TestMoveConflictsMatchPairwiseOverManySides(t *testing.T) {
 	t.Parallel()
 
-	const (
-		width     = 18
-		fileCount = 6
-		rounds    = 20000
-		maxSides  = 12
-	)
+	// Six file rights spread over 18 bits, the others plain rights.
+	const files = 1<<0 | 1<<3 | 1<<5 | 1<<9 | 1<<12 | 1<<17
 
-	rng := rand.New(rand.NewPCG(1, 2))
+	type side struct {
+		moveSide
 
-	for round := range rounds {
-		var files uint32
-		for bits.OnesCount32(files) < fileCount {
-			files |= 1 << rng.IntN(width)
+		destination bool
+	}
+
+	tests := map[string][]side{
+		"no sides": nil,
+		"only sources": {
+			{moveSide: moveSide{input: 1 << 3, result: 1<<3 | 1<<4, children: 0}},
+			{moveSide: moveSide{input: 1 << 9, result: 1 << 2, children: 1 << 0}},
+		},
+		"one bucket, the AND of its results decides": {
+			{moveSide: moveSide{input: 1 << 3, result: 1<<1 | 1<<2, children: 0}},
+			{moveSide: moveSide{input: 1 << 3, result: 1<<2 | 1<<4, children: 0}},
+			{moveSide: moveSide{input: 1 << 3, result: 1<<1 | 1<<2 | 1<<4}, destination: true},
+		},
+		"a destination passes one bucket only": {
+			{moveSide: moveSide{input: 1<<3 | 1<<5, result: 1 << 6, children: 0}},
+			{moveSide: moveSide{input: 1 << 3, result: 1<<6 | 1<<7, children: 0}},
+			{moveSide: moveSide{input: 1<<5 | 1<<1, result: 1<<7 | 1<<8}, destination: true},
+		},
+		"a child grants what the destination needs": {
+			{moveSide: moveSide{input: 0, result: 1 << 10, children: 1<<12 | 1<<17}},
+			{moveSide: moveSide{input: 1 << 12, result: 1<<10 | 1<<11 | 1<<12}, destination: true},
+			{moveSide: moveSide{input: 1<<12 | 1<<0, result: 1<<11 | 1<<14}, destination: true},
+		},
+		"destinations sharing file rights, different results": {
+			{moveSide: moveSide{input: 1 << 9, result: 1 << 1, children: 0}},
+			{moveSide: moveSide{input: 1<<9 | 1<<2, result: 1<<9 | 1<<4}, destination: true},
+			{moveSide: moveSide{input: 1<<9 | 1<<6, result: 1<<9 | 1<<7 | 1<<8}, destination: true},
+		},
+		"a destination no bucket passes": {
+			{moveSide: moveSide{input: 1 << 0, result: 0, children: 0}},
+			{moveSide: moveSide{input: 1<<0 | 1<<17, result: ^uint32(0) >> 14}, destination: true},
+		},
+		"a destination's own children do not count": {
+			{moveSide: moveSide{input: 0, result: 1 << 2, children: 0}},
+			{
+				moveSide:    moveSide{input: 1 << 5, result: 1<<5 | 1<<6, children: 1 << 5},
+				destination: true,
+			},
+		},
+		"many sides": {
+			{moveSide: moveSide{input: 1<<0 | 1<<3, result: 1<<1 | 1<<2 | 1<<4, children: 1 << 5}},
+			{moveSide: moveSide{input: 1<<0 | 1<<3, result: 1<<2 | 1<<6, children: 1 << 5}},
+			{moveSide: moveSide{input: 1 << 9, result: 1<<2 | 1<<4 | 1<<6, children: 1 << 12}},
+			{moveSide: moveSide{input: 1<<3 | 1<<5, result: 1<<1 | 1<<8}, destination: true},
+			{
+				moveSide:    moveSide{input: 1<<9 | 1<<12, result: 1<<6 | 1<<7 | 1<<8},
+				destination: true,
+			},
+			{
+				moveSide:    moveSide{input: 1 << 0, result: 1<<2 | 1<<10, children: 1 << 17},
+				destination: true,
+			},
+			{moveSide: moveSide{input: 0, result: 0, children: 0}, destination: true},
+		},
+	}
+
+	for name, sides := range tests {
+		moveSides := make([]moveSide, len(sides))
+		destination := make([]bool, len(sides))
+
+		for idx, each := range sides {
+			moveSides[idx] = each.moveSide
+			destination[idx] = each.destination
 		}
 
-		// Dense masks make the skip test pass more often, sparse ones less,
-		// so both are drawn.
-		draw := func() uint32 {
-			mask := rng.Uint32() & (1<<width - 1)
-			switch rng.IntN(3) {
-			case 0:
-				return mask | rng.Uint32()
-			case 1:
-				return mask & rng.Uint32()
-			default:
-				return mask
-			}
-		}
-
-		count := rng.IntN(maxSides)
-		sides := make([]moveSide, count)
-		destination := make([]bool, count)
-
-		for idx := range sides {
-			sides[idx] = moveSide{input: draw(), result: draw(), children: draw()}
-			destination[idx] = rng.IntN(2) == 0
-		}
-
-		want := pairwiseConflicts(sides, destinationSides(sides, destination), files)
-		if got := bucketedConflicts(sides, destination, files); got != want {
-			t.Fatalf("round %d: conflicts = %#b, want %#b for %+v (destination %v, files %#b)",
-				round, got, want, sides, destination, files)
+		want := pairwiseConflicts(moveSides, destinationSides(moveSides, destination), files)
+		if got := bucketedConflicts(moveSides, destination, files); got != want {
+			t.Errorf("%s: conflicts = %#b, want %#b", name, got, want)
 		}
 	}
 }

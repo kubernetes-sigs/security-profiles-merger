@@ -1764,3 +1764,124 @@ func TestValidateMessages(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateArtifactRejectsWideValueOn32Bit(t *testing.T) {
+	t.Parallel()
+
+	wideEntry := filtered("personality", specs.ActAllow, arg(0, specs.OpEqualTo, 1<<32|5))
+
+	for _, archs := range [][]specs.Arch{
+		{specs.ArchX86_64, specs.ArchX86, specs.ArchX32},
+		{specs.ArchX32},
+		{specs.ArchARM},
+		{specs.ArchMIPS64N32},
+	} {
+		profile := on(profileOf(specs.ActErrno, wideEntry), archs...)
+
+		err := seccomp.ForArch(specs.ArchX86_64).ValidateArtifact(profile)
+		if !errors.Is(err, seccomp.ErrValueTooWide) {
+			t.Errorf("ValidateArtifact(%s) = %v, want ErrValueTooWide",
+				seccomp.FormatProfile(profile), err)
+		}
+
+		err = seccomp.ForArch(specs.ArchX86_64).ValidateStrict(profile)
+		if !errors.Is(err, seccomp.ErrValueTooWide) {
+			t.Errorf("ValidateStrict(%s) = %v, want ErrValueTooWide",
+				seccomp.FormatProfile(profile), err)
+		}
+	}
+}
+
+func TestValidateArtifactAcceptsWideValueWithout32Bit(t *testing.T) {
+	t.Parallel()
+
+	for _, profile := range []*specs.LinuxSeccomp{
+		// No 32-bit architecture is covered.
+		on(profileOf(specs.ActErrno,
+			filtered("personality", specs.ActAllow, arg(0, specs.OpEqualTo, 1<<32|5)),
+		), specs.ArchX86_64, specs.ArchAARCH64),
+		// libseccomp reads valueTwo only within the mask of a masked
+		// comparison, and not at all for any other operator.
+		on(profileOf(specs.ActErrno,
+			filtered("personality", specs.ActAllow, masked(0, 0xff, 1<<32|5)),
+			filtered("read", specs.ActAllow, specs.LinuxSeccompArg{
+				Index: 0, Value: 1, ValueTwo: 1 << 40, Op: specs.OpEqualTo,
+			}),
+		), specs.ArchX86),
+		// An entry equal to the default loads no rule, so its condition
+		// reaches no filter, as the merge and the conflict checks read it.
+		on(profileOf(specs.ActErrno,
+			filtered("read", specs.ActErrno, arg(0, specs.OpEqualTo, 1<<33)),
+		), specs.ArchX86_64, specs.ArchX86),
+	} {
+		err := seccomp.ForArch(specs.ArchX86_64).ValidateArtifact(profile)
+		if err != nil {
+			t.Errorf("ValidateArtifact(%s) = %v, want nil", seccomp.FormatProfile(profile), err)
+		}
+	}
+
+	// A mask above 32 bits is itself a value libseccomp truncates: masked
+	// to its lower half, it is empty and matches every call.
+	profile := on(profileOf(specs.ActErrno,
+		filtered("personality", specs.ActAllow, masked(0, 1<<32, 1<<32)),
+	), specs.ArchX86)
+
+	err := seccomp.ForArch(specs.ArchX86_64).ValidateArtifact(profile)
+	if !errors.Is(err, seccomp.ErrValueTooWide) {
+		t.Errorf("ValidateArtifact(%s) = %v, want ErrValueTooWide",
+			seccomp.FormatProfile(profile), err)
+	}
+}
+
+// TestValidateBaselineReportsWideValuesNextToAnArtifact covers a baseline
+// that Intersect of it alone keeps whole, but every merge with an artifact
+// settles: a condition on a value above 32 bits next to x86 makes the merge
+// drop x86 on an x86_64 node, which kills every 32-bit process, and
+// collapse the syscall where x86 may be native. ValidateBaseline reports
+// both, and the same baseline without x86 on an x86_64 node passes.
+func TestValidateBaselineReportsWideValuesNextToAnArtifact(t *testing.T) {
+	t.Parallel()
+
+	baseline := on(profileOf(specs.ActErrno,
+		filtered("read", specs.ActAllow),
+		filtered("write", specs.ActAllow),
+		filtered("exit", specs.ActAllow),
+		filtered("personality", specs.ActAllow, arg(0, specs.OpEqualTo, 1<<32|8)),
+	), specs.ArchX86_64, specs.ArchX86)
+
+	for _, testCase := range []struct {
+		node seccomp.Options
+		want string
+	}{
+		{node: seccomp.ForArch(specs.ArchX86_64), want: "SCMP_ARCH_X86"},
+		{node: seccomp.ForArch(specs.ArchX86), want: "personality"},
+		{node: seccomp.ForAnyArch(), want: "personality"},
+	} {
+		settled, err := testCase.node.Intersect(baseline)
+		if err != nil {
+			t.Fatalf("%s: Intersect: %v", testCase.node, err)
+		}
+
+		diff, err := testCase.node.Diff(baseline, settled)
+		if err != nil || !diff.Equal {
+			t.Fatalf("%s: Intersect of the baseline alone settles it: %v, %v",
+				testCase.node, diff, err)
+		}
+
+		err = testCase.node.ValidateBaseline(baseline)
+		if !errors.Is(err, seccomp.ErrInexactBaseline) ||
+			!strings.Contains(err.Error(), "next to an artifact") ||
+			!strings.Contains(err.Error(), testCase.want) {
+			t.Errorf("%s: ValidateBaseline = %v, want ErrInexactBaseline naming %s",
+				testCase.node, err, testCase.want)
+		}
+	}
+
+	narrowed := seccomp.Clone(baseline)
+	narrowed.Architectures = []specs.Arch{specs.ArchX86_64}
+
+	err := seccomp.ForArch(specs.ArchX86_64).ValidateBaseline(narrowed)
+	if err != nil {
+		t.Errorf("ValidateBaseline without x86 = %v, want nil", err)
+	}
+}

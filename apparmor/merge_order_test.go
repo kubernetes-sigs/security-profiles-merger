@@ -47,10 +47,6 @@ func permutations(count int) [][]int {
 	return result
 }
 
-func readOnlyPaths(paths ...string) *apparmor.Profile {
-	return &apparmor.Profile{Filesystem: &apparmor.FilesystemRules{ReadOnlyPaths: paths}}
-}
-
 // emptyIntersection is what Intersect returns for profiles that share
 // nothing: every section explicit and empty.
 func emptyIntersection() *apparmor.Profile {
@@ -83,17 +79,17 @@ func TestIntersectKeepsLiteralsInEveryOrder(t *testing.T) {
 	}{
 		"literal under two patterns": {
 			inputs: []*apparmor.Profile{
-				readOnlyPaths("/data/*.txt"),
-				readOnlyPaths("/data/report.*"),
-				readOnlyPaths("/data/report.txt"),
+				readOnly("/data/*.txt"),
+				readOnly("/data/report.*"),
+				readOnly("/data/report.txt"),
 			},
 			want: withFs(apparmor.FilesystemRules{ReadOnlyPaths: []string{"/data/report.txt"}}),
 		},
 		"literal some input does not grant": {
 			inputs: []*apparmor.Profile{
-				readOnlyPaths("/data/*.txt"),
-				readOnlyPaths("/data/report.*"),
-				readOnlyPaths("/data/report.txt", "/data/notes.txt", "/data/report.csv"),
+				readOnly("/data/*.txt"),
+				readOnly("/data/report.*"),
+				readOnly("/data/report.txt", "/data/notes.txt", "/data/report.csv"),
 			},
 			want: withFs(apparmor.FilesystemRules{ReadOnlyPaths: []string{"/data/report.txt"}}),
 		},
@@ -115,7 +111,7 @@ func TestIntersectKeepsLiteralsInEveryOrder(t *testing.T) {
 		},
 		"read-only and write-only patterns grant nothing together": {
 			inputs: []*apparmor.Profile{
-				readOnlyPaths("/data/*.txt"),
+				readOnly("/data/*.txt"),
 				{Filesystem: &apparmor.FilesystemRules{WriteOnlyPaths: []string{"/data/report.*"}}},
 				{Filesystem: &apparmor.FilesystemRules{ReadWritePaths: []string{"/data/report.txt"}}},
 			},
@@ -160,7 +156,7 @@ func TestIntersectKeepsLiteralsInEveryOrder(t *testing.T) {
 		"lists are kept apart": {
 			inputs: []*apparmor.Profile{
 				{Executable: &apparmor.ExecutableRules{AllowedExecutables: []string{"/usr/bin/*"}}},
-				readOnlyPaths("/usr/bin/{cat,ls}"),
+				readOnly("/usr/bin/{cat,ls}"),
 				{
 					Executable: &apparmor.ExecutableRules{AllowedExecutables: []string{"/usr/bin/cat"}},
 					Filesystem: &apparmor.FilesystemRules{ReadOnlyPaths: []string{"/usr/bin/cat"}},
@@ -170,7 +166,7 @@ func TestIntersectKeepsLiteralsInEveryOrder(t *testing.T) {
 		},
 		"four inputs": {
 			inputs: []*apparmor.Profile{
-				readOnlyPaths("/data/*.txt", "/etc/hosts"),
+				readOnly("/data/*.txt", "/etc/hosts"),
 				{Filesystem: &apparmor.FilesystemRules{
 					ReadWritePaths: []string{"/data/report.*", "/etc/h*"},
 				}},
@@ -178,7 +174,7 @@ func TestIntersectKeepsLiteralsInEveryOrder(t *testing.T) {
 					ReadWritePaths: []string{"/data/report.txt", "/data/notes.txt"},
 					ReadOnlyPaths:  []string{"/etc/hosts"},
 				}},
-				readOnlyPaths("/data/{report,notes}.txt", "/etc/{hosts,passwd}"),
+				readOnly("/data/{report,notes}.txt", "/etc/{hosts,passwd}"),
 			},
 			want: withFs(apparmor.FilesystemRules{
 				ReadOnlyPaths: []string{"/data/report.txt", "/etc/hosts"},

@@ -24,7 +24,7 @@ import (
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
 
-// The tests below merge and compare syscall lists through profiles whose
+// The list helpers below merge and compare syscall lists through profiles whose
 // default, SCMP_ACT_KILL_PROCESS, is more restrictive than every action the
 // lists hold, which is how a caller holding lists rather than profiles gets
 // them merged. The lists must not use SCMP_ACT_KILL_PROCESS themselves,
@@ -75,4 +75,61 @@ func diffLists(t *testing.T, left, right []specs.LinuxSyscall) *seccomp.Syscalls
 	}
 
 	return diff.Syscalls
+}
+
+// forNode returns the options of a node whose native architecture is the
+// given one, the empty Arch for one that is not known.
+func forNode(native specs.Arch) seccomp.Options {
+	if native == "" {
+		return seccomp.ForAnyArch()
+	}
+
+	return seccomp.ForArch(native)
+}
+
+// littleEndianNode returns the options for the node the tests run on
+// where it is little-endian, and for an x86-64 node otherwise. A test of a
+// profile listing little-endian architectures runs with it, so that it
+// takes the native path of the host on amd64, arm64 and ppc64le, while a
+// big-endian host, which cannot load those architectures, checks it as an
+// x86-64 node would.
+func littleEndianNode() seccomp.Options {
+	native, known := seccomp.NativeArchitecture()
+	if known && !seccomp.BigEndian(native) {
+		return seccomp.ForHost()
+	}
+
+	return seccomp.ForArch(specs.ArchX86_64)
+}
+
+// littleEndianArch returns the architecture littleEndianNode names, or the
+// empty Arch where it is the host.
+func littleEndianArch() specs.Arch {
+	native, known := seccomp.NativeArchitecture()
+	if known && !seccomp.BigEndian(native) {
+		return ""
+	}
+
+	return specs.ArchX86_64
+}
+
+// on sets the architectures a profile lists.
+func on(profile *specs.LinuxSeccomp, archs ...specs.Arch) *specs.LinuxSeccomp {
+	profile.Architectures = archs
+
+	return profile
+}
+
+func requireEqualProfiles(t *testing.T, got, want *specs.LinuxSeccomp) {
+	t.Helper()
+
+	diff, err := seccomp.ForAnyArch().Diff(got, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !diff.Equal {
+		t.Fatalf("got %s, want %s: %s",
+			seccomp.FormatProfile(got), seccomp.FormatProfile(want), diff.String())
+	}
 }

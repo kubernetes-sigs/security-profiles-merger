@@ -218,6 +218,9 @@ import "sigs.k8s.io/security-profiles-merger/seccomp"
 `SyscallEntry`, `SyscallChange`, `SyscallDetail`), which are
 documented field by field in the
 [package reference](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#ProfileDiff).
+A `SyscallDetail` is one rule of a syscall, as `SyscallChange.Left` and
+`Right` list them, and a `SyscallEntry` is a `SyscallDetail` with the
+syscall's `Name`, which it embeds.
 
 `ProfileDiff`, `SyscallEntry` and `SyscallDetail` implement `fmt.Stringer`
 for human-readable formatting, quoted and bounded as `FormatProfile` is.
@@ -458,7 +461,7 @@ import "sigs.k8s.io/security-profiles-merger/landlock"
 
 The types are `Profile`, `Options`, `ResultError`, `LoweredPath`, the access rights
 (`FSAccessRight`, `NetAccessRight`, `ScopeRight`), `PathRule`, `NetRule`,
-`ABIVersion` with the constants `ABIV1` to `ABIV11` and `LatestABIVersion`,
+`ABIVersion` with the constants `ABIV1` to `ABIV12` and `LatestABIVersion`,
 and the diff types
 (`ProfileDiff`, `SliceDiff[T]`, `PathRulesDiff`, `PathRuleChange`,
 `NetRulesDiff`, `NetRuleChange`). The access rights mirror the Landlock UAPI,

@@ -25,7 +25,10 @@ import (
 // Profile represents a Landlock ruleset for merge operations.
 type Profile struct {
 	// HandledAccessFS is the set of filesystem access rights handled by this
-	// ruleset. Rights not listed here are not restricted.
+	// ruleset. Rights not listed here are not restricted, except
+	// FSAccessRefer: a ruleset handling any filesystem right denies it
+	// unless a rule grants it, whether or not it is listed (see the Refer
+	// section).
 	HandledAccessFS []FSAccessRight `json:"handledAccessFs,omitempty"`
 
 	// HandledAccessNet is the set of network access rights handled by this
@@ -116,7 +119,10 @@ const (
 	FSAccessMakeBlock FSAccessRight = "make_block"
 
 	// FSAccessRefer allows linking or renaming across directories.
-	// Available since Landlock ABI version 2.
+	// Available since Landlock ABI version 2. Unlike the other rights it is
+	// denied whenever the ruleset handles any filesystem right, listed in
+	// HandledAccessFS or not, so only a rule granting it allows such a move
+	// or link, and only where the ruleset lists it (see the Refer section).
 	FSAccessRefer FSAccessRight = "refer"
 
 	// FSAccessTruncate allows truncating a file. Available since Landlock
@@ -128,7 +134,9 @@ const (
 	FSAccessIOCTLDev FSAccessRight = "ioctl_dev"
 
 	// FSAccessResolveUnix allows resolving/connecting to pathname-based
-	// UNIX domain sockets. Available since Landlock ABI version 9.
+	// UNIX domain sockets. Available since Landlock ABI version 9. It
+	// restricts only sockets created outside the Landlock domain; a socket
+	// a process of the same domain bound stays reachable without it.
 	FSAccessResolveUnix FSAccessRight = "resolve_unix"
 )
 
@@ -170,6 +178,12 @@ const (
 )
 
 // PathRule defines the access rights allowed for a specific path hierarchy.
+//
+// The kernel rejects with EINVAL a rule on a path that is not a directory
+// granting a right other than those that apply to a file (execute,
+// write_file, read_file, truncate, ioctl_dev and resolve_unix). No
+// validator checks that, since it depends on the file system the rule is
+// loaded on.
 type PathRule struct {
 	// Path is the filesystem path hierarchy this rule applies to.
 	// UnmarshalStrict requires the member (ErrMissingField).
@@ -214,6 +228,11 @@ const (
 	ABIV10
 	// ABIV11 added a landlock_restrict_self flag but no access rights.
 	ABIV11
+	// ABIV12 added the capability and namespace permissions with their
+	// rule types, which restrict what a process does rather than the
+	// filesystem, network or IPC access a Profile expresses, so it adds no
+	// access right here.
+	ABIV12
 )
 
 // String returns "ABIV" and the number for a version from ABIV1 on, newer
@@ -241,7 +260,7 @@ func ScopeRights() map[ScopeRight]ABIVersion { return maps.Clone(scopeABI) }
 
 // LatestABIVersion is the newest Landlock ABI this package knows; Options
 // reads a newer one as this one.
-const LatestABIVersion = ABIV11
+const LatestABIVersion = ABIV12
 
 // The tables below are the single source of the rights this package knows,
 // each with the Landlock ABI version that introduced it. Validate accepts

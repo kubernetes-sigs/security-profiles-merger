@@ -84,11 +84,7 @@ func (k filterKey) nested(other filterKey) bool {
 }
 
 func newConflictTracker() *conflictTracker {
-	return &conflictTracker{
-		conditions: make(map[condition]uint16),
-		results:    nil,
-		rules:      nil,
-	}
+	return &conflictTracker{conditions: make(map[condition]uint16)}
 }
 
 // keyOf returns the key of a rule's filter, numbering its conditions, or
@@ -138,7 +134,7 @@ func (t *conflictTracker) resultOf(next clause) uint16 {
 		}
 	}
 
-	t.results = append(t.results, clause{action: next.action, errnoRet: next.errnoRet, args: nil})
+	t.results = append(t.results, clause{action: next.action, errnoRet: next.errnoRet})
 
 	return number
 }

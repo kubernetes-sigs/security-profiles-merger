@@ -163,7 +163,7 @@ type multiplexRules struct {
 // add records one rule of the syscall.
 func (r *multiplexRules) add(next clause) {
 	if r.results == nil {
-		r.first = clause{action: next.action, errnoRet: merge.ClonePtr(next.errnoRet), args: nil}
+		r.first = clause{action: next.action, errnoRet: merge.ClonePtr(next.errnoRet)}
 	} else if !next.sameResult(r.first) {
 		r.mixed = true
 	}
@@ -236,18 +236,8 @@ func collectMultiplexRules(
 		current, ok := rules[name]
 		if !ok {
 			current = &multiplexRules{
-				results:       nil,
-				unconditional: nil,
-				conditional:   false,
-				firstArg:      false,
-				wholeSubcall:  false,
-				mixed:         false,
-				first:         clause{action: "", errnoRet: nil, args: nil},
-				multiplexed:   nil,
-				seen:          nil,
-				keys:          nil,
-				summarized:    summarized[name],
-				entry:         idx,
+				summarized: summarized[name],
+				entry:      idx,
 			}
 
 			if !current.summarized {
@@ -619,15 +609,11 @@ func (in multiplexInput) replace(name string, rule clause, replaced map[string]*
 	in.rules[name] = &multiplexRules{
 		results:       (*clauseSummary)(nil).fold(rule),
 		unconditional: &rule,
-		conditional:   false,
-		firstArg:      false,
 		wholeSubcall:  true,
-		mixed:         false,
 		first:         rule,
 		multiplexed:   []clause{rule},
 		seen:          map[string]struct{}{clauseKey(rule): {}},
 		keys:          map[string]struct{}{actionKey(rule): {}},
-		summarized:    false,
 		entry:         entry,
 	}
 }

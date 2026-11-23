@@ -112,9 +112,7 @@ func orderSensitiveGroups(clauses []clause) map[siblingKey]bool {
 func recordSibling(groups map[siblingKey]*siblingGroup, node keyedSibling, rule clause) bool {
 	group, ok := groups[node.key]
 	if !ok {
-		groups[node.key] = &siblingGroup{
-			node: node.node, result: rule, nodes: false, results: false,
-		}
+		groups[node.key] = &siblingGroup{node: node.node, result: rule}
 
 		return false
 	}
@@ -319,10 +317,7 @@ func (order addOrder) entries(name string) []SyscallEntry {
 	entries := make([]SyscallEntry, 0, len(order.rules[name]))
 
 	for _, current := range order.rules[name] {
-		loaded := clauseToSyscall(name, current)
-		entries = append(entries, SyscallEntry{
-			Name: name, Action: loaded.Action, ErrnoRet: loaded.ErrnoRet, Args: loaded.Args,
-		})
+		entries = append(entries, syscallEntry(name, clauseToSyscall(name, current)))
 	}
 
 	return entries

@@ -58,7 +58,7 @@ func invalidUTF8(raw []byte) error {
 		offset += size
 	}
 
-	return &UTF8Error{Offset: offset, Escape: false}
+	return &UTF8Error{Offset: offset}
 }
 
 // UTF8Error is spm.ErrInvalidUTF8 at a byte offset of a document, which
@@ -256,7 +256,7 @@ type jsonField struct {
 // the member names it exactly rather than only ignoring case.
 func (set fieldSet) lookup(key string) (jsonField, bool, bool) {
 	if set.divergent {
-		return jsonField{name: "", typ: nil}, false, false
+		return jsonField{}, false, false
 	}
 
 	if fieldType, ok := set.exact[key]; ok {
@@ -272,7 +272,7 @@ func (set fieldSet) lookup(key string) (jsonField, bool, bool) {
 // caller holds already, which it does not fold again.
 func (set fieldSet) lookupFolded(key, folded string) (jsonField, bool, bool) {
 	if set.divergent {
-		return jsonField{name: "", typ: nil}, false, false
+		return jsonField{}, false, false
 	}
 
 	if fieldType, ok := set.exact[key]; ok {
@@ -450,7 +450,7 @@ func visibleFields(typ reflect.Type) []visibleField {
 		count   map[reflect.Type]int
 	)
 
-	next := []embeddedStruct{{typ: typ, index: nil, gate: nil}}
+	next := []embeddedStruct{{typ: typ}}
 	nextCount := map[reflect.Type]int{}
 	visited := map[reflect.Type]bool{}
 

@@ -863,7 +863,7 @@ func fsPermits(profile *landlock.Profile, path string, right landlock.FSAccessRi
 			continue
 		}
 
-		if landlock.IsAncestorOrSelf(oracleCleanPath(rule.Path), path) {
+		if evalCovers(oracleCleanPath(rule.Path), path) {
 			return true
 		}
 	}
@@ -1663,6 +1663,12 @@ func FuzzLandlockValidateArtifact(f *testing.F) {
 		uint32(0x00), uint32(0x00), uint16(80), uint16(443),
 		uint8(0x00), uint8(0x00),
 	)
+	// Two rules on one cleaned path, which only ValidateStrict rejects.
+	f.Add(
+		uint32(0x03), uint8(0x01), uint8(0x00), "/etc", "//etc",
+		uint32(0x01), uint32(0x02), uint16(80), uint16(80),
+		uint8(0x01), uint8(0x01),
+	)
 
 	f.Fuzz(func(
 		t *testing.T,
@@ -1677,13 +1683,18 @@ func FuzzLandlockValidateArtifact(f *testing.F) {
 			am1, am2, port1, port2, nm1, nm2,
 		)
 
+		// ValidateStrict adds only the duplicate checks to ValidateArtifact.
 		err := landlock.ValidateArtifact(profile)
-		if err != nil {
-			// Everything ValidateStrict accepts, ValidateArtifact accepts.
-			if landlock.ValidateStrict(profile) == nil {
-				t.Fatalf("ValidateStrict accepted a profile ValidateArtifact rejects: %v", err)
-			}
+		testutil.StrictOrdering(t, err, landlock.ValidateStrict(profile),
+			landlock.ErrDuplicateRule, landlock.ErrDuplicateRight)
 
+		// So do the methods of Options, which add the same ABI check to
+		// both; ABIV1 knows the fewest rights, so it rejects the most.
+		oldest := landlock.Options{ABI: landlock.ABIV1}
+		testutil.StrictOrdering(t, oldest.ValidateArtifact(profile), oldest.ValidateStrict(profile),
+			landlock.ErrDuplicateRule, landlock.ErrDuplicateRight)
+
+		if err != nil {
 			return
 		}
 

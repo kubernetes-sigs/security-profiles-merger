@@ -218,13 +218,14 @@ does not install or a machine it does not have:
 |--------|------------------|-------|
 | `verify` (typos step) | `typos` | [crate-ci/typos](https://github.com/crate-ci/typos) |
 | `snapshot` | `goreleaser release --snapshot --skip=sign --clean` | goreleaser and syft |
-| `test / macos-latest / floor go`, `test / macos-latest / release go`, `test / windows-latest / floor go`, `test / windows-latest / release go` | `go test -count=1 ./...` | a macOS or Windows machine, and for `release go` the Go in `.go-version` |
+| `test / <os> / floor go`, `test / <os> / release go` for `macos-latest` (arm64), `macos-26-intel`, `windows-latest` (amd64) and `windows-11-arm` | `go test -count=1 ./...` | a macOS or Windows machine of that architecture, and for `release go` the Go in `.go-version` |
 | `test / linux-386` | `GOARCH=386 CGO_ENABLED=0 make test-wall-clock` | nothing more on amd64, and a machine that runs little else |
 | `test / linux-arm64` | `CGO_ENABLED=0 go test -count=1 ./...` | an arm64 machine |
 | `test / linux-<arch> (qemu)` | `GOARCH=<arch> CGO_ENABLED=0 go test -count=1 ./...` | qemu-user with binfmt_misc for s390x, ppc64le or arm |
 | `test / release go` | `make test-wall-clock` (the suite one package at a time, with the wall-clock bounds on), then `go test -run='^$' -bench=. -benchtime=1x ./...` (each benchmark once) | the Go in `.go-version`, and a machine that runs little else |
 | `fuzz / <target>` | `make fuzz` | time |
-| `test-libseccomp / <version>`, `test-libseccomp / <version> / <arch>` | `make test-libseccomp`, then `SPM_LIBSECCOMP_OPTIMIZE=2 make test-libseccomp` | cgo and that libseccomp version, built for arm64 or for 386 (`GOARCH=386 CC="gcc -m32"`) |
+| `test-libseccomp / <version>`, `test-libseccomp / <version> / <arch>` | `make test-libseccomp` | cgo and that libseccomp version, built for arm64 or for 386 (`GOARCH=386 CC="gcc -m32"`) |
+| `test-libseccomp / <version> / binary tree`, `test-libseccomp / <version> / <arch> / binary tree` | `SPM_LIBSECCOMP_OPTIMIZE=2 make test-libseccomp` | the same |
 | `test / runtime` | `make test-runtime` | Linux with Landlock, runc or crun, strace and unprivileged user namespaces; without them the tests skip |
 | `api / gorelease` | `make api-report` | a clean working tree; it fails on an incompatible change only from v1.0.0 on |
 | `apparmor-parser` | `make test-apparmor-parser` | `apparmor_parser` on `PATH` or named by `SPM_APPARMOR_PARSER`; without it the tests skip |
@@ -304,11 +305,53 @@ merge should keep all four passing:
 
 ### seccomp architectures and libseccomp releases
 
-The Architectures section of the seccomp package documentation states what
-the merges do on 32-bit and multiplexing architectures and about the
-libseccomp defect that loses the rules of an architecture. This is how
-those statements were established, which a change to them has to redo:
+The seccomp package documentation states which rule sets the merges rely
+on libseccomp for (the safe shapes of the Evaluation model section) and,
+in the Architectures section, what the merges do on 32-bit and
+multiplexing architectures and about the libseccomp defect that loses the
+rules of an architecture. This is how those statements were established,
+which a change to them has to redo:
 
+- Why only safe shapes: libseccomp compiles the clauses of a syscall into
+  a decision tree that runs first-match in an order of its own, by
+  argument index (highest first), operator class and value, whatever the
+  actions. Two conditions on one argument that compare a 32-bit half
+  against the same value with a different operator of one class
+  (`SCMP_CMP_LT` and `SCMP_CMP_LE`, or `SCMP_CMP_GT` and `SCMP_CMP_GE`) or
+  a different mask keep the order they were added in instead: under
+  default `SCMP_ACT_ERRNO`, KILL if a0 < 5 and LOG if a0 <= 5 decide
+  read(3) by whichever comes first in the profile, which is why `Diff`
+  compares that order. libseccomp refuses some clause sets with `EEXIST`,
+  and releases before 2.6.2 compile some to programs that match none of
+  the clauses
+  ([GHSA-35x7-vh54-jvqf](https://github.com/seccomp/libseccomp/security/advisories/GHSA-35x7-vh54-jvqf))
+  and never return from adding others
+  ([GHSA-qxh5-4cq9-6mjx](https://github.com/seccomp/libseccomp/security/advisories/GHSA-qxh5-4cq9-6mjx)).
+- The multiplexers: socketcall(2) carries accept, accept4, bind, connect,
+  getpeername, getsockname, getsockopt, listen, recv, recvfrom, recvmmsg,
+  recvmsg, send, sendmmsg, sendmsg, sendto, setsockopt, shutdown, socket
+  and socketpair, and ipc(2) msgctl, msgget, msgrcv, msgsnd, semctl,
+  semget, semop, semtimedop, shmat, shmctl, shmdt and shmget. libseccomp
+  keeps the conditions on the other arguments in the copy it adds to the
+  multiplexer, refuses two copies with the same filter and different
+  results, errno included, with `EEXIST`, and lets an unconditional rule on
+  the multiplexer decide all of its calls. Where neither profile has
+  multiplexer rules and no rule of the syscall tests the first argument,
+  the path decides each call as the syscall does. Otherwise the merges read
+  each input's path as the set of results a call can get there: with an
+  unconditional multiplexer rule, that rule; with conditional multiplexer
+  rules, the results of those, of every syscall the multiplexer carries and
+  of the default; and otherwise the results of the syscall's rules, and the
+  default unless one of them matches the whole sub-call. They treat as
+  rules libseccomp may refuse different results for one of these syscalls
+  where a rule matches the whole sub-call or the rules form no safe shape
+  without the first argument, and conditional rules on the multiplexer.
+- The listener flags: the kernel refuses
+  `SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV` without the flag that creates
+  the listener, which runc sets only for a filter with a notify rule, and
+  `SECCOMP_FILTER_FLAG_TSYNC` next to that flag, which crun sets for any
+  `listenerPath`. runc knows no parisc, m68k or sh and refuses a profile
+  listing one, while crun resolves the name through libseccomp.
 - Both effects of other architectures, the 32-bit comparisons and the
   socket and SysV IPC multiplexers, were checked against libseccomp 2.6.1
   for every architecture it knows. The libseccomp tests check merge results
@@ -325,18 +368,18 @@ those statements were established, which a change to them has to redo:
   there, which is why releases older than 2.5.4 are not supported. The
   table of where each release places a syscall also covers 2.5.2, which
   only makes the check for lost rules more cautious.
-- The defect: libseccomp 2.5.2, 2.5.4, 2.5.5, 2.6.0 and 2.6.1 load the
-  syscall number in the code of the syscall they test first in an
-  architecture's block, and leave that code out when the architecture lacks
-  the syscall, which libseccomp then keeps under a number it makes up. A
-  block tests first the syscall whose rules compile to the fewest
-  comparisons, and one the architecture has wins a tie. Every architecture
-  keeps such a syscall except where it multiplexes the socket and SysV IPC
-  syscalls, which keeps only a multiplexed one it has no number for (as x86
-  does "accept"). x86_64 and x32 are affected only together: one alone
-  loads the number before any syscall is tested, while together they share
-  one AUDIT_ARCH value and are told apart by that number, so a block of
-  either that tests a syscall its architecture lacks first, as x32 does
+- The defect: libseccomp 2.5.2, 2.5.4, 2.5.5, 2.6.0 and 2.6.1 (2.5.3 was not
+  examined) load the syscall number in the code of the syscall they test
+  first in an architecture's block, and leave that code out when the
+  architecture lacks the syscall, which libseccomp then keeps under a number
+  it makes up. A block tests first the syscall whose rules compile to the
+  fewest comparisons, and one the architecture has wins a tie. Every
+  architecture keeps such a syscall except where it multiplexes the socket
+  and SysV IPC syscalls, which keeps only a multiplexed one it has no number
+  for (as x86 does "accept"). x86_64 and x32 are affected only together: one
+  alone loads the number before any syscall is tested, while together they
+  share one AUDIT_ARCH value and are told apart by that number, so a block
+  of either that tests a syscall its architecture lacks first, as x32 does
   with "set_thread_area", loses the rules of the other block as well, even
   when it holds no rule of its own to lose. It does not happen where
   libseccomp sorts into a binary tree, which runc asks for above 32 syscall
@@ -368,6 +411,16 @@ it returns. This is where the values come from:
   directories the inputs name, comparing each with at most 64 classes of
   the others, which keeps it linear in the rules as well. The profiles
   KEP-6061 expects runtimes to accept hold a few dozen rules.
+- The seccomp budgets (`seccomp/rules.go`): the pair budget admits
+  `MaxArtifactRulesPerSyscall` rules against a dozen filtered rules on the
+  other side, and the combined budget of a union collapses a syscall past
+  several hundred filtered rules even when one side has none. The read
+  budget exists because 441 KB of JSON can load ten million rules: past it
+  on one input, the syscalls loading the most rules (ties by name) are read
+  as the clause a collapse picks until the rest fit, at the cost of one
+  pass over their entries, and the multiplexer path takes their rules there
+  to be ones libseccomp may refuse wherever their results differ.
+  `MaxArtifactRules` lies well inside it.
 - `apparmor.MaxPathLen` is `PATH_MAX` less its terminating NUL, the limit
   the landlock package applies to the rule paths it opens, so that one
   bound holds for both packages. AppArmor never opens a rule path, and the

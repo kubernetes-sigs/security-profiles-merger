@@ -820,8 +820,8 @@ func TestABIVersionString(t *testing.T) {
 
 	for abi, want := range map[landlock.ABIVersion]string{
 		landlock.ABIV1:                "ABIV1",
-		landlock.LatestABIVersion:     "ABIV11",
-		landlock.LatestABIVersion + 1: "ABIV12",
+		landlock.LatestABIVersion:     "ABIV12",
+		landlock.LatestABIVersion + 1: "ABIV13",
 		0:                             "ABIVersion(0)",
 		-1:                            "ABIVersion(-1)",
 	} {

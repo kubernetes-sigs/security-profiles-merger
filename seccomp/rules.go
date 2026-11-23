@@ -162,9 +162,7 @@ func collectRules(syscalls []specs.LinuxSyscall, def *clause) map[string]*syscal
 	forEachClause(syscalls, def, skip, func(_ int, name string, next clause) {
 		current, ok := rules[name]
 		if !ok {
-			current = &syscallRules{
-				unconditional: nil, conditional: nil, summary: nil, narrowFirst: nil,
-			}
+			current = &syscallRules{}
 			rules[name] = current
 		}
 
@@ -363,9 +361,7 @@ func summarizeRules(
 
 			current, ok := rules[name]
 			if !ok {
-				current = &syscallRules{
-					unconditional: nil, conditional: nil, summary: nil, narrowFirst: nil,
-				}
+				current = &syscallRules{}
 				rules[name] = current
 			}
 
@@ -408,7 +404,6 @@ func baseClause(entry *specs.LinuxSyscall) clause {
 	return clause{
 		action:   canonicalAction(entry.Action),
 		errnoRet: runtimeErrno(entry.Action, entry.ErrnoRet),
-		args:     nil,
 	}
 }
 
@@ -519,11 +514,11 @@ type ruleMerger struct {
 // intersectRulesFor and unionRulesFor return the merger of a node whose
 // native architecture is the given one.
 func intersectRulesFor(native specs.Arch) ruleMerger {
-	return ruleMerger{intersect: true, narrow: false, narrowCovered: false, native: native}
+	return ruleMerger{intersect: true, native: native}
 }
 
 func unionRulesFor(native specs.Arch) ruleMerger {
-	return ruleMerger{intersect: false, narrow: false, narrowCovered: false, native: native}
+	return ruleMerger{native: native}
 }
 
 // pick chooses the action for a call that both sides constrain: the more
@@ -859,11 +854,15 @@ func (m ruleMerger) collapseAll(fallback *clause, sides ...[]clause) *clause {
 // would override every conditional entry of the same syscall at load time,
 // so a non-nil fallback must not be emitted next to conditional clauses.
 // A single one-condition clause is rewritten as the clause plus its
-// complement carrying the fallback, which is exact and a safe shape.
-// Otherwise the whole syscall collapses to one unconditional clause
-// combining the fallback and every conditional action with the merge
+// complement carrying the fallback, which is exact and a safe shape. The
+// two match disjoint calls, so a clause with the result of def is left out:
+// the calls it matches fall through to def anyway, and a runtime skips such
+// an entry. Otherwise the whole syscall collapses to one unconditional
+// clause combining the fallback and every conditional action with the merge
 // direction's preference, which is conservative in the safe direction.
-func (m ruleMerger) resolveMixed(fallback *clause, conditional []clause) (*clause, []clause) {
+func (m ruleMerger) resolveMixed(
+	def, fallback *clause, conditional []clause,
+) (*clause, []clause) {
 	if fallback == nil || len(conditional) == 0 {
 		return fallback, conditional
 	}
@@ -879,6 +878,10 @@ func (m ruleMerger) resolveMixed(fallback *clause, conditional []clause) (*claus
 				action:   fallback.action,
 				errnoRet: merge.ClonePtr(fallback.errnoRet),
 				args:     []specs.LinuxSeccompArg{complement},
+			}
+
+			if conditional[0].sameResult(*def) {
+				return nil, []clause{rest}
 			}
 
 			return nil, sortClauses([]clause{conditional[0], rest})
@@ -1289,7 +1292,6 @@ func defaultClause(profile *specs.LinuxSeccomp) *clause {
 	return &clause{
 		action:   canonicalAction(profile.DefaultAction),
 		errnoRet: runtimeErrno(profile.DefaultAction, profile.DefaultErrnoRet),
-		args:     nil,
 	}
 }
 
@@ -1378,7 +1380,7 @@ func (m ruleMerger) finishRules(
 		conditional = m.collapseClauses(conditional, fallback)
 	}
 
-	fallback, conditional = m.resolveMixed(fallback, conditional)
+	fallback, conditional = m.resolveMixed(mergedDefault, fallback, conditional)
 
 	return m.settleOutput(mergedDefault, fallback, conditional)
 }

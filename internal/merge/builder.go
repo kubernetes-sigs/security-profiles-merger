@@ -167,7 +167,7 @@ type Joiner struct {
 
 // NewJoiner returns a Joiner separating parts written to out with sep.
 func NewJoiner(out *Builder, sep string) Joiner {
-	return Joiner{out: out, sep: sep, started: false}
+	return Joiner{out: out, sep: sep}
 }
 
 // Next starts a part, writing the separator unless it is the first.

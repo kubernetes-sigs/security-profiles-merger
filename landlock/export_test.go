@@ -16,30 +16,6 @@ limitations under the License.
 
 package landlock
 
-import (
-	"strings"
-)
-
-// isAncestorOrSelf reports whether ancestor is path itself or one of its
-// parent directories. Paths are expected to be cleaned. This states the
-// hierarchy relation ancestors enumerates; the merge uses the
-// enumeration, and a test keeps the two in agreement.
-func isAncestorOrSelf(ancestor, path string) bool {
-	if ancestor == path {
-		return true
-	}
-
-	if ancestor == "/" {
-		return strings.HasPrefix(path, "/")
-	}
-
-	return strings.HasPrefix(path, ancestor+"/")
-}
-
-// IsAncestorOrSelf exposes isAncestorOrSelf to external tests so the fuzz
-// oracle evaluates path hierarchy exactly like the merge does.
-var IsAncestorOrSelf = isAncestorOrSelf
-
 // MaxMergeWork is the budget of Intersect and Union.
 const MaxMergeWork = maxMergeWork
 

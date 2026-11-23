@@ -284,12 +284,9 @@ type absentSettler struct {
 
 func newAbsentSettler(m ruleMerger, result *specs.LinuxSeccomp) *absentSettler {
 	return &absentSettler{
-		m:         m,
-		result:    result,
-		blocks:    make(map[specs.Arch]*blockTally),
-		asWritten: false,
-		tallied:   0,
-		steps:     0,
+		m:      m,
+		result: result,
+		blocks: make(map[specs.Arch]*blockTally),
 	}
 }
 
@@ -315,20 +312,9 @@ func (s *absentSettler) block(arch specs.Arch) *blockTally {
 // architecture whose block does. Names libseccomp does not know are left
 // out: a runtime cannot add a rule for them.
 //
-// The tally reads every entry as placing its rules, although a merge
-// result can hold an entry equal to the default: resolveMixed rewrites a
-// fallback and one single-condition clause as that clause and its
-// complement carrying the fallback, and the clause can carry the default
-// action, as in a0 == 40 -> ERRNO beside a0 != 40 -> ALLOW under a default
-// of ERRNO. runc and crun skip such an entry, so the filter holds fewer
-// rules than the tally counts, and that errs safe. The complement differs
-// from the default and keeps the syscall in the block, so leaving the
-// clause out only lowers the sum upperBound reads, which moves a syscall
-// the architecture has no later, and only raises the cheapest rule
-// lowerBound reads, which moves an absent one no earlier: absentFirst
-// still names every syscall the filter can test first. Every other entry
-// of a merge result differs from the default, since the merge drops the
-// rest.
+// The tally reads every entry as placing its rules, which holds for a
+// merge result: the merge drops every entry with the result of the
+// default, which a runtime would skip.
 func (s *absentSettler) absentFirst(arch specs.Arch, covered []specs.Arch) []string {
 	block := s.block(arch)
 	if len(block.absent) == 0 || !block.atStake && !s.partnerHasRules(arch, covered) {
@@ -376,7 +362,6 @@ func blockCounts(syscalls []specs.LinuxSyscall, arch specs.Arch) *blockTally {
 		bit:     archBit(arch),
 		present: make(map[string]*comparisonCount),
 		absent:  make(map[string]*comparisonCount),
-		atStake: false,
 	}
 
 	for idx := range syscalls {
@@ -433,7 +418,7 @@ func (b *blockTally) record(
 ) {
 	count, ok := side[name]
 	if !ok {
-		count = &comparisonCount{leaf: false, sum: 0, cheapest: 0, rules: 0}
+		count = &comparisonCount{}
 		side[name] = count
 	}
 

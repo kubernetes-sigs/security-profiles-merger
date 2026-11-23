@@ -66,7 +66,7 @@ var errRepeatedFlag = errors.New("already given")
 // flag package names it "value" otherwise.
 func stringFlag(flags *flag.FlagSet, target *string, name, value, usage string) {
 	*target = value
-	flags.Var(&singleValue{target: target, set: false}, name, usage)
+	flags.Var(&singleValue{target: target}, name, usage)
 }
 
 func (v *singleValue) String() string {
@@ -490,18 +490,13 @@ func startCommand(
 	}
 
 	return &invocation{
-		command:  flags.Name(),
-		paths:    flags.Args(),
-		inputs:   inputs,
-		report:   nil,
-		kind:     nil,
-		checks:   nil,
-		node:     node,
-		format:   opts.common().format,
-		out:      bytes.Buffer{},
-		stdout:   stdout,
-		stderr:   stderr,
-		refusals: nil,
+		command: flags.Name(),
+		paths:   flags.Args(),
+		inputs:  inputs,
+		node:    node,
+		format:  opts.common().format,
+		stdout:  stdout,
+		stderr:  stderr,
 	}, 0
 }
 

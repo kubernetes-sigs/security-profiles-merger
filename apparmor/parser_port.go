@@ -384,25 +384,9 @@ type converter struct {
 // ValidateArtifact and ValidateStrict report it.
 func convertPattern(pattern string) conversion {
 	conv := converter{
-		pattern:          pattern,
-		regex:            strings.Builder{},
-		escaped:          false,
-		grouping:         0,
-		counts:           [maxAltDepth]int{},
-		inClass:          false,
-		classOpen:        0,
-		firstGlob:        -1,
-		globs:            0,
-		trailingStarStar: false,
-		result: conversion{
-			regex:        "",
-			kind:         kindInvalid,
-			literalEnd:   0,
-			alternatives: 0,
-			starStarOnly: false,
-
-			escapedNegation: false,
-		},
+		pattern:   pattern,
+		firstGlob: -1,
+		result:    conversion{kind: kindInvalid},
 	}
 	conv.regex.Grow(len(pattern))
 
@@ -698,13 +682,13 @@ func lexRegex(regex string, pos int) (regexToken, int, bool) {
 	case '\\':
 		val, end, ok := escapeSequence(regex, pos+1, lexerEscapes)
 		if !ok {
-			return regexToken{char: 0, special: false}, pos, false
+			return regexToken{}, pos, false
 		}
 
-		return regexToken{char: val, special: false}, end, true
+		return regexToken{char: val}, end, true
 	}
 
-	return regexToken{char: char, special: false}, pos + 1, true
+	return regexToken{char: char}, pos + 1, true
 }
 
 // literalBytes returns the bytes a regex made of literal tokens denotes.
@@ -738,7 +722,7 @@ type regexParser struct {
 // translateRegex translates a libapparmor_re regex into Go syntax, or
 // reports false when libapparmor_re would fail to parse it.
 func translateRegex(regex string) (string, bool) {
-	parser := regexParser{regex: regex, pos: 0, out: strings.Builder{}}
+	parser := regexParser{regex: regex}
 	parser.out.Grow(len(regex))
 
 	if !parser.alternation() || parser.pos != len(regex) {
@@ -752,7 +736,7 @@ func translateRegex(regex string) (string, bool) {
 // of the regex or on a lexer error.
 func (parser *regexParser) peek() (regexToken, int, bool) {
 	if parser.pos >= len(parser.regex) {
-		return regexToken{char: 0, special: false}, parser.pos, false
+		return regexToken{}, parser.pos, false
 	}
 
 	return lexRegex(parser.regex, parser.pos)

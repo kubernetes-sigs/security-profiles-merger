@@ -40,7 +40,10 @@ func TestSortSyscallEntriesTieBreaks(t *testing.T) {
 	entry := func(
 		action specs.LinuxSeccompAction, ret *uint, args ...specs.LinuxSeccompArg,
 	) SyscallEntry {
-		return SyscallEntry{Name: "read", Action: action, ErrnoRet: ret, Args: args}
+		return SyscallEntry{
+			Name:          "read",
+			SyscallDetail: SyscallDetail{Action: action, ErrnoRet: ret, Args: args},
+		}
 	}
 
 	// Each pair differs in exactly one key, the earlier one sorting first.

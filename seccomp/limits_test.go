@@ -17,6 +17,7 @@ limitations under the License.
 package seccomp_test
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -280,5 +281,43 @@ func TestDiffSeesPastTheClauseBudget(t *testing.T) {
 
 	if !diff.Equal {
 		t.Errorf("Diff of one profile with itself = %s", diff.String())
+	}
+}
+
+func TestProfileOfSizeReachesArtifactLimit(t *testing.T) {
+	t.Parallel()
+
+	profile := buildArtifactSizedProfile(t)
+
+	data, err := json.Marshal(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(data) < artifactSizeLimit {
+		t.Fatalf("profile is %d bytes, want at least %d",
+			len(data), artifactSizeLimit)
+	}
+
+	err = seccomp.ValidateArtifact(profile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestIntersectArtifactSizeLimit(t *testing.T) {
+	t.Parallel()
+
+	baseline := buildProfile(400)
+	artifact := buildArtifactSizedProfile(t)
+
+	result, err := littleEndianNode().Intersect(baseline, artifact)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	err = seccomp.Validate(result)
+	if err != nil {
+		t.Fatalf("merged profile is invalid: %v", err)
 	}
 }

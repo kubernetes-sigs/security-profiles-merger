@@ -17,7 +17,6 @@ limitations under the License.
 package landlock_test
 
 import (
-	"math/rand/v2"
 	"path"
 	"slices"
 	"strings"
@@ -463,33 +462,97 @@ func assertUnionMoves(t *testing.T, inputs []*landlock.Profile, result *landlock
 // files, where the pairwise fold must still yield exactly the access every
 // input (Intersect) or any input (Union) permits, apart from the refer and
 // handled-right exceptions the file comment describes, and must decide
-// moves as the safety properties require.
+// moves as the safety properties require. The fuzz targets fold two inputs;
+// these cases fold up to four, where refer is settled against every input
+// at the end and grouping must not matter.
 func TestMergeManyPermitsAt(t *testing.T) {
 	t.Parallel()
 
-	rng := rand.New(rand.NewPCG(1, 2))
+	// The bits of evalProfile: a handled mask over evalRights, and a rule
+	// mask of one bit per right on each of evalRulePaths.
+	const (
+		read, write, readDir, refer = 1 << 0, 1 << 1, 1 << 2, 1 << 3
+		root, etc, etcSub, varDir   = 0, 1, 2, 3
+		varLog, usrBin              = 4, 5
+	)
 
-	for range 4000 {
-		profiles := make([]*landlock.Profile, 2+rng.IntN(3))
-		for idx := range profiles {
-			profiles[idx] = evalProfile(uint8(rng.UintN(16)), rng.Uint32())
+	type input struct {
+		handled uint8
+		rules   uint32
+	}
+
+	rule := func(path int, rights uint32) uint32 { return rights << (path * len(evalRights)) }
+
+	tests := map[string][]input{
+		"nested grants narrow down": {
+			{read, rule(root, read)},
+			{read, rule(etc, read)},
+			{read, rule(etcSub, read) | rule(varDir, read)},
+		},
+		"disjoint handled sets": {
+			{read, rule(etc, read)},
+			{write, rule(varDir, write)},
+			{readDir, rule(usrBin, readDir)},
+			{refer, rule(root, refer)},
+		},
+		"an input handling nothing": {
+			{0, 0},
+			{read | write, rule(etc, read|write)},
+			{read, rule(root, read)},
+		},
+		"refer granted by two, denied by a third": {
+			{read | refer, rule(etc, read|refer) | rule(varDir, refer)},
+			{read | refer, rule(etc, refer) | rule(varDir, read|refer)},
+			{read, rule(root, read)},
+		},
+		"a move gaining write that one input denies": {
+			{write | refer, rule(etc, refer) | rule(varDir, write|refer)},
+			{write | refer, rule(etc, refer) | rule(varDir, refer)},
+			{write | refer, rule(root, refer) | rule(varLog, write)},
+		},
+		"refer listed by one, implied by the others": {
+			{read | refer, rule(root, read|refer)},
+			{read, rule(etc, read)},
+			{write, rule(varDir, write)},
+		},
+		"grants spread over every rule path": {
+			{read | write | readDir | refer, 0xffffff},
+			{read | write | refer, rule(root, refer) | rule(etc, read|write) | rule(usrBin, read)},
+			{read | readDir | refer, rule(etcSub, read|readDir|refer) | rule(varLog, refer)},
+			{read | write | readDir | refer, 0},
+		},
+		"a union input granting refer at the root, others not": {
+			{read | refer, rule(root, refer) | rule(etc, read)},
+			{read | write, rule(etc, read) | rule(varDir, write)},
+			{write | refer, rule(varDir, write|refer) | rule(etc, refer)},
+		},
+	}
+
+	for name, inputs := range tests {
+		profiles := make([]*landlock.Profile, len(inputs))
+		for idx, each := range inputs {
+			profiles[idx] = evalProfile(each.handled, each.rules)
 		}
 
-		intersected, err := landlock.Intersect(profiles...)
-		if err != nil {
-			t.Fatalf("Intersect: %v", err)
-		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-		united, err := landlock.Union(profiles...)
-		if err != nil {
-			t.Fatalf("Union: %v", err)
-		}
+			intersected, err := landlock.Intersect(profiles...)
+			if err != nil {
+				t.Fatalf("Intersect: %v", err)
+			}
 
-		assertManyPermitsAt(t, profiles, intersected, united)
-		assertReferFromInputRules(t, intersected, profiles...)
-		assertReferFromInputRules(t, united, profiles...)
-		assertIntersectMoves(t, profiles, intersected)
-		assertUnionMoves(t, profiles, united)
+			united, err := landlock.Union(profiles...)
+			if err != nil {
+				t.Fatalf("Union: %v", err)
+			}
+
+			assertManyPermitsAt(t, profiles, intersected, united)
+			assertReferFromInputRules(t, intersected, profiles...)
+			assertReferFromInputRules(t, united, profiles...)
+			assertIntersectMoves(t, profiles, intersected)
+			assertUnionMoves(t, profiles, united)
+		})
 	}
 }
 

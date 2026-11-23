@@ -84,22 +84,13 @@ type SyscallsDiff struct {
 	Changed []SyscallChange `json:"changed,omitempty"`
 }
 
-// SyscallEntry is one rule of one syscall: the action a call of that name
-// gets when it matches every condition of Args.
+// SyscallEntry is one rule of one syscall, named. It reads as its
+// SyscallDetail, and JSON spells the detail's fields next to the name.
 type SyscallEntry struct {
 	// Name is the syscall name.
 	Name string `json:"name"`
-	// Action is the action of the rule. SCMP_ACT_KILL_THREAD is reported as
-	// SCMP_ACT_KILL, as a merge result spells it, since the two compare
-	// equal.
-	Action specs.LinuxSeccompAction `json:"action"`
-	// ErrnoRet is the errno the rule returns, set only for SCMP_ACT_ERRNO
-	// and SCMP_ACT_TRACE, where an unset value reads as EPERM (see the
-	// Errno values section of the package documentation).
-	ErrnoRet *uint `json:"errnoRet,omitempty"`
-	// Args are the conditions of the rule, sorted by argument index and
-	// written as libseccomp compares them; an unconditional rule has none.
-	Args []specs.LinuxSeccompArg `json:"args,omitempty"`
+
+	SyscallDetail //nolint:embeddedstructfieldcheck // second, so that JSON writes the name first
 }
 
 // SyscallChange is a syscall both profiles load different rules for.
@@ -118,14 +109,19 @@ type SyscallChange struct {
 	Right []SyscallDetail `json:"right"`
 }
 
-// SyscallDetail is one rule of the syscall a SyscallChange names. Its
-// fields mean what those of SyscallEntry mean.
+// SyscallDetail is one rule of a syscall: the action a call of that name
+// gets when it matches every condition of Args.
 type SyscallDetail struct {
-	// Action is the action of the rule.
+	// Action is the action of the rule. SCMP_ACT_KILL_THREAD is reported as
+	// SCMP_ACT_KILL, as a merge result spells it, since the two compare
+	// equal.
 	Action specs.LinuxSeccompAction `json:"action"`
-	// ErrnoRet is the errno of the rule, as in SyscallEntry.
+	// ErrnoRet is the errno the rule returns, set only for SCMP_ACT_ERRNO
+	// and SCMP_ACT_TRACE, where an unset value reads as EPERM (see the
+	// Errno values section of the package documentation).
 	ErrnoRet *uint `json:"errnoRet,omitempty"`
-	// Args are the conditions of the rule, as in SyscallEntry.
+	// Args are the conditions of the rule, sorted by argument index and
+	// written as libseccomp compares them; an unconditional rule has none.
 	Args []specs.LinuxSeccompArg `json:"args,omitempty"`
 }
 
@@ -154,7 +150,6 @@ func diffProfiles(native specs.Arch, left, right *specs.LinuxSeccomp) (*ProfileD
 	}
 
 	diff := &ProfileDiff{
-		Equal: false,
 		DefaultAction: merge.NewValueDiff(
 			defaultClause(left).action, defaultClause(right).action,
 		),
@@ -226,15 +221,14 @@ func diffSyscallLists(left, right []specs.LinuxSyscall, leftDef, rightDef *claus
 			case summarized[name]:
 				return syscallVerdict{
 					done: true, equal: slices.Equal(leftLoaded[name], rightLoaded[name]),
-					left: nil, right: nil,
 				}
 			case ordered[name] != nil && !leftOrder.sameGroups(rightOrder, name, ordered[name]):
 				return syscallVerdict{
-					done: true, equal: false,
+					done: true,
 					left: leftOrder.entries(name), right: rightOrder.entries(name),
 				}
 			default:
-				return syscallVerdict{done: false, equal: false, left: nil, right: nil}
+				return syscallVerdict{}
 			}
 		},
 	)
@@ -362,7 +356,7 @@ func changedSyscall(
 	}
 
 	if equal {
-		return SyscallChange{Name: "", Left: nil, Right: nil}, false
+		return SyscallChange{}, false
 	}
 
 	return SyscallChange{
@@ -435,27 +429,26 @@ func buildSyscallMap(
 
 	for _, syscall := range syscallsOfRules(rules, def) {
 		for _, name := range syscall.Names {
-			result[name] = append(result[name], SyscallEntry{
-				Name:     name,
-				Action:   syscall.Action,
-				ErrnoRet: syscall.ErrnoRet,
-				Args:     syscall.Args,
-			})
+			result[name] = append(result[name], syscallEntry(name, syscall))
 		}
 	}
 
 	return result
 }
 
+// syscallEntry returns the rule of an entry the merge emits as the entry
+// of the syscall name.
+func syscallEntry(name string, syscall specs.LinuxSyscall) SyscallEntry {
+	return SyscallEntry{Name: name, SyscallDetail: SyscallDetail{
+		Action: syscall.Action, ErrnoRet: syscall.ErrnoRet, Args: syscall.Args,
+	}}
+}
+
 func entriesToDetails(entries []SyscallEntry) []SyscallDetail {
 	details := make([]SyscallDetail, 0, len(entries))
 
 	for _, entry := range entries {
-		details = append(details, SyscallDetail{
-			Action:   entry.Action,
-			ErrnoRet: entry.ErrnoRet,
-			Args:     entry.Args,
-		})
+		details = append(details, entry.SyscallDetail)
 	}
 
 	return details

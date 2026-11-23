@@ -222,7 +222,13 @@ limitations under the License.
 // input handles filesystem rights but they share none, so that listing
 // refer keeps it denied; a kernel at ABIV1 knows no refer right and denies
 // every such move anyway. [Options.Downgrade] returns another policy that a
-// kernel at a given version loads.
+// kernel at a given version loads; for an Intersect result it can deny what
+// Intersect of the downgraded inputs permits (see [Intersect]).
+//
+// A Profile expresses the filesystem and network access rights and the IPC
+// scopes. The rest of the Landlock interface is out of scope: the
+// capability and namespace permissions and their rule types ([ABIV12]),
+// the quiet masks, and the flags of landlock_restrict_self.
 //
 // A version newer than [LatestABIVersion] is read as LatestABIVersion,
 // since versions are cumulative, so a profile is never refused because the

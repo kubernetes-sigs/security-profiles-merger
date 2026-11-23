@@ -157,6 +157,47 @@ func TestIntersectKeepsReferThroughDowngrade(t *testing.T) {
 		fsProfile(fsRights{landlock.FSAccessIOCTLDev}))
 }
 
+// An intersection downgraded can deny what the intersection of the
+// downgraded inputs permits, as the Intersect documentation says: the
+// input handling only truncate stops handling filesystem rights below
+// ABIV3, so it no longer takes the refer grant away, while the result
+// downgraded still handles refer without a rule granting it.
+func TestIntersectDowngradedDeniesMore(t *testing.T) {
+	t.Parallel()
+
+	refer := fsRights{landlock.FSAccessRefer}
+	grantsRefer := fsProfile(refer, landlock.PathRule{Path: "/x", AccessFS: refer})
+	truncateOnly := fsProfile(fsRights{landlock.FSAccessTruncate})
+
+	result := assertMergeFormat(t, "Intersect", landlock.Intersect,
+		"Profile{fs:refer,truncate}", grantsRefer, truncateOnly)
+
+	downgrade := landlock.Options{ABI: landlock.ABIV2}.Downgrade
+
+	downgraded, err := downgrade(result)
+	if err != nil {
+		t.Fatalf("Downgrade(result): %v", err)
+	}
+
+	if got, want := downgraded.String(), "Profile{fs:refer}"; got != want {
+		t.Errorf("Downgrade(result) = %s, want %s", got, want)
+	}
+
+	inputs := make([]*landlock.Profile, 0, 2)
+
+	for _, input := range []*landlock.Profile{grantsRefer, truncateOnly} {
+		each, err := downgrade(input)
+		if err != nil {
+			t.Fatalf("Downgrade(%s): %v", input, err)
+		}
+
+		inputs = append(inputs, each)
+	}
+
+	assertMergeFormat(t, "Intersect of the downgraded inputs", landlock.Intersect,
+		"Profile{fs:refer /x(refer)}", inputs...)
+}
+
 // A union must keep a refer grant that one input has when the other input
 // denies refer by default.
 func TestUnionKeepsReferGrant(t *testing.T) {

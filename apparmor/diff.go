@@ -122,7 +122,6 @@ func Diff(left, right *Profile) (*ProfileDiff, error) {
 	populateEmpty(normRight)
 
 	diff := &ProfileDiff{
-		Equal:        false,
 		Executable:   diffExecutables(normLeft, normRight),
 		Filesystem:   diffFilesystem(normLeft, normRight),
 		Network:      diffNetwork(normLeft, normRight),
@@ -174,7 +173,7 @@ func diffNetwork(left, right *Profile) *NetworkDiff {
 		return nil
 	}
 
-	network := &NetworkDiff{AllowRaw: rawDiff, Protocols: nil}
+	network := &NetworkDiff{AllowRaw: rawDiff}
 
 	if tcpDiff != nil || udpDiff != nil {
 		network.Protocols = &AllowedProtocolsDiff{AllowTCP: tcpDiff, AllowUDP: udpDiff}

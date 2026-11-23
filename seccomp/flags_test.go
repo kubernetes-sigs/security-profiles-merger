@@ -140,6 +140,31 @@ func TestMergeFlagsByPolarity(t *testing.T) {
 			wantUnion:     flags{spec},
 		},
 		{
+			// The baseline sets a list without SPEC_ALLOW, which the
+			// intersection keeps rather than take the flag from the other.
+			name:          "a baseline's empty list keeps a loosening flag off",
+			left:          flags{},
+			right:         flags{spec},
+			wantIntersect: flags{},
+			wantUnion:     flags{spec},
+		},
+		{
+			// A baseline without a list leaves SPEC_ALLOW on, so the
+			// intersection leaves it to the runtime as well.
+			name:          "a baseline without a list keeps the runtime default",
+			left:          nil,
+			right:         flags{spec},
+			wantIntersect: nil,
+			wantUnion:     flags{spec},
+		},
+		{
+			name:          "the merged flags are sorted",
+			left:          flags{spec, log},
+			right:         flags{log, spec},
+			wantIntersect: flags{log, spec},
+			wantUnion:     flags{log, spec},
+		},
+		{
 			// A list cannot name one flag and leave another to the runtime,
 			// so the intersection names SPEC_ALLOW next to the other flag.
 			name:          "the runtime default is named next to a flag",

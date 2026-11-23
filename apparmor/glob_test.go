@@ -19,6 +19,7 @@ package apparmor_test
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -732,30 +733,33 @@ func TestGlobTooManyAlternatives(t *testing.T) {
 func assertGlobIntersect(t *testing.T, left, right, want []string) {
 	t.Helper()
 
-	leftProfile := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: left,
-		},
-	}
+	assertGlobMerge(t, apparmor.Intersect, left, right, want)
+}
 
-	rightProfile := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: right,
-		},
-	}
+func assertGlobUnion(t *testing.T, left, right, want []string) {
+	t.Helper()
 
-	result, err := apparmor.Intersect(leftProfile, rightProfile)
+	assertGlobMerge(t, apparmor.Union, left, right, want)
+}
+
+// assertGlobMerge merges two executable lists and compares the result with
+// want in any order, as every merge result is sorted.
+func assertGlobMerge(
+	t *testing.T,
+	merge func(...*apparmor.Profile) (*apparmor.Profile, error),
+	left, right, want []string,
+) {
+	t.Helper()
+
+	result, err := merge(execProfile(left...), execProfile(right...))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	slices.Sort(want)
+	want = slices.Sorted(slices.Values(want))
 
 	if !slices.Equal(result.Executable.AllowedExecutables, want) {
-		t.Errorf(
-			"got %v, want %v",
-			result.Executable.AllowedExecutables, want,
-		)
+		t.Errorf("got %v, want %v", result.Executable.AllowedExecutables, want)
 	}
 }
 
@@ -766,34 +770,6 @@ func assertFilesystemGlobIntersect(
 	t.Helper()
 
 	assertFilesystemGlobMerge(t, apparmor.Intersect, left, right, want)
-}
-
-func assertGlobUnion(t *testing.T, left, right, want []string) {
-	t.Helper()
-
-	leftProfile := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: left,
-		},
-	}
-
-	rightProfile := &apparmor.Profile{
-		Executable: &apparmor.ExecutableRules{
-			AllowedExecutables: right,
-		},
-	}
-
-	result, err := apparmor.Union(leftProfile, rightProfile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !slices.Equal(result.Executable.AllowedExecutables, want) {
-		t.Errorf(
-			"got %v, want %v",
-			result.Executable.AllowedExecutables, want,
-		)
-	}
 }
 
 func assertFilesystemGlobUnion(
@@ -858,5 +834,609 @@ func assertFilesystemGlobMerge(
 			"ReadWritePaths = %v, want %v",
 			result.Filesystem.ReadWritePaths, want.ReadWritePaths,
 		)
+	}
+}
+
+func fsProfile(rules *apparmor.FilesystemRules) *apparmor.Profile {
+	return &apparmor.Profile{
+		Filesystem: rules,
+	}
+}
+
+func execProfile(paths ...string) *apparmor.Profile {
+	return &apparmor.Profile{
+		Executable: &apparmor.ExecutableRules{
+			AllowedExecutables: paths,
+		},
+	}
+}
+
+func readOnly(paths ...string) *apparmor.Profile {
+	return fsProfile(&apparmor.FilesystemRules{
+		ReadOnlyPaths: paths,
+	})
+}
+
+func readWrite(paths ...string) *apparmor.Profile {
+	return fsProfile(&apparmor.FilesystemRules{
+		ReadWritePaths: paths,
+	})
+}
+
+func mergeFs(
+	t *testing.T,
+	mergeFn func(...*apparmor.Profile) (*apparmor.Profile, error),
+	profiles ...*apparmor.Profile,
+) *apparmor.FilesystemRules {
+	t.Helper()
+
+	result, err := mergeFn(profiles...)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.Filesystem == nil {
+		return &apparmor.FilesystemRules{}
+	}
+
+	return result.Filesystem
+}
+
+func TestUnionKeepsBroaderGlob(t *testing.T) {
+	t.Parallel()
+
+	// "/etc/*" must not prune "/etc/**": matching one pattern string against
+	// the other pattern's regex says nothing about language inclusion.
+	for _, order := range [][]*apparmor.Profile{
+		{readWrite("/etc/*"), readWrite("/etc/**")},
+		{readWrite("/etc/**"), readWrite("/etc/*")},
+		{readWrite(), readWrite("/etc/*", "/etc/**")},
+	} {
+		got := mergeFs(t, apparmor.Union, order...).ReadWritePaths
+		if want := []string{"/etc/*", "/etc/**"}; !slices.Equal(got, want) {
+			t.Errorf("Union rw = %v, want %v", got, want)
+		}
+	}
+
+	got := mergeFs(t, apparmor.Union, readWrite("/etc/*"), readOnly("/etc/**"))
+	if !slices.Equal(got.ReadWritePaths, []string{"/etc/*"}) ||
+		!slices.Equal(got.ReadOnlyPaths, []string{"/etc/**"}) {
+		t.Errorf("Union = %s, want rw:/etc/* and r:/etc/**", got)
+	}
+}
+
+func TestIntersectDoubleStarNarrowsSamePrefix(t *testing.T) {
+	t.Parallel()
+
+	got := mergeFs(
+		t, apparmor.Intersect, readOnly("/etc/**"), readOnly("/etc/*.conf"),
+	).ReadOnlyPaths
+	if want := []string{"/etc/*.conf"}; !slices.Equal(got, want) {
+		t.Errorf("Intersect = %v, want %v", got, want)
+	}
+
+	result, err := apparmor.Intersect(execProfile("/etc/**"), execProfile("/etc/*"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := result.Executable.AllowedExecutables; !slices.Equal(got, []string{"/etc/*"}) {
+		t.Errorf("Intersect exec = %v, want [/etc/*]", got)
+	}
+}
+
+func TestEscapedLiteralMatchesAsFileName(t *testing.T) {
+	t.Parallel()
+
+	// "/etc/\*" names the single file "/etc/*", which "?" covers and "??"
+	// does not.
+	got := mergeFs(t, apparmor.Intersect, readOnly(`/etc/\*`), readOnly("/etc/??")).ReadOnlyPaths
+	if len(got) != 0 {
+		t.Errorf("Intersect with ?? = %v, want none", got)
+	}
+
+	got = mergeFs(t, apparmor.Intersect, readOnly(`/etc/\*`), readOnly("/etc/?")).ReadOnlyPaths
+	if want := []string{`/etc/\*`}; !slices.Equal(got, want) {
+		t.Errorf("Intersect with ? = %v, want %v", got, want)
+	}
+
+	got = mergeFs(t, apparmor.Union, readOnly(`/etc/\*`), readOnly("/etc/??")).ReadOnlyPaths
+	if want := []string{"/etc/??", `/etc/\*`}; !slices.Equal(got, want) {
+		t.Errorf("Union = %v, want %v", got, want)
+	}
+}
+
+// TestGlobsMatchBytes covers AppArmor's byte-oriented matching: "?" and a
+// class match one byte, so a multibyte character takes one per byte, and a
+// class member "é" stands for its two bytes separately.
+func TestGlobsMatchBytes(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		glob, literal string
+		matches       bool
+	}{
+		{"/tmp/[é]", "/tmp/é", false},
+		{"/tmp/[é]", "/tmp/\xc3", true},
+		{"/tmp/[é]", "/tmp/\xa9", true},
+		{"/tmp/[é]", "/tmp/Ã", false},
+		{"/tmp/[é][é]", "/tmp/é", true},
+		{"/tmp/?", "/tmp/é", false},
+		{"/tmp/??", "/tmp/é", true},
+		{"/tmp/?", "/tmp/\xe9", true},
+		{"/tmp/[^a]", "/tmp/é", false},
+		{"/tmp/*", "/tmp/é", true},
+	} {
+		got := mergeFs(
+			t,
+			apparmor.Intersect,
+			readOnly(test.glob),
+			readOnly(test.literal),
+		).ReadOnlyPaths
+		if matched := slices.Equal(got, []string{test.literal}); matched != test.matches {
+			t.Errorf(
+				"Intersect(%q, %q) = %q, want match %v",
+				test.glob,
+				test.literal,
+				got,
+				test.matches,
+			)
+		}
+
+		got = mergeFs(t, apparmor.Union, readOnly(test.glob), readOnly(test.literal)).ReadOnlyPaths
+		if pruned := len(got) == 1; pruned != test.matches {
+			t.Errorf(
+				"Union(%q, %q) = %q, want pruned %v",
+				test.glob,
+				test.literal,
+				got,
+				test.matches,
+			)
+		}
+	}
+}
+
+// TestClassBangIsAMember covers "[!a]": AppArmor passes classes to its regex
+// engine verbatim, where only "^" negates, so the class holds "!" and "a".
+func TestClassBangIsAMember(t *testing.T) {
+	t.Parallel()
+
+	got := mergeFs(t, apparmor.Intersect, readOnly("/tmp/[!a]"), readOnly("/tmp/b")).ReadOnlyPaths
+	if len(got) != 0 {
+		t.Errorf("Intersect = %q, want nothing", got)
+	}
+
+	got = mergeFs(t, apparmor.Intersect,
+		readOnly("/tmp/[!a]"), readOnly("/tmp/!", "/tmp/a", "/tmp/b")).ReadOnlyPaths
+	if want := []string{"/tmp/!", "/tmp/a"}; !slices.Equal(got, want) {
+		t.Errorf("Intersect = %q, want %q", got, want)
+	}
+
+	got = mergeFs(t, apparmor.Union, readOnly("/tmp/[!a]"), readOnly("/tmp/b")).ReadOnlyPaths
+	if want := []string{"/tmp/[!a]", "/tmp/b"}; !slices.Equal(got, want) {
+		t.Errorf("Union = %q, want %q", got, want)
+	}
+}
+
+// TestDoubleStarNarrowsOnlyGlobsBelowItsPrefix covers "<prefix>**", which
+// requires a character after the prefix: a glob that can match the prefix
+// itself is not narrowed by it, and neither is anything by a relative "**",
+// nor a glob whose literal prefix spells "//" with an escaped slash.
+func TestDoubleStarNarrowsOnlyGlobsBelowItsPrefix(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		base, glob string
+		narrowed   bool
+	}{
+		{"/etc/**", "/etc/{,**}", false},
+		{"/etc/**", "/etc/{,foo}", false},
+		{"/etc/**", "/etc/{**,}", false},
+		{"/etc/**", "/etc/{a,*}", false},
+		{"/**", "/{,etc}", false},
+		{"/etc/**", "/etc/{a,b}", true},
+		{"/etc/**", "/etc/**foo", true},
+		{"/etc/**", "/etc/*.conf", true},
+		{"/**", "/etc/{,**}", true},
+		{"/etc/**", "/etc/sub/{,*}", true},
+		{`/etc\/**`, "/etc/*", true},
+		// A run of two or more stars is one "**", so it narrows what
+		// "/etc/**" narrows: the extra stars add nothing to the names the
+		// run matches, and a baseline is not meant to change what a merge
+		// keeps because someone typed one star too many.
+		{"/etc/***", "/etc/*", true},
+		{"/etc/**/", "/etc/*/", false},
+		// A "**" that does not start a component is no "<prefix>**":
+		// "/etc/foo**" matches no name under "/etc/" outside "foo".
+		{"/etc/foo**", "/etc/bar*", false},
+		{"/etc/foo**", "/etc/*.conf", false},
+		{"/etc/**", `/etc/\/foo/*`, false},
+		{"/etc/**", `/etc/foo/\/*`, false},
+		{"/**", `/etc/\/*`, false},
+	} {
+		want := []string(nil)
+		if test.narrowed {
+			want = []string{test.glob}
+		}
+
+		for _, order := range [][2]string{{test.base, test.glob}, {test.glob, test.base}} {
+			got := mergeFs(
+				t,
+				apparmor.Intersect,
+				readOnly(order[0]),
+				readOnly(order[1]),
+			).ReadOnlyPaths
+			if !slices.Equal(got, want) {
+				t.Errorf("Intersect(ro %q, ro %q) = %q, want %q", order[0], order[1], got, want)
+			}
+
+			result, err := apparmor.Intersect(execProfile(order[0]), execProfile(order[1]))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if got := result.Executable.AllowedExecutables; !slices.Equal(got, want) {
+				t.Errorf("Intersect(exec %q, exec %q) = %q, want %q", order[0], order[1], got, want)
+			}
+		}
+	}
+}
+
+// TestUnionPromotedLiteralLeavesWriteOnly covers a write-only literal that a
+// read glob of the other side covers: it becomes read-write, and must not
+// stay write-only as well, which Validate would reject. A profile's own glob
+// does not promote its literals, so Union(p, p) keeps p as written.
+func TestUnionPromotedLiteralLeavesWriteOnly(t *testing.T) {
+	t.Parallel()
+
+	globProfile := fsProfile(&apparmor.FilesystemRules{
+		ReadOnlyPaths: []string{"/etc/*"},
+	})
+	literalProfile := fsProfile(&apparmor.FilesystemRules{
+		WriteOnlyPaths: []string{"/etc/passwd"},
+	})
+	both := fsProfile(&apparmor.FilesystemRules{
+		ReadOnlyPaths:  []string{"/etc/*"},
+		WriteOnlyPaths: []string{"/etc/passwd"},
+	})
+
+	for _, test := range []struct {
+		left, right *apparmor.Profile
+		want        string
+	}{
+		{globProfile, literalProfile, "Profile{r:/etc/* rw:/etc/passwd}"},
+		{literalProfile, globProfile, "Profile{r:/etc/* rw:/etc/passwd}"},
+		{both, both, "Profile{r:/etc/* w:/etc/passwd}"},
+	} {
+		result, err := apparmor.Union(test.left, test.right)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		err = apparmor.Validate(result)
+		if err != nil {
+			t.Errorf("Union result is invalid: %v", err)
+		}
+
+		if got := result.String(); got != test.want {
+			t.Errorf("Union = %s, want %s", got, test.want)
+		}
+	}
+}
+
+// TestSingleIntersectDropsUnusableGlobs covers Intersect(p), which must give
+// what Intersect(p, p) gives: a glob that matches nothing grants nothing.
+func TestSingleIntersectDropsUnusableGlobs(t *testing.T) {
+	t.Parallel()
+
+	tooComplex := "/etc/{" + strings.Repeat("a,", 100) + "b}"
+	profile := &apparmor.Profile{
+		Executable: &apparmor.ExecutableRules{
+			AllowedExecutables: []string{tooComplex, "/bin/sh"},
+			AllowedLibraries:   []string{"/lib/[a-]"},
+		},
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths:  []string{tooComplex, "/etc/passwd"},
+			WriteOnlyPaths: []string{"/etc/{a}"},
+			ReadWritePaths: []string{"/tmp/**"},
+		},
+	}
+
+	single, err := apparmor.Intersect(profile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	double, err := apparmor.Intersect(profile, profile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !reflect.DeepEqual(single, double) {
+		t.Errorf("Intersect(p) = %s, Intersect(p, p) = %s", single, double)
+	}
+
+	want := "Profile{exec:/bin/sh r:/etc/passwd rw:/tmp/** net:!raw,!tcp,!udp caps:none}"
+	if got := single.String(); got != want {
+		t.Errorf("Intersect(p) = %s, want %s", got, want)
+	}
+}
+
+func TestTrailingSlashDistinguishesDirectoryRules(t *testing.T) {
+	t.Parallel()
+
+	got := mergeFs(t, apparmor.Union, readOnly("/var/log/"), readOnly("/var/log/**")).ReadOnlyPaths
+	if want := []string{"/var/log/", "/var/log/**"}; !slices.Equal(got, want) {
+		t.Errorf("Union = %v, want %v", got, want)
+	}
+
+	profile := fsProfile(&apparmor.FilesystemRules{
+		ReadOnlyPaths:  []string{"/var/log/"},
+		ReadWritePaths: []string{"/var/log"},
+	})
+
+	err := apparmor.Validate(profile)
+	if err != nil {
+		t.Errorf("Validate rejected distinct file and directory rules: %v", err)
+	}
+
+	diff, err := apparmor.Diff(readOnly("/var/log/"), readOnly("/var/log"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if diff.Equal {
+		t.Error("Diff treats /var/log/ and /var/log as equal")
+	}
+
+	got = mergeFs(
+		t,
+		apparmor.Intersect,
+		readOnly("/var/log//"),
+		readOnly("/var/log/"),
+	).ReadOnlyPaths
+	if want := []string{"/var/log/"}; !slices.Equal(got, want) {
+		t.Errorf("Intersect = %v, want %v", got, want)
+	}
+}
+
+func TestStarRequiresOneCharacterAtComponentStart(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name    string
+		literal string
+		glob    string
+		matches bool
+	}{
+		{"root not matched by /*", "/", "/*", false},
+		{"directory not matched by its **", "/etc/", "/etc/**", false},
+		{"directory not matched by its *", "/etc/", "/etc/*", false},
+		{"file matched by **", "/etc/x", "/etc/**", true},
+		{"nested file matched by **", "/etc/a/b", "/etc/**", true},
+		{"file matched by *", "/etc/x", "/etc/*", true},
+		{"star mid component may be empty", "/etc/x", "/etc/x*", true},
+		{"double star mid component may be empty", "/etc/x", "/etc/x**", true},
+		{"star before suffix may be empty", "/etc/.conf", "/etc/*.conf", true},
+		{"double star before suffix may be empty", "/etc/foo", "/etc/**foo", true},
+		{"star before comma may be empty", "/etc/", "/etc/{*,a}", true},
+		{"star before brace may be empty", "/etc/", "/etc/{a,*}", true},
+		{"star before slash needs a character", "/etc//x", "/etc/*/x", false},
+		{"star run at the end needs a character", "/etc/", "/etc/***", false},
+		{"escaped slash counts as a separator", "/etc/", `/etc\/*`, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := mergeFs(
+				t,
+				apparmor.Intersect,
+				readOnly(test.literal),
+				readOnly(test.glob),
+			).ReadOnlyPaths
+
+			if matched := len(got) == 1; matched != test.matches {
+				t.Errorf(
+					"%q vs %q: matched = %v, want %v",
+					test.literal,
+					test.glob,
+					matched,
+					test.matches,
+				)
+			}
+		})
+	}
+}
+
+func TestOversizeGlobDroppedOnIntersection(t *testing.T) {
+	t.Parallel()
+
+	long := "/" + strings.Repeat("{a,b}", 51) + "/*"
+
+	for _, right := range []*apparmor.Profile{readOnly(long), readOnly("/**")} {
+		if got := mergeFs(
+			t,
+			apparmor.Intersect,
+			readOnly(long),
+			right,
+		).ReadOnlyPaths; len(
+			got,
+		) != 0 {
+			t.Errorf("Intersect kept oversize glob: %d entries", len(got))
+		}
+	}
+
+	exec := execProfile(long)
+
+	result, err := apparmor.Intersect(exec, exec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := result.Executable.AllowedExecutables; len(got) != 0 {
+		t.Errorf("Intersect kept oversize executable glob: %v", got)
+	}
+
+	if got := mergeFs(
+		t,
+		apparmor.Union,
+		readOnly(long),
+		readOnly("/**"),
+	).ReadOnlyPaths; len(
+		got,
+	) != 2 {
+		t.Errorf("Union dropped oversize glob: %v", got)
+	}
+}
+
+func TestValidateNormalizesPathsForDuplicateChecks(t *testing.T) {
+	t.Parallel()
+
+	profile := fsProfile(&apparmor.FilesystemRules{
+		ReadOnlyPaths:  []string{"/etc/passwd"},
+		ReadWritePaths: []string{"/etc//passwd"},
+	})
+
+	err := apparmor.Validate(profile)
+	if !errors.Is(err, apparmor.ErrDuplicatePath) {
+		t.Errorf("Validate = %v, want ErrDuplicatePath", err)
+	}
+}
+
+func TestValidateStrictNormalizesExecutablePaths(t *testing.T) {
+	t.Parallel()
+
+	profile := execProfile("/bin/sh", "/bin//sh")
+
+	err := apparmor.ValidateStrict(profile)
+	if !errors.Is(err, apparmor.ErrDuplicateExecutablePath) {
+		t.Errorf("ValidateStrict = %v, want ErrDuplicateExecutablePath", err)
+	}
+}
+
+func TestIsGlobPatternSyntax(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"/usr/bin/bash", false},
+		{"/usr/lib/**", true},
+		{"/usr/lib/*.so", true},
+		{"/dev/tty?", true},
+		{"/lib/[abc].so", true},
+		{"/lib/[^a].so", true},
+		{"/etc/{a,b}/x", true},
+		{"/etc/{a,{b,c}}/x", true},
+		{`/etc/\*literal`, false},
+		{`/etc/\[literal\]`, false},
+		{`/etc/\x2a`, false},
+		{`/etc/a\\`, false},
+		{"/etc/a,b", false},
+		// apparmor_parser rejects these, and so do ValidateArtifact and
+		// ValidateStrict; the merge treats them as patterns matching
+		// nothing.
+		{`/etc/\[literal]`, true},
+		{"/etc/[unbalanced", true},
+		{"/etc/{unbalanced", true},
+		{"/etc/unbalanced}", true},
+		{`/etc/trailing\`, true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.path, func(t *testing.T) {
+			t.Parallel()
+
+			if got := apparmor.IsGlobPattern(test.path); got != test.want {
+				t.Errorf("IsGlobPattern(%q) = %v, want %v", test.path, got, test.want)
+			}
+		})
+	}
+}
+
+// intersectReadOnly intersects two read-only path lists and returns the
+// surviving paths.
+func intersectReadOnly(t *testing.T, left, right []string) []string {
+	t.Helper()
+
+	result, err := apparmor.Intersect(readOnly(left...), readOnly(right...))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	return result.Filesystem.ReadOnlyPaths
+}
+
+func TestGlobMatchingSyntax(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		pattern string
+		literal string
+		matches bool
+	}{
+		{"nested alternation", "/etc/{a,{b,c}}/x", "/etc/b/x", true},
+		{"nested alternation miss", "/etc/{a,{b,c}}/x", "/etc/d/x", false},
+		{"alternation with glob inside", "/{usr/,}lib/*.so", "/lib/libc.so", true},
+		{"alternation with glob inside usr", "/{usr/,}lib/*.so", "/usr/lib/libc.so", true},
+		{"character class", "/lib/[abc].so", "/lib/a.so", true},
+		{"character class miss", "/lib/[abc].so", "/lib/d.so", false},
+		{"character range", "/lib/lib[a-c].so", "/lib/libb.so", true},
+		{"negated class", "/lib/[^a].so", "/lib/b.so", true},
+		{"negated class miss", "/lib/[^a].so", "/lib/a.so", false},
+		{"bang is a class member", "/lib/[!a].so", "/lib/!.so", true},
+		{"bang does not negate", "/lib/[!a].so", "/lib/b.so", false},
+		{"escaped letter in class is literal", `/lib/[\d].so`, "/lib/d.so", true},
+		{"escaped letter in class is not a regex class", `/lib/[\d].so`, "/lib/1.so", false},
+		{"class with escaped bracket member", `/lib/[\]a].so`, `/lib/\].so`, true},
+		{"class with leading dash member", "/lib/[-a].so", "/lib/-.so", true},
+		{"class inside alternation", "/x/{[a,b],c}", "/x/a", true},
+		{"class inside alternation second branch", "/x/{[a,b],c}", "/x/c", true},
+		{"class inside alternation miss", "/x/{[a,b],c}", "/x/d", false},
+		{"brace inside class", "/x/[}]", `/x/\}`, true},
+		{"escaped plain character", `/etc/\q*`, "/etc/qbc", true},
+		{"escape sequence", `/etc/\a*`, "/etc/\abc", true},
+		{"hex escape", `/etc/\x61*`, "/etc/abc", true},
+		{"octal escape", `/etc/\141*`, "/etc/abc", true},
+		{"decimal escape", `/etc/\d97*`, "/etc/abc", true},
+		{"escaped literal matched by its file name", "/etc/a*", `/etc/\x61bc`, true},
+		{"escaped star does not glob", `/etc/\*/*`, "/etc/a/foo", false},
+		{"question mark", "/dev/tty?", "/dev/tty1", true},
+		{"question mark no slash", "/dev/tty?", "/dev/tty/", false},
+		{"star no slash", "/var/*", "/var/log/syslog", false},
+		{"double star slash", "/var/**", "/var/log/syslog", true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := intersectReadOnly(t, []string{test.pattern}, []string{test.literal})
+			matched := slices.Contains(got, test.literal)
+
+			if matched != test.matches {
+				t.Errorf(
+					"%q vs %q: matched = %v, want %v (got %v)",
+					test.pattern, test.literal, matched, test.matches, got,
+				)
+			}
+		})
+	}
+}
+
+func TestGlobAlternativeBudget(t *testing.T) {
+	t.Parallel()
+
+	const groups = 60
+
+	pattern := "/etc/{" + strings.Repeat("{a,b},", groups-1) + "{a,b}}"
+
+	// 60 groups of 2 plus the outer 60 exceed the alternative budget, so the
+	// pattern never matches and the literal is dropped on intersection.
+	got := intersectReadOnly(t, []string{pattern}, []string{"/etc/a"})
+	if len(got) != 0 {
+		t.Errorf("expected no match for over-budget pattern, got %v", got)
 	}
 }

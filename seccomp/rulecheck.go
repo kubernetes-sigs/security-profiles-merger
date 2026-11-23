@@ -192,11 +192,9 @@ func (c *ruleChecker) record(idx int, name string, next clause) {
 	state, ok := c.states[name]
 	if !ok {
 		state = &syscallRuleState{
-			trackers:    [2]*conflictTracker{newConflictTracker(), nil},
-			recorded:    0,
-			conditional: nil,
-			first:       next,
-			mixedAt:     -1,
+			trackers: [2]*conflictTracker{newConflictTracker(), nil},
+			first:    next,
+			mixedAt:  -1,
 		}
 
 		if c.truncate {
