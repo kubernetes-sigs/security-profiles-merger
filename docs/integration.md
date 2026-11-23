@@ -503,10 +503,13 @@ what it is given at face value.
   drops an architecture, and `Union`, which cannot drop one, refuses with
   `ErrLostRules`. `ValidateArtifact` reports an input that has the form as
   written, even where the merges, which drop rules on syscalls no covered
-  architecture has, accept it. An allowlist is not affected. See
+  architecture has, accept it. An allowlist is not affected. libseccomp
+  2.6.2 fixed the defect
+  ([GHSA-q75f-27j4-2h7j](https://github.com/seccomp/libseccomp/security/advisories/GHSA-q75f-27j4-2h7j)),
+  but a node may link an earlier release. See
   [Architectures](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Architectures).
 - **seccomp: libseccomp releases.** The merges are sound for a node linking
-  libseccomp 2.5.4 to 2.6.1, the releases checked; 2.5.2 is not supported,
+  libseccomp 2.5.4 to 2.6.2, the releases checked; 2.5.2 is not supported,
   and on a later release a rule on a syscall only that release knows is not
   checked for lost rules.
 - **Landlock: refer.** The kernel allows a move or link into another

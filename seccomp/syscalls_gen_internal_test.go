@@ -33,7 +33,7 @@ import (
 // syscallTableVersions are the libseccomp releases syscallPlacements covers,
 // each read from the syscalls.csv it ships in its source tree. Keep it in
 // step with SYSCALL_CSVS in the Makefile.
-var syscallTableVersions = []string{"2.5.2", "2.5.4", "2.5.5", "2.6.0", "2.6.1"}
+var syscallTableVersions = []string{"2.5.2", "2.5.4", "2.5.5", "2.6.0", "2.6.1", "2.6.2"}
 
 // csvColumns maps a column of libseccomp's syscalls.csv to the
 // architectures that share its numbers: the little- and big-endian variants
@@ -288,7 +288,7 @@ limitations under the License.
 package seccomp
 
 // syscallPlacements maps every syscall name libseccomp 2.5.2, 2.5.4, 2.5.5,
-// 2.6.0 or 2.6.1 knows to where those releases place a rule on it, per
-// architecture (see syscallPlacement). Regenerate it with make
+// 2.6.0, 2.6.1 or 2.6.2 knows to where those releases place a rule on it,
+// per architecture (see syscallPlacement). Regenerate it with make
 // verify-syscalls.
 `
