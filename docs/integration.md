@@ -41,9 +41,9 @@ What a runtime gets wrong most easily, each explained further down:
   `specs.Spec`: marshalling the spec drops an empty `"flags": []`, and the
   runtime then sets `SECCOMP_FILTER_FLAG_SPEC_ALLOW`
   ([Extra steps after Intersect](#extra-steps-after-intersect)).
-- **Check `landlock.LoweredRulePaths`** of a Landlock result and open each
-  path it reports beneath its `Ancestor` without crossing a symlink or a
-  mount (where `InRoot` is set, only inside the root), or refuse the
+- **Merge Landlock profiles with `landlock.IntersectLowered`** and open
+  each path it reports beneath its `Ancestor` without crossing a symlink
+  or a mount (where `InRoot` is set, only inside the root), or refuse the
   profile
   ([Landlock: lowered rule paths](#landlock-lowered-rule-paths)).
 - **Check the Landlock result against the node's ABI** with
@@ -274,7 +274,7 @@ for that too.
 | Package | Before loading the result |
 |---------|---------------------------|
 | `apparmor` | Render the profile text yourself, as the [checklist](#rendering-the-result) below says: `Profile.String` is for people, not for apparmor_parser |
-| `landlock` | Check the result with `landlock.Options{ABI: nodeABI}.Validate`. Check each of `LoweredRulePaths` (see [below](#landlock-lowered-rule-paths)). Map the rights to the kernel's bits as the [checklist](#rendering-the-result) below says. A result that handles and scopes nothing restricts nothing and the kernel refuses to load it: apply no ruleset. After `Intersect` that happens only when no input handles or scopes anything, which `ValidateArtifact` refuses in an artifact |
+| `landlock` | Check the result with `landlock.Options{ABI: nodeABI}.Validate`. Merge with `IntersectLowered` and open each path it reports (see [below](#landlock-lowered-rule-paths)). Map the rights to the kernel's bits as the [checklist](#rendering-the-result) below says. A result that handles and scopes nothing restricts nothing and the kernel refuses to load it: apply no ruleset. After `Intersect` that happens only when no input handles or scopes anything, which `ValidateArtifact` refuses in an artifact |
 | `seccomp` | Run the merge on the node that loads the result, or name that node's architecture with `seccomp.ForArch` (see [What the models leave out](#what-the-models-leave-out)). Keep an empty `Flags` list of the result as `"flags": []`: `json.Marshal` leaves it out of a `specs.LinuxSeccomp`, and runc and crun then set `SECCOMP_FILTER_FLAG_SPEC_ALLOW` (see [Flags](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Flags)). `seccomp.Marshal` writes the profile alone that way. A runtime that sets the result as `spec.Linux.Seccomp` and marshals the whole `specs.Spec` loses the empty list all the same, so where the result's `Flags` is empty but not nil it writes the `linux.seccomp` member of `config.json` from `seccomp.Marshal` itself, for example by replacing that member of the marshaled spec with the bytes `Marshal` returns |
 
 ### Rendering the result
@@ -539,6 +539,8 @@ comes from the baseline's rule on an ancestor. Where that path is a symlink
 or a bind mount, the kernel binds the rule to whatever it resolves to,
 which the baseline never covered, and the artifact's author chose the path
 (see [Lowered rule paths](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#hdr-Lowered_rule_paths)).
+`landlock.IntersectLowered` returns what `Intersect` returns together with
+these paths.
 
 Open each reported path so that it cannot leave the hierarchy of its
 `Ancestor`, and keep the descriptor through `landlock_add_rule`:
@@ -590,15 +592,12 @@ var isMultiplyLinkedFile func(fd int) bool
 var ruleFDs map[string]int
 -->
 ```go
-effective, err := landlock.Intersect(baseline, artifact)
-// ...
-// An InputError here numbers the inputs as Intersect does, so the baseline
-// is Index 0; a bad effective comes as a *landlock.ResultError, not an
-// InputError.
-lowered, err := landlock.LoweredRulePaths(effective, baseline, artifact)
+// An InputError numbers the inputs, so the baseline is Index 0.
+effective, lowered, err := landlock.IntersectLowered(baseline, artifact)
 if err != nil {
     return err
 }
+// ... check effective, then open the lowered paths:
 for _, each := range lowered {
     rel := strings.TrimPrefix(strings.TrimPrefix(each.Path, each.Ancestor), "/")
     if each.InRoot {
@@ -668,9 +667,11 @@ downgraded result still denies the moves and links an input's `refer`
 denial covers. After `Downgrade`, check the copy with `ValidateBaseline`,
 which reports a copy that handles and scopes nothing (`ErrEmptyRuleset`;
 apply no ruleset then) and, unlike `ValidateArtifact`, does not hold a
-merge result to `MaxArtifactRules`. Compute `LoweredRulePaths` on the copy
-you apply, with the original inputs: the inputs need no downgrade, since a
-lowered grant is a right the copy's own rule carries.
+merge result to `MaxArtifactRules`. The paths `IntersectLowered` reported
+hold for the copy: it carries a subset of the rights at each rule path, so
+each path it lowers is among them, and opening it beneath the `Ancestor`
+reported is at least as strict as its own would be. Skip a path whose rule
+the copy no longer holds.
 
 ## seccomp: the listener
 

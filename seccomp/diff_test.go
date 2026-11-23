@@ -1197,6 +1197,138 @@ func TestDiffReportsWideDefaultErrnoAsWritten(t *testing.T) {
 	}
 }
 
+// TestDiffReportsWideRuleErrnoAsWritten covers a rule errno wider than the
+// 16 bits a runtime loads, which Diff reports as the default's: compared as
+// loaded, shown as written where every entry of the syscall with that
+// action and loaded value writes the same one.
+func TestDiffReportsWideRuleErrnoAsWritten(t *testing.T) {
+	t.Parallel()
+
+	const wide = 99999
+
+	for _, test := range []struct {
+		name string
+		left []specs.LinuxSyscall
+		// want is the diff against a profile whose rule returns errno 5,
+		// and removed the one against a profile without the rule.
+		want, removed string
+	}{
+		{
+			name:    "changed rule",
+			left:    []specs.LinuxSyscall{withErrno(filtered(syscallRead, specs.ActErrno), wide)},
+			want:    "Diff{~read:SCMP_ACT_ERRNO(errno:99999)->SCMP_ACT_ERRNO(errno:5)}",
+			removed: "Diff{-read->SCMP_ACT_ERRNO(errno:99999)}",
+		},
+		{
+			// Values that load alike but differ leave the loaded one.
+			name: "entries writing different values",
+			left: []specs.LinuxSyscall{
+				withErrno(filtered(syscallRead, specs.ActErrno), wide),
+				withErrno(filtered(syscallRead, specs.ActErrno), wide&0xffff),
+			},
+			want:    "Diff{~read:SCMP_ACT_ERRNO(errno:34463)->SCMP_ACT_ERRNO(errno:5)}",
+			removed: "Diff{-read->SCMP_ACT_ERRNO(errno:34463)}",
+		},
+		{
+			// 65537 loads as EPERM, which a merge result spells without an
+			// errno.
+			name:    "wide EPERM",
+			left:    []specs.LinuxSyscall{withErrno(filtered(syscallRead, specs.ActErrno), 65537)},
+			want:    "Diff{~read:SCMP_ACT_ERRNO(errno:65537)->SCMP_ACT_ERRNO(errno:5)}",
+			removed: "Diff{-read->SCMP_ACT_ERRNO(errno:65537)}",
+		},
+	} {
+		left := profileOf(specs.ActAllow, test.left...)
+		right := profileOf(specs.ActAllow, withErrno(filtered(syscallRead, specs.ActErrno), 5))
+
+		diff, err := seccomp.ForArch(specs.ArchX86_64).Diff(left, right)
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+
+		if got := diff.String(); got != test.want {
+			t.Errorf("%s: Diff = %s, want %s", test.name, got, test.want)
+		}
+
+		// The right side loses its rule: Removed is reported as written too.
+		diff, err = seccomp.ForArch(specs.ArchX86_64).Diff(left, profileOf(specs.ActAllow))
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+
+		if got := diff.String(); got != test.removed {
+			t.Errorf("%s: Diff of the removed rule = %s, want %s", test.name, got, test.removed)
+		}
+	}
+}
+
+// TestDiffWideErrnoOfRulesOnDifferentArguments covers two rules of one
+// syscall on different arguments whose errno values load alike but are
+// written differently: neither can be told from the other by its errno, so
+// both show the loaded value, in either order.
+func TestDiffWideErrnoOfRulesOnDifferentArguments(t *testing.T) {
+	t.Parallel()
+
+	one := withErrno(filtered(syscallRead, specs.ActErrno, arg(0, specs.OpEqualTo, 1)), 99999)
+	two := withErrno(filtered(syscallRead, specs.ActErrno, arg(0, specs.OpEqualTo, 2)), 34463)
+
+	const want = "Diff{-read([0]SCMP_CMP_EQ:1)->SCMP_ACT_ERRNO(errno:34463) " +
+		"-read([0]SCMP_CMP_EQ:2)->SCMP_ACT_ERRNO(errno:34463)}"
+
+	for _, entries := range [][]specs.LinuxSyscall{{one, two}, {two, one}} {
+		diff, err := seccomp.ForArch(specs.ArchX86_64).Diff(
+			profileOf(specs.ActAllow, entries...), profileOf(specs.ActAllow),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if got := diff.String(); got != want {
+			t.Errorf("Diff = %s, want %s", got, want)
+		}
+	}
+}
+
+// TestDiffWideErrnoSpelledDifferentlyOnEachSide covers a rule both sides
+// load alike, with errno values written differently that load as one: the
+// rule is unchanged, and a diff whose one change is another rule shows no
+// errno change for it.
+func TestDiffWideErrnoSpelledDifferentlyOnEachSide(t *testing.T) {
+	t.Parallel()
+
+	condition := arg(0, specs.OpEqualTo, 1)
+	left := profileOf(specs.ActAllow,
+		withErrno(filtered(syscallRead, specs.ActErrno, condition), 99999))
+	right := profileOf(specs.ActAllow,
+		withErrno(filtered(syscallRead, specs.ActErrno, condition), 34463),
+		filtered(syscallWrite, specs.ActLog))
+
+	diff, err := seccomp.ForArch(specs.ArchX86_64).Diff(left, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const want = "Diff{+write->SCMP_ACT_LOG}"
+	if got := diff.String(); got != want {
+		t.Errorf("Diff = %s, want %s", got, want)
+	}
+
+	// With the other rule changed instead, both sides show the loaded
+	// value.
+	right = profileOf(specs.ActAllow,
+		withErrno(filtered(syscallRead, specs.ActErrno, condition), 34463),
+		filtered(syscallRead, specs.ActLog))
+
+	diff, err = seccomp.ForArch(specs.ArchX86_64).Diff(left, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := diff.String(); strings.Contains(got, "99999") {
+		t.Errorf("Diff = %s, want the loaded errno 34463 on both sides", got)
+	}
+}
+
 // TestDiffComparesAddOrderWithinSiblingGroups covers a syscall whose order
 // matters for one pair of rules only: moving an unrelated rule between them
 // leaves the pair in its order, which libseccomp builds the same, so the

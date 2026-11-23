@@ -282,7 +282,7 @@ func ExampleValidateArtifact() {
 	// true
 }
 
-func ExampleLoweredRulePaths() {
+func ExampleIntersectLowered() {
 	baseline := &landlock.Profile{
 		HandledAccessFS: []landlock.FSAccessRight{
 			landlock.FSAccessReadFile,
@@ -312,15 +312,10 @@ func ExampleLoweredRulePaths() {
 		}},
 	}
 
-	result, err := landlock.Intersect(baseline, artifact)
-	if err != nil {
-		panic(err)
-	}
-
 	// The result grants the baseline's access on the artifact's path, so
 	// the runtime must open it beneath /srv without following symlinks or
 	// crossing mounts, or refuse the artifact.
-	lowered, err := landlock.LoweredRulePaths(result, baseline, artifact)
+	_, lowered, err := landlock.IntersectLowered(baseline, artifact)
 	if err != nil {
 		panic(err)
 	}
@@ -458,7 +453,7 @@ func Example() {
 		return
 	}
 
-	effective, err := landlock.Intersect(baseline, artifact)
+	effective, lowered, err := landlock.IntersectLowered(baseline, artifact)
 	if err != nil {
 		fmt.Println("reject:", err)
 
@@ -470,11 +465,6 @@ func Example() {
 		fmt.Println("the node cannot enforce it:", err)
 
 		return
-	}
-
-	lowered, err := landlock.LoweredRulePaths(effective, baseline, artifact)
-	if err != nil {
-		panic(err)
 	}
 
 	fmt.Println(effective.String())

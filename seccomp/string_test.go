@@ -491,3 +491,33 @@ func TestFormatDefaultsUntruncated(t *testing.T) {
 		}
 	}
 }
+
+// TestFormatSyscall checks that one entry renders as FormatProfile writes
+// it within the profile, and that a nil one renders without a panic.
+func TestFormatSyscall(t *testing.T) {
+	t.Parallel()
+
+	errno := uint(13)
+	entry := specs.LinuxSyscall{
+		Names:    []string{"read", "write"},
+		Action:   specs.ActErrno,
+		ErrnoRet: &errno,
+		Args:     []specs.LinuxSeccompArg{{Index: 0, Value: 1, Op: specs.OpEqualTo}},
+	}
+
+	const want = "read,write([0]SCMP_CMP_EQ:1)->SCMP_ACT_ERRNO(errno:13)"
+	if got := seccomp.FormatSyscall(&entry); got != want {
+		t.Errorf("FormatSyscall = %q, want %q", got, want)
+	}
+
+	profile := &specs.LinuxSeccomp{
+		DefaultAction: specs.ActAllow, Syscalls: []specs.LinuxSyscall{entry},
+	}
+	if got := seccomp.FormatProfile(profile); !strings.Contains(got, " "+want+"}") {
+		t.Errorf("FormatProfile = %q, want it to hold %q", got, want)
+	}
+
+	if got := seccomp.FormatSyscall(nil); got != "<nil>" {
+		t.Errorf("FormatSyscall(nil) = %q, want %q", got, "<nil>")
+	}
+}

@@ -212,8 +212,13 @@ limitations under the License.
 // lower 16 bits of errnoRet, and the merges and [Diff] read it the same way:
 // 65537 is EPERM, so an entry carrying it against a default errno of 1
 // equals the default. Results and Diff spell an errno as it is loaded,
-// except that Diff reports a default errno wider than 16 bits as written,
-// since its lower bits name a value the profile never holds.
+// except that Diff reports an errno wider than 16 bits as written, the
+// default's and a rule's alike, since its lower bits name a value the
+// profile never holds. Diff compares rules as loaded, so one rule can stand
+// for several entries writing values that load alike; it shows a rule's
+// value as written only where every entry of the syscall with that action
+// and loaded value, in both profiles, writes the same one, and as loaded
+// otherwise.
 //
 // # Architectures
 //

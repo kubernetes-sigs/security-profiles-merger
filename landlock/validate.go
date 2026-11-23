@@ -53,9 +53,11 @@ var (
 	// when a profile holds more than MaxArtifactRules rules.
 	ErrTooManyRules = merge.LimitError("too many rules")
 
-	// ErrParentPath is returned by Validate and every function that runs it
-	// when a path rule holds a ".." component, relative or not.
-	ErrParentPath = errors.New(`path contains a ".." component`)
+	// ErrDotComponent is spm.ErrDotComponent, matched by the error of
+	// Validate and every function that runs it when a path rule holds a ".."
+	// component, relative or not, which reads as such (see
+	// errParentComponent). A "." component is cleaned away instead.
+	ErrDotComponent = spm.ErrDotComponent
 
 	// ErrUnhandledRight is returned by ValidateBaseline, ValidateArtifact
 	// and ValidateStrict when a rule grants a right its profile does not
@@ -69,7 +71,7 @@ var (
 	// ErrRelativePath is returned by Validate and every function that runs
 	// it when a path rule does not start with "/", "./" included. A path
 	// holding a NUL byte or a ".." component reports that instead, so
-	// "../x" matches ErrParentPath alone.
+	// "../x" matches ErrDotComponent alone.
 	ErrRelativePath = spm.ErrRelativePath
 
 	// ErrTrailingSlash is returned by ValidateBaseline, ValidateArtifact and
@@ -159,12 +161,17 @@ func netRuleRef(idx int) fieldRef {
 func pathRef(idx int) fieldRef { return fieldRef{rules: pathRulesName, rule: idx, field: "path"} }
 func portRef(idx int) fieldRef { return fieldRef{rules: netRulesName, rule: idx, field: "port"} }
 
+// errParentComponent is what a ".." component is reported as: it matches
+// ErrDotComponent, which the apparmor package shares, and names the one
+// dot component this package refuses.
+var errParentComponent = merge.AliasError(`path contains a ".." component`, ErrDotComponent)
+
 // Validate checks what the merge needs, and is what Intersect and Union run
 // on every input: known access rights (ErrUnknownRight) and paths that are
 // not empty (ErrEmptyPath), longer than MaxPathLen (ErrPathTooLong),
-// holding a NUL byte (ErrNulInPath) or a ".." component (ErrParentPath), or
-// relative (ErrRelativePath). The merge compares paths as text, while the
-// kernel resolves a relative path against the working directory of the
+// holding a NUL byte (ErrNulInPath) or a ".." component (ErrDotComponent),
+// or relative (ErrRelativePath). The merge compares paths as text, while
+// the kernel resolves a relative path against the working directory of the
 // process loading the ruleset, which no merge can see.
 // Duplicate rules and rights pass. Failures are collected into one bounded
 // report. See the Validation and Rule paths sections.
@@ -336,7 +343,7 @@ func (p pathProblem) err(path string) error {
 	case pathNUL:
 		return fmt.Errorf("%s: %w", merge.QuoteBounded(path), ErrNulInPath)
 	case pathParent:
-		return fmt.Errorf("%s: %w", merge.QuoteBounded(path), ErrParentPath)
+		return fmt.Errorf("%s: %w", merge.QuoteBounded(path), errParentComponent)
 	case pathRelative:
 		return fmt.Errorf("%s: %w", merge.QuoteBounded(path), ErrRelativePath)
 	case pathValid:
@@ -480,7 +487,7 @@ func isKnownNetRight(right NetAccessRight) bool {
 // MaxArtifactRules rules first and on its own (ErrTooManyRules). Duplicate
 // rules and rights pass. It checks no ABI version (Options.ValidateArtifact
 // does) and does not see the rule paths Intersect may lower onto (see
-// LoweredRulePaths).
+// IntersectLowered).
 func ValidateArtifact(profile *Profile) error {
 	_, err := validateProfile(profile, tierArtifact)
 
@@ -502,8 +509,8 @@ func ValidateArtifact(profile *Profile) error {
 // Unlike the seccomp and apparmor ValidateBaseline, it does not compare the
 // baseline with Intersect of the baseline alone, which changes how rules
 // are spelled but not what they permit.
-func ValidateBaseline(profile *Profile) error {
-	_, err := validateProfile(profile, tierBaseline)
+func ValidateBaseline(baseline *Profile) error {
+	_, err := validateProfile(baseline, tierBaseline)
 
 	return err
 }
@@ -574,7 +581,7 @@ func highestABI[T ~string](rights []T, table map[T]ABIVersion) ABIVersion {
 
 // Options names the Landlock ABI version of the kernel a profile is checked
 // for. It has a method for every operation whose result depends on that
-// version; the merges, Diff and LoweredRulePaths do not, so a runtime checks
+// version; the merges, IntersectLowered and Diff do not, so a runtime checks
 // a merge result with Options.Validate before it applies it. The zero value
 // names no version, and every method reports it with ErrUnknownABIVersion.
 // A kernel without Landlock reports no version; such a node applies no
@@ -597,8 +604,8 @@ func (o Options) Validate(profile *Profile) error {
 // ValidateBaseline runs ValidateBaseline and reports every access right the
 // ABI version does not support, as Validate of the options does. A runtime
 // calls it at config load with the node's ABI version.
-func (o Options) ValidateBaseline(profile *Profile) error {
-	return o.validate(profile, tierBaseline)
+func (o Options) ValidateBaseline(baseline *Profile) error {
+	return o.validate(baseline, tierBaseline)
 }
 
 // ValidateArtifact runs ValidateArtifact and reports every access right the

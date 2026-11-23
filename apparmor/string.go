@@ -17,8 +17,6 @@ limitations under the License.
 package apparmor
 
 import (
-	"strconv"
-
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 )
 
@@ -26,7 +24,9 @@ import (
 // people rather than apparmor_parser: a value holding a control character,
 // an invisible rune, a byte that is not valid UTF-8 or the punctuation of
 // the format is quoted, and the line is cut at 64 KiB, ending in
-// "... (output truncated)". A nil profile reads "Profile{<nil>}".
+// "... (output truncated)". A nil profile reads "Profile{<nil>}". A section
+// that lists nothing is left out, as a nil one is: both deny everything the
+// section covers.
 func (p *Profile) String() string {
 	if p == nil {
 		return "Profile{<nil>}"
@@ -48,7 +48,7 @@ func (p *Profile) String() string {
 			p.Network.writeTo(out)
 		}
 
-		if p.Capabilities != nil {
+		if p.Capabilities != nil && len(p.Capabilities.AllowedCapabilities) > 0 {
 			parts.Next()
 			p.Capabilities.writeTo(out)
 		}
@@ -56,7 +56,7 @@ func (p *Profile) String() string {
 }
 
 // String returns a human-readable representation of the executable rules,
-// quoted and bounded as Profile.String is.
+// quoted and bounded as Profile.String is, and the empty string for none.
 func (e ExecutableRules) String() string {
 	return merge.Render(e.writeTo)
 }
@@ -74,7 +74,7 @@ func (e ExecutableRules) writeTo(out *merge.Builder) {
 }
 
 // String returns a human-readable representation of the filesystem rules,
-// quoted and bounded as Profile.String is.
+// quoted and bounded as Profile.String is, and the empty string for none.
 func (f FilesystemRules) String() string {
 	return merge.Render(f.writeTo)
 }
@@ -92,7 +92,8 @@ func (f FilesystemRules) writeTo(out *merge.Builder) {
 	merge.WriteList(out, &parts, "rw:", f.ReadWritePaths)
 }
 
-// String returns a human-readable representation of the network rules.
+// String returns a human-readable representation of the network rules, and
+// the empty string for a section that sets nothing.
 func (n NetworkRules) String() string {
 	if !n.hasRules() {
 		return ""
@@ -139,39 +140,17 @@ func writeBool(out *merge.Builder, name string, val bool) {
 	out.WriteString(name)
 }
 
-// emptyCapabilities is how an empty capability list reads.
-const emptyCapabilities = "none"
-
 // String returns a human-readable representation of the capability rules,
-// quoted and bounded as Profile.String is. An empty list reads "none", so a
-// capability spelled that way is quoted, which keeps a profile naming it
-// apart from one granting nothing.
+// quoted and bounded as Profile.String is, and the empty string for none.
 func (c CapabilityRules) String() string {
+	if len(c.AllowedCapabilities) == 0 {
+		return ""
+	}
+
 	return merge.Render(c.writeTo)
 }
 
 func (c CapabilityRules) writeTo(out *merge.Builder) {
 	out.WriteString("caps:")
-
-	if len(c.AllowedCapabilities) == 0 {
-		out.WriteString(emptyCapabilities)
-
-		return
-	}
-
-	for idx, name := range c.AllowedCapabilities {
-		if out.Full() {
-			return
-		}
-
-		if idx > 0 {
-			out.WriteString(",")
-		}
-
-		if name == emptyCapabilities {
-			out.WriteString(strconv.Quote(name))
-		} else {
-			out.WriteText(name)
-		}
-	}
+	merge.WriteTexts(out, c.AllowedCapabilities, ",")
 }

@@ -23,7 +23,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"regexp"
 	"strings"
@@ -179,17 +178,17 @@ func (opts *commonOptions) check(stderr io.Writer) int {
 	return exitUsage
 }
 
-// parseFlags parses a subcommand's arguments. Requested help goes to stdout
-// and exits 0. A parse error is reported on stderr, followed by the hint at
-// the help (see usageHint), and exits with the usage code. The error names
-// the argument it is about, which the caller chose, so that is written the
-// way every other argument is (see merge.SafeName), and with the dashes the
-// caller wrote (see flagAsWritten). The first result reports whether the
-// command should stop with the second.
+// parseFlags parses a subcommand's arguments, flags and file arguments in
+// any order (see parseInterspersed). Requested help goes to stdout and
+// exits 0. A parse error is reported on stderr, followed by the hint at the
+// help (see usageHint), and exits with the usage code; the error names the
+// argument it is about, which is written as merge.SafeName writes any
+// argument. The first result reports whether the command should stop with
+// the second.
 func parseFlags(
 	flags *flag.FlagSet, usageText string, args []string, stdout, stderr io.Writer,
 ) (bool, int) {
-	err := flags.Parse(args)
+	err := parseInterspersed(flags, args)
 	if err == nil {
 		return false, 0
 	}
@@ -198,9 +197,71 @@ func parseFlags(
 		return true, writeStdout([]byte(usageWithFlags(flags, usageText)), stdout, stderr)
 	}
 
-	_, _ = fmt.Fprintln(stderr, "error: "+flagAsWritten(err.Error(), args))
+	_, _ = fmt.Fprintln(stderr, "error: "+merge.SafeName(err.Error()))
 
 	return true, usageHint(flags.Name(), stderr)
+}
+
+// parseInterspersed parses flags given before, between and after the file
+// arguments. It walks the arguments itself and hands the flag package one
+// flag at a time, with the argument after it where that is its value, so
+// that the flag package still reports an unknown flag, -h, a malformed one
+// and a missing value in its own words. "-" and an argument without a
+// leading dash are files, and "--" ends the flags: every argument after it
+// is a file, whatever it starts with. Once parsed, flags.Args() holds the
+// file arguments in order.
+func parseInterspersed(flags *flag.FlagSet, args []string) error {
+	var files []string
+
+	for idx := 0; idx < len(args); idx++ {
+		arg := args[idx]
+
+		switch {
+		case arg == "--":
+			files = append(files, args[idx+1:]...)
+			idx = len(args)
+
+			continue
+		case arg == stdinArg || !strings.HasPrefix(arg, "-"):
+			files = append(files, arg)
+
+			continue
+		}
+
+		segment := args[idx : idx+1]
+		if takesValue(flags, arg) && idx+1 < len(args) {
+			segment = args[idx : idx+2]
+			idx++
+		}
+
+		err := flags.Parse(segment)
+		if err != nil {
+			return err //nolint:wrapcheck // parseFlags reports it as the flag package words it
+		}
+	}
+
+	// Parsing "--" and the files sets flags.Args() to the files without
+	// touching a flag.
+	return flags.Parse(append([]string{"--"}, files...)) //nolint:wrapcheck // as above
+}
+
+// takesValue reports whether a flag argument such as "--name" reads the
+// next argument as its value: one written without "=" that names a flag of
+// the set other than a boolean one. An unknown flag is left to the flag
+// package to report.
+func takesValue(flags *flag.FlagSet, arg string) bool {
+	if strings.Contains(arg, "=") {
+		return false
+	}
+
+	named := flags.Lookup(strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-"))
+	if named == nil {
+		return false
+	}
+
+	boolFlag, isBool := named.Value.(interface{ IsBoolFlag() bool })
+
+	return !isBool || !boolFlag.IsBoolFlag()
 }
 
 // usageHint follows the report of a usage error of the named command with
@@ -211,83 +272,6 @@ func usageHint(command string, stderr io.Writer) int {
 	_, _ = fmt.Fprintf(stderr, "Run 'spm %s --help' for usage.\n", command)
 
 	return exitUsage
-}
-
-// flagAsWritten rewrites the flag an error of the flag package names, which
-// that package prints with one dash however it was given, to the argument
-// that named it: "-real.json", which the caller may have meant as a file,
-// must not read as "--real.json". A flag the arguments do not show is
-// written with the two dashes the usage and the documentation spell a flag
-// with. The name follows one of a few phrases; the last of them in the
-// message is taken, since a value the error quotes comes before it.
-//
-// The name is written as merge.SafeName writes an argument, quoted only
-// when it holds a character that does not print as itself, and the rest of
-// the message is left as it is: a value the flag package quotes is escaped
-// already. The argument of a "bad flag syntax" error is written the same
-// way, and a message of another shape is quoted whole where it needs it.
-func flagAsWritten(message string, args []string) string {
-	found, start, last := -1, 0, false
-
-	for _, phrase := range []struct {
-		text string
-		// last reports a phrase the name ends the message after; after
-		// the others, a reason follows it, separated by ": ".
-		last bool
-	}{
-		{" for flag -", false},
-		{" for -", false},
-		{"flag provided but not defined: -", true},
-		{"flag needs an argument: -", true},
-	} {
-		at := strings.LastIndex(message, phrase.text)
-		if at > found {
-			found, start, last = at, at+len(phrase.text)-1, phrase.last
-		}
-	}
-
-	if found < 0 {
-		if syntax, ok := strings.CutPrefix(message, badFlagSyntax); ok {
-			return badFlagSyntax + merge.SafeName(syntax)
-		}
-
-		return merge.SafeName(message)
-	}
-
-	name := message[start+1:]
-	if !last {
-		name, _, _ = strings.Cut(name, ": ")
-	}
-
-	return message[:start] + merge.SafeName(writtenFlag(name, args)) +
-		message[start+1+len(name):]
-}
-
-// badFlagSyntax starts the error of the flag package about an argument it
-// cannot parse as a flag, such as "---x", which it follows with the
-// argument as it is.
-const badFlagSyntax = "bad flag syntax: "
-
-// writtenFlag returns the flag of the given name as the arguments spell it,
-// with one dash or two, or with two when they do not show it.
-func writtenFlag(name string, args []string) string {
-	for _, arg := range args {
-		if arg == "--" {
-			break
-		}
-
-		dashes := "-"
-		if strings.HasPrefix(arg, "--") {
-			dashes = "--"
-		}
-
-		spelled, _, _ := strings.Cut(strings.TrimPrefix(arg, dashes), "=")
-		if strings.HasPrefix(arg, "-") && spelled == name {
-			return dashes + name
-		}
-	}
-
-	return "--" + name
 }
 
 // flagDefaultLine matches the start of a flag in what the flag package
@@ -319,94 +303,6 @@ func flagNamed(flags *flag.FlagSet, name string) bool {
 	})
 
 	return named
-}
-
-// argsSeparated reports whether the caller ended the flags with a "--",
-// after which everything is a file name. Only a "--" the flag parser would
-// consume counts: one after the first operand is an operand itself, and a
-// flag value that happens to be "--" is not a separator either, so the scan
-// follows the parser, stopping at the first argument that is neither a flag
-// nor a flag's value.
-func argsSeparated(flags *flag.FlagSet, args []string) bool {
-	for idx := 0; idx < len(args); idx++ {
-		arg := args[idx]
-
-		if arg == "--" {
-			return true
-		}
-
-		if arg == stdinArg || !strings.HasPrefix(arg, "-") {
-			return false
-		}
-
-		// A flag given as "-name value" takes the next argument unless it
-		// is a boolean one; one given as "-name=value" never does.
-		if !strings.Contains(arg, "=") && takesValue(flags, arg) {
-			idx++
-		}
-	}
-
-	return false
-}
-
-// takesValue reports whether the flag an argument such as "--name" names
-// reads the next argument as its value. A boolean flag does not, and a flag
-// the set does not know stopped the parser before it got here.
-func takesValue(flags *flag.FlagSet, arg string) bool {
-	name := strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-")
-
-	known := flags.Lookup(name)
-	if known == nil {
-		return false
-	}
-
-	boolFlag, isBool := known.Value.(interface{ IsBoolFlag() bool })
-
-	return !isBool || !boolFlag.IsBoolFlag()
-}
-
-// checkFlagOrder rejects flags placed after file arguments. The flag package
-// stops at the first file argument, so a flag after it would be read as a
-// file name; such an argument that names no file is reported as a misplaced
-// flag. Commands run this before checking their flag values, since a flag
-// the parser never saw would otherwise be reported as missing.
-func checkFlagOrder(args []string, separated bool, stderr io.Writer) int {
-	// After "--" the caller has said these are file names, whatever they
-	// start with, so a missing one is a missing file rather than a
-	// misplaced flag. flag.Args() no longer records the separator, so the
-	// caller passes it through (see argsSeparated).
-	if separated {
-		return 0
-	}
-
-	for _, arg := range args {
-		if arg == stdinArg || !strings.HasPrefix(arg, "-") {
-			continue
-		}
-
-		_, err := os.Stat(arg)
-		if errors.Is(err, fs.ErrNotExist) && arg == "--" {
-			// The separator itself, given among the files rather than
-			// before them, where it ends the flags.
-			_, _ = fmt.Fprintln(
-				stderr, "error: -- must come before the file arguments, not among them",
-			)
-
-			return exitUsage
-		}
-
-		if errors.Is(err, fs.ErrNotExist) {
-			_, _ = fmt.Fprintf(
-				stderr,
-				"error: %s is not a file (flags must precede file arguments)\n",
-				merge.SafeName(arg),
-			)
-
-			return exitUsage
-		}
-	}
-
-	return 0
 }
 
 // checkStdin rejects running without file arguments when stdin is a
@@ -444,8 +340,11 @@ type invocation struct {
 	// report holds what was found about the inputs so far; resolveKind
 	// creates it.
 	report *inputReport
-	// kind is the profile kind the run uses, which resolveKind sets.
-	kind profileKind
+	// kind is the profile kind the run uses, which resolveKind sets, and
+	// detected the type it detected, which noteDetected notes, or "" where
+	// --type named it or the note is off.
+	kind     profileKind
+	detected string
 	// checks says how the command checks each input, which a run whose
 	// inputs disagree on the type needs before it has a kind.
 	checks *inputChecks
@@ -477,7 +376,7 @@ func startCommand(
 		return nil, code
 	}
 
-	node, code := checkCommandLine(flags, opts, args, stdin, stderr)
+	node, code := checkCommandLine(flags, opts, stdin, stderr)
 	if code != 0 {
 		return nil, usageHint(flags.Name(), stderr)
 	}
@@ -500,21 +399,15 @@ func startCommand(
 	}, 0
 }
 
-// checkCommandLine checks what the arguments alone show: the flag order,
-// then the flag values, --arch, --abi and --output among them, then the
-// file arguments (see checkPaths), and then that stdin is no terminal where
-// it is read. The flag order comes first, so that a flag after the file
-// arguments is reported as such rather than as missing. It returns the
-// node the flags describe, or the usage exit code once it has reported why
-// not.
+// checkCommandLine checks what the arguments alone show: the flag values,
+// --arch, --abi and --output among them, then the file arguments (see
+// checkPaths), and then that stdin is no terminal where it is read. It
+// returns the node the flags describe, or the usage exit code once it has
+// reported why not.
 func checkCommandLine(
-	flags *flag.FlagSet, opts commandOptions, args []string, stdin io.Reader, stderr io.Writer,
+	flags *flag.FlagSet, opts commandOptions, stdin io.Reader, stderr io.Writer,
 ) (nodeOptions, int) {
 	var node nodeOptions
-
-	if code := checkFlagOrder(flags.Args(), argsSeparated(flags, args), stderr); code != 0 {
-		return node, code
-	}
 
 	common := opts.common()
 

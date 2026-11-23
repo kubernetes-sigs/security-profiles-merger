@@ -98,7 +98,7 @@ func TestContract(t *testing.T) {
 			{
 				Profile: fsProfile(fsRights{read},
 					landlock.PathRule{Path: "/a/../b", AccessFS: fsRights{read}}),
-				Sentinel: landlock.ErrParentPath,
+				Sentinel: landlock.ErrDotComponent,
 			},
 			{Profile: etc(read), Sentinel: nil},
 			{Profile: fsProfile(fsRights{"fly"}), Sentinel: landlock.ErrUnknownRight},

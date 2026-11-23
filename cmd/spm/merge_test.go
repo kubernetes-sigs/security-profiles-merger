@@ -27,7 +27,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -57,12 +56,12 @@ func TestMergeErrors(t *testing.T) {
 			wantStderr: parsingError(invalidFile),
 		},
 		{
-			name: "flag after file",
+			name: "unknown flag after file",
 			args: []string{
-				cmdMerge, flagStrategy, strategyIntersect, testdataSeccompA, flagType, typeSeccomp,
+				cmdMerge, flagStrategy, strategyIntersect, testdataSeccompA, "--typo",
 			},
 			wantCode:   exitUsage,
-			wantStderr: "flags must precede file arguments",
+			wantStderr: "flag provided but not defined: -typo",
 		},
 		{
 			name:       "empty stdin",
@@ -380,40 +379,6 @@ func TestMergeAutoDetectLandlock(t *testing.T) {
 
 	if len(result.PathRules) != 1 {
 		t.Errorf("expected 1 path rule, got %d", len(result.PathRules))
-	}
-}
-
-func TestMergeOutputFlag(t *testing.T) {
-	t.Parallel()
-
-	file := writeTemp(t, seccompJSON(t, testSyscallRead))
-	outFile := filepath.Join(t.TempDir(), "output.json")
-
-	code, _, _ := runCapture(t, []string{
-		cmdMerge, flagType, typeSeccomp,
-		flagStrategy, strategyIntersect,
-		"--output", outFile,
-		file,
-	}, nil)
-
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-
-	data, err := os.ReadFile(outFile)
-	if err != nil {
-		t.Fatalf("reading output file: %v", err)
-	}
-
-	var result specs.LinuxSeccomp
-
-	err = json.Unmarshal(data, &result)
-	if err != nil {
-		t.Fatalf("unmarshaling output file: %v", err)
-	}
-
-	if len(result.Syscalls) != 1 {
-		t.Errorf("expected 1 syscall, got %d", len(result.Syscalls))
 	}
 }
 
@@ -999,45 +964,6 @@ func TestUnmarshalAllRejectsTrailingData(t *testing.T) {
 	}
 }
 
-// TestReadInputsBoundsTotalSize covers the aggregate bound: each file is
-// under the per-file limit, but together they are not, and without the bound
-// a thousand of them would all be read into memory first.
-func TestReadInputsBoundsTotalSize(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-
-	const (
-		fileSize = 8 << 20
-		files    = maxTotalInputSize/fileSize + 2
-	)
-
-	filler := make([]byte, fileSize)
-	for idx := range filler {
-		filler[idx] = ' '
-	}
-
-	copy(filler, `{"defaultAction":"SCMP_ACT_ERRNO"}`)
-
-	paths := make([]string, 0, files)
-
-	for idx := range files {
-		path := filepath.Join(dir, "profile"+strconv.Itoa(idx)+".json")
-
-		err := os.WriteFile(path, filler, 0o600)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		paths = append(paths, path)
-	}
-
-	_, err := readInputs(paths, nil)
-	if !errors.Is(err, errInputTooLarge) {
-		t.Errorf("error = %v, want %v", err, errInputTooLarge)
-	}
-}
-
 // mergeKind runs the merge command of the named profile type on inputs
 // as runMerge does without --validate: lenient decoding and no extra check
 // per input, since the merge functions validate their own inputs.
@@ -1167,25 +1093,22 @@ func TestMergeNoDetectNoteSuppressesDetectionNote(t *testing.T) {
 		t.Errorf("stderr = %q, want it to note the detected type", stderr)
 	}
 
-	code, _, _ = runCapture(t, append(args, flagNoDetectNote), nil)
-	if code != exitUsage {
-		t.Fatalf("a flag after the files should be a usage error, got %d", code)
-	}
+	for _, args := range [][]string{
+		{cmdMerge, flagStrategy, strategyIntersect, flagNoDetectNote, testdataSeccompA},
+		append(args, flagNoDetectNote),
+	} {
+		code, stdout, stderr := runCapture(t, args, nil)
+		if code != 0 {
+			t.Fatalf("%v: exit code = %d, want 0 (stderr: %s)", args, code, stderr)
+		}
 
-	code, stdout, stderr := runCapture(t, []string{
-		cmdMerge, flagStrategy, strategyIntersect, flagNoDetectNote,
-		testdataSeccompA,
-	}, nil)
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0 (stderr: %s)", code, stderr)
-	}
+		if strings.Contains(stderr, note) {
+			t.Errorf("%v: stderr = %q, want no detection note", args, stderr)
+		}
 
-	if strings.Contains(stderr, note) {
-		t.Errorf("stderr = %q, want no detection note", stderr)
-	}
-
-	if stdout == "" {
-		t.Error("stdout is empty, want the merged profile")
+		if stdout == "" {
+			t.Errorf("%v: stdout is empty, want the merged profile", args)
+		}
 	}
 }
 
@@ -1644,11 +1567,58 @@ func TestMergeOutputReplacesTheFile(t *testing.T) {
 	}
 }
 
-// TestMergeOutputKeepsContentWhenItCannotReplace covers a write that fails
-// after the old file was checked: the directory refuses the new file, and
-// the old one is left whole.
-func TestMergeOutputKeepsContentWhenItCannotReplace(t *testing.T) {
+// TestMergeOutputInADirectoryThatTakesNoNewFile covers an output file the
+// caller can write in a directory it cannot add a file to: it is written in
+// place, keeping its mode.
+func TestMergeOutputInADirectoryThatTakesNoNewFile(t *testing.T) {
 	t.Parallel()
+
+	const mode = 0o644
+
+	dir, target := fileInReadOnlyDir(t, mode)
+
+	code, stderr := mergeToOutputFile(t, target)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0: %s", code, stderr)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil || !strings.Contains(string(data), testSyscallRead) {
+		t.Errorf("output file = %q (%v), want the merge result", data, err)
+	}
+
+	assertFilePerm(t, target, mode)
+	assertDirHoldsOne(t, dir)
+}
+
+// TestMergeOutputKeepsAFileItCannotWrite covers an output file the caller
+// cannot write, in a directory it cannot add a file to: it is left whole.
+func TestMergeOutputKeepsAFileItCannotWrite(t *testing.T) {
+	t.Parallel()
+
+	dir, target := fileInReadOnlyDir(t, 0o444)
+
+	code, stderr := mergeToOutputFile(t, target)
+	if code == 0 || !strings.Contains(stderr, "writing "+target+": permission denied") {
+		t.Errorf("exit code = %d, stderr = %q, want a failure naming the file", code, stderr)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil || string(data) != keptContent {
+		t.Errorf("output file = %q (%v), want %q", data, err, keptContent)
+	}
+
+	assertDirHoldsOne(t, dir)
+}
+
+// keptContent is what fileInReadOnlyDir writes to the file it makes.
+const keptContent = "keep me"
+
+// fileInReadOnlyDir returns a directory the caller cannot add a file to and
+// a file in it of the given mode, skipping where the mode bits do not
+// refuse the caller.
+func fileInReadOnlyDir(t *testing.T, mode os.FileMode) (string, string) {
+	t.Helper()
 
 	if runtime.GOOS == "windows" {
 		t.Skip("directory permissions do not refuse a write the same way")
@@ -1658,12 +1628,10 @@ func TestMergeOutputKeepsContentWhenItCannotReplace(t *testing.T) {
 		t.Skip("root is not refused by the mode bits")
 	}
 
-	const keep = "keep me"
-
 	dir := t.TempDir()
 	target := filepath.Join(dir, "out.json")
 
-	err := os.WriteFile(target, []byte(keep), 0o600)
+	err := os.WriteFile(target, []byte(keptContent), mode)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1675,33 +1643,17 @@ func TestMergeOutputKeepsContentWhenItCannotReplace(t *testing.T) {
 
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
-	code, stderr := mergeToOutputFile(t, target)
-	if code == 0 {
-		t.Fatalf("exit code = 0, want a failure: %s", stderr)
-	}
-
-	// The file itself is writable, so the error says that it was the new
-	// file beside it that could not be created, and where.
-	want := "writing " + target + ": creating temporary file in " + dir + "/: "
-	if !strings.Contains(stderr, want) {
-		t.Errorf("stderr = %q, want %q", stderr, want)
-	}
-
-	data, err := os.ReadFile(target)
-	if err != nil || string(data) != keep {
-		t.Errorf("output file = %q (%v), want %q", data, err, keep)
-	}
-
-	assertDirHolds(t, dir, 1)
+	return dir, target
 }
 
-// assertDirHolds checks how many entries a directory holds.
-func assertDirHolds(t *testing.T, dir string, want int) {
+// assertDirHoldsOne checks that a directory holds one entry, the output
+// file, and no temporary file beside it.
+func assertDirHoldsOne(t *testing.T, dir string) {
 	t.Helper()
 
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != want {
-		t.Errorf("%s holds %d entries (%v), want %d", dir, len(entries), err, want)
+	if err != nil || len(entries) != 1 {
+		t.Errorf("%s holds %d entries (%v), want the output file alone", dir, len(entries), err)
 	}
 }
 

@@ -420,13 +420,13 @@ func TestValidateReportsEscapeAliases(t *testing.T) {
 		"ValidateStrict":   apparmor.ValidateStrict,
 	} {
 		err := validate(crossCategory)
-		if !errors.Is(err, apparmor.ErrDuplicatePath) {
-			t.Errorf("%s = %v, want ErrDuplicatePath", name, err)
+		if !errors.Is(err, apparmor.ErrDuplicatePathAcrossCategories) {
+			t.Errorf("%s = %v, want ErrDuplicatePathAcrossCategories", name, err)
 		}
 
 		err = validate(readOnly("/a/b", `/a/\b`))
-		if !errors.Is(err, apparmor.ErrDuplicatePathInCategory) {
-			t.Errorf("%s in one category = %v, want ErrDuplicatePathInCategory", name, err)
+		if !errors.Is(err, apparmor.ErrDuplicatePathInList) {
+			t.Errorf("%s in one category = %v, want ErrDuplicatePathInList", name, err)
 		}
 	}
 
@@ -437,8 +437,8 @@ func TestValidateReportsEscapeAliases(t *testing.T) {
 	}
 
 	err := apparmor.ValidateStrict(execs)
-	if !errors.Is(err, apparmor.ErrDuplicateExecutablePath) {
-		t.Errorf("ValidateStrict = %v, want ErrDuplicateExecutablePath", err)
+	if !errors.Is(err, apparmor.ErrDuplicatePathInList) {
+		t.Errorf("ValidateStrict = %v, want ErrDuplicatePathInList", err)
 	}
 
 	// Two patterns are aliases when they compile to the same matcher, and
@@ -488,8 +488,12 @@ func TestMergeFoldsEscapeAliases(t *testing.T) {
 		}
 
 		_, err = mergeFn(crossCategory, crossCategory)
-		if !errors.Is(err, apparmor.ErrDuplicatePath) {
-			t.Errorf("%s of a cross-category alias = %v, want ErrDuplicatePath", name, err)
+		if !errors.Is(err, apparmor.ErrDuplicatePathAcrossCategories) {
+			t.Errorf(
+				"%s of a cross-category alias = %v, want ErrDuplicatePathAcrossCategories",
+				name,
+				err,
+			)
 		}
 	}
 

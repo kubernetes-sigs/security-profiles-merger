@@ -33,8 +33,9 @@ Compare two security profiles and show their differences.
 Reads from stdin (as a JSON array of exactly 2 profiles) when no files are
 provided. A file argument of - reads stdin beside the other file, and a
 single file argument may hold a JSON array of exactly 2 profiles.
-Flags must precede file arguments, and -- ends them; a flag that takes a
-value may be given twice only with the same value both times.
+Flags may come before or after the file arguments, and -- ends them; a
+flag that takes a value may be given twice only with the same value both
+times.
 Exit status: 0 when the profiles are equal, 1 when they differ, 2 on any
 error.
 
@@ -107,7 +108,7 @@ func (opts *diffOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) int {
 	}
 
 	validate := flagNamed(flags, "validate")
-	if validate && checkValidateModes(opts.validate, flags.NArg(), stderr) != 0 {
+	if validate && checkValidateModes(opts.validate, flags.NArg(), false, stderr) != 0 {
 		return exitUsage
 	}
 
@@ -214,6 +215,8 @@ func (ops kindOps[T, D]) diffCommand(inv *invocation) int {
 	}
 
 	profiles := unmarshalAll[T](inv.inputs, strict, inv.report)
+
+	inv.noteDetected()
 
 	if inv.checks != nil {
 		checkInputs(profiles, inv.report, func(idx int, profile *T) error {

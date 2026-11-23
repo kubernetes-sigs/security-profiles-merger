@@ -69,9 +69,10 @@ depends on the node, and the zero value of each is an error, so an
   architecture the package does not know, are `ErrInvalidOptions`.
 - `landlock.Options` names a kernel ABI version: its validators and
   `DecodeArtifact` add that version's check to each level, and `Downgrade`
-  drops the rights the version does not know. The merges, `Diff` and
-  `LoweredRulePaths` do not depend on the version and have no method. 0
-  names no version and is `ErrUnknownABIVersion` and `ErrInvalidOptions`.
+  drops the rights the version does not know. The merges,
+  `IntersectLowered` and `Diff` do not depend on the version and have no
+  method. 0 names no version and is `ErrUnknownABIVersion` and
+  `ErrInvalidOptions`.
 
 `apparmor` has no `Options`: nothing it does depends on the node.
 
@@ -142,7 +143,7 @@ from any of the three packages.
 | Sentinel | Raised by | Meaning |
 |----------|-----------|---------|
 | `ErrNoProfiles` | `Intersect` and `Union` of every package | No profiles were given |
-| `ErrNilProfile` | Every function that takes a profile and returns an error | A nil profile was given; a merge, `Diff` and `LoweredRulePaths` wrap it in an `InputError` naming the input, except a nil result of `LoweredRulePaths`, which comes as a `landlock.ResultError` |
+| `ErrNilProfile` | Every function that takes a profile and returns an error | A nil profile was given; a merge and `Diff` wrap it in an `InputError` naming the input |
 | `ErrMoreProblems` | Every validator; every merge, inside the `InputError` of an input whose report left failures out, and beside the joined `InputError`s past the bound | The report left failures out; the [spm documentation](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/spm#hdr-Reading_a_validation_error) describes the bound |
 | `ErrArtifactTooLarge` | `ValidateArtifact` and `ValidateStrict` of every package, through each `ErrTooMany*` | A profile past a `MaxArtifact*` limit. Every `ErrTooMany*` sentinel matches it with `errors.Is`; it is never returned on its own |
 | `ErrInexactBaseline` | `seccomp.ValidateBaseline`, `apparmor.ValidateBaseline` | A baseline whose intersection alone, or for seccomp its intersection with a profile allowing every call, differs from it: every merge with it takes away what the message names |
@@ -152,6 +153,7 @@ from any of the three packages.
 | `ErrNulInPath` | `apparmor`: `ValidateArtifact` and `ValidateStrict`; `landlock`: every validator and merge | A path holds a NUL byte, or in `apparmor` an escape denoting one |
 | `ErrRelativePath` | `apparmor`: every validator and merge, and `QuotePath`; `landlock`: every validator and merge | A path does not start with `/`, for `apparmor` as written, so an escape spelling the first `/` is relative too; in `landlock` a NUL byte or a `..` component is reported instead |
 | `ErrPathTooLong` | `apparmor`, `landlock`: every validator and merge | A path is longer than `MaxPathLen`; [Path checks](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/spm#hdr-Path_checks) says which checks run before it |
+| `ErrDotComponent` | `apparmor`: `ValidateArtifact`, `ValidateStrict` and `ValidateBaseline`; `landlock`: every validator and merge | A path has a component the package does not resolve: in `apparmor` a `.` or `..` component, which matches nothing; in `landlock` a `..` component, which the kernel resolves against the file system, while a `.` component is cleaned away |
 | `ErrDuplicateKey`, `ErrUnknownField`, `ErrMisspelledField`, `ErrInvalidUTF8`, `ErrUnexpectedData`, `ErrNotAnObject` | `UnmarshalStrict` of every package | See [Strict decoding](#strict-decoding) |
 | `ErrMissingField` | `seccomp.UnmarshalStrict` and `landlock.UnmarshalStrict` | See [Strict decoding](#strict-decoding) |
 
@@ -210,6 +212,7 @@ import "sigs.k8s.io/security-profiles-merger/seccomp"
 | `Clone` | A deep copy of a profile, keeping nil and empty lists apart |
 | `NativeArchitecture` | The seccomp architecture of the running program, from `runtime.GOARCH` |
 | `FormatProfile` | Human-readable representation of a profile on one line that is safe to log, quoted and cut at 64 KiB |
+| `FormatSyscall` | One syscall entry as `FormatProfile` writes it, such as `read,write->SCMP_ACT_ALLOW` |
 
 ### Types
 
@@ -226,7 +229,10 @@ syscall's `Name`, which it embeds.
 for human-readable formatting, quoted and bounded as `FormatProfile` is.
 `ProfileDiff.String` has a value receiver, so a diff and a pointer to one
 both implement `fmt.Stringer`; `Diff` returns a non-nil diff whenever its
-error is nil.
+error is nil. A diff compares errno values as a runtime loads them, the
+lower 16 bits, and reports one wider than that as the profile writes it:
+the default's, and a rule's where every entry of the syscall with that
+action and loaded value, in both profiles, writes the same one.
 
 ### Errors
 
@@ -355,31 +361,31 @@ the diff types (`ProfileDiff`, `SliceDiff[T]`, `ExecutableDiff`,
 `*Profile`, `ExecutableRules`, `FilesystemRules`, `NetworkRules`,
 `CapabilityRules` and `ProfileDiff` implement `fmt.Stringer`, quoted and
 cut at 64 KiB as in [seccomp](#functions); a nil `*Profile` formats as
-`Profile{<nil>}`.
+`Profile{<nil>}`, and a section that lists nothing formats as the empty
+string and is left out of its profile's, as a nil section is.
 `ProfileDiff` has value receivers, as in seccomp. `(*Profile).Clone` returns
 a deep copy, or nil for a nil profile.
 
 ### Errors
 
 `ErrNoProfiles`, `ErrNilProfile`, `ErrMoreProblems`, `ErrBudgetExceeded`,
-`ErrEmptyPath`, `ErrNulInPath`, `ErrRelativePath`, `ErrPathTooLong` and
-the `UnmarshalStrict` sentinels are shared and listed under [spm](#spm). A
-merge fails with `ErrNoProfiles` when given nothing, `Intersect` with
-`ErrBudgetExceeded` past its budget, and otherwise only on the rows that
-name it and on `ErrNilProfile`, `ErrEmptyPath`, `ErrRelativePath`,
-`ErrPathTooLong` and `ErrMoreProblems`, wrapped in an `InputError`.
+`ErrEmptyPath`, `ErrNulInPath`, `ErrRelativePath`, `ErrPathTooLong`,
+`ErrDotComponent` and the `UnmarshalStrict` sentinels are shared and listed
+under [spm](#spm). A merge fails with `ErrNoProfiles` when given nothing,
+`Intersect` with `ErrBudgetExceeded` past its budget, and otherwise only on
+the rows that name it and on `ErrNilProfile`, `ErrEmptyPath`,
+`ErrRelativePath`, `ErrPathTooLong` and `ErrMoreProblems`, wrapped in an
+`InputError`.
 
 | Sentinel | Raised by | Meaning |
 |----------|-----------|---------|
-| `ErrDuplicatePath` | Every validator and merge | A path is listed in two filesystem categories, however each is spelled |
+| `ErrDuplicatePathAcrossCategories` | Every validator and merge | A path is listed in two filesystem categories, however each is spelled |
 | `ErrEmptyCapability` | Every validator and merge | A capability name is empty |
 | `ErrUnsupportedVariable` | Every validator and merge | A path uses an AppArmor variable such as `@{HOME}` |
-| `ErrDuplicatePathInCategory` | Every validator | A path is listed twice within one category; the merge folds it |
+| `ErrDuplicatePathInList` | Every validator | A path is listed twice within one list: a filesystem category, `AllowedExecutables` or `AllowedLibraries`; the merge folds it |
 | `ErrDuplicateCapability` | Every validator | A capability is listed twice, ignoring case; the merge folds it |
-| `ErrDuplicateExecutablePath` | Every validator | A path is listed twice in `AllowedExecutables` or `AllowedLibraries`; the merge folds it |
 | `ErrInvalidGlob` | `ValidateArtifact`, `ValidateStrict`, `ValidateBaseline`; `QuotePath` with `ErrUnquotablePath` | A pattern apparmor_parser rejects or loads as something else; see [Paths the validators reject](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#hdr-Paths_the_validators_reject) for how the merge treats it |
 | `ErrGlobTooComplex` | `ValidateArtifact`, `ValidateStrict`, `ValidateBaseline` | A pattern past the matcher's limits (100 alternatives in total), which never matches |
-| `ErrDotComponent` | `ValidateArtifact`, `ValidateStrict`, `ValidateBaseline` | A `.` or `..` component, which matches nothing |
 | `ErrUnquotablePath` | `ValidateArtifact`, `ValidateStrict`, `ValidateBaseline`, `QuotePath` | A character the lexer does not accept unescaped, or one that does not print as itself; from `QuotePath` also a pattern apparmor_parser rejects, with `ErrInvalidGlob` |
 | `ErrInvalidCapabilityName` | `ValidateArtifact`, `ValidateStrict`, `ValidateBaseline` | A capability name outside `[A-Za-z0-9_]`, or one starting with `cap_` in any case, which apparmor_parser does not load |
 | `ErrTooManyPaths`, `ErrTooManyPatternBytes`, `ErrTooManyCapabilities` | `ValidateArtifact`, `ValidateStrict`, first and on their own | A [limit](#limits-1) is exceeded; each matches `ErrArtifactTooLarge` |
@@ -452,14 +458,14 @@ import "sigs.k8s.io/security-profiles-merger/landlock"
 | `RequiredABIVersion` | The lowest ABI version supporting every right a profile uses, after `Validate` |
 | `FSAccessRights`, `NetAccessRights`, `ScopeRights` | Every right this package knows, each with the ABI version that introduced it |
 | `Options.Downgrade` | A copy of a profile without the rights the ABI version does not support: another policy than the profile ([ABI versions](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#hdr-ABI_versions), [Refer](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#hdr-Refer)) |
-| `LoweredRulePaths` | The rule paths of a result that carry access an input granted only on an ancestor path, each as a `LoweredPath` saying where a runtime opens it ([Lowered rule paths](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#hdr-Lowered_rule_paths)). A bad input is an `InputError`, a bad result a `*ResultError` |
+| `IntersectLowered` | `Intersect`, and the rule paths of its result that carry access an input granted only on an ancestor path, each as a `LoweredPath` saying where a runtime opens it ([Lowered rule paths](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#hdr-Lowered_rule_paths)). What a runtime merges an artifact into its baseline with |
 | `UnmarshalStrict` | Decode a profile, refusing what `encoding/json` accepts silently; see [strict decoding](#strict-decoding) |
 | `DecodeArtifact` | `UnmarshalStrict` then `ValidateArtifact`, returning the profile only when both pass; `Options.DecodeArtifact` checks the ABI version too |
 | `Diff` | Structured diff of the cleaned rules as written, not of the access they grant. A nil profile is an `InputError` naming it, wrapping `ErrNilProfile` |
 
 ### Types
 
-The types are `Profile`, `Options`, `ResultError`, `LoweredPath`, the access rights
+The types are `Profile`, `Options`, `LoweredPath`, the access rights
 (`FSAccessRight`, `NetAccessRight`, `ScopeRight`), `PathRule`, `NetRule`,
 `ABIVersion` with the constants `ABIV1` to `ABIV12` and `LatestABIVersion`,
 and the diff types
@@ -476,17 +482,16 @@ seccomp.
 
 `ErrNoProfiles`, `ErrNilProfile`, `ErrMoreProblems`, `ErrBudgetExceeded`,
 `ErrEmptyPath`, `ErrNulInPath`, `ErrRelativePath`, `ErrPathTooLong`,
-`ErrInvalidOptions` and the `UnmarshalStrict` sentinels are shared and
-listed under [spm](#spm). A merge fails with `ErrNoProfiles` when given
-nothing, with `ErrBudgetExceeded` past its budget, and otherwise only on the
-rows that name it and on `ErrNilProfile`, `ErrEmptyPath`, `ErrNulInPath`,
-`ErrRelativePath`, `ErrPathTooLong` and `ErrMoreProblems`, wrapped in an
-`InputError`.
+`ErrDotComponent`, `ErrInvalidOptions` and the `UnmarshalStrict` sentinels
+are shared and listed under [spm](#spm). A merge fails with `ErrNoProfiles`
+when given nothing, with `ErrBudgetExceeded` past its budget, and otherwise
+only on the rows that name it and on `ErrNilProfile`, `ErrEmptyPath`,
+`ErrNulInPath`, `ErrRelativePath`, `ErrPathTooLong`, `ErrDotComponent` and
+`ErrMoreProblems`, wrapped in an `InputError`.
 
 | Sentinel | Raised by | Meaning |
 |----------|-----------|---------|
 | `ErrUnknownRight` | Every validator and merge | An access right value this package does not know |
-| `ErrParentPath` | Every validator and merge | A path has a `..` component, which the kernel resolves against the file system |
 | `ErrUnhandledRight` | `ValidateBaseline`, `ValidateArtifact`, `ValidateStrict` | A rule grants a right outside the handled set, which the kernel rejects (`EINVAL`); the merge prunes it |
 | `ErrTrailingSlash` | `ValidateBaseline`, `ValidateArtifact`, `ValidateStrict` | A path other than the root ends in `/` or `/.`, which the kernel opens only as a directory; the merge and `Diff` clean the suffix away |
 | `ErrInvalidUTF8Path` | `ValidateBaseline`, `ValidateArtifact`, `ValidateStrict` | A path is not valid UTF-8, which the JSON form of a profile cannot carry; `Validate` and the merge accept it |

@@ -142,31 +142,37 @@ func TestCapabilityRulesString(t *testing.T) {
 	}
 }
 
-func TestCapabilityRulesStringQuotesNone(t *testing.T) {
+// TestEmptySectionsStringAlike checks that a section listing nothing reads
+// as the empty string, whichever section it is, and is left out of the
+// profile, as a nil section is: both deny everything the section covers.
+func TestEmptySectionsStringAlike(t *testing.T) {
 	t.Parallel()
 
-	// An empty list reads "none", so a capability spelled that way must
-	// not read the same.
-	rules := apparmor.CapabilityRules{
-		AllowedCapabilities: []string{"none", "NET_ADMIN"},
+	for _, section := range []fmt.Stringer{
+		apparmor.ExecutableRules{},
+		apparmor.FilesystemRules{},
+		apparmor.NetworkRules{},
+		apparmor.CapabilityRules{},
+	} {
+		if got := section.String(); got != "" {
+			t.Errorf("%T{}.String() = %q, want the empty string", section, got)
+		}
 	}
 
-	const want = `caps:"none",NET_ADMIN`
-
-	if got := rules.String(); got != want {
-		t.Errorf("String() = %q, want %q", got, want)
+	profile := &apparmor.Profile{
+		Executable:   &apparmor.ExecutableRules{},
+		Filesystem:   &apparmor.FilesystemRules{},
+		Network:      &apparmor.NetworkRules{},
+		Capabilities: &apparmor.CapabilityRules{AllowedCapabilities: []string{}},
 	}
-}
+	if got := profile.String(); got != "Profile{}" {
+		t.Errorf("String() = %q, want %q", got, "Profile{}")
+	}
 
-func TestCapabilityRulesStringEmpty(t *testing.T) {
-	t.Parallel()
-
-	rules := apparmor.CapabilityRules{}
-
-	const want = "caps:none"
-
-	if got := rules.String(); got != want {
-		t.Errorf("String() = %q, want %q", got, want)
+	// A capability spelled "none" needs no quoting: nothing else reads so.
+	rules := apparmor.CapabilityRules{AllowedCapabilities: []string{"none", "NET_ADMIN"}}
+	if got := rules.String(); got != "caps:none,NET_ADMIN" {
+		t.Errorf("String() = %q, want %q", got, "caps:none,NET_ADMIN")
 	}
 }
 

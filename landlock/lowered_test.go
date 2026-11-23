@@ -18,8 +18,8 @@ package landlock_test
 
 import (
 	"errors"
+	"reflect"
 	"slices"
-	"strings"
 	"testing"
 
 	"sigs.k8s.io/security-profiles-merger/landlock"
@@ -34,7 +34,7 @@ import (
 // somewhere the baseline never covered.
 //
 // This is the behaviour Intersect and ValidateArtifact document, and
-// LoweredRulePaths reports it. Do not "simplify" it away without reading
+// IntersectLowered reports it. Do not "simplify" it away without reading
 // those: dropping the deeper rule would deny access both inputs permit, and
 // keeping it is only safe for a caller that resolves the path without
 // leaving its declared hierarchy.
@@ -59,8 +59,8 @@ func TestIntersectLowersAncestorGrant(t *testing.T) {
 	}
 
 	want := []string{"/data/link"}
-	if got := loweredPaths(t, result, baseline, artifact); !slices.Equal(got, want) {
-		t.Errorf("LoweredRulePaths = %v, want %v", got, want)
+	if got := loweredPaths(t, baseline, artifact); !slices.Equal(got, want) {
+		t.Errorf("IntersectLowered = %v, want %v", got, want)
 	}
 }
 
@@ -80,18 +80,18 @@ func TestIntersectLowersRefer(t *testing.T) {
 	right := fsProfile(rights, landlock.PathRule{Path: "/data/x", AccessFS: rights})
 
 	want := "Profile{fs:make_reg,refer,remove_file /data/x(make_reg,refer,remove_file)}"
-	result := assertMergeFormat(t, "Intersect", landlock.Intersect, want, left, right)
+	assertMergeFormat(t, "Intersect", landlock.Intersect, want, left, right)
 	assertMergeFormat(t, "Intersect", landlock.Intersect, want, right, left)
 
 	lowered := []string{"/data/x"}
-	if got := loweredPaths(t, result, left, right); !slices.Equal(got, lowered) {
-		t.Errorf("LoweredRulePaths = %v, want %v", got, lowered)
+	if got := loweredPaths(t, left, right); !slices.Equal(got, lowered) {
+		t.Errorf("IntersectLowered = %v, want %v", got, lowered)
 	}
 }
 
-// TestLoweredRulePaths covers what the function answers for the shapes a
-// caller meets.
-func TestLoweredRulePaths(t *testing.T) {
+// TestIntersectLowered covers what IntersectLowered answers for the shapes
+// a caller meets.
+func TestIntersectLowered(t *testing.T) {
 	t.Parallel()
 
 	read := fsRights{landlock.FSAccessReadFile}
@@ -100,12 +100,10 @@ func TestLoweredRulePaths(t *testing.T) {
 	refer := fsRights{landlock.FSAccessRefer}
 
 	tests := map[string]struct {
-		result *landlock.Profile
 		inputs []*landlock.Profile
 		want   []string
 	}{
 		"a grant lowered from an ancestor": {
-			result: fsProfile(read, landlock.PathRule{Path: "/data/link", AccessFS: read}),
 			inputs: []*landlock.Profile{
 				fsProfile(read, landlock.PathRule{Path: "/data", AccessFS: read}),
 				fsProfile(read, landlock.PathRule{Path: "/data/link", AccessFS: read}),
@@ -113,37 +111,38 @@ func TestLoweredRulePaths(t *testing.T) {
 			want: []string{"/data/link"},
 		},
 		"every input names the path": {
-			result: fsProfile(read, landlock.PathRule{Path: "/data", AccessFS: read}),
 			inputs: []*landlock.Profile{
 				fsProfile(read, landlock.PathRule{Path: "/data", AccessFS: read}),
 				fsProfile(read, landlock.PathRule{Path: "/data", AccessFS: read}),
 			},
 			want: nil,
 		},
-		"the input grants another right on the ancestor": {
-			result: fsProfile(readWrite, landlock.PathRule{Path: "/data/link", AccessFS: write}),
+		"the input's own rule grants the right": {
+			// The first input grants read on the ancestor, and the write the
+			// result keeps through its own rule on the path.
 			inputs: []*landlock.Profile{
-				fsProfile(readWrite, landlock.PathRule{Path: "/data", AccessFS: read}),
+				fsProfile(readWrite,
+					landlock.PathRule{Path: "/data", AccessFS: read},
+					landlock.PathRule{Path: "/data/link", AccessFS: write}),
 				fsProfile(readWrite, landlock.PathRule{Path: "/data/link", AccessFS: write}),
 			},
 			want: nil,
 		},
-		"a rule of the result on the root": {
-			result: fsProfile(read, landlock.PathRule{Path: "/", AccessFS: read}),
+		"a rule on the root": {
 			inputs: []*landlock.Profile{
+				fsProfile(read, landlock.PathRule{Path: "/", AccessFS: read}),
 				fsProfile(read, landlock.PathRule{Path: "/", AccessFS: read}),
 			},
 			want: nil,
 		},
 		"paths are cleaned as the merge cleans them": {
-			result: fsProfile(read, landlock.PathRule{Path: "/data/link/", AccessFS: read}),
 			inputs: []*landlock.Profile{
 				fsProfile(read, landlock.PathRule{Path: "//data//", AccessFS: read}),
+				fsProfile(read, landlock.PathRule{Path: "/data/link/", AccessFS: read}),
 			},
 			want: []string{"/data/link"},
 		},
 		"reported once for several inputs": {
-			result: fsProfile(read, landlock.PathRule{Path: "/a/b/c", AccessFS: read}),
 			inputs: []*landlock.Profile{
 				fsProfile(read, landlock.PathRule{Path: "/a", AccessFS: read}),
 				fsProfile(read, landlock.PathRule{Path: "/a/b", AccessFS: read}),
@@ -151,16 +150,19 @@ func TestLoweredRulePaths(t *testing.T) {
 			},
 			want: []string{"/a/b/c"},
 		},
-		"no inputs": {
-			result: fsProfile(read, landlock.PathRule{Path: "/data/link", AccessFS: read}),
-			want:   nil,
+		"a single input": {
+			inputs: []*landlock.Profile{
+				fsProfile(read,
+					landlock.PathRule{Path: "/data", AccessFS: read},
+					landlock.PathRule{Path: "/data/link", AccessFS: read}),
+			},
+			want: nil,
 		},
 		"a grant of a right the input does not handle": {
 			// The merge drops the write grant of the first input, which does
 			// not handle write and so permits it everywhere already: the
 			// result's write on the deeper path is not the first input's
 			// grant lowered.
-			result: fsProfile(readWrite, landlock.PathRule{Path: "/home/x", AccessFS: write}),
 			inputs: []*landlock.Profile{
 				fsProfile(read, landlock.PathRule{Path: "/", AccessFS: readWrite}),
 				fsProfile(write, landlock.PathRule{Path: "/home/x", AccessFS: write}),
@@ -170,7 +172,6 @@ func TestLoweredRulePaths(t *testing.T) {
 		"a refer grant the input does not list": {
 			// Refer is denied implicitly, and a grant of it is ignored
 			// unless the handled set lists it.
-			result: fsProfile(refer, landlock.PathRule{Path: "/home/x", AccessFS: refer}),
 			inputs: []*landlock.Profile{
 				fsProfile(read, landlock.PathRule{
 					Path:     "/",
@@ -181,7 +182,6 @@ func TestLoweredRulePaths(t *testing.T) {
 			want: nil,
 		},
 		"a listed refer grant is lowered": {
-			result: fsProfile(refer, landlock.PathRule{Path: "/home/x", AccessFS: refer}),
 			inputs: []*landlock.Profile{
 				fsProfile(refer, landlock.PathRule{Path: "/", AccessFS: refer}),
 				fsProfile(refer, landlock.PathRule{Path: "/home/x", AccessFS: refer}),
@@ -189,138 +189,76 @@ func TestLoweredRulePaths(t *testing.T) {
 			want: []string{"/home/x"},
 		},
 		"rules for one path are folded": {
-			result: fsProfile(
-				readWrite,
-				landlock.PathRule{Path: "/data/link", AccessFS: readWrite},
-			),
 			inputs: []*landlock.Profile{
 				fsProfile(readWrite,
 					landlock.PathRule{Path: "/data", AccessFS: read},
 					landlock.PathRule{Path: "/data/link", AccessFS: read},
 					landlock.PathRule{Path: "/data/link/", AccessFS: write},
 				),
+				fsProfile(readWrite, landlock.PathRule{Path: "/data/link", AccessFS: readWrite}),
 			},
 			want: nil,
 		},
 	}
 
 	for name, test := range tests {
-		got := loweredPaths(t, test.result, test.inputs...)
+		got := loweredPaths(t, test.inputs...)
 		if !slices.Equal(got, test.want) {
-			t.Errorf("%s: LoweredRulePaths = %v, want %v", name, got, test.want)
+			t.Errorf("%s: IntersectLowered = %v, want %v", name, got, test.want)
 		}
 	}
 }
 
-// TestLoweredRulePathsResultErrors checks that a bad result is reported
-// on its own and not as an InputError, so that a caller dispatching on
-// InputError never blames an input for it.
-func TestLoweredRulePathsResultErrors(t *testing.T) {
+// TestIntersectLoweredInputErrors checks that IntersectLowered fails as
+// Intersect does: a bad input is an InputError numbered among the inputs,
+// and every failing input is reported in input order.
+func TestIntersectLoweredInputErrors(t *testing.T) {
 	t.Parallel()
 
 	read := fsRights{landlock.FSAccessReadFile}
 
-	for _, testCase := range []struct {
-		name   string
-		result *landlock.Profile
-		want   error
-	}{
-		{name: "nil result", result: nil, want: landlock.ErrNilProfile},
-		{
-			name:   "invalid result",
-			result: fsProfile(fsRights{"bogus"}),
-			want:   landlock.ErrUnknownRight,
-		},
-	} {
-		// A bad input as well is not reported: the result comes first.
-		_, err := landlock.LoweredRulePaths(testCase.result, fsProfile(read), nil)
-
-		var (
-			inputErr  *landlock.InputError
-			resultErr *landlock.ResultError
-		)
-		if !errors.Is(err, testCase.want) || errors.As(err, &inputErr) ||
-			!errors.As(err, &resultErr) || !strings.HasPrefix(err.Error(), "result: ") {
-			t.Errorf("%s: LoweredRulePaths = %v, want a result error wrapping %v",
-				testCase.name, err, testCase.want)
-		}
-	}
-}
-
-// TestResultErrorWithoutErr checks that a ResultError a caller builds
-// without an Err still formats rather than panics.
-func TestResultErrorWithoutErr(t *testing.T) {
-	t.Parallel()
-
-	err := &landlock.ResultError{Err: nil}
-	if got := err.Error(); got != "result: <nil>" {
-		t.Errorf("Error() = %q, want %q", got, "result: <nil>")
-	}
-}
-
-// TestLoweredRulePathsInputErrors checks that a bad input is an InputError
-// numbered among the inputs, as Intersect numbers it, so inputs[0] is
-// Index 0, and that every failing input is reported in input order.
-func TestLoweredRulePathsInputErrors(t *testing.T) {
-	t.Parallel()
-
-	read := fsRights{landlock.FSAccessReadFile}
-
-	_, err := landlock.LoweredRulePaths(fsProfile(read), fsProfile(fsRights{"bogus"}))
+	_, _, err := landlock.IntersectLowered(fsProfile(read), fsProfile(fsRights{"bogus"}))
 
 	var inputErr *landlock.InputError
-	if !errors.As(err, &inputErr) || inputErr.Index != 0 ||
+	if !errors.As(err, &inputErr) || inputErr.Index != 1 ||
 		!errors.Is(err, landlock.ErrUnknownRight) {
-		t.Errorf("LoweredRulePaths(valid, invalid) = %v, want an InputError for input 0", err)
+		t.Errorf("IntersectLowered(valid, invalid) = %v, want an InputError for input 1", err)
 	}
 
-	_, err = landlock.LoweredRulePaths(fsProfile(read), nil, fsProfile(read), nil)
+	_, _, err = landlock.IntersectLowered(fsProfile(read), nil, fsProfile(read), nil)
 
 	var joined interface{ Unwrap() []error }
 	if !errors.As(err, &joined) || len(joined.Unwrap()) != 2 {
-		t.Fatalf("LoweredRulePaths(valid, nil, valid, nil) = %v, want two InputErrors", err)
+		t.Fatalf("IntersectLowered(valid, nil, valid, nil) = %v, want two InputErrors", err)
 	}
 
-	for idx, wantIndex := range []int{0, 2} {
+	for idx, wantIndex := range []int{1, 3} {
 		got := joined.Unwrap()[idx]
 		if !errors.As(got, &inputErr) || inputErr.Index != wantIndex ||
 			!errors.Is(got, landlock.ErrNilProfile) {
-			t.Errorf("LoweredRulePaths(valid, nil, valid, nil) failure %d = %v, "+
+			t.Errorf("IntersectLowered(valid, nil, valid, nil) failure %d = %v, "+
 				"want an InputError for input %d wrapping ErrNilProfile", idx, got, wantIndex)
 		}
 	}
 }
 
-// TestLoweredRulePathsMisreadUnion pins why LoweredRulePaths means nothing
-// for a Union result: Union keeps every input rule on its own path, yet the
-// function reports the deeper rule as lowered from the other input's
-// ancestor rule.
-func TestLoweredRulePathsMisreadUnion(t *testing.T) {
+// TestIntersectLoweredWithoutInputs checks that IntersectLowered of no
+// input fails as Intersect does, with ErrNoProfiles.
+func TestIntersectLoweredWithoutInputs(t *testing.T) {
 	t.Parallel()
 
-	read := fsRights{landlock.FSAccessReadFile}
-	etc := fsProfile(read, landlock.PathRule{Path: "/etc", AccessFS: read})
-	passwd := fsProfile(read, landlock.PathRule{Path: "/etc/passwd", AccessFS: read})
-
-	result := assertMergeFormat(t, "Union", landlock.Union,
-		"Profile{fs:read_file /etc(read_file) /etc/passwd(read_file)}", etc, passwd)
-
-	want := []string{"/etc/passwd"}
-	if got := loweredPaths(t, result, etc, passwd); !slices.Equal(got, want) {
-		t.Errorf("LoweredRulePaths = %v, want %v", got, want)
+	result, lowered, err := landlock.IntersectLowered()
+	if !errors.Is(err, landlock.ErrNoProfiles) || result != nil || lowered != nil {
+		t.Errorf("IntersectLowered() = %v, %v, %v, want ErrNoProfiles", result, lowered, err)
 	}
 }
 
-// loweredPaths returns the paths LoweredRulePaths reports, failing the test
-// on an error.
-func loweredPaths(t *testing.T, result *landlock.Profile, inputs ...*landlock.Profile) []string {
+// loweredPaths returns the paths IntersectLowered reports for the inputs,
+// failing the test as intersectLowered does.
+func loweredPaths(t *testing.T, inputs ...*landlock.Profile) []string {
 	t.Helper()
 
-	lowered, err := landlock.LoweredRulePaths(result, inputs...)
-	if err != nil {
-		t.Fatalf("LoweredRulePaths: %v", err)
-	}
-
+	lowered := intersectLowered(t, inputs...)
 	if lowered == nil {
 		return nil
 	}
@@ -333,11 +271,34 @@ func loweredPaths(t *testing.T, result *landlock.Profile, inputs ...*landlock.Pr
 	return paths
 }
 
-// TestLoweredRulePathsNameTheAncestor checks the ancestor reported for each
+// intersectLowered returns the lowered paths IntersectLowered reports for
+// the inputs, failing the test on an error or on a result that is not the
+// one Intersect returns.
+func intersectLowered(t *testing.T, inputs ...*landlock.Profile) []landlock.LoweredPath {
+	t.Helper()
+
+	result, lowered, err := landlock.IntersectLowered(inputs...)
+	if err != nil {
+		t.Fatalf("IntersectLowered: %v", err)
+	}
+
+	want, err := landlock.Intersect(inputs...)
+	if err != nil {
+		t.Fatalf("Intersect: %v", err)
+	}
+
+	if !reflect.DeepEqual(result, want) {
+		t.Fatalf("IntersectLowered = %s, want the result of Intersect, %s", result, want)
+	}
+
+	return lowered
+}
+
+// TestIntersectLoweredNamesTheAncestor checks the ancestor reported for each
 // lowered path, which a runtime opens the path beneath: the shallowest rule
 // path any input lowered a grant from, a deeper rule of the same input
 // included, and the input that rule belongs to.
-func TestLoweredRulePathsNameTheAncestor(t *testing.T) {
+func TestIntersectLoweredNamesTheAncestor(t *testing.T) {
 	t.Parallel()
 
 	read := fsRights{landlock.FSAccessReadFile}
@@ -357,7 +318,7 @@ func TestLoweredRulePathsNameTheAncestor(t *testing.T) {
 		landlock.PathRule{Path: "/srv/a/x", AccessFS: readWrite},
 	)
 
-	result := assertMergeFormat(t, "Intersect", landlock.Intersect,
+	assertMergeFormat(t, "Intersect", landlock.Intersect,
 		"Profile{fs:read_file,write_file /srv/a(write_file) /srv/a/x(read_file)}",
 		baseline, artifact)
 
@@ -366,30 +327,8 @@ func TestLoweredRulePathsNameTheAncestor(t *testing.T) {
 		{Path: "/srv/a/x", Ancestor: "/srv", Input: 0, InRoot: false},
 	}
 
-	lowered, err := landlock.LoweredRulePaths(result, baseline, artifact)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !slices.Equal(lowered, want) {
-		t.Errorf("LoweredRulePaths = %v, want %v", lowered, want)
-	}
-
-	// The union keeps write on /srv/a/x, which the baseline grants from
-	// /srv/a. The ancestor stays /srv, the shallower of the two, so that
-	// opening beneath it also checks that /srv/a lies within /srv.
-	united := assertMergeFormat(t, "Union", landlock.Union,
-		"Profile{fs:read_file,write_file /(write_file) /srv(read_file) "+
-			"/srv/a(write_file) /srv/a/x(read_file,write_file)}",
-		baseline, artifact)
-
-	lowered, err = landlock.LoweredRulePaths(united, baseline, artifact)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !slices.Equal(lowered, want) {
-		t.Errorf("LoweredRulePaths of the union = %v, want %v", lowered, want)
+	if lowered := intersectLowered(t, baseline, artifact); !slices.Equal(lowered, want) {
+		t.Errorf("IntersectLowered = %v, want %v", lowered, want)
 	}
 }
 
@@ -405,46 +344,13 @@ func requiredABI(t *testing.T, profile *landlock.Profile) landlock.ABIVersion {
 	return abi
 }
 
-// TestLoweredRulePathsOnMergeResults checks the answer against real merge
-// results: an intersection that keeps only paths every input names lowers
-// nothing, and a union reports the paths whose access another input granted
-// on an ancestor.
-func TestLoweredRulePathsOnMergeResults(t *testing.T) {
-	t.Parallel()
-
-	read := fsRights{landlock.FSAccessReadFile}
-	same := fsProfile(read, landlock.PathRule{Path: pathEtc, AccessFS: read})
-
-	result, err := landlock.Intersect(same, same)
-	if err != nil {
-		t.Fatalf("Intersect: %v", err)
-	}
-
-	if got := loweredPaths(t, result, same, same); got != nil {
-		t.Errorf("LoweredRulePaths of an intersection of equal profiles = %v, want nil", got)
-	}
-
-	root := fsProfile(read, landlock.PathRule{Path: "/", AccessFS: read})
-	nested := fsProfile(read, landlock.PathRule{Path: "/var/run", AccessFS: read})
-
-	united, err := landlock.Union(root, nested)
-	if err != nil {
-		t.Fatalf("Union: %v", err)
-	}
-
-	want := []string{"/var/run"}
-	if got := loweredPaths(t, united, root, nested); !slices.Equal(got, want) {
-		t.Errorf("LoweredRulePaths of a union = %v, want %v", got, want)
-	}
-}
-
-// TestLoweredRulePathsRootAncestor covers the ancestor reported for grants
+// TestIntersectLoweredRootAncestor covers the ancestor reported for grants
 // a rule on "/" carries. Such a rule covers everything a path from the root
 // reaches, through every mount, so the ancestor is "/" only when the rule
 // on "/" grants every lowered right, and otherwise the ancestor the other
 // rights come from, which a runtime opens the path beneath without
 // crossing a mount.
-func TestLoweredRulePathsRootAncestor(t *testing.T) {
+func TestIntersectLoweredRootAncestor(t *testing.T) {
 	t.Parallel()
 
 	read := fsRights{landlock.FSAccessReadFile}
@@ -499,23 +405,13 @@ func TestLoweredRulePathsRootAncestor(t *testing.T) {
 	}
 
 	for name, test := range tests {
-		result, err := landlock.Intersect(test.inputs...)
-		if err != nil {
-			t.Fatalf("%s: Intersect: %v", name, err)
-		}
-
-		got, err := landlock.LoweredRulePaths(result, test.inputs...)
-		if err != nil {
-			t.Fatalf("%s: LoweredRulePaths: %v", name, err)
-		}
-
-		if !slices.Equal(got, test.want) {
-			t.Errorf("%s: LoweredRulePaths(%s) = %v, want %v", name, result, got, test.want)
+		if got := intersectLowered(t, test.inputs...); !slices.Equal(got, test.want) {
+			t.Errorf("%s: IntersectLowered = %v, want %v", name, got, test.want)
 		}
 	}
 }
 
-// TestLoweredRulePathsReferStaysBeneath pins that a result granting refer
+// TestIntersectLoweredReferStaysBeneath pins that a result granting refer
 // never takes the shortcut of an Ancestor of "/". The rule on "/" covers
 // every path from the root for the access it grants, but the kernel decides
 // a move by comparing the rights of two directories: with /q a symlink to
@@ -523,7 +419,7 @@ func TestLoweredRulePathsRootAncestor(t *testing.T) {
 // moving a file from /p to /y, which the baseline denies, since the file
 // would gain write_file there. Linux denies that rename with EXDEV under
 // the baseline and allows it under such a result.
-func TestLoweredRulePathsReferStaysBeneath(t *testing.T) {
+func TestIntersectLoweredReferStaysBeneath(t *testing.T) {
 	t.Parallel()
 
 	referMake := fsRights{landlock.FSAccessRefer, landlock.FSAccessMakeReg}
@@ -537,21 +433,18 @@ func TestLoweredRulePathsReferStaysBeneath(t *testing.T) {
 		landlock.PathRule{Path: "/q", AccessFS: referMake},
 	)
 
-	result := assertMergeFormat(t, "Intersect", landlock.Intersect,
+	assertMergeFormat(t, "Intersect", landlock.Intersect,
 		"Profile{fs:make_reg,refer,write_file /p(make_reg,refer) /q(make_reg,refer) "+
 			"/y(write_file)}",
 		baseline, artifact)
 
-	lowered, err := landlock.LoweredRulePaths(result, baseline, artifact)
-	if err != nil {
-		t.Fatal(err)
-	}
+	lowered := intersectLowered(t, baseline, artifact)
 
 	want := []landlock.LoweredPath{
 		{Path: "/p", Ancestor: "/", Input: 0, InRoot: false},
 		{Path: "/q", Ancestor: "/", Input: 0, InRoot: false},
 	}
 	if !slices.Equal(lowered, want) {
-		t.Errorf("LoweredRulePaths = %v, want %v", lowered, want)
+		t.Errorf("IntersectLowered = %v, want %v", lowered, want)
 	}
 }

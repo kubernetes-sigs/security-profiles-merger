@@ -443,26 +443,6 @@ func TestValidateArtifactLandlockRejectsUnhandledRight(t *testing.T) {
 	}
 }
 
-func TestValidateStrictRejectsUnknownFields(t *testing.T) {
-	t.Parallel()
-
-	// "arg" instead of "args" would silently drop the filter.
-	file := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[`+
-		`{"names":["read"],"action":"SCMP_ACT_ALLOW","arg":[{"index":0,"value":1,"op":"SCMP_CMP_EQ"}]}]}`)
-
-	code, _, stderr := runCapture(t, []string{
-		cmdValidate, flagType, typeSeccomp, "--strict", file,
-	}, nil)
-
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1: %s", code, stderr)
-	}
-
-	if !strings.Contains(stderr, `error: `+file+`: unknown field "syscalls[0].arg"`) {
-		t.Errorf("stderr = %q, want the unknown field named", stderr)
-	}
-}
-
 func TestValidateWarnsAboutUnknownFields(t *testing.T) {
 	t.Parallel()
 
@@ -652,7 +632,7 @@ func TestArchErrorsForMergeAndValidate(t *testing.T) {
 		},
 		{
 			[]string{cmdValidate, flagArch, archNative, apparmorA},
-			"--arch only applies with --strict, --artifact or --baseline",
+			"--arch only applies to the strict, artifact and baseline checks",
 		},
 		{
 			[]string{cmdValidate, "--artifact", flagArch, archNative, apparmorA},
@@ -677,8 +657,8 @@ func TestArchErrorsForMergeAndValidate(t *testing.T) {
 // TestArtifactRejectsUnknownFields covers an artifact with a member the
 // profile type has no field for, such as a misspelled "syscalls": it drops
 // the rules it was meant to carry, and UnmarshalStrict, which runtimes
-// decode an artifact with, refuses it, so the artifact checks refuse it too.
-// The default checks a baseline gets still only warn.
+// decode an artifact with, refuses it, so the artifact and strict checks
+// refuse it too. The default checks a baseline gets still only warn.
 func TestArtifactRejectsUnknownFields(t *testing.T) {
 	t.Parallel()
 
@@ -690,6 +670,7 @@ func TestArtifactRejectsUnknownFields(t *testing.T) {
 
 	for _, args := range [][]string{
 		{cmdValidate, "--artifact", misspelled},
+		{cmdValidate, flagStrict, misspelled},
 		{
 			cmdMerge, flagStrategy, strategyIntersect, "--validate", "default,artifact",
 			baseline, misspelled,
@@ -1295,7 +1276,7 @@ func TestValidateBaselineAndABI(t *testing.T) {
 			name:     "--baseline with --artifact",
 			args:     []string{"--baseline", "--artifact", scoped},
 			wantCode: exitUsage,
-			want:     "error: --baseline cannot be combined with --strict or --artifact\n",
+			want:     "error: --artifact cannot be combined with --baseline\n",
 		},
 		{
 			name:     "--arch with --baseline",
@@ -1428,5 +1409,146 @@ func TestABIForMergeAndDiff(t *testing.T) {
 					code, stderr, test.wantCode, test.want)
 			}
 		})
+	}
+}
+
+// TestValidateModeFlag covers --validate on validate, which takes the modes
+// merge and diff take, and baseline, one for every profile or one each,
+// and which the boolean mode flags are short for.
+func TestValidateModeFlag(t *testing.T) {
+	t.Parallel()
+
+	const unknownField = "testdata/seccomp_unknown_field.json"
+
+	for _, test := range []struct {
+		args     []string
+		wantCode int
+		want     string
+	}{
+		{[]string{unknownField}, 0, ""},
+		{[]string{"--validate", modeNameDefault, unknownField}, 0, ""},
+		{[]string{"--validate", modeNameArtifact, unknownField}, 1, unknownField + ": unknown fields"},
+		{[]string{"--artifact", unknownField}, 1, unknownField + ": unknown fields"},
+		{
+			[]string{"--validate", "default,artifact", testdataSeccompA, unknownField},
+			1, unknownField + ": unknown fields",
+		},
+		{[]string{"--validate", "artifact,default", testdataSeccompA, unknownField}, 0, ""},
+		{
+			[]string{"--validate", modeNameBaseline, flagArch, "SCMP_ARCH_X86_64", testdataSeccompA},
+			0, "",
+		},
+		{
+			[]string{"--validate", modeNameArtifact, "--artifact", testdataSeccompA},
+			exitUsage, "error: --artifact cannot be combined with --validate\n",
+		},
+		{
+			[]string{flagStrict, "--validate", modeNameStrict, testdataSeccompA},
+			exitUsage, "error: --strict cannot be combined with --validate\n",
+		},
+		{
+			[]string{"--validate", "", testdataSeccompA},
+			exitUsage, `error: unknown validation mode ""`,
+		},
+		{
+			[]string{"--validate", testBogus, testdataSeccompA},
+			exitUsage,
+			`error: unknown validation mode "bogus" (use default, strict, artifact, or baseline)`,
+		},
+		{
+			[]string{"--validate", "default,artifact,strict", testdataSeccompA, testdataSeccompB},
+			exitUsage, "error: wrong number of validation modes: got 3 for 2 profiles\n",
+		},
+		{
+			[]string{"--validate", "default,artifact", testdataSeccompA, testdataSeccompB, unknownField},
+			exitUsage, "error: wrong number of validation modes: got 2 for 3 file arguments\n",
+		},
+		{
+			[]string{
+				"--validate", "default,default", flagArch, archNone,
+				testdataSeccompA, testdataSeccompB,
+			},
+			exitUsage, "error: --arch only applies to the strict, artifact and baseline checks\n",
+		},
+		{
+			[]string{
+				"--validate", "default,strict", flagArch, archNone,
+				testdataSeccompA, testdataSeccompB,
+			},
+			0, "",
+		},
+	} {
+		args := append([]string{cmdValidate, flagQuiet}, test.args...)
+
+		code, _, stderr := runCapture(t, args, nil)
+		if code != test.wantCode || !strings.Contains(stderr, test.want) {
+			t.Errorf("%v: exit code = %d, stderr = %q, want %d and %q",
+				test.args, code, stderr, test.wantCode, test.want)
+		}
+	}
+
+	// merge and diff check no baseline.
+	code, _, stderr := runCapture(t, []string{
+		cmdMerge, flagStrategy, strategyUnion, "--validate", modeNameBaseline, testdataSeccompA,
+	}, nil)
+
+	want := `error: unknown validation mode "baseline" (use default, strict, or artifact)`
+	if code != exitUsage || !strings.Contains(stderr, want) {
+		t.Errorf("merge --validate baseline: exit code = %d, stderr = %q, want %d and %q",
+			code, stderr, exitUsage, want)
+	}
+}
+
+// TestWeakestMode covers the mode a --validate list of the wrong length
+// checks every input under: the one whose checks every listed mode
+// includes.
+func TestWeakestMode(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		modes []validateMode
+		want  validateMode
+	}{
+		{[]validateMode{modeStrict, modeArtifact}, modeArtifact},
+		{[]validateMode{modeStrict, modeDefault}, modeDefault},
+		{[]validateMode{modeBaseline, modeBaseline}, modeBaseline},
+		{[]validateMode{modeBaseline, modeArtifact}, modeDefault},
+		{[]validateMode{modeStrict, modeBaseline, modeStrict}, modeDefault},
+	} {
+		if got := weakestMode(test.modes); got != test.want {
+			t.Errorf("weakestMode(%v) = %v, want %v", test.modes, got, test.want)
+		}
+	}
+}
+
+// TestDetectionNoteFollowsDecoding covers the note about an auto-detected
+// profile type, which says what the inputs were taken for: it is written
+// once every input decoded as that type, and not when one did not.
+func TestDetectionNoteFollowsDecoding(t *testing.T) {
+	t.Parallel()
+
+	const note = "auto-detected profile type: seccomp\n"
+
+	for _, test := range []struct {
+		args     []string
+		wantCode int
+		wantNote bool
+	}{
+		{[]string{cmdMerge, flagStrategy, strategyUnion, testdataSeccompA, testdataSeccompB}, 0, true},
+		{
+			[]string{
+				cmdMerge, flagStrategy, strategyUnion,
+				"testdata/seccomp_type_error.json", testdataSeccompA,
+			},
+			1, false,
+		},
+		{[]string{cmdValidate, "--artifact", "testdata/seccomp_unknown_field.json"}, 1, false},
+		{[]string{cmdValidate, "testdata/invalid_action.json"}, 1, true},
+	} {
+		code, _, stderr := runCapture(t, test.args, nil)
+		if code != test.wantCode || strings.HasPrefix(stderr, note) != test.wantNote {
+			t.Errorf("%v: exit code = %d, stderr = %q, want %d and the note %v",
+				test.args, code, stderr, test.wantCode, test.wantNote)
+		}
 	}
 }

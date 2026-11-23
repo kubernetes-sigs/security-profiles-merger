@@ -49,7 +49,7 @@ type ExecutableRules struct {
 
 // FilesystemRules defines file access permissions. Each path is an absolute
 // path or an AppArmor glob pattern, and one path may appear in only one of
-// the three lists (ErrDuplicatePath).
+// the three lists (ErrDuplicatePathAcrossCategories).
 type FilesystemRules struct {
 	// ReadOnlyPaths are the paths the profile may read.
 	ReadOnlyPaths []string `json:"readOnlyPaths,omitempty"`

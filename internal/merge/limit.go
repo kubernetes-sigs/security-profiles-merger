@@ -26,6 +26,26 @@ func LimitError(text string) error {
 	return &limitError{text: text}
 }
 
+// AliasError returns an error with the given text that errors.Is also
+// matches against target, for a package that reports a shared sentinel in
+// words of its own.
+func AliasError(text string, target error) error {
+	return &aliasError{text: text, target: target}
+}
+
+// aliasError is the error AliasError returns.
+type aliasError struct {
+	text   string
+	target error
+}
+
+func (a *aliasError) Error() string { return a.text }
+
+// Is reports whether target is the one the error stands for.
+func (a *aliasError) Is(target error) bool {
+	return target == a.target
+}
+
 // limitError is the sentinel LimitError returns.
 type limitError struct {
 	text string

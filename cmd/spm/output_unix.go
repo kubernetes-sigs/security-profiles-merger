@@ -127,6 +127,24 @@ func isMountPoint(err error) bool {
 	return errors.Is(err, syscall.EBUSY)
 }
 
+// fileOwnedBy reports whether the user of the given ID owns the open file.
+func fileOwnedBy(file *os.File, uid int) bool {
+	info, err := file.Stat()
+	if err != nil {
+		return false
+	}
+
+	stat, ok := info.Sys().(*syscall.Stat_t)
+
+	return ok && int64(stat.Uid) == int64(uid)
+}
+
+// isReadOnlyFS reports whether creating a file failed because its file
+// system is mounted read-only, which open(2) reports as EROFS.
+func isReadOnlyFS(err error) bool {
+	return errors.Is(err, syscall.EROFS)
+}
+
 // isSymlinkRefusal reports whether an open failed because O_NOFOLLOW
 // refused a symlink, whose errno on its own reads as a link loop or as
 // something else entirely. Which errno that is differs between the

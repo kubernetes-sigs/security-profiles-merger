@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -33,12 +34,13 @@ import (
 // per line, in the notation the String methods of the library write on one
 // line for a log: a real profile holds hundreds of rules, which one line
 // does not let a reader scan. Each line stands on its own, so that grep
-// finds a rule with what it applies to. Values are quoted as the library
-// quotes them, through merge.Builder: a value holding whitespace is quoted,
-// so that no value spans two lines. Every part of a line is written here
-// rather than through the String method of a rule, which bounds its own
-// output and would put the truncation marker in the middle of one that
-// still fits.
+// finds a rule with what it applies to. A rule is written as the library
+// renders it (seccomp.FormatSyscall, the String method of a diff entry or
+// a Landlock rule), and values are quoted as the library quotes them,
+// through merge.Builder: a value holding whitespace is quoted, so that no
+// value spans two lines. A rendering the library cut ends in
+// merge.TruncationMarker, which cuts the output at that line (see
+// humanText.line).
 
 // noRules is the line of a profile that has nothing to write, which would
 // otherwise print as an empty line. Its parentheses and space are quoted
@@ -203,63 +205,9 @@ func humanSeccomp(profile *specs.LinuxSeccomp) string {
 		writeOptional(lines, "listenerMeta:", profile.ListenerMetadata)
 
 		eachLine(lines, len(profile.Syscalls), "", func(out *merge.Builder, idx int) {
-			rule := &profile.Syscalls[idx]
-
-			merge.WriteTexts(out, rule.Names, ",")
-			writeResult(out, rule.Args, rule.Action, rule.ErrnoRet)
+			out.WriteString(seccomp.FormatSyscall(&profile.Syscalls[idx]))
 		})
 	})
-}
-
-// writeResult writes what follows the names of a seccomp rule: its
-// arguments in parentheses, if it has any, and then "->" and its action.
-func writeResult(
-	out *merge.Builder, args []specs.LinuxSeccompArg, action specs.LinuxSeccompAction,
-	errnoRet *uint,
-) {
-	if len(args) > 0 {
-		out.WriteString("(")
-		writeArgs(out, args)
-		out.WriteString(")")
-	}
-
-	out.WriteString("->")
-	writeAction(out, action, errnoRet)
-}
-
-// writeArgs writes the argument conditions of a seccomp rule, as in
-// "[0]SCMP_CMP_EQ:1,[2]SCMP_CMP_MASKED_EQ:0:6".
-func writeArgs(out *merge.Builder, args []specs.LinuxSeccompArg) {
-	for idx := range args {
-		if idx > 0 {
-			out.WriteString(",")
-		}
-
-		arg := &args[idx]
-
-		out.WriteString("[")
-		out.WriteUint(uint64(arg.Index))
-		out.WriteString("]")
-		out.WriteText(string(arg.Op))
-		out.WriteString(":")
-		out.WriteUint(arg.Value)
-
-		if arg.Op == specs.OpMaskedEqual {
-			out.WriteString(":")
-			out.WriteUint(arg.ValueTwo)
-		}
-	}
-}
-
-// writeAction writes an action, followed by its errno value if it has one.
-func writeAction(out *merge.Builder, action specs.LinuxSeccompAction, errnoRet *uint) {
-	out.WriteText(string(action))
-
-	if errnoRet != nil {
-		out.WriteString("(errno:")
-		out.WriteUint(uint64(*errnoRet))
-		out.WriteString(")")
-	}
 }
 
 // humanSeccompDiff renders a seccomp diff: each changed setting, then each
@@ -304,21 +252,19 @@ func humanSeccompDiff(diff *seccomp.ProfileDiff) string {
 		eachLine(lines, len(changed), "~", func(out *merge.Builder, idx int) {
 			out.WriteText(changed[idx].Name)
 			out.WriteString(":")
-			writeDetails(out, changed[idx].Left)
+			writeStrings(out, changed[idx].Left)
 			out.WriteString("->")
-			writeDetails(out, changed[idx].Right)
+			writeStrings(out, changed[idx].Right)
 		})
 	})
 }
 
-// writeEntries writes each syscall a side of a diff alone holds on a line
-// of its own after sign, as in "-read->SCMP_ACT_ALLOW".
-func writeEntries(lines *humanText, sign string, entries []seccomp.SyscallEntry) {
+// writeEntries writes each item on a line of its own after sign, as its
+// String renders it, such as a syscall a side of a diff alone holds, as in
+// "-read->SCMP_ACT_ALLOW", or a Landlock rule, as in "/etc(read_file)".
+func writeEntries[T fmt.Stringer](lines *humanText, sign string, entries []T) {
 	eachLine(lines, len(entries), sign, func(out *merge.Builder, idx int) {
-		entry := &entries[idx]
-
-		out.WriteText(entry.Name)
-		writeResult(out, entry.Args, entry.Action, entry.ErrnoRet)
+		out.WriteString(entries[idx].String())
 	})
 }
 
@@ -357,27 +303,22 @@ func writeTextChange(lines *humanText, prefix string, diff *spm.ValueDiff[string
 	})
 }
 
-// writeDetails writes what one side of a changed syscall holds, separated
-// by commas: each result, after the arguments it applies to if it has
-// any, as in "SCMP_ACT_ERRNO(errno:38)" or "([0]SCMP_CMP_EQ:1)->SCMP_ACT_LOG".
-func writeDetails(out *merge.Builder, details []seccomp.SyscallDetail) {
-	for idx := range details {
+// writeStrings writes the items as their String renders them, separated by
+// commas, such as what one side of a changed syscall holds, as in
+// "SCMP_ACT_ERRNO(errno:38)" or "([0]SCMP_CMP_EQ:1)->SCMP_ACT_LOG".
+func writeStrings[T fmt.Stringer](out *merge.Builder, items []T) {
+	for idx := range items {
+		if out.Full() {
+			return
+		}
+
 		if idx > 0 {
 			out.WriteString(",")
 		}
 
-		detail := &details[idx]
-		if len(detail.Args) == 0 {
-			writeAction(out, detail.Action, detail.ErrnoRet)
-		} else {
-			writeResult(out, detail.Args, detail.Action, detail.ErrnoRet)
-		}
+		out.WriteString(items[idx].String())
 	}
 }
-
-// emptyCapabilities is how an AppArmor capability list that grants nothing
-// reads, as apparmor.CapabilityRules writes it.
-const emptyCapabilities = "none"
 
 // humanAppArmor renders an AppArmor profile: each executable, library and
 // path, the network settings, and each capability.
@@ -402,24 +343,9 @@ func humanAppArmor(profile *apparmor.Profile) string {
 			}
 		}
 
-		if profile.Capabilities == nil {
-			return
+		if profile.Capabilities != nil {
+			writeEach(lines, "caps:", profile.Capabilities.AllowedCapabilities)
 		}
-
-		names := profile.Capabilities.AllowedCapabilities
-		if len(names) == 0 {
-			lines.line(func(out *merge.Builder) { out.WriteString("caps:" + emptyCapabilities) })
-		}
-
-		// A capability spelled as the empty list reads is quoted, so that a
-		// profile granting it is not read as one granting nothing.
-		eachLine(lines, len(names), "caps:", func(out *merge.Builder, idx int) {
-			if names[idx] == emptyCapabilities {
-				out.WriteString(strconv.Quote(names[idx]))
-			} else {
-				out.WriteText(names[idx])
-			}
-		})
 	})
 }
 
@@ -490,30 +416,8 @@ func humanLandlock(profile *landlock.Profile) string {
 		writeList(lines, "fs:", profile.HandledAccessFS)
 		writeList(lines, "net:", profile.HandledAccessNet)
 		writeList(lines, "scoped:", profile.Scoped)
-		writePathRules(lines, "", profile.PathRules)
-		writeNetRules(lines, "", profile.NetRules)
-	})
-}
-
-// writePathRules writes each Landlock path rule on a line of its own after
-// sign, as in "/etc(read_file)".
-func writePathRules(lines *humanText, sign string, rules []landlock.PathRule) {
-	eachLine(lines, len(rules), sign, func(out *merge.Builder, idx int) {
-		out.WriteText(rules[idx].Path)
-		out.WriteString("(")
-		merge.WriteTexts(out, rules[idx].AccessFS, ",")
-		out.WriteString(")")
-	})
-}
-
-// writeNetRules writes each Landlock network rule on a line of its own
-// after sign, as in ":443(connect_tcp)".
-func writeNetRules(lines *humanText, sign string, rules []landlock.NetRule) {
-	eachLine(lines, len(rules), sign+":", func(out *merge.Builder, idx int) {
-		out.WriteUint(uint64(rules[idx].Port))
-		out.WriteString("(")
-		merge.WriteTexts(out, rules[idx].AccessNet, ",")
-		out.WriteString(")")
+		writeEntries(lines, "", profile.PathRules)
+		writeEntries(lines, "", profile.NetRules)
 	})
 }
 
@@ -530,8 +434,8 @@ func humanLandlockDiff(diff *landlock.ProfileDiff) string {
 		writeChanges(lines, "scoped", diff.Scoped)
 
 		if paths := diff.PathRules; paths != nil {
-			writePathRules(lines, "-", paths.Removed)
-			writePathRules(lines, "+", paths.Added)
+			writeEntries(lines, "-", paths.Removed)
+			writeEntries(lines, "+", paths.Added)
 			eachLine(lines, len(paths.Changed), "~", func(out *merge.Builder, idx int) {
 				out.WriteText(paths.Changed[idx].Path)
 				writeRightsChange(out, paths.Changed[idx].Left, paths.Changed[idx].Right)
@@ -539,8 +443,8 @@ func humanLandlockDiff(diff *landlock.ProfileDiff) string {
 		}
 
 		if ports := diff.NetRules; ports != nil {
-			writeNetRules(lines, "-", ports.Removed)
-			writeNetRules(lines, "+", ports.Added)
+			writeEntries(lines, "-", ports.Removed)
+			writeEntries(lines, "+", ports.Added)
 			eachLine(lines, len(ports.Changed), "~:", func(out *merge.Builder, idx int) {
 				out.WriteUint(uint64(ports.Changed[idx].Port))
 				writeRightsChange(out, ports.Changed[idx].Left, ports.Changed[idx].Right)

@@ -35,8 +35,9 @@ A single profile is normalized without merging.
 Reads from stdin when no files are provided: a single profile, or a JSON
 array of profiles, which a file may hold as well.
 A file argument of - reads stdin beside the files.
-Flags must precede file arguments, and -- ends them; a flag that takes a
-value may be given twice only with the same value both times.
+Flags may come before or after the file arguments, and -- ends them; a
+flag that takes a value may be given twice only with the same value both
+times.
 Exit status: 0 on success, 1 when a profile is invalid, of another type, or
 cannot be read, when the merge fails, or when the result cannot be written,
 2 on a usage error; 1 when a usage error comes up after a profile was found
@@ -137,8 +138,9 @@ var (
 )
 
 // parseValidateModes turns a --validate value into the modes it lists, and
-// reports a name that is no mode.
-func parseValidateModes(value string) ([]validateMode, error) {
+// reports a name that is no mode. Only validate takes baseline, which
+// withBaseline says.
+func parseValidateModes(value string, withBaseline bool) ([]validateMode, error) {
 	names := strings.Split(value, ",")
 
 	parsed := make([]validateMode, 0, len(names))
@@ -146,12 +148,16 @@ func parseValidateModes(value string) ([]validateMode, error) {
 	for _, spelled := range names {
 		name := strings.TrimSpace(spelled)
 
-		mode, ok := modeByName(name)
+		mode, ok := modeByName(name, withBaseline)
 		if !ok {
+			known := modeNameDefault + ", " + modeNameStrict + ", or " + modeNameArtifact
+			if withBaseline {
+				known = modeNameDefault + ", " + modeNameStrict + ", " + modeNameArtifact +
+					", or " + modeNameBaseline
+			}
+
 			return nil, fmt.Errorf(
-				"%w %s (use %s, %s, or %s)",
-				errUnknownValidateMode, merge.QuoteBounded(name),
-				modeNameDefault, modeNameStrict, modeNameArtifact,
+				"%w %s (use %s)", errUnknownValidateMode, merge.QuoteBounded(name), known,
 			)
 		}
 
@@ -181,7 +187,9 @@ func modeCountError(listed, count int, of string) error {
 // could not be read brings an unknown number of profiles, one at least, so
 // only a list too short is refused then: its failure is the answer.
 func (inv *invocation) validateModes(value string) []validateMode {
-	listed, err := parseValidateModes(value)
+	// The flags were checked to name modes the command takes, so baseline
+	// is one only for validate.
+	listed, err := parseValidateModes(value, true)
 	if err != nil {
 		// The flags were checked to name known modes.
 		inv.refusals = append(inv.refusals, err)
@@ -200,19 +208,16 @@ func (inv *invocation) validateModes(value string) []validateMode {
 		inv.refusals = append(inv.refusals, modeCountError(len(listed), count, "profile"))
 	}
 
-	weakest := slices.MinFunc(listed, func(left, right validateMode) int {
-		return left.strength() - right.strength()
-	})
-
-	return slices.Repeat([]validateMode{weakest}, count)
+	return slices.Repeat([]validateMode{weakestMode(listed)}, count)
 }
 
 // checkValidateModes reports a --validate value that names an unknown
 // mode, or lists one mode each for fewer profiles than the args file
-// arguments bring at least, before anything is read. The modes are parsed
-// again once the inputs are known (see invocation.validateModes).
-func checkValidateModes(value string, args int, stderr io.Writer) int {
-	listed, err := parseValidateModes(value)
+// arguments bring at least, before anything is read. withBaseline says
+// whether the command takes baseline. The modes are parsed again once the
+// inputs are known (see invocation.validateModes).
+func checkValidateModes(value string, args int, withBaseline bool, stderr io.Writer) int {
+	listed, err := parseValidateModes(value, withBaseline)
 	if err == nil && len(listed) > 1 && len(listed) < args {
 		err = modeCountError(len(listed), args, "file argument")
 	}
@@ -228,7 +233,7 @@ func checkValidateModes(value string, args int, stderr io.Writer) int {
 
 // checkFlags checks the merge flags (see commandOptions).
 func (opts *mergeOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) int {
-	if code := checkValidateModes(opts.validate, flags.NArg(), stderr); code != 0 {
+	if code := checkValidateModes(opts.validate, flags.NArg(), false, stderr); code != 0 {
 		return code
 	}
 
@@ -260,6 +265,8 @@ func (ops kindOps[T, D]) mergeProfiles(
 ) int {
 	report := inv.report
 	profiles := unmarshalAll[T](inv.inputs, strict, report)
+
+	inv.noteDetected()
 
 	checkInputs(profiles, report, func(idx int, profile *T) error {
 		if checks[idx] == nil {

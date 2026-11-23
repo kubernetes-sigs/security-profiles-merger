@@ -747,8 +747,8 @@ func TestRelativeGlobKeepsItsIdentity(t *testing.T) {
 	}
 
 	err := apparmor.Validate(readOnly("x[bc]", "x[cb]"))
-	if !errors.Is(err, apparmor.ErrDuplicatePathInCategory) {
-		t.Errorf("Validate: expected ErrDuplicatePathInCategory, got: %v", err)
+	if !errors.Is(err, apparmor.ErrDuplicatePathInList) {
+		t.Errorf("Validate: expected ErrDuplicatePathInList, got: %v", err)
 	}
 
 	diff, err := apparmor.Diff(readOnly("x[bc]"), readOnly("x[cb]"))
@@ -1013,7 +1013,7 @@ func TestMergeErrorsNameTheCallersEntry(t *testing.T) {
 				ReadOnlyPaths:  []string{"/etc//passwd"},
 				ReadWritePaths: []string{`/etc/\passwd`},
 			}),
-			sentinel: apparmor.ErrDuplicatePath,
+			sentinel: apparmor.ErrDuplicatePathAcrossCategories,
 			want: `filesystem.readWritePaths[0]: "/etc/\\passwd": ` +
 				`duplicate path across filesystem categories (also at filesystem.readOnlyPaths[0])`,
 		},

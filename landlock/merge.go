@@ -60,7 +60,7 @@ var (
 const maxMergeWork = 1 << 25
 
 // InputError is [spm.InputError], the error a merge, Diff or
-// LoweredRulePaths returns for one of its inputs, naming it by its
+// IntersectLowered returns for one of its inputs, naming it by its
 // position.
 type InputError = spm.InputError
 
@@ -69,9 +69,9 @@ type InputError = spm.InputError
 // It may deny moves and links every input allows, and inside a mount other
 // than the root mount can allow a move an input denies (see the Refer
 // section). A rule of the result can carry an ancestor's access onto a
-// deeper path another input chose, so a caller merging an artifact checks
-// LoweredRulePaths or enforces the inputs as separate layers. See the
-// Handled access, Rule paths and Lowered rule paths sections.
+// deeper path another input chose, so a caller merging an artifact calls
+// IntersectLowered instead or enforces the inputs as separate layers. See
+// the Handled access, Rule paths and Lowered rule paths sections.
 //
 // Unlike Union, the result can lose access once downgraded: Options.Downgrade
 // of the result can deny what Intersect of the downgraded inputs permits,
@@ -87,7 +87,9 @@ type InputError = spm.InputError
 // ValidateArtifact first. The result shares no memory with the inputs, a
 // single input included.
 func Intersect(profiles ...*Profile) (*Profile, error) {
-	return foldProfiles(profiles, intersectTwo, finishIntersect, false)
+	result, _, err := foldProfiles(profiles, intersectTwo, finishIntersect, false)
+
+	return result, err
 }
 
 // Union returns a profile that permits access where any input permits it,
@@ -100,22 +102,24 @@ func Intersect(profiles ...*Profile) (*Profile, error) {
 // Inputs are validated, the cost is bounded, and the result is owned by the
 // caller, as for Intersect.
 func Union(profiles ...*Profile) (*Profile, error) {
-	return foldProfiles(profiles, unionTwo, finishUnion, true)
+	result, _, err := foldProfiles(profiles, unionTwo, finishUnion, true)
+
+	return result, err
 }
 
 // foldProfiles validates, normalizes and merges the profiles, then hands the
-// result to finish together with the normalized inputs. A move or link
-// depends on the rights of two paths at once, which a pairwise fold cannot
-// see, so finish settles it against every input at the end, and the result
-// does not depend on how the fold grouped them. settlesMoves reports a
-// finish that settles moves as a union does (see unhandleMoveConflicts),
-// whose work the budget counts besides the lookups.
+// result to finish together with the normalized inputs, which it returns as
+// well. A move or link depends on the rights of two paths at once, which a
+// pairwise fold cannot see, so finish settles it against every input at the
+// end, and the result does not depend on how the fold grouped them.
+// settlesMoves reports a finish that settles moves as a union does (see
+// unhandleMoveConflicts), whose work the budget counts besides the lookups.
 func foldProfiles(
 	profiles []*Profile,
 	mergeTwo func(left, right *Profile) *Profile,
 	finish func(result *Profile, inputs []*Profile),
 	settlesMoves bool,
-) (*Profile, error) {
+) (*Profile, []*Profile, error) {
 	// Validate the caller's profiles first, so errors name their own
 	// indices and paths, and so that a path past MaxPathLen is reported as
 	// such rather than counted against the budget. Validation is linear in
@@ -123,12 +127,12 @@ func foldProfiles(
 	// every input passed, so it stays outside an InputError.
 	cleaned, err := validateInputs(profiles)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	err = checkMergeBudget(profiles, cleaned, settlesMoves)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	normalized := make([]*Profile, len(profiles))
@@ -144,14 +148,14 @@ func foldProfiles(
 		return mergeTwo(left, right), nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("merge: %w", err)
+		return nil, nil, fmt.Errorf("merge: %w", err)
 	}
 
 	finish(result, normalized)
 	sortProfile(result)
 	emptyToNil(result)
 
-	return result, nil
+	return result, normalized, nil
 }
 
 // checkMergeBudget refuses inputs whose merge would cost more than
@@ -871,31 +875,8 @@ func validateInputs(profiles []*Profile) ([][]string, error) {
 	return cleaned, nil
 }
 
-// ResultError is the error LoweredRulePaths returns for a merge result that
-// is nil or fails Validate. It is not an InputError, and errors.Is sees
-// through it to the sentinels of Err.
-type ResultError struct {
-	// Err is what was wrong with the result: ErrNilProfile or the error
-	// Validate returned for it.
-	Err error
-}
-
-// Error returns "result: " followed by the message of Err, or "result:
-// <nil>" where Err is nil.
-func (e *ResultError) Error() string {
-	if e.Err == nil {
-		return "result: <nil>"
-	}
-
-	return "result: " + e.Err.Error()
-}
-
-// Unwrap returns Err, so that errors.Is and errors.As see the sentinels it
-// holds.
-func (e *ResultError) Unwrap() error { return e.Err }
-
-// LoweredPath is a rule path of a merge result that carries access an
-// input granted only on an ancestor path, as LoweredRulePaths reports it,
+// LoweredPath is a rule path of an intersection that carries access an
+// input granted only on an ancestor path, as IntersectLowered reports it,
 // with the ancestor a runtime opens it beneath.
 type LoweredPath struct {
 	// Path is the rule path of the result, cleaned as the merge cleans it.
@@ -921,65 +902,52 @@ type LoweredPath struct {
 	InRoot bool
 }
 
-// LoweredRulePaths reports the rule paths where a merge result grants a
-// right that some input grants through a rule on an ancestor and not
-// through its own rule on the path, once each, sorted by path, or nil when
-// no grant was lowered. Inputs are read as the merge reads them: paths
-// cleaned, rules for one path folded, unhandled rights dropped. A caller
-// opens these paths as the Lowered rule paths section says.
+// IntersectLowered returns what Intersect returns, together with the rule
+// paths where the result grants a right that some input grants through a
+// rule on an ancestor and not through its own rule on the path, once each,
+// sorted by path, or nil when no grant was lowered. A caller opens these
+// paths as the Lowered rule paths section says. It fails as Intersect
+// fails, and reads the inputs as the merge reads them: paths cleaned, rules
+// for one path folded, unhandled rights dropped.
 //
-// The answer means something only for a result of Intersect. Union never
-// lowers a grant: it keeps every input rule on its own path, so a rule
-// beneath another input's ancestor rule is that input's own grant. The
-// function cannot tell, and for Union of /etc(read_file) and
-// /etc/passwd(read_file) it reports /etc/passwd as lowered from /etc.
-//
-// The result is checked with Validate first and reported on its own as a
-// *ResultError, never an InputError. Each input that is nil or fails
-// Validate is reported as an InputError indexed by its position among the
-// inputs, so in LoweredRulePaths(effective, baseline, artifact) the
-// baseline is 0, as in Intersect(baseline, artifact), and several are
-// joined in input order. Without inputs it returns nil once the result
-// passes.
-//
-// It checks no budget: its work grows with the number of inputs times the
-// rules of the result and their depth, which the merge budget bounds only
-// where result is what Intersect or Union returned for these inputs.
-func LoweredRulePaths(result *Profile, inputs ...*Profile) ([]LoweredPath, error) {
-	resultPaths, err := validateProfile(result, tierMerge)
+// A copy of the result that Options.Downgrade returns carries a subset of
+// the rights at each rule path, so its lowered paths are among these, and
+// opening a path as reported here is at least as strict as the copy needs.
+// A path whose rule the copy no longer holds needs no opening.
+func IntersectLowered(profiles ...*Profile) (*Profile, []LoweredPath, error) {
+	result, inputs, err := foldProfiles(profiles, intersectTwo, finishIntersect, false)
 	if err != nil {
-		return nil, &ResultError{Err: err}
+		return nil, nil, err
 	}
 
-	cleaned, err := validateInputs(inputs)
-	if err != nil {
-		return nil, err
+	return result, loweredPaths(result, inputs), nil
+}
+
+// loweredPaths returns the lowered rule paths of an intersection result
+// (see IntersectLowered), given its inputs as the merge normalized them. A
+// single input lowers nothing: every rule of the result is on a path it
+// names, with no right its own rule there does not grant. Its normalized
+// form is also the result itself, which the fold returns as it is.
+func loweredPaths(result *Profile, inputs []*Profile) []LoweredPath {
+	if len(inputs) < 2 || len(result.PathRules) == 0 {
+		return nil
 	}
 
-	if len(result.PathRules) == 0 {
-		return nil, nil
-	}
-
-	resultProfile := normalizeProfile(result, resultPaths)
-	resultRules := pathKind().ruleMap(resultProfile.PathRules)
-	grantsRefer := rulesGrantRefer(resultProfile.PathRules)
+	resultRules := pathKind().ruleMap(result.PathRules)
+	grantsRefer := rulesGrantRefer(result.PathRules)
 	lowered := make(map[string]LoweredPath)
 
 	for idx, input := range inputs {
-		// Read the input as the merge does, so that a grant the merge
-		// ignores is not reported as lowered.
-		normalized := normalizeProfile(input, cleaned[idx])
-		pruneUnhandledRights(normalized)
-		addLowered(lowered, resultRules, pathRuleMasks(normalized.PathRules), idx, grantsRefer)
+		addLowered(lowered, resultRules, pathRuleMasks(input.PathRules), idx, grantsRefer)
 	}
 
 	if len(lowered) == 0 {
-		return nil, nil
+		return nil
 	}
 
 	return slices.SortedFunc(maps.Values(lowered), func(left, right LoweredPath) int {
 		return cmp.Compare(left.Path, right.Path)
-	}), nil
+	})
 }
 
 // addLowered records in lowered each rule path of the result onto which
@@ -1172,9 +1140,9 @@ func cleanPaths(rules []PathRule) []string {
 // ones seen, made on the first repeat of the key, so that each key holds
 // its distinct rights only and each rule costs its own: concatenating every
 // rule into the rights gathered so far cost an unvalidated profile, which
-// Diff and LoweredRulePaths read, time and memory in the square of its rules
-// for one path, and gathering every right of a key before deduplicating
-// them holds all of them at once.
+// Diff reads, time and memory in the square of its rules for one path, and
+// gathering every right of a key before deduplicating them holds all of
+// them at once.
 func mergeDuplicateRules[Rule any, Key cmp.Ordered, Right comparable](
 	rules []Rule, kind ruleKind[Rule, Key, Right], key func(int, Rule) Key,
 ) []Rule {

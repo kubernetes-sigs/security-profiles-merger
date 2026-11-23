@@ -39,6 +39,7 @@ const (
 	flagFormat   = "--format"
 
 	flagStrict = "--strict"
+	flagQuiet  = "--quiet"
 
 	flagNoDetectNote = "--no-detect-note"
 

@@ -190,12 +190,13 @@ func parentDir(path string) string {
 // synced and then renamed over path. A write that fails half way, on a full
 // disk say, then leaves the previous file whole instead of truncated, and a
 // reader never sees half a profile. The new file has the mode above,
-// whatever the umask and whatever mode the file it replaces had.
+// whatever the umask and whatever mode the file it replaces had, and on
+// Linux the extended attributes readXattrs keeps.
 //
-// A regular file that is a mount point is the exception, since it cannot be
-// replaced: a file bind-mounted into a container (docker run -v
-// ./out.json:/out.json, or a Kubernetes subPath mount) is written in place
-// and keeps its mode, which belongs to whoever mounted it.
+// A regular file that cannot be replaced is written in place and keeps its
+// mode: a mount point, such as a file bind-mounted into a container, and a
+// file the caller owns in a directory that takes no new file or whose
+// attributes the new file cannot be given (see replaceOutputFileWith).
 //
 // Anything else is written in place and left as it is. --output may name a
 // device or a FIFO, and "> /dev/null to check the exit code" is an ordinary
@@ -207,7 +208,7 @@ func writeOutputFile(path string, content []byte) error {
 
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return replaceOutputFile(path, content)
+		return replaceOutputFile(path, content, nil)
 	case err != nil:
 		return bareFileError(err)
 	case info.Mode()&fs.ModeSymlink != 0 && refuseSymlinks:
@@ -237,6 +238,16 @@ func writeOutputFile(path string, content []byte) error {
 // point, and what a mount point is then written through, so that a file put
 // at path in the meantime is neither asked about nor written.
 func writeRegularFile(path string, content []byte) error {
+	return writeRegularFileWith(path, content, readXattrs)
+}
+
+// writeRegularFileWith is writeRegularFile with the function that reads
+// the extended attributes the new file keeps. Where those cannot be read,
+// as a label a confined process may not read, the file is written in place
+// instead, which keeps them, if the caller owns it (see writeOwnedFile).
+func writeRegularFileWith(
+	path string, content []byte, read func(*os.File) ([]xattr, error),
+) error {
 	file, err := openOutput(path, true, 0)
 	if err != nil {
 		return err
@@ -248,13 +259,22 @@ func writeRegularFile(path string, content []byte) error {
 	// root. Any other file is closed before it is replaced, which Windows
 	// refuses for a file held open.
 	if !isMountedFile(file, path) {
+		attrs, err := read(file)
+		if err != nil {
+			return writeOwnedFile(file, content, err, os.Geteuid())
+		}
+
 		err = file.Close()
 		if err != nil {
 			return bareFileError(err)
 		}
 
-		return replaceOutputFile(path, content)
+		return replaceOutputFile(path, content, attrs)
 	}
+
+	// A mount point is written in place whoever owns it: mounting a file
+	// over a path takes a privilege no other user of the directory has, so
+	// it is not a file planted for the caller to write.
 
 	err = file.Truncate(0)
 	if err != nil {
@@ -263,7 +283,7 @@ func writeRegularFile(path string, content []byte) error {
 		return fmt.Errorf("truncate: %w", bareFileError(err))
 	}
 
-	return writeAndClose(file, content)
+	return writtenInPlace(writeAndClose(file, content))
 }
 
 // errNotRegular reports an output file that was a regular file when it was
@@ -276,26 +296,18 @@ var errBecameRegular = errors.New("is now a regular file, not the device or FIFO
 
 // openOutput opens for writing, with the given extra flags and without
 // following a symlink, an output file that was found to be a regular file,
-// or with regular false, one that was found to be neither a regular file
-// nor a symlink, such as a device or a FIFO. It refuses a file that is no
+// or with regular false, a device or a FIFO, and refuses a file that is no
 // longer what it was found to be.
 //
-// A regular file is opened without blocking: a FIFO put at path since it
-// was checked would otherwise hold the open until something reads from it,
-// which a run that meant to replace a file must not wait for, and a device
-// would be written to. The type is only known once the file is open, so a
-// device or a FIFO put at path in the window between the check and the
-// open is opened, though never written to, before it is refused; Unix has
-// no way to open a path only if it is a regular file. Such a FIFO without
-// a reader fails the open with ENXIO, and so does a device without its
-// hardware, neither of which a regular file ever does, so that failure is
-// reported as the file no longer being a regular one rather than as "no
-// such device or address".
-//
-// A device or a FIFO is opened as a shell redirection opens it, so that a
-// FIFO waits for its reader. A regular file put at path since it was
-// checked is refused: it is opened without truncating it, so writing it in
-// place would leave whatever of its old content lies past the new.
+// A regular file is opened without blocking, so that a FIFO put at path
+// since the check cannot hold the open. Unix cannot open a path only if it
+// is a regular file, so such a FIFO or device is opened, never written to,
+// and refused; a FIFO without a reader, or a device without its hardware,
+// fails that open with ENXIO, which a regular file never does, and is
+// reported as no longer being a regular file. A device or a FIFO is opened
+// as a shell redirection opens it, so that a FIFO waits for its reader; a
+// regular file put there instead is refused, since it is not truncated and
+// writing it in place would leave its old tail behind.
 func openOutput(path string, regular bool, flags int) (*os.File, error) {
 	flags |= os.O_WRONLY | oNoFollow
 	if regular {
@@ -371,16 +383,20 @@ func symlinkOpenError(path string, err error) error {
 // the file system takes would leave no room for the rest of the pattern.
 const tempPattern = ".spm-output-*.tmp"
 
-// replaceOutputFile writes content to a new file in the directory of path
-// and renames it over path. The new file is created exclusively, so it is
-// never one that someone else put there first, and removed again when
-// anything fails. Rename replaces a symlink that appeared at path since it
-// was checked rather than following it.
-func replaceOutputFile(path string, content []byte) error {
-	return replaceOutputFileWith(path, content, os.Rename, syncDir)
+// replaceOutputFile writes content to a new file in the directory of path,
+// with the extended attributes attrs, and renames it over path. The new
+// file is created exclusively, so it is never one that someone else put
+// there first, and removed again when anything fails. Rename replaces a
+// symlink that appeared at path since it was checked rather than following
+// it.
+func replaceOutputFile(path string, content []byte, attrs []xattr) error {
+	keep := func(temp *os.File) error { return writeXattrs(temp, attrs) }
+
+	return replaceOutputFileWith(path, content, keep, os.Rename, syncDir)
 }
 
-// replaceOutputFileWith is replaceOutputFile with the rename and the
+// replaceOutputFileWith is replaceOutputFile with the step that gives the
+// new file the attributes it keeps, nil for none, and the rename and the
 // directory sync to use. Once the rename has succeeded, the directory is
 // synced as well where the platform can (see syncDir), so that the new name
 // outlasts a crash as the data it points at does. That is best effort: the
@@ -388,29 +404,37 @@ func replaceOutputFile(path string, content []byte) error {
 // writtenUnsyncedError, which reportWrite reports as a warning rather than
 // as a failed write.
 //
-// A file that is a mount point cannot be renamed over. writeOutputFile
-// writes one in place where the platform can tell it is one (see
-// isMountedFile); where it cannot, the rename says so, and the file is
-// written in place then, once the new file has shown that the content can
-// be written at all.
+// Some files are written in place instead, keeping their mode and
+// attributes: a file whose directory takes no new file (EACCES, EPERM or
+// EROFS) and one whose attributes the new file cannot be given, as a label
+// a confined process may not set, where the caller owns the file (see
+// writeOwnedFile), and a mount point, which writeOutputFile recognizes up
+// front where the platform can (see isMountedFile) and the rename reports
+// elsewhere (see isMountPoint), once the new file has shown that the
+// content can be written at all. Any other failed rename, such as EPERM for
+// another user's file in a sticky directory, fails the write.
 func replaceOutputFileWith(
-	path string, content []byte,
+	path string, content []byte, keep func(temp *os.File) error,
 	rename func(oldPath, newPath string) error, sync func(dir string) error,
 ) error {
 	dir := parentDir(path)
 
-	// A directory that takes no new file fails here, before the output file
-	// itself is touched, so the error says which step and directory it was:
-	// a bare "permission denied" for a file the caller can write would
-	// point at the wrong thing.
 	temp, err := os.CreateTemp(dir, tempPattern)
 	if err != nil {
-		return fmt.Errorf(
-			"creating temporary file in %s: %w", merge.SafeName(dir), bareFileError(err),
-		)
+		return writeInPlaceInstead(path, content, dir, err)
 	}
 
 	tempPath := temp.Name()
+
+	if keep != nil {
+		err = keep(temp)
+		if err != nil {
+			_ = temp.Close()
+			_ = os.Remove(tempPath)
+
+			return writeInPlaceOr(path, content, err)
+		}
+	}
 
 	err = writeTempFile(temp, content)
 	if err != nil {
@@ -441,6 +465,77 @@ func replaceOutputFileWith(
 	}
 
 	return err
+}
+
+// writeInPlaceInstead writes content in place to the regular file at path
+// where the new file to replace it could not be created in dir, with
+// createErr, because the directory takes none, as writeInPlaceOr does.
+// Otherwise, or for any other failure to create the new file, it returns
+// createErr, naming the step and the directory: a bare "permission denied"
+// for a file the caller can write would point at the wrong thing.
+func writeInPlaceInstead(path string, content []byte, dir string, createErr error) error {
+	err := fmt.Errorf(
+		"creating temporary file in %s: %w", merge.SafeName(dir), bareFileError(createErr),
+	)
+	if errors.Is(createErr, fs.ErrPermission) || isReadOnlyFS(createErr) {
+		return writeInPlaceOr(path, content, err)
+	}
+
+	return err
+}
+
+// writeInPlaceOr writes content in place to the regular file at path, which
+// could not be replaced for the reason refused gives, when it opens for
+// writing and the caller owns it (see writeOwnedFile), and returns refused
+// otherwise, leaving the file untouched.
+func writeInPlaceOr(path string, content []byte, refused error) error {
+	return writeOwnedInPlace(path, content, refused, os.Geteuid())
+}
+
+// writeOwnedInPlace is writeInPlaceOr for the caller of the given user ID.
+func writeOwnedInPlace(path string, content []byte, refused error, uid int) error {
+	file, err := openOutput(path, true, 0)
+	if err != nil {
+		return refused
+	}
+
+	return writeOwnedFile(file, content, refused, uid)
+}
+
+// writeOwnedFile truncates and writes the open regular file, which could
+// not be replaced for the reason refused gives, when the user of the given
+// ID owns it, and otherwise closes it untouched and returns refused. A file
+// another user owns was not the caller's to write in place: in a directory
+// that user can write, they could have planted it, writable by anyone, to
+// change the profile once it is written, which replacing the file rules
+// out. Where the platform does not tell the owner (see fileOwnedBy), no
+// file is written in place.
+func writeOwnedFile(file *os.File, content []byte, refused error, uid int) error {
+	if !fileOwnedBy(file, uid) {
+		_ = file.Close()
+
+		return refused
+	}
+
+	err := file.Truncate(0)
+	if err != nil {
+		_ = file.Close()
+
+		return fmt.Errorf("truncate: %w", bareFileError(err))
+	}
+
+	return writtenInPlace(writeAndClose(file, content))
+}
+
+// writtenInPlace marks a failure to write in place a regular file that
+// could not be replaced: the file is truncated by then and its old content
+// gone, which a failed replacement leaves whole.
+func writtenInPlace(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("%w (written in place, the old content is gone)", err)
 }
 
 // tempFile is what writeTempFile needs of the temporary file: an *os.File,
@@ -504,7 +599,12 @@ func writeInPlace(path string, content []byte, regular bool) error {
 		return bareFileError(err)
 	}
 
-	return writeAndClose(file, content)
+	err = writeAndClose(file, content)
+	if regular {
+		return writtenInPlace(err)
+	}
+
+	return err
 }
 
 // writeAndClose writes content to a file opened for writing in place, and

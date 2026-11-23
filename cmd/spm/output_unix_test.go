@@ -21,6 +21,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -56,7 +57,7 @@ func TestOutputOverMountPointIsWrittenInPlace(t *testing.T) {
 		return &os.LinkError{Op: "rename", Old: oldPath, New: newPath, Err: syscall.EBUSY}
 	}
 
-	err = replaceOutputFileWith(target, []byte("new"), busy, syncDir)
+	err = replaceOutputFileWith(target, []byte("new"), nil, busy, syncDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -77,6 +78,148 @@ func TestOutputOverMountPointIsWrittenInPlace(t *testing.T) {
 	}
 }
 
+// TestOutputTheDirectoryWillNotReplaceIsKept covers an output file the
+// directory does not let the caller replace, as a sticky directory does for
+// another user's file, which rename(2) refuses with EPERM: the write fails
+// with the rename's error and the file is left as it was, even where the
+// caller could write it, since another user's file is not the caller's to
+// write in place. The other user's file is stood in for by the rename.
+func TestOutputTheDirectoryWillNotReplaceIsKept(t *testing.T) {
+	t.Parallel()
+
+	dir, target := fileOfMode(t, 0o666)
+
+	err := replaceOutputFileWith(target, []byte("new"), nil, refusedRename, syncDir)
+	if !errors.Is(err, syscall.EPERM) || err.Error() != "rename: operation not permitted" {
+		t.Errorf("got %v, want the rename's error", err)
+	}
+
+	content, err := os.ReadFile(target)
+	if err != nil || string(content) != previousContent {
+		t.Errorf("content = %q (%v), want it kept", content, err)
+	}
+
+	assertDirHoldsOne(t, dir)
+}
+
+// TestOutputWrittenInPlaceOnlyByItsOwner covers the files that are written
+// in place because they cannot be replaced: only one the caller owns is,
+// keeping its mode, while one another user owns, which that user could
+// have planted writable by anyone to change the profile afterwards, is left
+// untouched with the error that kept it from being replaced. The other
+// user is stood in for by the user ID the owner is compared with.
+func TestOutputWrittenInPlaceOnlyByItsOwner(t *testing.T) {
+	t.Parallel()
+
+	refused := fmt.Errorf("creating temporary file: %w", syscall.EACCES)
+
+	_, target := fileOfMode(t, 0o640)
+
+	err := writeOwnedInPlace(target, []byte("new"), refused, os.Geteuid()+1)
+	if !errors.Is(err, refused) {
+		t.Errorf("another user's file: got %v, want the error it was refused with", err)
+	}
+
+	content, err := os.ReadFile(target)
+	if err != nil || string(content) != previousContent {
+		t.Errorf("another user's file: content = %q (%v), want it untouched", content, err)
+	}
+
+	err = writeOwnedInPlace(target, []byte("new"), refused, os.Geteuid())
+	if err != nil {
+		t.Fatalf("the caller's file: unexpected error: %v", err)
+	}
+
+	content, err = os.ReadFile(target)
+	if err != nil || string(content) != "new" {
+		t.Errorf("the caller's file: content = %q (%v), want the new content", content, err)
+	}
+
+	assertFilePerm(t, target, 0o640)
+}
+
+// TestOutputAttributesItCannotCarryOverWriteInPlace covers an output file
+// whose attributes the new file cannot be given, or that cannot be read,
+// as a confined process may neither read nor set an SELinux label: the file
+// the caller owns is written in place, which keeps its inode and with it the
+// attributes, and no temporary file stays behind.
+func TestOutputAttributesItCannotCarryOverWriteInPlace(t *testing.T) {
+	t.Parallel()
+
+	denied := fmt.Errorf("keeping the SELinux label: %w", syscall.EACCES)
+
+	for _, test := range []struct {
+		name  string
+		write func(target string) error
+	}{
+		{"label that cannot be set", func(target string) error {
+			keep := func(*os.File) error { return denied }
+
+			return replaceOutputFileWith(target, []byte("new"), keep, os.Rename, syncDir)
+		}},
+		{"label that cannot be read", func(target string) error {
+			read := func(*os.File) ([]xattr, error) { return nil, denied }
+
+			return writeRegularFileWith(target, []byte("new"), read)
+		}},
+	} {
+		dir, target := fileOfMode(t, 0o640)
+
+		before, err := os.Stat(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = test.write(target)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", test.name, err)
+		}
+
+		after, err := os.Stat(target)
+		if err != nil || !os.SameFile(before, after) {
+			t.Errorf("%s: the file was replaced (%v), want it written in place", test.name, err)
+		}
+
+		content, err := os.ReadFile(target)
+		if err != nil || string(content) != "new" {
+			t.Errorf("%s: content = %q (%v), want the new content", test.name, content, err)
+		}
+
+		assertDirHoldsOne(t, dir)
+	}
+}
+
+// refusedRename stands in for a rename(2) the directory refuses, as a
+// sticky directory refuses to replace another user's file.
+func refusedRename(oldPath, newPath string) error {
+	return &os.LinkError{Op: "rename", Old: oldPath, New: newPath, Err: syscall.EPERM}
+}
+
+// previousContent is what fileOfMode writes.
+const previousContent = "a longer previous content"
+
+// fileOfMode returns a directory and a file in it of exactly the given
+// mode, holding previousContent.
+func fileOfMode(t *testing.T, mode os.FileMode) (string, string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "out.json")
+
+	err := os.WriteFile(target, []byte(previousContent), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The umask may have cleared bits WriteFile asked for.
+	err = os.Chmod(target, mode)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return dir, target
+}
+
 // TestOutputReportsOtherRenameFailures covers a rename that fails for any
 // other reason than a mount point: it is reported, without the path of the
 // temporary file, and the output file is left as it was.
@@ -95,7 +238,7 @@ func TestOutputReportsOtherRenameFailures(t *testing.T) {
 		return &os.LinkError{Op: "rename", Old: oldPath, New: newPath, Err: syscall.EACCES}
 	}
 
-	err = replaceOutputFileWith(target, []byte("other"), denied, syncDir)
+	err = replaceOutputFileWith(target, []byte("other"), nil, denied, syncDir)
 	if !errors.Is(err, syscall.EACCES) || strings.Contains(err.Error(), dir) {
 		t.Errorf("got %v, want a bare permission error", err)
 	}
@@ -154,7 +297,7 @@ func TestOutputWarnsWhenItsDirectoryCannotBeSynced(t *testing.T) {
 
 	failing := func(string) error { return syscall.EIO }
 
-	err = replaceOutputFileWith(target, []byte("new"), os.Rename, failing)
+	err = replaceOutputFileWith(target, []byte("new"), nil, os.Rename, failing)
 
 	var stderr bytes.Buffer
 
@@ -205,7 +348,7 @@ func TestOutputSyncsItsDirectory(t *testing.T) {
 	// The directory has to be readable again for it to be removed.
 	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o700) })
 
-	err = replaceOutputFile(filepath.Join(unreadable, "out.json"), []byte("new"))
+	err = replaceOutputFile(filepath.Join(unreadable, "out.json"), []byte("new"), nil)
 	if err != nil {
 		t.Errorf("writing into a directory that cannot be read = %v, want it written", err)
 	}

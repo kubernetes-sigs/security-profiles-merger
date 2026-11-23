@@ -64,8 +64,8 @@ Commands:
   version    Print the version (also: spm --version, spm -v)
   help       Print this help, or a command's (also: spm --help, spm -h)
 
-Flags must precede file arguments, and -- ends them. A file argument of -
-reads stdin.
+Flags may come before or after the file arguments, and -- ends them. A
+file argument of - reads stdin.
 Run 'spm help <command>' or 'spm <command> --help' for details on each command.
 `
 

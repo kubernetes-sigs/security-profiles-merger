@@ -162,12 +162,12 @@ limitations under the License.
 // merge keeps it as written.
 //
 // Two spellings of one path are one rule: the validators report "/tmp/A" and
-// `/tmp/\x41` in two categories with [ErrDuplicatePath], a merge folds two
-// spellings within one list, and inputs spelling one rule differently are
-// given a common spelling first, so their intersection keeps the file. The
-// spelling kept is one an input holds once its slashes are filtered, never
-// one derived from the decoded name, preferring one that renders as a rule,
-// then the shortest.
+// `/tmp/\x41` in two categories with [ErrDuplicatePathAcrossCategories], a
+// merge folds two spellings within one list, and inputs spelling one rule
+// differently are given a common spelling first, so their intersection keeps
+// the file. The spelling kept is one an input holds once its slashes are
+// filtered, never one derived from the decoded name, preferring one that
+// renders as a rule, then the shortest.
 //
 // # Paths the validators reject
 //

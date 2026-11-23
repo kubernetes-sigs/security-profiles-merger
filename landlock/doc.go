@@ -23,9 +23,9 @@ limitations under the License.
 // describes. [Union] produces one that permits access where any input does,
 // which the Security Profiles Operator uses to combine recorded profiles.
 // [Diff] compares two profiles. A runtime decodes an artifact with
-// [Options.DecodeArtifact] and, before applying an Intersect result, opens
-// the rule paths [LoweredRulePaths] reports as the Lowered rule paths
-// section says.
+// [Options.DecodeArtifact], merges it with [IntersectLowered] and, before
+// applying the result, opens the rule paths it reports as the Lowered rule
+// paths section says.
 //
 // # Validation
 //
@@ -167,7 +167,7 @@ limitations under the License.
 // by its author, so the result can permit more than an input. A caller
 // that cannot rule this out does one of three things:
 //
-//   - It opens each path [LoweredRulePaths] reports so that it cannot leave
+//   - It opens each path [IntersectLowered] reports so that it cannot leave
 //     the hierarchy of its [LoweredPath].Ancestor: it opens Ancestor as it
 //     opens a rule path when loading a profile, opens the path relative to
 //     that descriptor with openat2 and RESOLVE_BENEATH,
