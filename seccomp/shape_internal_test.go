@@ -442,3 +442,136 @@ func TestPruneDominatedOnEquivalentFilters(t *testing.T) {
 		}
 	}
 }
+
+// TestMayCover pins when pruneCovered skips a syscall without comparing its
+// clauses pairwise: where every clause is a single equality, which a
+// recorded profile of many distinct values is made of, and where there is
+// one clause. For each skipped set no clause covers another, which is what
+// makes the skip exact.
+func TestMayCover(t *testing.T) {
+	t.Parallel()
+
+	equality := func(index uint, value uint64) clause {
+		return clauseOn(specs.ActAllow, index, specs.OpEqualTo, value)
+	}
+
+	for name, test := range map[string]struct {
+		clauses []clause
+		want    bool
+	}{
+		"distinct equalities on one argument": {[]clause{equality(0, 1), equality(0, 2), equality(0, 3)}, false},
+		"equalities on two arguments":         {[]clause{equality(0, 1), equality(1, 1)}, false},
+		"equalities differing above 32 bits":  {[]clause{equality(0, 5), equality(0, 1<<32|5)}, false},
+		"one range":                           {[]clause{clauseOn(specs.ActAllow, 0, specs.OpLessThan, 16)}, false},
+		"an equality inside a range": {
+			[]clause{equality(0, 8), clauseOn(specs.ActAllow, 0, specs.OpLessThan, 16)}, true,
+		},
+		"an equality and a mask": {
+			[]clause{equality(0, 4), {action: specs.ActAllow, args: []specs.LinuxSeccompArg{
+				{Index: 0, Value: 6, ValueTwo: 4, Op: specs.OpMaskedEqual},
+			}}},
+			true,
+		},
+	} {
+		if got := mayCover(test.clauses); got != test.want {
+			t.Errorf("%s: mayCover = %v, want %v", name, got, test.want)
+		}
+
+		if test.want {
+			continue
+		}
+
+		for _, wide := range test.clauses {
+			for _, narrow := range test.clauses {
+				if !reflect.DeepEqual(wide, narrow) && argsCover(wide.args, narrow.args) {
+					t.Errorf("%s: %v covers %v, which mayCover skips", name, wide.args, narrow.args)
+				}
+			}
+		}
+	}
+}
+
+// TestPruneUniformKeepsWhatPairwiseKeeps checks the shortcut pruneDominated
+// takes for clauses of one result and one condition each against the
+// comparison of every pair, on hand-picked sets: equalities inside ranges
+// and masks, twins of which one has the smallest key or one is dead, nested
+// ranges, masks inside masks, and one value on two argument indices.
+func TestPruneUniformKeepsWhatPairwiseKeeps(t *testing.T) {
+	t.Parallel()
+
+	cond := func(index uint, operator specs.LinuxSeccompOperator, value uint64) clause {
+		return clauseOn(specs.ActAllow, index, operator, value)
+	}
+	mask := func(index uint, bits, value uint64) clause {
+		return clause{action: specs.ActAllow, args: []specs.LinuxSeccompArg{
+			{Index: index, Value: bits, ValueTwo: value, Op: specs.OpMaskedEqual},
+		}}
+	}
+	enoent := uint(2)
+
+	for name, test := range map[string]struct {
+		clauses []clause
+		kept    int
+	}{
+		"an equality inside a range": {
+			[]clause{
+				cond(0, specs.OpEqualTo, 8), cond(0, specs.OpLessThan, 16),
+				cond(0, specs.OpEqualTo, 20), cond(1, specs.OpEqualTo, 3),
+			},
+			3,
+		},
+		"three twins keep one": {
+			[]clause{
+				cond(0, specs.OpLessThan, 1), cond(0, specs.OpEqualTo, 0),
+				cond(0, specs.OpLessEqual, 0),
+			},
+			1,
+		},
+		"twins a mask covers go together": {
+			[]clause{cond(0, specs.OpLessThan, 1), cond(0, specs.OpEqualTo, 0), mask(0, 1, 0)},
+			1,
+		},
+		"nested ranges": {
+			[]clause{
+				cond(0, specs.OpLessThan, 16), cond(0, specs.OpLessThan, 8),
+				cond(0, specs.OpGreaterThan, 2),
+			},
+			2,
+		},
+		"masks inside masks on the third argument": {
+			[]clause{mask(2, 6, 4), mask(2, 2, 0), cond(2, specs.OpEqualTo, 4)},
+			1,
+		},
+		"one value on two arguments": {
+			[]clause{
+				cond(0, specs.OpEqualTo, 5), cond(1, specs.OpLessThan, 10),
+				cond(1, specs.OpEqualTo, 5),
+			},
+			2,
+		},
+		"one errno": {
+			[]clause{
+				{action: specs.ActErrno, errnoRet: &enoent, args: cond(0, specs.OpEqualTo, 0).args},
+				{action: specs.ActErrno, errnoRet: &enoent, args: cond(0, specs.OpLessThan, 1).args},
+				{
+					action: specs.ActErrno, errnoRet: &enoent,
+					args: cond(0, specs.OpGreaterEqual, 9).args,
+				},
+			},
+			2,
+		},
+	} {
+		keyed := make([]keyedClause, len(test.clauses))
+		for idx, current := range test.clauses {
+			keyed[idx] = keyedClause{key: sortedArgsKey(current.args), clause: current}
+		}
+
+		got := pruneUniform(slices.Clone(keyed))
+		want := prunePairwise(slices.Clone(keyed))
+
+		if !reflect.DeepEqual(got, want) || len(got) != test.kept {
+			t.Errorf("%s: pruneUniform = %v, want %v as prunePairwise keeps, %d clauses",
+				name, got, want, test.kept)
+		}
+	}
+}

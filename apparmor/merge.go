@@ -190,14 +190,14 @@ func ValidateBaseline(baseline *Profile) error {
 // compiles every pattern, within the compile budget of one call, which the
 // baseline's patterns fit once baselinePatternBytes has admitted them, so a
 // pattern left uncompiled is one the regexp package refused rather than one
-// past the budget. Every other failure globStatus reports has been reported
-// by baselineRendering already. What it compiles goes to the shared cache,
-// where the intersection that follows finds it.
+// past the budget. Every other failure rejectInvalidGlobs reports has been
+// reported by baselineRendering already. What it compiles goes to the shared
+// cache, where the intersection that follows finds it.
 func baselineCompiles(baseline *Profile) error {
 	check := newValidator(newMatcherCache())
 
 	for list, paths := range pathLists(normalizeProfile(baseline)) {
-		check.globStatus(list, *paths)
+		check.rejectInvalidGlobs(list, *paths)
 	}
 
 	return check.report.Err()
@@ -215,7 +215,7 @@ func baselineCompiles(baseline *Profile) error {
 func baselineRendering(baseline *Profile) error {
 	// The checks identify patterns without matching any, so the validator
 	// compiles nothing: an uncompiled pattern is not reported as past the
-	// compile budget there (see globStatus).
+	// compile budget there (see rejectInvalidGlobs).
 	check := newValidator(newKeyCache())
 
 	for list, paths := range pathLists(baseline) {
@@ -257,7 +257,7 @@ func baselinePatternBytes(profile *Profile) int {
 
 	for _, paths := range pathLists(profile) {
 		for _, path := range *paths {
-			normalized := normalizePath(path)
+			normalized := filterRawSlashes(path)
 			if seen[normalized] || !matchers.isGlob(normalized) {
 				continue
 			}
@@ -750,7 +750,7 @@ func missingLiteralGrants(
 	}
 
 	maps.DeleteFunc(missing, func(_ string, perm fsPermission) bool {
-		return !perm.read && !perm.write
+		return !perm.any()
 	})
 
 	return missing, true
@@ -766,12 +766,12 @@ func missingGrant(
 	kept map[string]fsPermission, keptSide *fsSide, budget *matchBudget,
 ) (fsPermission, bool) {
 	possible := permReadWrite.without(kept[literal.path])
-	if !possible.read && !possible.write {
+	if !possible.any() {
 		return possible, true
 	}
 
 	perm, within := literalGrant(literal, possible, inputs, sides, budget)
-	if !within || !anyPerm(perm.intersect(keptSide.globPerms)) {
+	if !within || !perm.intersect(keptSide.globPerms).any() {
 		return perm, within
 	}
 
@@ -801,12 +801,9 @@ func literalGrant(
 	literal fsPathEntry, possible fsPermission, inputs []map[string]fsPermission, sides []fsSide,
 	budget *matchBudget,
 ) (fsPermission, bool) {
-	for idx := range sides {
-		possible = possible.intersect(inputs[idx][literal.path].union(sides[idx].globPerms))
-	}
-
-	if !anyPerm(possible) {
-		return possible, true
+	possible, within := narrowGrant(literal, possible, inputs, sides, budget)
+	if !within || !possible.any() {
+		return possible, within
 	}
 
 	for idx := range sides {
@@ -826,7 +823,7 @@ func literalGrant(
 
 	for idx := range sides {
 		own, listed := inputs[idx][literal.path]
-		if !listed || !anyPerm(possible.without(own)) {
+		if !listed || !possible.without(own).any() {
 			continue
 		}
 
@@ -841,9 +838,24 @@ func literalGrant(
 	return perm, true
 }
 
-// anyPerm reports whether perm grants anything.
-func anyPerm(perm fsPermission) bool {
-	return perm.read || perm.write
+// narrowGrant narrows possible by what each input can grant the literal at
+// most, its entry and the union of what its patterns grant, and returns
+// false where that runs past the budget. It looks at every input once,
+// which the budget is charged one comparison each for, so that many inputs
+// of many literals cannot make the pass cost their product uncharged.
+func narrowGrant(
+	literal fsPathEntry, possible fsPermission, inputs []map[string]fsPermission, sides []fsSide,
+	budget *matchBudget,
+) (fsPermission, bool) {
+	if !budget.charge(pathCount(len(sides)), 0) {
+		return fsPermission{}, false
+	}
+
+	for idx := range sides {
+		possible = possible.intersect(inputs[idx][literal.path].union(sides[idx].globPerms))
+	}
+
+	return possible, true
 }
 
 // chargedGrants is fsSide.grants, charging the budget one comparison for
@@ -938,7 +950,7 @@ func intersectPerms(
 
 		if rightPerm, ok := rightPerms[path]; ok {
 			intersected := leftPerm.intersect(rightPerm)
-			if intersected.read || intersected.write {
+			if intersected.any() {
 				merged[path] = intersected
 			}
 		}
@@ -1014,7 +1026,7 @@ func keepsAll(merged, side map[string]fsPermission) bool {
 // addFsMatch records the permissions two matching entries share under key,
 // combining them with what an earlier match already granted there.
 func addFsMatch(merged map[string]fsPermission, key string, perm fsPermission) {
-	if !perm.read && !perm.write {
+	if !perm.any() {
 		return
 	}
 
@@ -1339,6 +1351,11 @@ var (
 	permReadWrite = fsPermission{read: true, write: true}
 )
 
+// any reports whether perm grants anything.
+func (perm fsPermission) any() bool {
+	return perm.read || perm.write
+}
+
 func (perm fsPermission) intersect(other fsPermission) fsPermission {
 	return fsPermission{
 		read:  perm.read && other.read,
@@ -1509,16 +1526,12 @@ func deduplicateProfile(profile *Profile) {
 	}
 }
 
-// normalizePath collapses repeated slashes, as apparmor_parser does before
-// compiling a rule, counting an escaped slash as one (see
-// filterRawSlashes). It keeps a trailing slash, which distinguishes a
-// directory rule from a file rule, and leaves "." and ".." components alone:
-// the kernel hands AppArmor canonical paths, so a rule containing them
-// matches nothing, and resolving them would make the rule grant more.
-func normalizePath(path string) string {
-	return filterRawSlashes(path)
-}
-
+// normalizePaths collapses repeated slashes in every path, as
+// apparmor_parser does before compiling a rule, counting an escaped slash as
+// one (see filterRawSlashes). It keeps a trailing slash, which distinguishes
+// a directory rule from a file rule, and leaves "." and ".." components
+// alone: the kernel hands AppArmor canonical paths, so a rule containing
+// them matches nothing, and resolving them would make the rule grant more.
 func normalizePaths(paths []string) []string {
 	if paths == nil {
 		return nil
@@ -1527,7 +1540,7 @@ func normalizePaths(paths []string) []string {
 	result := make([]string, len(paths))
 
 	for idx, p := range paths {
-		result[idx] = normalizePath(p)
+		result[idx] = filterRawSlashes(p)
 	}
 
 	return result

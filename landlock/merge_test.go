@@ -376,9 +376,6 @@ func TestMergePaths(t *testing.T) {
 	slashes := func() *landlock.Profile {
 		return fsProfile(read, rule("//etc//", read))
 	}
-	relative := func() *landlock.Profile {
-		return fsProfile(read, rule("./etc", read))
-	}
 	root := func() *landlock.Profile {
 		return fsProfile(readWrite, rule("/", read))
 	}
@@ -453,20 +450,6 @@ func TestMergePaths(t *testing.T) {
 			inputs:    []*landlock.Profile{slashes(), fsProfile(read, rule("/./etc/./", read))},
 			intersect: "Profile{fs:read_file /etc(read_file)}",
 			union:     "Profile{fs:read_file /etc(read_file)}",
-		},
-		{
-			// A relative path is unrelated to the absolute one, even when
-			// their components match.
-			name:      "relative path",
-			inputs:    []*landlock.Profile{slashes(), relative()},
-			intersect: "Profile{fs:read_file}",
-			union:     "Profile{fs:read_file /etc(read_file) etc(read_file)}",
-		},
-		{
-			// "/" is not the ancestor of a relative path.
-			name:      "relative path under the root rule",
-			inputs:    []*landlock.Profile{fsProfile(read, rule("/", read)), relative()},
-			intersect: "Profile{fs:read_file}",
 		},
 		{
 			name:      "nested rules under the root rule",
@@ -770,6 +753,42 @@ func TestMergePrunesUnhandledRights(t *testing.T) {
 }
 
 type fsRights = []landlock.FSAccessRight
+
+// TestMergesRefuseRelativePaths checks that the merges refuse a relative
+// rule path. The merge compares paths as text, so "rel" is beneath no
+// absolute rule, while the kernel resolves it against the working
+// directory: an intersection with this input could keep refer on "/",
+// which allows moving a file into cwd/rel, where it would gain write_file,
+// a move the input denies.
+func TestMergesRefuseRelativePaths(t *testing.T) {
+	t.Parallel()
+
+	handled := fsRights{landlock.FSAccessRefer, landlock.FSAccessWriteFile}
+	refer := fsRights{landlock.FSAccessRefer}
+	relative := fsProfile(handled,
+		landlock.PathRule{Path: "/", AccessFS: refer},
+		landlock.PathRule{Path: "rel", AccessFS: fsRights{landlock.FSAccessWriteFile}})
+	other := fsProfile(handled, landlock.PathRule{Path: "/", AccessFS: refer})
+
+	for name, merge := range map[string]func(...*landlock.Profile) (*landlock.Profile, error){
+		"Intersect": landlock.Intersect, "Union": landlock.Union,
+	} {
+		_, err := merge(relative, other)
+
+		var inputErr *landlock.InputError
+		if !errors.Is(err, landlock.ErrRelativePath) || !errors.As(err, &inputErr) ||
+			inputErr.Index != 0 {
+			t.Errorf("%s = %v, want ErrRelativePath for input 0", name, err)
+		}
+	}
+
+	// The same rule on an absolute path settles: the input denies
+	// write_file outside /w/rel, so the result grants refer nowhere.
+	absolute := fsProfile(handled,
+		landlock.PathRule{Path: "/", AccessFS: refer},
+		landlock.PathRule{Path: "/w/rel", AccessFS: fsRights{landlock.FSAccessWriteFile}})
+	assertMergeFormat(t, "Intersect", landlock.Intersect, "Profile{fs:write_file}", absolute, other)
+}
 
 func fsProfile(handled []landlock.FSAccessRight, rules ...landlock.PathRule) *landlock.Profile {
 	return &landlock.Profile{

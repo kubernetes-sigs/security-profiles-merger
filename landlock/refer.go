@@ -165,14 +165,28 @@ func referRulePaths(inputs []*Profile) map[string]struct{} {
 	paths := make(map[string]struct{})
 
 	for _, input := range inputs {
-		for _, rule := range input.PathRules {
-			if slices.Contains(rule.AccessFS, FSAccessRefer) {
-				paths[rule.Path] = struct{}{}
-			}
-		}
+		addReferPaths(paths, input.PathRules, nil)
 	}
 
 	return paths
+}
+
+// addReferPaths adds to paths the path of every rule granting refer: the
+// rule's own, or where cleaned is not nil its entry there, which holds the
+// cleaned path of every rule, index aligned.
+func addReferPaths(paths map[string]struct{}, rules []PathRule, cleaned []string) {
+	for idx, rule := range rules {
+		if !slices.Contains(rule.AccessFS, FSAccessRefer) {
+			continue
+		}
+
+		path := rule.Path
+		if cleaned != nil {
+			path = cleaned[idx]
+		}
+
+		paths[path] = struct{}{}
+	}
 }
 
 // unhandleMoveConflicts removes from the handled filesystem rights of a
@@ -559,17 +573,17 @@ func moveSides(
 // no other such rule, so that no path is beneath two of them.
 func referRoots(rules []PathRule) []string {
 	granted := make(map[string]struct{})
+	addReferPaths(granted, rules, nil)
 
-	for _, rule := range rules {
-		if slices.Contains(rule.AccessFS, FSAccessRefer) {
-			granted[rule.Path] = struct{}{}
-		}
-	}
+	return topmostPaths(granted)
+}
 
-	roots := make([]string, 0, len(granted))
+// topmostPaths returns the paths that lie beneath no other of the paths.
+func topmostPaths(paths map[string]struct{}) []string {
+	roots := make([]string, 0, len(paths))
 
-	for path := range granted {
-		if !beneathAny(path, granted) {
+	for path := range paths {
+		if !beneathAny(path, paths) {
 			roots = append(roots, path)
 		}
 	}

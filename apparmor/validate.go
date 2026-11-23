@@ -499,7 +499,7 @@ func (check *validator) loadablePaths(profile, normalizedProfile *Profile, unquo
 		}
 
 		check.reject(context, paths, hasNul, ErrNulInPath, showQuoted)
-		check.globStatus(context, normalized)
+		check.rejectInvalidGlobs(context, normalized)
 		check.reject(context, normalized, func(path string) bool {
 			return dotComponentIn(path, check.matchers.matcher(path))
 		}, ErrDotComponent, showQuoted)
@@ -1058,15 +1058,15 @@ func capabilityWord(name string) bool {
 	return true
 }
 
-// globStatus reports patterns apparmor_parser rejects or loads with another
-// meaning than they spell, and glob patterns that exceed the matcher's
-// limits, which never match. It runs on normalized patterns, the form the
-// merge matches, so it agrees with Intersect on what is dropped. A pattern
-// over the limits is left out of the message, since it has over 100
+// rejectInvalidGlobs reports patterns apparmor_parser rejects or loads with
+// another meaning than they spell, and glob patterns that exceed the
+// matcher's limits, which never match. It runs on normalized patterns, the
+// form the merge matches, so it agrees with Intersect on what is dropped. A
+// pattern over the limits is left out of the message, since it has over 100
 // alternatives. A cache made by newKeyCache compiles nothing, so there a
 // pattern left uncompiled is one still to be compiled rather than one past
 // the compile budget, and is not reported.
-func (check *validator) globStatus(context string, paths []string) {
+func (check *validator) rejectInvalidGlobs(context string, paths []string) {
 	check.reject(context, paths, func(pattern string) bool {
 		matcher := check.matchers.matcher(pattern)
 

@@ -393,9 +393,10 @@ limitations under the License.
 //
 // Intersect(p) and Union(p) normalize a profile without merging: they reduce
 // it to the rules a runtime loads from it, collapse syscalls whose
-// conditional rules do not form a safe shape, in their direction, and settle
-// the multiplexer path as a merge does, but keep values above 32 bits, which
-// mean on a 32-bit architecture what the profile means there. A syscall
+// conditional rules do not form a safe shape, in their direction, drop from
+// the others each rule another rule with the same result covers, and settle
+// the multiplexer path, as a merge does, but keep values above 32 bits,
+// which mean on a 32-bit architecture what the profile means there. A syscall
 // whose unconditional rule follows a rule that holds for every call on a
 // 32-bit architecture the profile covers is read as the stricter or the
 // looser of the two everywhere, which is not exact where the other one
@@ -410,11 +411,15 @@ limitations under the License.
 // several conditions on one argument index are alternatives, conditions
 // compare as libseccomp evaluates them, exact duplicates are dropped, and
 // errno values and SCMP_ACT_KILL_THREAD are compared as the Errno values and
-// Action order sections describe. The diff reports entries in that form,
-// with EPERM spelled as unset. Rules are not rewritten beyond that: two
-// rules with the same filter and different results both remain, as does a
-// rule libseccomp's order never reaches. Architectures are compared with the
-// native architecture implied on both sides.
+// Action order sections describe. Where the rules of a syscall form a safe
+// shape, a rule that another rule with the same result covers is dropped
+// too, as in a merge, such as "a0 == 8" next to "a0 < 16", unless the
+// syscall holds more than 512 conditional rules (see below). The diff
+// reports entries in that form, with EPERM spelled as unset. Rules are not
+// rewritten beyond that: two rules with the same filter and different
+// results both remain, as does a rule libseccomp's order never reaches
+// outside the safe shapes. Architectures are compared with the native
+// architecture implied on both sides.
 //
 // Where libseccomp keeps the profile order for two rules outside the safe
 // shapes with different results (two conditions on one argument comparing
@@ -451,6 +456,11 @@ limitations under the License.
 // from entries in the same order, even where the entries listed for it are
 // the same on both sides.
 //
+// A syscall of more than 512 conditional rules is not pruned of the rules
+// other rules with the same result cover, in a merge or in Diff, since that
+// compares its rules pairwise. Diff can then report such a rule as a
+// change against a profile without it, and never hides a change.
+//
 // # Cost bounds
 //
 // The merges and [Diff] bound their work with internal budgets: on the
@@ -473,6 +483,15 @@ limitations under the License.
 // Diff of such a profile allocates around 150 times its size in JSON.
 // Validate an artifact with ValidateArtifact before anything else looks at
 // it.
+//
+// Dropping the rules other rules with the same result cover, which Diff, a
+// merge and a profile intersected alone all do, compares the rules of one
+// syscall in pairs: of one result, only pairs on one argument index of
+// which one is no equality, so a syscall of distinct equalities costs a
+// pass, and otherwise every pair. A syscall can cost up to 512 squared such
+// comparisons, the bound past which nothing is dropped (see the Diff
+// section), so Diff and Intersect and Union of one profile stay linear in
+// its syscalls with that factor for each.
 //
 // [ValidateArtifact] bounds an artifact so that it reports one too large to
 // merge precisely instead of the merge silently collapsing a syscall, each

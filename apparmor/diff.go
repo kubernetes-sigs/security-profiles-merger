@@ -208,7 +208,7 @@ func diffCapabilities(left, right *Profile) *CapabilityDiff {
 // spelling of it are one rule, so a profile and its merge result, which
 // keeps one spelling per rule, do not differ in it. A path only one side
 // holds is reported in that side's spelling once Diff has collapsed its
-// repeated slashes (see normalizePath), so "//etc//passwd" is reported as
+// repeated slashes (see normalizePaths), so "//etc//passwd" is reported as
 // "/etc/passwd".
 func diffPaths(left, right []string) *SliceDiff[string] {
 	leftKeys := pathsByRule(left)

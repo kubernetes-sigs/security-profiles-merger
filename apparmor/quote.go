@@ -60,8 +60,8 @@ func QuotePath(path string) (string, error) {
 
 	// A pattern the port refuses, or one whose translation libapparmor_re
 	// would fail to parse, matches nothing to the merge, which no spelling
-	// renders, as ValidateArtifact reports both (see globStatus).
-	if analysis.kind == kindInvalid || analysis.status == globInvalid {
+	// renders, as ValidateArtifact reports both (see rejectInvalidGlobs).
+	if analysis.status == globInvalid {
 		return "", &invalidPatternError{path: path}
 	}
 

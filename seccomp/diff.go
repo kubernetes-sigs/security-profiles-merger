@@ -205,6 +205,11 @@ func diffSyscallLists(left, right []specs.LinuxSyscall, leftDef, rightDef *claus
 	leftRules := collectRules(left, leftDef)
 	rightRules := collectRules(right, rightDef)
 
+	// A syscall in a safe shape is never order sensitive, so pruning it
+	// leaves orderedGroups as it finds it.
+	pruneCovered(leftRules)
+	pruneCovered(rightRules)
+
 	ordered := orderedGroups(leftRules, nil)
 	ordered = orderedGroups(rightRules, ordered)
 

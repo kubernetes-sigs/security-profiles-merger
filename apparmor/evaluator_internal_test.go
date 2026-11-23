@@ -439,24 +439,26 @@ func (op operation) String() string {
 }
 
 // grantsPath reports whether any rule of the list names the file or covers
-// it with a glob. Rules and probes are canonical, so a literal rule is
-// compared as written.
+// it with a glob. A literal rule goes through matchGlob as well, which
+// resolves its escapes, so `/etc/\x61pp.conf` names "/etc/app.conf".
 func grantsPath(rules []string, name string) bool {
-	for _, rule := range rules {
-		if IsGlobPattern(rule) {
-			if matchGlob(rule, name) {
-				return true
-			}
+	return slices.ContainsFunc(rules, func(rule string) bool { return matchGlob(rule, name) })
+}
 
-			continue
-		}
-
-		if rule == name {
-			return true
-		}
+// evalLiteralName returns the file a literal rule names, its escapes
+// resolved by the evaluator's own parser rather than the port's.
+func evalLiteralName(rule string) string {
+	nodes, valid := evalParse(rule)
+	if !valid {
+		panic("evaluator does not support literal " + rule)
 	}
 
-	return false
+	name := make([]byte, 0, len(nodes))
+	for idx := range nodes {
+		name = append(name, nodes[idx].char)
+	}
+
+	return string(name)
 }
 
 // permits reports whether the profile permits the operation on the file. A
@@ -502,6 +504,11 @@ var evalProbes = []string{
 	"/etc/", "/etc/.conf", "/etc/!hadow", "/etc/ahadow", "/var/log/", "/etc/sub/",
 	"/usr/bin/zh", "/usr/bin/éh", "/usr/bin/\xe9h", "/etc/foo.conf", "/etc/foo",
 	"/var/", "/usr/", "/etc/sub/deep/", "/é",
+	// Names only evalComposedPatterns tell apart: a file named by an escaped
+	// star, files under the alternations' branches, and the pairings of a
+	// sequence of two alternations.
+	"/etc/*", "/etc/*x", "/etc/sub/x", "/etc/sub/deep/x", "/usr/lib/sub/libc.so",
+	"/usr/bin/snv", "/usr/bin/enh", "/var/log/sub/x.log", "/var/x", "/etc/a",
 }
 
 // evalPatterns are the rules profiles are built from: literals, stars within
@@ -540,6 +547,28 @@ var evalCapabilities = []string{
 // merges reach that case by different routes, so the oracle has to see it.
 const capSectionAbsent = 1 << 8
 
+// composedShift is the first bit of the capability selector past
+// capSectionAbsent. The bits from there select evalComposedPatterns, two
+// bits each as fsSelectorBits does, so that the fuzzers reach them without
+// a selector of their own, which would invalidate every corpus entry.
+const composedShift = 9
+
+// evalComposedPatterns are the compositions evalPatterns lacks: nested
+// alternations holding "**", escaped literals next to globs and inside an
+// alternation, a file named by an escaped star, the classes "[/]" and
+// "[^/]", and a sequence of two alternations. A pattern selected read-only
+// or read-write is also an allowed executable, so that the executable list
+// holds them too. There are at most 11 of them, as the 23 bits of the
+// capability selector past capSectionAbsent select them.
+var evalComposedPatterns = []string{
+	`/etc/{sub/{**,deep/*},p*}`, `/{usr/{bin/**,lib/*},etc/sub/**}`, `/{e\x74c,var}/**`,
+	`/etc/\x61pp.conf`, `/etc/\x61*`, `/etc/\*`, `/etc/\**`, `/etc[/]sub/*`,
+	`/usr/bin/[^/]h`, `/var/log/{[^/]*,sub/[^/]*}.log`, `/usr/bin/{s,e}{h,nv}`,
+}
+
+// composedBits selects every one of evalComposedPatterns read-write.
+const composedBits = uint32(1<<(fsSelectorBits*11)-1) << composedShift
+
 // Bits of the network selector: the three permissions, and the two ways a
 // profile can leave a permission unsaid.
 const (
@@ -553,8 +582,8 @@ const (
 func evalProfile(fsSelector uint64, execMask, capMask uint32, netBits uint8) *Profile {
 	var readOnly, writeOnly, readWrite, executables []string
 
-	for idx, pattern := range evalPatterns {
-		switch (fsSelector >> (fsSelectorBits * uint(idx))) & 0b11 {
+	add := func(pattern string, category uint64) {
+		switch category {
 		case 1:
 			readOnly = append(readOnly, pattern)
 		case 2:
@@ -562,8 +591,21 @@ func evalProfile(fsSelector uint64, execMask, capMask uint32, netBits uint8) *Pr
 		case 3:
 			readWrite = append(readWrite, pattern)
 		}
+	}
+
+	for idx, pattern := range evalPatterns {
+		add(pattern, (fsSelector>>(fsSelectorBits*uint(idx)))&0b11)
 
 		if execMask&(1<<uint(idx)) != 0 {
+			executables = append(executables, pattern)
+		}
+	}
+
+	for idx, pattern := range evalComposedPatterns {
+		category := uint64(capMask>>(composedShift+fsSelectorBits*uint(idx))) & 0b11
+		add(pattern, category)
+
+		if category&1 != 0 {
 			executables = append(executables, pattern)
 		}
 	}
@@ -732,7 +774,7 @@ func TestMatchGlobAgreesWithRegex(t *testing.T) {
 	probes := append([]string{"", "//", "/etc//x", "/etc/*", "/etc/{a,b}", "/etc/b/"},
 		evalProbes...)
 
-	for _, pattern := range append(evalExtraPatterns, evalPatterns...) {
+	for _, pattern := range slices.Concat(evalExtraPatterns, evalPatterns, evalComposedPatterns) {
 		if !IsGlobPattern(pattern) {
 			continue
 		}
@@ -818,6 +860,62 @@ func addEvalSeeds(f *testing.F) {
 		uint64(1), uint32(1), uint32(3), uint8(1),
 		uint64(1073741828), uint32(32770), uint32(3), uint8(1),
 	)
+
+	addComposedSeeds(f)
+}
+
+// composed selects one of evalComposedPatterns in a category of
+// fsSelectorBits, as bits of the capability selector.
+func composed(idx int, category uint32) uint32 {
+	return category << (composedShift + fsSelectorBits*idx)
+}
+
+// addComposedSeeds adds the seeds that pair evalComposedPatterns with the
+// patterns of evalPatterns they overlap.
+func addComposedSeeds(f *testing.F) {
+	f.Helper()
+
+	// Every composed pattern read-write, and so executable, against every
+	// pattern of the table read-write.
+	f.Add(uint64(0), uint32(0), composedBits|0b11, uint8(netRawBit),
+		uint64(math.MaxUint64), uint32(math.MaxUint32), uint32(0b11), uint8(netRawBit))
+	// The nested alternation holding "**" against "/etc/**" and
+	// "/etc/sub/*.conf".
+	f.Add(uint64(0), uint32(0), composed(0, 1), uint8(0),
+		uint64(0b01)<<(fsSelectorBits*2)|uint64(0b01)<<(fsSelectorBits*4), uint32(1<<2),
+		uint32(0), uint8(0))
+	// Two alternations of "**" branches against each other.
+	f.Add(uint64(0), uint32(0), composed(1, 3), uint8(0),
+		uint64(0), uint32(0), composed(0, 3)|composed(2, 1), uint8(0))
+	// An escape inside an alternation, `/{e\x74c,var}/**`, against
+	// "/{usr,var}/**" and "/etc/{,**}".
+	f.Add(uint64(0), uint32(0), composed(2, 3), uint8(0),
+		uint64(0b11)<<(fsSelectorBits*25)|uint64(0b11)<<(fsSelectorBits*14),
+		uint32(1<<25), uint32(0), uint8(0))
+	// An escaped literal and an escape before a star, against the class and
+	// the star that cover both.
+	f.Add(uint64(0), uint32(0), composed(3, 3)|composed(4, 1), uint8(0),
+		uint64(0b11)<<(fsSelectorBits*22)|uint64(0b10)<<(fsSelectorBits*1),
+		uint32(1<<1), uint32(0), uint8(0))
+	// The file named by an escaped star, and an escaped star before a star,
+	// against "/etc/*" and "/etc/**".
+	f.Add(uint64(0), uint32(0), composed(5, 3)|composed(6, 2), uint8(0),
+		uint64(0b01)<<(fsSelectorBits*1)|uint64(0b10)<<(fsSelectorBits*2),
+		uint32(1<<1|1<<2), uint32(0), uint8(0))
+	// The class "[/]" against "/etc/sub/[^a]*" and "/etc/{*,sub/*}".
+	f.Add(uint64(0), uint32(0), composed(7, 3), uint8(0),
+		uint64(0b01)<<(fsSelectorBits*23)|uint64(0b10)<<(fsSelectorBits*21),
+		uint32(0), uint32(0), uint8(0))
+	// The class "[^/]" and a sequence of two alternations, executable,
+	// against "/usr/bin/?h", "/usr/bin/[^z]h" and "/usr/bin/*".
+	f.Add(uint64(0), uint32(0), composed(8, 1)|composed(10, 3), uint8(0),
+		uint64(0b01)<<(fsSelectorBits*17)|uint64(0b11)<<(fsSelectorBits*27),
+		uint32(1<<17|1<<27|1<<8), uint32(0), uint8(0))
+	// Classes "[^/]" inside an alternation against "/var/log/**" and
+	// "/var/log/{app,sub/app}.log".
+	f.Add(uint64(0), uint32(0), composed(9, 3), uint8(0),
+		uint64(0b01)<<(fsSelectorBits*5)|uint64(0b11)<<(fsSelectorBits*19),
+		uint32(1<<5), uint32(0), uint8(0))
 }
 
 // assertPermits runs one safety property over every probe and operation.
@@ -1133,12 +1231,12 @@ func FuzzAppArmorUnionPermits(f *testing.F) {
 // semantics, and the parser port compiles a pattern into a regular
 // expression, so the two disagree only where one of them is wrong.
 //
-// The table names 47 patterns. It is the only check the port has on what a
+// The table names 58 patterns. It is the only check the port has on what a
 // pattern means rather than on what the merge does with it, and the escape
 // decoder and the class parser hold cases the table never reaches, such as
 // an uppercase hex escape or a class whose range runs backwards.
 func FuzzMatchGlobAgreesWithPort(f *testing.F) {
-	for _, pattern := range append(evalExtraPatterns, evalPatterns...) {
+	for _, pattern := range slices.Concat(evalExtraPatterns, evalPatterns, evalComposedPatterns) {
 		for _, probe := range evalProbes {
 			f.Add(pattern, probe)
 		}

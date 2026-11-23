@@ -17,12 +17,18 @@ limitations under the License.
 package strictjson_test
 
 import (
+	"cmp"
+	"encoding"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
+	"unicode"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
@@ -431,4 +437,157 @@ func TestUnmarshalStrictRequiresSeccompSyscallMembers(t *testing.T) {
 			t.Errorf("syscalls %s = %v, want nil", syscalls, err)
 		}
 	}
+}
+
+// TestProfileTypesHaveFlatFields guards what the scans assume of the types
+// a document decodes into: every struct reachable from a profile type holds
+// plain exported fields, named by a valid json tag or by their Go name, of
+// scalars, structs, pointers and slices, and no two fields of one struct
+// share a name ignoring case. encoding/json resolves an embedded struct, a
+// json tag that is no valid name, and two fields of one name, by rules the
+// scans do not follow, and its releases built on encoding/json/v2 resolve
+// some of them differently; the scans do not look into a map, an interface
+// or a Go array, and a type that decodes itself reads members the scans
+// cannot know. A runtime-spec release that adds any of these to the
+// seccomp types has to fail here rather than leave members unchecked.
+func TestProfileTypesHaveFlatFields(t *testing.T) {
+	t.Parallel()
+
+	for _, root := range []reflect.Type{
+		reflect.TypeFor[specs.LinuxSeccomp](),
+		reflect.TypeFor[apparmor.Profile](),
+		reflect.TypeFor[landlock.Profile](),
+	} {
+		for _, problem := range flatShapeProblems(root) {
+			t.Errorf("%v: %s", root, problem)
+		}
+	}
+
+	// The walk finds each shape it guards against.
+	for _, bad := range []reflect.Type{
+		reflect.TypeFor[struct{ apparmor.ExecutableRules }](),
+		reflect.TypeFor[struct {
+			N string `json:"a'b"` //nolint:staticcheck // the invalid tag is the point
+		}](),
+		reflect.TypeFor[struct{ M map[string]string }](),
+		reflect.TypeFor[struct{ A [2]landlock.PathRule }](),
+		reflect.TypeFor[struct{ I any }](),
+		reflect.TypeFor[struct{ R []json.RawMessage }](),
+		reflect.TypeFor[struct{ T *[]time.Time }](),
+		// Built at run time, since go vet refuses a repeated json tag
+		// written out.
+		reflect.StructOf([]reflect.StructField{
+			{Name: "A", Type: reflect.TypeFor[string](), Tag: `json:"x"`},
+			{Name: "B", Type: reflect.TypeFor[string](), Tag: `json:"x"`},
+		}),
+		// A tag of "-," names a field "-", which two fields share here.
+		reflect.StructOf([]reflect.StructField{
+			{Name: "A", Type: reflect.TypeFor[string](), Tag: `json:"-,"`},
+			{Name: "B", Type: reflect.TypeFor[string](), Tag: `json:"-,omitempty"`},
+		}),
+		reflect.TypeFor[struct {
+			X string
+			Y string `json:"x"`
+		}](),
+	} {
+		if len(flatShapeProblems(bad)) == 0 {
+			t.Errorf("%v: no problem found", bad)
+		}
+	}
+}
+
+// flatShapeProblems walks the types reachable from root and describes each
+// shape TestProfileTypesHaveFlatFields guards against.
+func flatShapeProblems(root reflect.Type) []string {
+	var problems []string
+
+	seen := map[reflect.Type]bool{}
+	pending := []reflect.Type{root}
+
+	for len(pending) > 0 {
+		typ := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+
+		if seen[typ] {
+			continue
+		}
+
+		seen[typ] = true
+
+		for _, unmarshaler := range []reflect.Type{
+			reflect.TypeFor[json.Unmarshaler](), reflect.TypeFor[encoding.TextUnmarshaler](),
+		} {
+			if reflect.PointerTo(typ).Implements(unmarshaler) {
+				problems = append(problems, fmt.Sprintf("%v implements %v", typ, unmarshaler))
+			}
+		}
+
+		//nolint:exhaustive // every other kind is a scalar, which holds no members
+		switch typ.Kind() {
+		case reflect.Pointer, reflect.Slice:
+			pending = append(pending, typ.Elem())
+		case reflect.Array, reflect.Map, reflect.Interface:
+			problems = append(problems, fmt.Sprintf("%v is a %v", typ, typ.Kind()))
+		case reflect.Struct:
+			fieldTypes, found := structShapeProblems(typ)
+			pending = append(pending, fieldTypes...)
+			problems = append(problems, found...)
+		}
+	}
+
+	return problems
+}
+
+// structShapeProblems returns the types of the fields of a struct type a
+// decoder fills, and describes each field flatShapeProblems guards against.
+func structShapeProblems(typ reflect.Type) ([]reflect.Type, []string) {
+	var (
+		fieldTypes []reflect.Type
+		problems   []string
+		names      []string
+	)
+
+	for idx := range typ.NumField() {
+		field := typ.Field(idx)
+		tag := field.Tag.Get("json")
+		name, _, _ := strings.Cut(tag, ",")
+
+		switch {
+		case field.Anonymous:
+			problems = append(problems, fmt.Sprintf("%v embeds %v", typ, field.Type))
+		// A tag of "-," names a field "-", as encoding/json reads it.
+		case !field.IsExported() || tag == "-":
+		case !validTagName(name):
+			problems = append(problems,
+				fmt.Sprintf("%v.%s has the invalid tag name %q", typ, field.Name, name))
+		default:
+			fieldTypes = append(fieldTypes, field.Type)
+			name = cmp.Or(name, field.Name)
+
+			if slices.ContainsFunc(names, func(other string) bool {
+				return strings.EqualFold(other, name)
+			}) {
+				problems = append(problems,
+					fmt.Sprintf("%v.%s shares the name %q ignoring case", typ, field.Name, name))
+			}
+
+			names = append(names, name)
+		}
+	}
+
+	return fieldTypes, problems
+}
+
+// validTagName reports whether encoding/json takes a json tag name as the
+// name of a field: letters, digits and punctuation other than a backslash
+// and quotes.
+func validTagName(name string) bool {
+	for _, char := range name {
+		if !strings.ContainsRune("!#$%&()*+-./:;<=>?@[]^_{|}~ ", char) &&
+			!unicode.IsLetter(char) && !unicode.IsDigit(char) {
+			return false
+		}
+	}
+
+	return true
 }

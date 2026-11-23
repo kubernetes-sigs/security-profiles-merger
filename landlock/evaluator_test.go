@@ -67,9 +67,10 @@ func evalCovers(rulePath, file string) bool {
 	return strings.HasPrefix(file, rulePath+"/")
 }
 
-// evalPermits reports whether the profile permits the access at the file.
-// A right the ruleset does not handle is allowed everywhere; a handled one
-// needs a rule on the file or on one of its ancestors. As in the kernel, a
+// evalPermits reports whether the profile permits the access at the
+// cleaned path file. A right the ruleset does not handle is allowed
+// everywhere; a handled one needs a rule on the file or on one of its
+// ancestors, compared on the rule's cleaned path. As in the kernel, a
 // ruleset handling any filesystem right denies refer even when it does not
 // list it, and then no rule can grant it.
 //
@@ -86,7 +87,7 @@ func evalPermits(
 	}
 
 	for _, rule := range profile.PathRules {
-		if slices.Contains(rule.AccessFS, right) && evalCovers(rule.Path, file) {
+		if slices.Contains(rule.AccessFS, right) && evalCovers(oracleCleanPath(rule.Path), file) {
 			return true
 		}
 	}

@@ -319,8 +319,8 @@ The AppArmor check also refuses a path `QuotePath` cannot render, and one
 `..` component, which a merge followed by a diff would not find. For
 Landlock it runs `landlock.ValidateBaseline`, or `landlock.Options.ValidateBaseline` for
 the version `--abi` names: every check of `ValidateArtifact` but its
-bound on the number of rules, such as a relative path or a rule granting
-a right the baseline does not handle, which the default checks accept
+bound on the number of rules, such as a path ending in a slash or a rule
+granting a right the baseline does not handle, which the default checks accept
 and the merge would read otherwise than meant. A Landlock merge of one
 profile drops rights a rule on an ancestor already grants, so a merge and
 a diff cannot tell an exact Landlock baseline from an inexact one.

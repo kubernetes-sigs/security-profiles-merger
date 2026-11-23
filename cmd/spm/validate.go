@@ -61,7 +61,7 @@ for the baseline a runtime merges every artifact into, checked as the
 runtime checks it at config load, with the library's ValidateBaseline: for
 seccomp and AppArmor it refuses a baseline the merge does not read
 exactly, and for Landlock what the merge would read otherwise than meant,
-such as a relative path.
+such as a rule granting a right the baseline does not handle.
 
 --arch names the native seccomp architecture of the node that loads the
 profiles. A value above 32 bits is refused where that node covers a 32-bit
