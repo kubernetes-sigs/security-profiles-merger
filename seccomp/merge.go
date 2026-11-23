@@ -78,8 +78,8 @@ type InputError = spm.InputError
 //
 // Every input is checked with Validate, and each that fails is reported as
 // an *InputError naming its index. Pass the baseline first: errno ties go to
-// the earlier input, and only the first may name a listener
-// ([ErrConflictingListener]). Intersect refuses an input listing an
+// the earlier input, and a later input may name a listener only as the
+// first does ([ErrConflictingListener]). Intersect refuses an input listing an
 // architecture of another byte order than the native one, or of both where
 // that is not known ([ErrMixedByteOrder]), and a result that would notify
 // without a listener ([ErrNotifyWithoutListener]). It may drop 32-bit and

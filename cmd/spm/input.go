@@ -48,7 +48,7 @@ var (
 	errEmptyArgument  = errors.New("empty file argument (use - for stdin)")
 	errDirectoryInput = errors.New("is a directory")
 	errNotRegularFile = errors.New("not a regular file or a pipe")
-	errNoWriter       = errors.New("FIFO has no writer (nothing was written)")
+	errNoWriter       = errors.New("empty pipe (it had no writer, or nothing was written)")
 )
 
 // The inputs past the limits (see inputLimitError). One that a single

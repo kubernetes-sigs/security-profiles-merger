@@ -15,9 +15,9 @@ limitations under the License.
 */
 
 // Package spm holds the declarations the seccomp, apparmor and landlock
-// packages share. Each of them re-exports what it uses under its own name,
-// so nothing needs to import this package; import it to match a sentinel
-// without picking one of the three.
+// packages share. Each of them re-exports what it uses under its own name
+// apart from [Problems]; import this package for Problems, or to match a
+// sentinel without picking one of the three.
 //
 //   - [SliceDiff] and [ValueDiff] are the shared diff shapes:
 //     seccomp.SliceDiff, apparmor.SliceDiff and landlock.SliceDiff are

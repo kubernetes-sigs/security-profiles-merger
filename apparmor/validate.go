@@ -735,6 +735,9 @@ func referencesVariable(path string) bool {
 	text := decodeEscapes(path)
 	escaped := false
 
+	// Built at the first "@{", which most paths lack (see closingBraces).
+	var closing []int
+
 	for idx := 0; idx < len(text); idx++ {
 		switch text[idx] {
 		case '\\':
@@ -746,7 +749,11 @@ func referencesVariable(path string) bool {
 				continue
 			}
 
-			if variableName(text, idx+len("@{")) {
+			if closing == nil {
+				closing = closingBraces(text)
+			}
+
+			if variableName(text, idx+len("@{"), closing) {
 				return true
 			}
 
@@ -765,10 +772,10 @@ func referencesVariable(path string) bool {
 // variableName reports whether the text after an "@{", which starts at
 // start, closes a variable reference the parser expands or refuses: an
 // empty name, or a name up to the first unescaped "}" other than the comma
-// form (see commaForm).
+// form (see commaForm). closing is what closingBraces returns for text.
 // Like extract_variable, it does not read the character at start for the
 // closing brace or an escape.
-func variableName(text string, start int) bool {
+func variableName(text string, start int, closing []int) bool {
 	if start >= len(text) {
 		return false
 	}
@@ -777,24 +784,36 @@ func variableName(text string, start int) bool {
 		return true
 	}
 
-	escaped := false
+	end := closing[start+1]
 
-	for idx := start + 1; idx < len(text); idx++ {
-		switch text[idx] {
-		case '\\':
-			escaped = !escaped
-		case '}':
-			if !escaped {
-				return !commaForm(text[start:idx])
-			}
+	return end >= 0 && !commaForm(text[start:end])
+}
 
-			escaped = false
+// closingBraces returns, for each position of text and the one past its
+// end, the index of the first "}" no backslash escapes when text is read
+// from that position on in the unescaped state, or -1 where there is none.
+// A backslash escapes the character after it, after which the read goes on
+// unescaped, so one pass from the end answers every position: each "@{" of
+// a path would otherwise read the rest of the path again, which is
+// quadratic in its length where no "}" closes them.
+func closingBraces(text string) []int {
+	closing := make([]int, len(text)+1)
+	closing[len(text)] = -1
+
+	for idx := len(text) - 1; idx >= 0; idx-- {
+		switch {
+		case text[idx] == '}':
+			closing[idx] = idx
+		case text[idx] != '\\':
+			closing[idx] = closing[idx+1]
+		case idx+1 < len(text):
+			closing[idx] = closing[idx+2]
 		default:
-			escaped = false
+			closing[idx] = -1
 		}
 	}
 
-	return false
+	return closing
 }
 
 // commaForm reports whether apparmor_parser 5 skips a variable name as an

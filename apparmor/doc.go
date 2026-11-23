@@ -255,7 +255,9 @@ limitations under the License.
 // prune or promote its own literals, so Union(p, p) keeps the paths of p.
 // The union of two profiles depends neither on their order nor on the order
 // of their paths. A union whose every path is a literal is taken in one
-// pass, linear in the inputs apart from sorting the result.
+// pass, linear in the inputs apart from sorting the result. Otherwise each
+// step of the fold below indexes the result so far again, so a merge of
+// many profiles holding patterns takes time quadratic in their number.
 //
 // More than two profiles are folded from left to right. A pattern survives a
 // step only where the other side spells it alike or expands over it, so two
@@ -371,7 +373,8 @@ limitations under the License.
 //
 // The only state shared between calls is a lock-guarded cache of compiled
 // patterns. It changes no result, only the work a repeated pattern costs,
-// and a call past its compile budget ignores it. It is bounded by an
-// estimate of its memory and evicts older patterns, but a process merging
-// artifacts keeps some of their paths in memory after a call returns.
+// and a call past its compile budget ignores it. It holds up to 1024
+// patterns and an estimated 16 MiB, evicting older patterns past either, so
+// a process merging artifacts keeps some of their paths in memory after a
+// call returns.
 package apparmor

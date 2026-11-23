@@ -251,7 +251,10 @@ limitations under the License.
 // less the architectures it drops as described below; Union combines them
 // exactly. On an architecture only one input lists, the other input applies
 // libseccomp's action for an unlisted architecture, SCMP_ACT_KILL, while the
-// union applies the merged rules, which is the permissive direction.
+// union applies the merged rules, which is the permissive direction except
+// where every input's rules answer a call with SCMP_ACT_KILL_PROCESS: the
+// union kills the process there, where the input not listing the
+// architecture kills only the thread, and both deny the call.
 //
 // The evaluation model covers the program libseccomp compiles for a 64-bit
 // architecture on which every syscall is called directly. The three effects
@@ -265,28 +268,28 @@ limitations under the License.
 // syscall only a later release knows is not checked. CONTRIBUTING.md
 // records how each claim was checked.
 //
-// Lost rules: libseccomp 2.5.2 to 2.6.1, sorting syscalls by priority (crun
-// always, runc up to 32 syscall names), lose every rule of an architecture,
-// which then applies the default to every call, when the syscall its block
-// tests first does not exist there. That takes a profile in which every rule
-// on a syscall the architecture has is conditional and a rule on one it
-// lacks is cheaper, as "socketcall" with one unconditional rule and "socket"
-// with a conditional one are on x86_64; x86_64 and x32 share one block.
-// Allowlists, which name a syscall every covered architecture has in an
-// unconditional rule, are not affected. Intersect and Union check every
-// covered architecture of their result against a table of where libseccomp
-// places each syscall, which errs safe for every supported release, and drop
-// a rule on a syscall no covered architecture has, which is exact. Otherwise
-// Intersect drops x32 where it pairs with x86_64, x86_64 where x32 is
-// native, the affected architecture where it is not native, and otherwise
-// the listed architectures on which the offending syscall applies. It
-// refuses with [ErrLostRules] where it can drop none: where the affected
-// architecture is native and the syscall applies there too, or, where the
-// native architecture is not known, the affected one is the last listed.
-// [Union] refuses such a result with ErrLostRules. Where the native
-// architecture is not known, each architecture a runtime can be native on is
-// checked as native and an architecture is dropped only where that helps
-// whichever is native, so the merge is refused more often.
+// Lost rules: libseccomp 2.5.2, 2.5.4, 2.5.5, 2.6.0 and 2.6.1 (2.5.3 was not
+// examined), sorting syscalls by priority (crun always, runc up to 32 syscall
+// names), lose every rule of an architecture, which then applies the default
+// to every call, when the syscall its block tests first does not exist there.
+// That takes a profile in which every rule on a syscall the architecture has
+// is conditional and a rule on one it lacks is cheaper, as "socketcall" with
+// one unconditional rule and "socket" with a conditional one are on x86_64;
+// x86_64 and x32 share one block. Allowlists, which name a syscall every
+// covered architecture has in an unconditional rule, are not affected.
+// Intersect and Union check every covered architecture of their result
+// against a table of where libseccomp places each syscall, which errs safe
+// for every supported release, and drop a rule on a syscall no covered
+// architecture has, which is exact. Otherwise Intersect drops x32 where it
+// pairs with x86_64, x86_64 where x32 is native, the affected architecture
+// where it is not native, and otherwise the listed architectures on which the
+// offending syscall applies. It refuses with [ErrLostRules] where it can drop
+// none: where the affected architecture is native and the syscall applies
+// there too, or, where the native architecture is not known, the affected one
+// is the last listed. [Union] refuses such a result with ErrLostRules. Where
+// the native architecture is not known, each architecture a runtime can be
+// native on is checked as native and an architecture is dropped only where
+// that helps whichever is native, so the merge is refused more often.
 // [ValidateArtifact] and [ValidateStrict] report the shape as written
 // (ErrLostRules); the merges settle the rules first and may accept it.
 // libseccomp 2.6.2 no longer loses the rules (GHSA-q75f-27j4-2h7j), and the

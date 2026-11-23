@@ -36,8 +36,9 @@ Reads from stdin when no files are provided: a single profile, or a JSON
 array of profiles. A file argument of - reads stdin beside the files.
 Flags must precede file arguments, and -- ends them.
 Exit status: 0 on success, 1 when a profile is invalid, of another type, or
-cannot be read, or the result cannot be written, 2 on a usage error; 1 when
-a usage error comes up after a profile was found invalid.
+cannot be read, when the merge fails, or when the result cannot be written,
+2 on a usage error; 1 when a usage error comes up after a profile was found
+invalid.
 
 --validate names the checks to run on the inputs before merging: one mode
 for all of them, or one mode per input, separated by commas. A container
@@ -245,6 +246,17 @@ func (ops kindOps[T, D]) mergeProfiles(
 
 	result, err := mergeFn(profiles...)
 	if err != nil {
+		// The merge names at most merge.MaxJoinedErrors failing inputs.
+		// Past that, each input is checked alone, as when the merge does
+		// not run, so that the run names every one.
+		if omitsProblems(err) {
+			checkLeftInputs(mergeFn, checks, profiles, report)
+
+			if report.anyFailed() {
+				return inv.stop(1)
+			}
+		}
+
 		reportMergeFailure(err, len(profiles), report, inv.stderr)
 
 		return 1
@@ -297,7 +309,9 @@ func mergeInputCheck[T any](mergeFn func(...*T) (*T, error)) func(*T) error {
 // functions report every input that fails as an spm.InputError naming its
 // position among the profiles they were given; each is recorded against its
 // input, since a file name or "stdin[2]" is what a reader can act on. A
-// failure that blames no input is written as it is.
+// failure that blames no input is written as it is. The count of failures
+// the merge left out shows only where no input fails alone, since
+// mergeProfiles checks each input alone past that many.
 func reportMergeFailure(err error, count int, report *inputReport, stderr io.Writer) {
 	recorded, omitted := recordInputErrors(err, count, report)
 
@@ -335,6 +349,16 @@ func recordInputErrors(err error, count int, report *inputReport) (bool, string)
 	}
 
 	return recorded, omitted
+}
+
+// omitsProblems reports whether a merge failure left failures out because
+// it held too many, rather than an input's own report leaving some out:
+// spm.Problems does not list what an InputError wraps.
+func omitsProblems(err error) bool {
+	problems := spm.Problems(err)
+
+	//nolint:err113,errorlint // Problems lists the sentinel itself
+	return len(problems) > 0 && problems[len(problems)-1] == spm.ErrMoreProblems
 }
 
 // inputFailure returns the index of the input a merge failure names and the

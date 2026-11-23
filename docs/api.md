@@ -120,7 +120,7 @@ for why it holds no more.
 import "sigs.k8s.io/security-profiles-merger/spm"
 ```
 
-Nothing needs to import it: each package re-exports `SliceDiff`,
+Only `Problems` needs it: each package re-exports `SliceDiff`,
 `InputError` and every shared sentinel it returns under its own name, and
 `seccomp` and `apparmor` also `ValueDiff`, so `seccomp.SliceDiff`,
 `apparmor.SliceDiff` and `landlock.SliceDiff` all name `spm.SliceDiff`, and
@@ -279,10 +279,10 @@ limit it reports.
 | `MaxArtifactRules` | 16384 | Rules the whole profile loads | `ErrTooManyRules` |
 | `MaxArtifactEntries` | 16384 | Entries the whole profile holds | `ErrTooManyEntries` |
 
-`ValidateArtifact` and `ValidateStrict` enforce all five, the three on the
-whole profile first and on their own, the two per syscall next, ahead of
-every other failure of the report; `Validate` enforces none. Why they
-keep an artifact inside the merge's budgets is under
+`ValidateArtifact` and `ValidateStrict` enforce all five, the names per
+entry and the two on the whole profile first and on their own, the two
+per syscall next, ahead of every other failure of the report; `Validate`
+enforces none. Why they keep an artifact inside the merge's budgets is under
 [Cost bounds](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Cost_bounds).
 
 ### Semantics at a glance
@@ -359,10 +359,9 @@ a deep copy, or nil for a nil profile.
 ### Errors
 
 `ErrNoProfiles`, `ErrNilProfile`, `ErrMoreProblems`, `ErrBudgetExceeded`,
-`ErrEmptyPath`, `ErrNulInPath`, `ErrRelativePath`, `ErrPathTooLong`,
-`ErrInvalidOptions` and the `UnmarshalStrict` sentinels are shared and
-listed under [spm](#spm). A merge
-fails with `ErrNoProfiles` when given nothing, `Intersect` with
+`ErrEmptyPath`, `ErrNulInPath`, `ErrRelativePath`, `ErrPathTooLong` and
+the `UnmarshalStrict` sentinels are shared and listed under [spm](#spm). A
+merge fails with `ErrNoProfiles` when given nothing, `Intersect` with
 `ErrBudgetExceeded` past its budget, and otherwise only on the rows that
 name it and on `ErrNilProfile`, `ErrEmptyPath`, `ErrRelativePath`,
 `ErrPathTooLong` and `ErrMoreProblems`, wrapped in an `InputError`.
@@ -377,7 +376,7 @@ name it and on `ErrNilProfile`, `ErrEmptyPath`, `ErrRelativePath`,
 | `ErrInvalidGlob` | `ValidateArtifact`, `ValidateStrict` | A pattern apparmor_parser rejects or loads as something else; see [Paths the validators reject](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#hdr-Paths_the_validators_reject) for how the merge treats it |
 | `ErrGlobTooComplex` | `ValidateArtifact`, `ValidateStrict` | A pattern past the matcher's limits (100 alternatives in total), which never matches |
 | `ErrDotComponent` | `ValidateArtifact`, `ValidateStrict` | A `.` or `..` component, which matches nothing |
-| `ErrUnquotablePath` | `ValidateArtifact`, `ValidateStrict`, `QuotePath` | A character the lexer does not accept unescaped, or one that does not print as itself |
+| `ErrUnquotablePath` | `ValidateArtifact`, `ValidateStrict`, `ValidateBaseline`, `QuotePath` | A character the lexer does not accept unescaped, or one that does not print as itself |
 | `ErrInvalidCapabilityName` | `ValidateArtifact`, `ValidateStrict`, `ValidateBaseline` | A capability name outside `[A-Za-z0-9_]`, or one starting with `cap_` in any case, which apparmor_parser does not load |
 | `ErrTooManyPaths`, `ErrTooManyPatternBytes`, `ErrTooManyCapabilities` | `ValidateArtifact`, `ValidateStrict`, first and on their own | A [limit](#limits-1) is exceeded; each matches `ErrArtifactTooLarge` |
 | `ErrUnknownCapability` | `ValidateStrict` | A capability name outside the known set |
@@ -475,11 +474,10 @@ seccomp.
 `ErrNoProfiles`, `ErrNilProfile`, `ErrMoreProblems`, `ErrBudgetExceeded`,
 `ErrEmptyPath`, `ErrNulInPath`, `ErrRelativePath`, `ErrPathTooLong`,
 `ErrInvalidOptions` and the `UnmarshalStrict` sentinels are shared and
-listed under [spm](#spm). A merge
-fails with `ErrNoProfiles` when given nothing, with `ErrBudgetExceeded` past
-its budget, and otherwise only on the rows that name it and on
-`ErrNilProfile`, `ErrEmptyPath`, `ErrNulInPath`, `ErrPathTooLong` and
-`ErrMoreProblems`, wrapped in an `InputError`.
+listed under [spm](#spm). A merge fails with `ErrNoProfiles` when given
+nothing, with `ErrBudgetExceeded` past its budget, and otherwise only on the
+rows that name it and on `ErrNilProfile`, `ErrEmptyPath`, `ErrNulInPath`,
+`ErrPathTooLong` and `ErrMoreProblems`, wrapped in an `InputError`.
 
 | Sentinel | Raised by | Meaning |
 |----------|-----------|---------|

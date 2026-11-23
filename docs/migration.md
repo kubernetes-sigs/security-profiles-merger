@@ -66,8 +66,9 @@ unknown architecture matches `ErrUnknownArch` as well.
 | `ErrTooManyNames` | `ErrTooManyNamesPerEntry` |
 
 - **`Validate` refuses runtime-spec fields it does not read**
-  (`ErrUnsupportedSpecField`), a `listenerPath` or `listenerMetadata` that
-  is not valid UTF-8, and two inputs naming different listeners
+  (`ErrUnsupportedSpecField`) and a `listenerPath` or `listenerMetadata`
+  that is not valid UTF-8.
+- **`Intersect` and `Union` refuse inputs naming different listeners**
   (`ErrConflictingListener`).
 - **`UnmarshalStrict` requires** `index` and `op` in an argument condition
   (`ErrMissingField`).
@@ -96,7 +97,14 @@ unknown architecture matches `ErrUnknownArch` as well.
 | `FilesystemDiff.ReadOnly`, `WriteOnly`, `ReadWrite` | `ReadOnlyPaths`, `WriteOnlyPaths`, `ReadWritePaths` |
 | `NetworkDiff.AllowTCP`, `AllowUDP` | `NetworkDiff.Protocols.AllowTCP`, `AllowUDP` |
 
-The JSON of a diff follows the same names.
+The JSON of a diff follows the fields of `Profile` too:
+
+| v0.7.1 | Now |
+|--------|-----|
+| `"executables"`, `"libraries"` | `"executable"` with `"allowedExecutables"` and `"allowedLibraries"` |
+| `"capabilities"` | `"capability"` with `"allowedCapabilities"` |
+| `"readOnly"`, `"writeOnly"`, `"readWrite"` | `"readOnlyPaths"`, `"writeOnlyPaths"`, `"readWritePaths"` |
+| `"network"` with `"allowTcp"`, `"allowUdp"` | `"network"` with `"allowedProtocols"` holding `"allowTcp"`, `"allowUdp"` |
 
 - **Capability names come back in lower case** (`chown`), the spelling
   apparmor_parser accepts, where v0.7.1 upper-cased them, and
@@ -143,10 +151,13 @@ The JSON of a diff follows the same names.
   grants `refer` as well it stops handling filesystem rights, which
   permits more.
 - **The merges validate their inputs** and refuse inputs past a work
-  budget with `ErrBudgetExceeded`, about 300 recordings of 50 rules each.
+  budget with `ErrBudgetExceeded`, about 300 recordings of 50 rules on
+  paths of five components each.
 - **`LatestABIVersion` is `ABIV11`**, and the validators reject a trailing
   slash (`ErrTrailingSlash`) and a path that is not valid UTF-8
   (`ErrInvalidUTF8Path`) in an artifact.
+- **The JSON of a changed rule leaves out** an empty `"left"` or
+  `"right"`.
 - **New**: `DecodeArtifact`, `Profile.Clone`, `ABIVersion.String` and the
   listings `FSAccessRights`, `NetAccessRights` and `ScopeRights`.
 
@@ -166,6 +177,8 @@ listed under [Every package](#every-package).
 - Every input that cannot be read, decoded or validated is reported, each
   line naming the input, and the run exits 1; usage errors start with
   `error:`.
+- `spm diff --format json` writes the diff JSON of each package, so it
+  follows the renames above.
 - A repeated JSON member is an error in every mode, an input of no known
   profile type is refused, and `--arch` names the node for `merge` and
   `validate`. [cli.md](cli.md) describes each.

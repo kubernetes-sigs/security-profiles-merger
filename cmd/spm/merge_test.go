@@ -1824,9 +1824,9 @@ func TestMergeReportsEveryBadInputAcrossModes(t *testing.T) {
 	}
 }
 
-// TestMergeReportsTheBadInputsItLeftOut covers more bad inputs than the merge
-// reports one by one: the ones it reports are named, and the rest counted.
-func TestMergeReportsTheBadInputsItLeftOut(t *testing.T) {
+// TestMergeNamesEveryBadInput covers more bad inputs than the merge reports
+// one by one: each is checked alone, so every one is named.
+func TestMergeNamesEveryBadInput(t *testing.T) {
 	t.Parallel()
 
 	bad := `{"defaultAction":"SCMP_ACT_BOGUS"}`
@@ -1837,11 +1837,10 @@ func TestMergeReportsTheBadInputsItLeftOut(t *testing.T) {
 	}, strings.NewReader(stdin))
 
 	lines := strings.Split(strings.TrimSuffix(stderr, "\n"), "\n")
-	if code != 1 || stdout != "" || len(lines) != 33 ||
-		!strings.HasPrefix(lines[31], "error: stdin[31]: defaultAction:") ||
-		lines[32] != "error: 2 more problems omitted" {
-		t.Errorf("exit code = %d, stdout = %q, stderr = %q, want 1, nothing, "+
-			"32 inputs named and 2 more counted", code, stdout, stderr)
+	if code != 1 || stdout != "" || len(lines) != 34 ||
+		!strings.HasPrefix(lines[33], "error: stdin[33]: defaultAction:") {
+		t.Errorf("exit code = %d, stdout = %q, stderr = %q, want 1, nothing and "+
+			"all 34 inputs named", code, stdout, stderr)
 	}
 }
 

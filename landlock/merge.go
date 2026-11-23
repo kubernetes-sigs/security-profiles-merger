@@ -773,6 +773,10 @@ type LoweredPath struct {
 // baseline is 0, as in Intersect(baseline, artifact), and several are
 // joined in input order. Without inputs it returns nil once the result
 // passes.
+//
+// It checks no budget: its work grows with the number of inputs times the
+// rules of the result and their depth, which the merge budget bounds only
+// where result is what Intersect or Union returned for these inputs.
 func LoweredRulePaths(result *Profile, inputs ...*Profile) ([]LoweredPath, error) {
 	resultPaths, err := validateProfile(result, tierMerge)
 	if err != nil {

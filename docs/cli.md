@@ -25,7 +25,7 @@ The same code means the same thing in every subcommand:
 | Code | Meaning |
 |------|---------|
 | `0` | Success. For `diff`, the two profiles are equal |
-| `1` | The profile is bad: it is empty, does not parse, is not of the type `--type` names or the other inputs reveal, has no type that can be detected, does not validate, cannot be read (a missing or unreadable file, a directory, device or socket, or `-` reading a terminal, another device or a directory), or its output could not be written. For `diff`, `1` means *different* and nothing else |
+| `1` | The profile is bad: it is empty, does not parse, is not of the type `--type` names or the other inputs reveal, has no type that can be detected, does not validate, cannot be read (a missing or unreadable file, a directory, device or socket, or `-` reading a terminal, another device or a directory), or its output could not be written. For `merge`, also a merge that fails on inputs that pass, such as `ErrLostRules` or `ErrBudgetExceeded`. For `diff`, `1` means *different* and nothing else |
 | `2` | Usage error, listed below. For `diff`, every failure, since `1` is taken |
 
 Usage errors, which exit `2`:
@@ -134,8 +134,8 @@ an empty file. A file argument is opened without blocking, so that a FIFO
 planted among untrusted profiles does not hold the run. A FIFO is therefore read
 only if a writer already has it open when spm opens it, as with `<(cmd)`, a pipe
 into `/dev/stdin`, or a writer started before spm. Without one, it fails at once
-with "FIFO has no writer", so `spm validate f & cmd > f` fails and can leave
-`cmd` blocked in its open: start the writer first. A writer that opens the FIFO
+with "empty pipe", so `spm validate f & cmd > f` fails and can leave `cmd`
+blocked in its open: start the writer first. A writer that opens the FIFO
 but never closes it still holds the run. On FreeBSD, and possibly the other
 BSDs, a FIFO without a writer may still wait for one.
 
@@ -371,9 +371,9 @@ rules every merge would take away whatever the artifact says. The seccomp
 check also diffs the baseline against its merge with a profile allowing
 every call, which refuses what only a merge next to an artifact takes
 away, such as a condition on a value above 32 bits where the node covers
-a 32-bit architecture. The CRI-O default seccomp profile passes the
-default checks but fails here, since the merge rewrites its masked
-`clone` clauses; restated as the integration guide describes, it passes.
+a 32-bit architecture. The CRI-O default seccomp profile passes the default
+checks but fails here, since the merge rewrites its masked `clone` and its
+`socket` clauses; restated as the integration guide describes, it passes.
 The AppArmor check also refuses a path `QuotePath` cannot render, which a
 merge followed by a diff would not find. For Landlock it runs
 `landlock.ValidateBaseline`, or `landlock.Options.ValidateBaseline` for

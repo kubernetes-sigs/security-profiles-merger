@@ -198,6 +198,23 @@ func TestUnknownFieldsWalksPromotedAndMapFields(t *testing.T) {
 	}
 }
 
+// TestDuplicateKeysOfAMapAreExact covers an object decoding into a map:
+// encoding/json keeps each of its keys as written, so keys that differ only
+// in case are distinct, while the members of a struct inside still fold.
+func TestDuplicateKeysOfAMapAreExact(t *testing.T) {
+	t.Parallel()
+
+	raw := `{"values":{"a":{"inner":"x"},"A":{"inner":"y","INNER":"z"},"a":{}},` +
+		`"VALUES":{}}`
+
+	scan := scanDocument([]byte(raw), reflect.TypeFor[walkTarget](), false)
+
+	want := []string{"values.A.INNER", "values.a", "VALUES"}
+	if !slices.Equal(scan.duplicates.paths, want) {
+		t.Errorf("duplicates = %q, want %q", scan.duplicates.paths, want)
+	}
+}
+
 // TestDuplicateKeysBoundsPathWork covers a document nesting deeply under
 // long names, whose paths are megabytes each: naming the repeated members
 // must not copy a path per level, and the report shows the same start of
