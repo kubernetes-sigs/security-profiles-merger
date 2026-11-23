@@ -209,7 +209,9 @@ limitations under the License.
 // Clauses of one syscall that apply one action, each test one argument for
 // equality with a different filter, and report different errno values are
 // given the errno of the first of them, so the action still applies to every
-// call one of them matches. A clause set that is already a safe shape keeps
+// call one of them matches. Two clauses that apply one action to the same
+// calls, spelled differently, such as a0 < 1 and a0 == 0, are one clause,
+// and the merge keeps the errno the leftmost input gives it. A clause set that is already a safe shape keeps
 // its errno values as written, and [ValidateArtifact] reports such clauses
 // in one profile as conflicting rather than unifying them.
 //

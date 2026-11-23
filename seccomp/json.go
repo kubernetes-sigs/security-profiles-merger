@@ -40,11 +40,12 @@ var (
 // accepts silently: a member no field reads ([ErrUnknownField]) or that
 // names a field only ignoring case ([ErrMisspelledField]), a member repeated
 // within one object ([ErrDuplicateKey]), bytes that are not valid UTF-8
-// ([ErrInvalidUTF8]), data behind the profile ([ErrUnexpectedData]), an
-// argument condition without its index or op, or with a null one
-// ([ErrMissingField]), and a document that is not a JSON object, such as
-// null ([ErrNotAnObject]). A condition may leave out value and valueTwo,
-// which default to 0. Error messages are bounded in length.
+// ([ErrInvalidUTF8]), data behind the profile ([ErrUnexpectedData]), a
+// syscall entry without its names or action and an argument condition
+// without its index or op, or with a null one, and a null entry or
+// condition ([ErrMissingField]), and a document that is not a JSON object,
+// such as null ([ErrNotAnObject]). A condition may leave out value and
+// valueTwo, which default to 0. Error messages are bounded in length.
 //
 // The document is decoded into a fresh profile, which replaces the one given
 // only on success: a member the document omits is zero in the result, and an

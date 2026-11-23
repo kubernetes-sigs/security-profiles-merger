@@ -542,3 +542,34 @@ func TestUnknownFallbackNamesTheMember(t *testing.T) {
 		t.Errorf("quotePath of a plain path = %s", got)
 	}
 }
+
+// TestUnknownMembersTheScanFinds covers a document whose unknown members
+// the decoder's error does not name, as where a release of encoding/json
+// words that error otherwise: the members the scan found are reported by
+// their paths all the same, rather than dropped for want of a hint, and
+// they take precedence over the decoder's one name where both found some.
+func TestUnknownMembersTheScanFinds(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`{"defaultAction":"SCMP_ACT_ERRNO","bogus":1,"syscalls":[{"x":2}]}`)
+	scan := scanDocument(raw, reflect.TypeFor[specs.LinuxSeccomp](), false)
+
+	for _, hint := range []Hint{
+		{unknown: "", found: false},
+		{unknown: "bogus", found: true},
+	} {
+		err := scan.unknownErr(hint)
+		if !errors.Is(err, spm.ErrUnknownField) ||
+			!strings.Contains(err.Error(), `"bogus"`) ||
+			!strings.Contains(err.Error(), `"syscalls[0].x"`) {
+			t.Errorf("unknownErr(%+v) = %v, want both members by their paths", hint, err)
+		}
+	}
+
+	// Through the decoder, which names the first unknown member, the same
+	// document reports both.
+	err := Unmarshal(raw, new(specs.LinuxSeccomp))
+	if !errors.Is(err, spm.ErrUnknownField) || !strings.Contains(err.Error(), "syscalls[0].x") {
+		t.Errorf("Unmarshal = %v, want both unknown members", err)
+	}
+}

@@ -45,8 +45,14 @@ const (
 // out: the Security Profiles Operator writes them with omitempty, so
 // a0 == 0 arrives as {"index":0,"op":"SCMP_CMP_EQ"}, and 0 is what the
 // member would say.
+//
+// A syscall entry has to hold "names" and "action", as the runtime spec
+// requires: an entry without either says nothing a runtime can load, and
+// a null element of "syscalls", which decodes as an entry holding neither,
+// is refused as missing both, as a null rule of a Landlock profile is.
 var requiredFields = map[reflect.Type][]string{
 	reflect.TypeFor[specs.LinuxSeccompArg](): {"Index", "Op"},
+	reflect.TypeFor[specs.LinuxSyscall]():    {"Names", "Action"},
 }
 
 // requiresCache caches requiresFields and layoutCache structLayout, by

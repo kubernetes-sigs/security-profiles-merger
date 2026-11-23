@@ -168,10 +168,10 @@ says how, and in which order the problems are reported.
 
 | Sentinel | The document holds |
 |----------|--------------------|
-| `ErrDuplicateKey` | A member repeated within one object, compared ignoring case as `encoding/json` matches members to fields |
+| `ErrDuplicateKey` | A member repeated within one object, compared ignoring case in an object decoding into a struct, as `encoding/json` matches members to fields, and exactly elsewhere, such as inside a member no field reads |
 | `ErrUnknownField` | A member the profile type has no field for |
 | `ErrMisspelledField` | A member that names a field only ignoring case, such as `"Syscalls"` or `"ſyscalls"` (U+017F) for `syscalls` |
-| `ErrMissingField` | No `index` or `op` in a seccomp argument condition (its `value` and `valueTwo` may be left out, as producers writing them with `omitempty` do), no `path` in a Landlock path rule or no `port` in a Landlock network rule, or a null one, and a null condition or rule |
+| `ErrMissingField` | No `names` or `action` in a seccomp syscall entry, no `index` or `op` in a seccomp argument condition (its `value` and `valueTwo` may be left out, as producers writing them with `omitempty` do), no `path` in a Landlock path rule or no `port` in a Landlock network rule, or a null one, and a null entry, condition or rule |
 | `ErrInvalidUTF8` | A byte that is not valid UTF-8, or a `\u` escape spelling half a surrogate pair |
 | `ErrUnexpectedData` | Anything but whitespace after the profile |
 | `ErrNotAnObject` | A document whose value is not a JSON object: `null`, an array, a string, a number or a boolean |
@@ -250,7 +250,7 @@ error is nil.
 | `ErrNotifyNotAllowed` | `ValidateArtifact`, `ValidateStrict` | `SCMP_ACT_NOTIFY`, which needs a listener only the node provides |
 | `ErrListenerNotAllowed` | `ValidateArtifact`, `ValidateStrict` | `listenerPath`, `listenerMetadata` or `SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV` |
 | `ErrInvalidSyscallName` | `Validate` and up for a NUL byte; `ValidateArtifact`, `ValidateStrict` for any other control character and for invalid UTF-8 | A name holding a NUL byte, where libseccomp's C API ends it, another control character, or a byte that is not valid UTF-8 |
-| `ErrValueTooWide` | `ValidateArtifact`, `ValidateStrict` | A value or mask above 32 bits where the filter covers a 32-bit architecture |
+| `ErrValueTooWide` | `ValidateArtifact`, `ValidateStrict` | A value or mask above 32 bits where the filter covers a 32-bit architecture, in an entry that loads a rule |
 | `ErrMixedByteOrder` | `ValidateArtifact`, `ValidateStrict`; `Intersect` for a known node, in an `InputError` naming the input | An architecture whose byte order differs from the node's (or, for an unknown node, a list holding both byte orders), which libseccomp refuses with `EDOM` |
 | `ErrConflictingEntries` | `ValidateArtifact`, `ValidateStrict` | Rules of one syscall with different results that a runtime refuses or evaluates in its own order ([Conflicting rules](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Conflicting_rules)) |
 | `ErrTooManyEntriesPerSyscall`, `ErrTooManyRulesPerSyscall`, `ErrTooManyNamesPerEntry`, `ErrTooManyRules`, `ErrTooManyEntries` | `ValidateArtifact`, `ValidateStrict` | A profile past one of the [limits](#limits); each matches `ErrArtifactTooLarge` |
@@ -332,15 +332,15 @@ import "sigs.k8s.io/security-profiles-merger/apparmor"
 |----------|-------------|
 | `Intersect` | Merge via intersection: capabilities and paths intersected, network AND. For a runtime combining an artifact with its baseline. Fails with `ErrBudgetExceeded` past its budgets when the result may lose access |
 | `Union` | Merge via union: capabilities and paths combined, network OR. For combining recorded profiles |
-| `Validate` | Empty, oversized and relative paths, AppArmor variables, duplicates within or across filesystem categories, empty or duplicate capability names. What the merge runs on each input, except the duplicates within one list, which it folds |
+| `Validate` | Empty, oversized and relative paths, AppArmor variables, duplicates within or across filesystem categories, duplicate executable or library paths, empty or duplicate capability names. What the merge runs on each input, except the duplicates within one list, which it folds |
 | `ValidateArtifact` | `Validate` plus the [limits](#limits-1), checked first and on their own, and what a runtime could not load, would silently drop or would render as further rules ([Paths the validators reject](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#hdr-Paths_the_validators_reject)) |
-| `ValidateStrict` | `ValidateArtifact` plus capability names outside the known set and duplicate executable or library paths |
-| `ValidateBaseline` | The check of a baseline at config load: `Validate`, `QuotePath` of every path and the spelling of every capability name, the total pattern length (`ErrBudgetExceeded`), then `Diff` against its own intersection (`ErrInexactBaseline`) |
+| `ValidateStrict` | `ValidateArtifact` plus capability names outside the known set |
+| `ValidateBaseline` | The check of a baseline at config load: `Validate`; `QuotePath` of every path, the patterns `ValidateArtifact` refuses as invalid or too complex, `.` and `..` components, NUL bytes and the spelling of every capability name; the total pattern length (`ErrBudgetExceeded`); a pattern that fails to compile (`ErrGlobTooComplex`); then `Diff` against its own intersection (`ErrInexactBaseline`) |
 | `UnmarshalStrict` | Decode a profile, refusing what `encoding/json` accepts silently; see [strict decoding](#strict-decoding) |
 | `DecodeArtifact` | `UnmarshalStrict` then `ValidateArtifact`, returning the profile only when both pass |
 | `Diff` | Structured diff, comparing what AppArmor loads from the two profiles. A nil profile is an `InputError` naming it, wrapping `ErrNilProfile` |
 | `IsGlobPattern` | Whether a path holds glob syntax, including syntax apparmor_parser rejects |
-| `QuotePath` | A path spelled as one token of a rendered file rule; `ErrRelativePath`, `ErrEmptyPath`, or `ErrUnquotablePath` where no such spelling exists |
+| `QuotePath` | A path spelled as one token of a rendered file rule; `ErrRelativePath`, `ErrEmptyPath`, or `ErrUnquotablePath` where no such spelling exists, which for a pattern apparmor_parser rejects matches `ErrInvalidGlob` too |
 
 ### Types
 
@@ -373,21 +373,21 @@ name it and on `ErrNilProfile`, `ErrEmptyPath`, `ErrRelativePath`,
 | `ErrUnsupportedVariable` | Every validator and merge | A path uses an AppArmor variable such as `@{HOME}` |
 | `ErrDuplicatePathInCategory` | Every validator | A path is listed twice within one category; the merge folds it |
 | `ErrDuplicateCapability` | Every validator | A capability is listed twice, ignoring case; the merge folds it |
-| `ErrInvalidGlob` | `ValidateArtifact`, `ValidateStrict` | A pattern apparmor_parser rejects or loads as something else; see [Paths the validators reject](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#hdr-Paths_the_validators_reject) for how the merge treats it |
-| `ErrGlobTooComplex` | `ValidateArtifact`, `ValidateStrict` | A pattern past the matcher's limits (100 alternatives in total), which never matches |
-| `ErrDotComponent` | `ValidateArtifact`, `ValidateStrict` | A `.` or `..` component, which matches nothing |
-| `ErrUnquotablePath` | `ValidateArtifact`, `ValidateStrict`, `ValidateBaseline`, `QuotePath` | A character the lexer does not accept unescaped, or one that does not print as itself |
+| `ErrDuplicateExecutablePath` | Every validator | A path is listed twice in `AllowedExecutables` or `AllowedLibraries`; the merge folds it |
+| `ErrInvalidGlob` | `ValidateArtifact`, `ValidateStrict`, `ValidateBaseline`; `QuotePath` with `ErrUnquotablePath` | A pattern apparmor_parser rejects or loads as something else; see [Paths the validators reject](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/apparmor#hdr-Paths_the_validators_reject) for how the merge treats it |
+| `ErrGlobTooComplex` | `ValidateArtifact`, `ValidateStrict`, `ValidateBaseline` | A pattern past the matcher's limits (100 alternatives in total), which never matches |
+| `ErrDotComponent` | `ValidateArtifact`, `ValidateStrict`, `ValidateBaseline` | A `.` or `..` component, which matches nothing |
+| `ErrUnquotablePath` | `ValidateArtifact`, `ValidateStrict`, `ValidateBaseline`, `QuotePath` | A character the lexer does not accept unescaped, or one that does not print as itself; from `QuotePath` also a pattern apparmor_parser rejects, with `ErrInvalidGlob` |
 | `ErrInvalidCapabilityName` | `ValidateArtifact`, `ValidateStrict`, `ValidateBaseline` | A capability name outside `[A-Za-z0-9_]`, or one starting with `cap_` in any case, which apparmor_parser does not load |
 | `ErrTooManyPaths`, `ErrTooManyPatternBytes`, `ErrTooManyCapabilities` | `ValidateArtifact`, `ValidateStrict`, first and on their own | A [limit](#limits-1) is exceeded; each matches `ErrArtifactTooLarge` |
 | `ErrUnknownCapability` | `ValidateStrict` | A capability name outside the known set |
-| `ErrDuplicateExecutablePath` | `ValidateStrict` | A path is listed twice in `AllowedExecutables` or `AllowedLibraries` |
 
 ### Limits
 
 | Constant | Value | Bounds | Error |
 |----------|-------|--------|-------|
 | `MaxArtifactPaths` | 1024 | Paths, over every list of the profile | `ErrTooManyPaths` |
-| `MaxArtifactPatternBytes` | 64 KiB | Glob patterns, in total | `ErrTooManyPatternBytes` |
+| `MaxArtifactPatternBytes` | 64 KiB | Glob patterns, the paths `IsGlobPattern` reports, in total | `ErrTooManyPatternBytes` |
 | `MaxArtifactCapabilities` | 512 | Capability names | `ErrTooManyCapabilities` |
 | `MaxPathLen` | 4095 | One path, in every validator and merge | `ErrPathTooLong` |
 
@@ -440,7 +440,7 @@ import "sigs.k8s.io/security-profiles-merger/landlock"
 | Function | Description |
 |----------|-------------|
 | `Intersect` | Merge via intersection: handled and scoped sets unioned, rules intersected. For a runtime combining an artifact with its baseline. Fails with `ErrBudgetExceeded` past the [merge budget](#limits-2) |
-| `Union` | Merge via union: handled and scoped sets intersected, rules unioned. For combining recorded profiles. Has the budget of `Intersect` |
+| `Union` | Merge via union: handled and scoped sets intersected, rules unioned. For combining recorded profiles. Has the budget of `Intersect`, plus the work of settling moves on the rule paths at or beneath each input's grants of `refer` |
 | `Validate` | Known rights and valid paths: no empty paths, paths over `MaxPathLen`, NUL bytes or `..` components. What the merge runs on each input; duplicates pass |
 | `ValidateBaseline` | `Validate` plus what a kernel could not load: relative paths, trailing `/` or `/.`, unhandled or empty grants, an empty ruleset, and paths that are not valid UTF-8. Used through `Options.ValidateBaseline` with the node's ABI version |
 | `ValidateArtifact` | `ValidateBaseline` plus the [limit](#limits-2), checked first and on its own |

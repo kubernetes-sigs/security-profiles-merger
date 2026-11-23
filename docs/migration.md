@@ -70,8 +70,9 @@ unknown architecture matches `ErrUnknownArch` as well.
   that is not valid UTF-8.
 - **`Intersect` and `Union` refuse inputs naming different listeners**
   (`ErrConflictingListener`).
-- **`UnmarshalStrict` requires** `index` and `op` in an argument condition
-  (`ErrMissingField`).
+- **`UnmarshalStrict` requires** `names` and `action` in a syscall entry
+  and `index` and `op` in an argument condition, and refuses a null entry
+  or condition (`ErrMissingField`).
 - **`Intersect` refuses an input listing an architecture of the other byte
   order** (`ErrMixedByteOrder`), and `Union` may refuse a result in which
   libseccomp would lose the rules of an architecture (`ErrLostRules`).
@@ -122,10 +123,21 @@ The JSON of a diff follows the fields of `Profile` too:
   permits there no longer depends on the input order, and a literal can
   move to another list of a diff. A profile intersected alone or with
   itself is unchanged.
+- **`Validate`, and with it `ValidateArtifact`, refuses a path listed
+  twice in `AllowedExecutables` or `AllowedLibraries`**
+  (`ErrDuplicateExecutablePath`), as it refuses one listed twice in a
+  filesystem category, where only `ValidateStrict` did. The merges still
+  fold such a path into one entry.
+- **`MaxArtifactPatternBytes` counts only the paths `IsGlobPattern`
+  reports**, so a literal path escaping a character, such as
+  `/home/user/My\ Documents`, no longer counts.
 - **New**: `ValidateBaseline`, which also refuses capability names
-  apparmor_parser does not load and glob patterns longer in total than
-  `2*MaxArtifactPatternBytes` (`ErrBudgetExceeded`), `QuotePath` (render
-  every path through it), `DecodeArtifact` and `Profile.Clone`.
+  apparmor_parser does not load, the paths `ValidateArtifact` refuses for
+  what they load as, such as `/a/[\^x]` or a `..` component, and glob
+  patterns longer in total than `2*MaxArtifactPatternBytes`
+  (`ErrBudgetExceeded`), `QuotePath` (render every path through it; it
+  refuses a pattern apparmor_parser rejects), `DecodeArtifact` and
+  `Profile.Clone`.
 
 ## landlock
 
@@ -152,7 +164,11 @@ The JSON of a diff follows the fields of `Profile` too:
   permits more.
 - **The merges validate their inputs** and refuse inputs past a work
   budget with `ErrBudgetExceeded`, about 300 recordings of 50 rules on
-  paths of five components each.
+  paths of five components each. `Union` also counts the moves it settles
+  beneath each grant of `refer`, so it refuses more inputs where they grant
+  `refer` on a directory they share: about 115 such recordings, and two
+  inputs of `MaxArtifactRules` rules on the deepest paths rather than
+  three.
 - **`LatestABIVersion` is `ABIV11`**, and the validators reject a trailing
   slash (`ErrTrailingSlash`) and a path that is not valid UTF-8
   (`ErrInvalidUTF8Path`) in an artifact.

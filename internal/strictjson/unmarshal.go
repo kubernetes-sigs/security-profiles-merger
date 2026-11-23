@@ -118,8 +118,8 @@ type Hint struct {
 // Decode decodes data into target as json.Unmarshal does, failing the same
 // way and leaving target as it leaves it, also where target is not zero,
 // and returns a Hint saying whether the decoder met a member the type of
-// target has no field for, which Findings takes as the word on whether a
-// document has one.
+// target has no field for, which Findings reports along with the members
+// its own scan finds no field for (see unknownErr).
 func Decode[T any](data []byte, target *T) (Hint, error) {
 	// A document json.Unmarshal refuses before decoding anything, such as
 	// one with data behind it, is refused with its error.
@@ -290,23 +290,25 @@ func findings[T any](data []byte, decoded *T, hint Hint, withUTF8 bool) iter.Seq
 	}
 }
 
-// unknownErr reports the members no field reads. The decoder is what
-// decides that, so they are only reported where hint says the decoder met
-// one; should the scan ever disagree and find none, such as for a document
-// it cannot read to the end, the decoder's own finding is reported rather
-// than dropped, so that the check fails closed. That finding is a member
-// name rather than a path, so it is written as the path of a member by that
+// unknownErr reports the members no field reads, where either the decoder
+// or the scan found one, so that the check fails closed on each: the scan
+// may not read a document to the end, and the decoder's finding is read
+// out of the text of its error, which a release of encoding/json may word
+// differently, so that it would no longer be recognized. The scan names
+// every such member by its path; where it found none, the decoder's own
+// finding is reported rather than dropped. That finding is a member name
+// rather than a path, so it is written as the path of a member by that
 // name, which brackets and quotes a name that is no plain path segment. A
-// member of a type whose fields decoders resolve differently is reported
-// whatever the decoder says (see jsonFields).
+// member of a type whose fields decoders resolve differently is among the
+// members the scan found (see jsonFields).
 func (scan *documentScan) unknownErr(hint Hint) error {
 	switch {
-	case !hint.found && !scan.divergent:
-		return nil
-	case len(scan.unknown.paths) == 0 && scan.unknown.omitted == 0:
+	case len(scan.unknown.paths) > 0 || scan.unknown.omitted > 0:
+		return scan.unknown.err(spm.ErrUnknownField)
+	case hint.found:
 		return pathsError(spm.ErrUnknownField, []string{joinFieldPath("", hint.unknown)}, nil, 0)
 	default:
-		return scan.unknown.err(spm.ErrUnknownField)
+		return nil
 	}
 }
 

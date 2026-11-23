@@ -581,23 +581,24 @@ func TestValidateBaseline(t *testing.T) {
 }
 
 // TestAppArmorValidateBaseline checks the config-load check of apparmor: a
-// pattern the intersection drops is ErrInexactBaseline, a path QuotePath
-// refuses is reported with its list and index, and an invalid baseline
-// fails as Validate fails, without an InputError.
+// pattern apparmor_parser rejects and a path QuotePath refuses are each
+// reported with their list and index, before an intersection would drop
+// the pattern, and an invalid baseline fails as Validate fails, without an
+// InputError.
 func TestAppArmorValidateBaseline(t *testing.T) {
 	t.Parallel()
 
 	var inputErr *spm.InputError
 
 	// A pattern apparmor_parser rejects matches nothing, so an intersection
-	// drops it.
+	// would drop it, which the check of the paths reports first.
 	unloadable := &apparmor.Profile{
 		Filesystem: &apparmor.FilesystemRules{ReadOnlyPaths: []string{"/etc/{a}", "/etc/b"}},
 	}
 
 	err := apparmor.ValidateBaseline(unloadable)
-	if !errors.Is(err, apparmor.ErrInexactBaseline) {
-		t.Errorf("apparmor ValidateBaseline(unloadable) = %v, want ErrInexactBaseline", err)
+	if !errors.Is(err, apparmor.ErrInvalidGlob) {
+		t.Errorf("apparmor ValidateBaseline(unloadable) = %v, want ErrInvalidGlob", err)
 	}
 
 	unloadable.Filesystem.ReadOnlyPaths = unloadable.Filesystem.ReadOnlyPaths[1:]

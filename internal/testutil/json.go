@@ -39,7 +39,10 @@ func AddJSONFuzzSeeds(f *testing.F) {
 		`{}`,
 		`[]`,
 		`[[[[[[[[[[1]]]]]]]]]]`,
-		`{"a":{"a":{"a":{"a":1,"A":2}}}}`,
+		`{"a":{"a":{"a":{"a":1,"a":2}}}}`,
+		// Names that differ in case are two members outside a struct, such
+		// as inside a member no field reads, and one inside a struct.
+		`{"defaultAction":"SCMP_ACT_ERRNO","x":{"Name":1,"name":2}}`,
 		// Two repeated members in different objects whose paths would
 		// collide if a name that is not a plain segment were written bare.
 		`{"":{"":1,"":2},"":3}`,

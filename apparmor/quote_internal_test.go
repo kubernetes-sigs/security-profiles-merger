@@ -126,14 +126,54 @@ func TestQuotePathRefuses(t *testing.T) {
 		// An empty alternative: the second comma cannot be written so that
 		// the lexer reads it and the parser still takes it as a separator.
 		"/etc/{a,,b}",
-		// A pattern apparmor_parser rejects, here an unclosed class, is
-		// identified by its text, which a new spelling changes.
-		"/tmp/\x1b[31m",
 	} {
 		got, err := QuotePath(path)
-		if !errors.Is(err, ErrUnquotablePath) {
-			t.Errorf("QuotePath(%q) = %q, %v, want ErrUnquotablePath", path, got, err)
+		if !errors.Is(err, ErrUnquotablePath) || errors.Is(err, ErrInvalidGlob) {
+			t.Errorf("QuotePath(%q) = %q, %v, want ErrUnquotablePath alone", path, got, err)
 		}
+	}
+}
+
+// TestQuotePathRefusesInvalidPatterns checks that QuotePath refuses every
+// pattern ValidateArtifact refuses as invalid, whether or not it needs
+// escaping: the merge reads it as matching nothing, which no spelling
+// renders. The error matches ErrInvalidGlob as well as ErrUnquotablePath,
+// since the pattern may hold no character that needs escaping. A class
+// opened by an escaped "^", which ValidateArtifact refuses as misleading,
+// loads as the negated class the merge reads it as, so it is returned.
+func TestQuotePathRefusesInvalidPatterns(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{
+		// An unclosed class, which also needs escaping.
+		"/tmp/\x1b[31m",
+		// Patterns the port refuses, as apparmor_parser rejects them or
+		// loads them as something other than they spell.
+		"/a/{",
+		"/a/[]",
+		"/etc/[*]",
+		"/etc/[][c]",
+		`/a/\`,
+		// Patterns the port translates into a regex libapparmor_re would
+		// fail to parse: a range without an end, and one of "-" alone.
+		"/etc/[a-]",
+		"/etc/[--]",
+	} {
+		got, err := QuotePath(path)
+		if !errors.Is(err, ErrUnquotablePath) || !errors.Is(err, ErrInvalidGlob) {
+			t.Errorf("QuotePath(%q) = %q, %v, want ErrUnquotablePath and ErrInvalidGlob",
+				path, got, err)
+		}
+
+		profile := &Profile{Filesystem: &FilesystemRules{ReadOnlyPaths: []string{path}}}
+		if !errors.Is(ValidateArtifact(profile), ErrInvalidGlob) {
+			t.Errorf("ValidateArtifact does not refuse %q as an invalid glob", path)
+		}
+	}
+
+	got, err := QuotePath(`/a/[\^x]`)
+	if err != nil || got != `/a/[\^x]` {
+		t.Errorf("QuotePath(%q) = %q, %v, want it as it is", `/a/[\^x]`, got, err)
 	}
 }
 

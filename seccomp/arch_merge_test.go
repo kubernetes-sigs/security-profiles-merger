@@ -131,6 +131,11 @@ func TestValidateArtifactAcceptsWideValueWithout32Bit(t *testing.T) {
 				Index: 0, Value: 1, ValueTwo: 1 << 40, Op: specs.OpEqualTo,
 			}),
 		), specs.ArchX86),
+		// An entry equal to the default loads no rule, so its condition
+		// reaches no filter, as the merge and the conflict checks read it.
+		on(profileOf(specs.ActErrno,
+			filtered("read", specs.ActErrno, arg(0, specs.OpEqualTo, 1<<33)),
+		), specs.ArchX86_64, specs.ArchX86),
 	} {
 		err := seccomp.ForArch(specs.ArchX86_64).ValidateArtifact(profile)
 		if err != nil {

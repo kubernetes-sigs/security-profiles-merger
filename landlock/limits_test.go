@@ -137,6 +137,211 @@ func TestMergeBudgetCountsInputsTimesRules(t *testing.T) {
 	}
 }
 
+// TestUnionBudgetCountsMoveSettling covers the work a union settling moves
+// does besides the ancestor lookups: for every input, some 40 units for
+// each rule path of every input at or beneath a path that input grants
+// refer on (see moveSettlingWork). A rule on "/p0" costs two lookups, so
+// 64 copies of a profile of 1024 such rules, granting refer on "/" and so
+// above every rule path, cost 64*64*2049 lookups, within the budget an
+// intersection keeps, and over 64*64*1025*32 units more, past the one a
+// union keeps. Without refer, no input asks a directory about moves, and
+// the union is admitted as the intersection is.
+func TestUnionBudgetCountsMoveSettling(t *testing.T) {
+	t.Parallel()
+
+	profileOf := func(rights ...landlock.FSAccessRight) *landlock.Profile {
+		rules := make([]landlock.PathRule, 0, 1025)
+		rules = append(rules, landlock.PathRule{Path: "/", AccessFS: rights})
+
+		for idx := range 1024 {
+			rules = append(rules, landlock.PathRule{
+				Path: fmt.Sprintf("/p%d", idx), AccessFS: rights,
+			})
+		}
+
+		return fsProfile(fsRights{landlock.FSAccessReadFile, landlock.FSAccessRefer}, rules...)
+	}
+
+	copies := func(profile *landlock.Profile) []*landlock.Profile {
+		inputs := make([]*landlock.Profile, 64)
+		for idx := range inputs {
+			inputs[idx] = profile
+		}
+
+		return inputs
+	}
+
+	referring := copies(profileOf(landlock.FSAccessReadFile, landlock.FSAccessRefer))
+
+	err := landlock.CheckMergeBudget(referring, false)
+	if err != nil {
+		t.Errorf("the intersection budget = %v, want the inputs admitted", err)
+	}
+
+	err = landlock.CheckMergeBudget(referring, true)
+	if !errors.Is(err, landlock.ErrBudgetExceeded) {
+		t.Errorf("the union budget = %v, want ErrBudgetExceeded", err)
+	}
+
+	result, err := landlock.Union(referring...)
+	if !errors.Is(err, landlock.ErrBudgetExceeded) || result != nil {
+		t.Errorf("Union = %v, %v, want ErrBudgetExceeded", result, err)
+	}
+
+	err = landlock.CheckMergeBudget(copies(profileOf(landlock.FSAccessReadFile)), true)
+	if err != nil {
+		t.Errorf("the union budget without refer = %v, want the inputs admitted", err)
+	}
+}
+
+// TestUnionBudgetAdmitsDocumentedRecordings pins the numbers of
+// recordings the documentation says a union admits: of 50 rules on paths of
+// five components each, about 300 where each recording grants refer on one
+// of its own leaves, as where none grants it, and about 115 where each
+// grants it on a directory they all share. A union asks only the
+// directories at or beneath an input's grant of refer about moves: one rule
+// path per recording in the first case, every rule path of every recording
+// for each recording in the second. An intersection asks no directory about
+// moves and admits about 300 in either case.
+func TestUnionBudgetAdmitsDocumentedRecordings(t *testing.T) {
+	t.Parallel()
+
+	recordings := func(count int, shared string) []*landlock.Profile {
+		inputs := make([]*landlock.Profile, count)
+
+		for idx := range inputs {
+			rules := make([]landlock.PathRule, 0, 51)
+
+			for leaf := range 50 {
+				access := fsRights{landlock.FSAccessReadFile}
+				if leaf == 0 && shared == "" {
+					access = append(access, landlock.FSAccessRefer)
+				}
+
+				rules = append(rules, landlock.PathRule{
+					Path: fmt.Sprintf("/a/b/c/d%d/e%d", idx, leaf), AccessFS: access,
+				})
+			}
+
+			if shared != "" {
+				rules = append(rules, landlock.PathRule{
+					Path: shared, AccessFS: fsRights{landlock.FSAccessRefer},
+				})
+			}
+
+			inputs[idx] = fsProfile(
+				fsRights{landlock.FSAccessReadFile, landlock.FSAccessRefer}, rules...,
+			)
+		}
+
+		return inputs
+	}
+
+	for _, test := range []struct {
+		name                       string
+		shared                     string
+		union, unionPast, admitted int
+	}{
+		{name: "refer on a leaf", shared: "", union: 300, unionPast: 500, admitted: 300},
+		{name: "refer on a shared directory", shared: "/a", union: 115, unionPast: 125, admitted: 300},
+	} {
+		err := landlock.CheckMergeBudget(recordings(test.union, test.shared), true)
+		if err != nil {
+			t.Errorf("%s: union budget of %d recordings = %v, want admitted",
+				test.name, test.union, err)
+		}
+
+		err = landlock.CheckMergeBudget(recordings(test.unionPast, test.shared), true)
+		if !errors.Is(err, landlock.ErrBudgetExceeded) {
+			t.Errorf("%s: union budget of %d recordings = %v, want ErrBudgetExceeded",
+				test.name, test.unionPast, err)
+		}
+
+		err = landlock.CheckMergeBudget(recordings(test.admitted, test.shared), false)
+		if err != nil {
+			t.Errorf("%s: intersection budget of %d recordings = %v, want admitted",
+				test.name, test.admitted, err)
+		}
+	}
+}
+
+// TestBudgetAdmitsDeepestArtifacts pins what the documentation says of
+// inputs ValidateArtifact accepts at their largest, MaxArtifactRules rules
+// on paths of MaxPathLen bytes: Intersect admits three, and so does Union
+// where they share no grant of refer, while where each grants refer on "/",
+// above every rule path of all of them, Union admits two, and refuses
+// three with ErrBudgetExceeded before merging anything, as the check the
+// test reads does.
+func TestBudgetAdmitsDeepestArtifacts(t *testing.T) {
+	t.Parallel()
+
+	three := deepestArtifacts(3, false)
+
+	err := landlock.ValidateArtifact(three[0])
+	if err != nil {
+		t.Fatalf("ValidateArtifact = %v, want nil", err)
+	}
+
+	for _, settlesMoves := range []bool{false, true} {
+		err = landlock.CheckMergeBudget(three, settlesMoves)
+		if err != nil {
+			t.Errorf("budget (union %t) of three = %v, want admitted", settlesMoves, err)
+		}
+	}
+
+	sharing := deepestArtifacts(3, true)
+
+	err = landlock.CheckMergeBudget(sharing, false)
+	if err != nil {
+		t.Errorf("intersection budget of three sharing refer = %v, want admitted", err)
+	}
+
+	err = landlock.CheckMergeBudget(sharing, true)
+	if !errors.Is(err, landlock.ErrBudgetExceeded) {
+		t.Errorf("union budget of three sharing refer = %v, want ErrBudgetExceeded", err)
+	}
+
+	result, err := landlock.Union(sharing...)
+	if !errors.Is(err, landlock.ErrBudgetExceeded) || result != nil {
+		t.Errorf("Union of three sharing refer = %v, %v, want ErrBudgetExceeded", result, err)
+	}
+
+	err = landlock.CheckMergeBudget(sharing[:2], true)
+	if err != nil {
+		t.Errorf("union budget of two sharing refer = %v, want admitted", err)
+	}
+}
+
+// deepestArtifacts returns count profiles of MaxArtifactRules rules on
+// distinct paths of nearly MaxPathLen bytes, each of them granting
+// refer on "/" where referOnRoot is set.
+func deepestArtifacts(count int, referOnRoot bool) []*landlock.Profile {
+	deep := strings.Repeat("/a", landlock.MaxPathLen/2)
+	inputs := make([]*landlock.Profile, count)
+
+	for idx := range inputs {
+		rules := make([]landlock.PathRule, 0, landlock.MaxArtifactRules)
+		if referOnRoot {
+			rules = append(rules, landlock.PathRule{
+				Path: "/", AccessFS: fsRights{landlock.FSAccessRefer},
+			})
+		}
+
+		for len(rules) < landlock.MaxArtifactRules {
+			rules = append(rules, landlock.PathRule{
+				Path:     fmt.Sprintf("%s%d/%d", deep[:len(deep)-12], idx, len(rules)),
+				AccessFS: fsRights{landlock.FSAccessReadFile},
+			})
+		}
+
+		inputs[idx] = fsProfile(
+			fsRights{landlock.FSAccessReadFile, landlock.FSAccessRefer}, rules...,
+		)
+	}
+
+	return inputs
+}
+
 // TestMergePastTheBudgetDoesNoWork pins that the budget is checked before
 // anything is walked: a refused merge allocates no more than validation's
 // slice of cleaned paths per input and its error, however many rules the

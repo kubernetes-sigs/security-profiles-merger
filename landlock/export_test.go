@@ -48,3 +48,16 @@ const MaxMergeWork = maxMergeWork
 func MergeLookups(profiles []*Profile, limit uint64) (uint64, bool) {
 	return mergeLookups(profiles, limit)
 }
+
+// CheckMergeBudget exposes the budget check of Intersect, and with
+// settlesMoves of Union, which refuses inputs before merging anything.
+func CheckMergeBudget(profiles []*Profile, settlesMoves bool) error {
+	// The paths are cleaned as the merges clean them, by validation, so
+	// that the check weighs what a merge of the same inputs weighs.
+	cleaned, err := validateInputs(profiles)
+	if err != nil {
+		return err
+	}
+
+	return checkMergeBudget(profiles, cleaned, settlesMoves)
+}

@@ -100,8 +100,7 @@ func validationCorpus() map[string]*apparmor.Profile {
 }
 
 // TestValidateAccepts covers profiles the validators accept, among them
-// what Validate leaves to ValidateStrict: duplicate executables and
-// libraries, and capability names in any case.
+// what Validate leaves to ValidateStrict: capability names in any case.
 func TestValidateAccepts(t *testing.T) {
 	t.Parallel()
 
@@ -129,16 +128,6 @@ func TestValidateAccepts(t *testing.T) {
 		{
 			"mixed-case capabilities", apparmor.Validate,
 			validationProfile([3][]string{}, [2][]string{}, []string{"Sys_Admin", "net_ADMIN"}),
-		},
-		{
-			"duplicate executable", apparmor.Validate, validationProfile(
-				[3][]string{}, [2][]string{{pathBinShell, pathBinSh, pathBinShell}, nil}, nil,
-			),
-		},
-		{
-			"duplicate library", apparmor.Validate, validationProfile(
-				[3][]string{}, [2][]string{nil, {pathLibCStd, pathLibCStd}}, nil,
-			),
 		},
 	} {
 		err := test.validate(test.profile)
@@ -277,17 +266,28 @@ func TestValidateRejects(t *testing.T) {
 			nil,
 		},
 		{
-			"executable twice", apparmor.ValidateStrict,
+			// An executable or library listed twice is reported at the
+			// tier a filesystem path listed twice is, by Validate.
+			"executable twice", apparmor.Validate,
 			validationProfile([3][]string{}, [2][]string{{pathBinShell, pathBinSh, pathBinShell}, nil}, nil),
 			[]error{apparmor.ErrDuplicateExecutablePath},
 			[]string{"executable.allowedExecutables[2]: " + strconv.Quote(pathBinShell)},
 			nil,
 		},
 		{
-			"library twice", apparmor.ValidateStrict,
+			"library twice", apparmor.Validate,
 			validationProfile([3][]string{}, [2][]string{nil, {pathLibCStd, pathLibCStd}}, nil),
 			[]error{apparmor.ErrDuplicateExecutablePath},
 			[]string{"executable.allowedLibraries[1]: " + strconv.Quote(pathLibCStd)},
+			nil,
+		},
+		{
+			// Two spellings of one path are one path, as in a filesystem
+			// category.
+			"executable spelled twice", apparmor.ValidateArtifact,
+			validationProfile([3][]string{}, [2][]string{{pathBinShell, "/bin//bash"}, nil}, nil),
+			[]error{apparmor.ErrDuplicateExecutablePath},
+			[]string{`executable.allowedExecutables[1]: "/bin//bash"`},
 			nil,
 		},
 		{
@@ -315,16 +315,17 @@ func TestValidateRejects(t *testing.T) {
 			nil,
 		},
 		{
-			// Past an oversized path nothing is normalized, and the
-			// duplicate executables are found in the lists as written.
+			// Past an oversized path nothing is normalized, so a duplicate
+			// executable is not looked for, as a duplicate filesystem path
+			// is not.
 			"oversized path and executable twice", apparmor.ValidateStrict,
 			validationProfile(
 				[3][]string{{"/" + strings.Repeat("a", apparmor.MaxPathLen)}, nil, nil},
 				[2][]string{{pathBinShell, "/bin//bash"}, nil}, nil,
 			),
-			[]error{apparmor.ErrPathTooLong, apparmor.ErrDuplicateExecutablePath},
-			[]string{"filesystem.readOnlyPaths[0]", `executable.allowedExecutables[1]: "/bin//bash"`},
-			nil,
+			[]error{apparmor.ErrPathTooLong},
+			[]string{"filesystem.readOnlyPaths[0]"},
+			apparmor.ErrDuplicateExecutablePath,
 		},
 		{
 			"unknown capability", apparmor.ValidateStrict,
@@ -621,6 +622,94 @@ func TestValidateBaselineReportsARelativePathOnce(t *testing.T) {
 	}
 }
 
+// TestValidateBaselineRefusesWhatLoadsAsSomethingElse covers the paths
+// Validate and QuotePath accept and ValidateArtifact refuses for what they
+// load as: a class opened by an escaped "^", which apparmor_parser loads as
+// every byte but x, "/" included, so that an intersection with it keeps an
+// artifact's "/a/y" the baseline does not mean to grant; dot components and
+// NUL escapes, which match nothing and would carry into results
+// ValidateArtifact refuses; and patterns the parser rejects or the matcher
+// cannot model. A pattern that needs no escaping is reported as an invalid
+// glob alone, one that needs escaping as unquotable too, as
+// ValidateArtifact reports them.
+func TestValidateBaselineRefusesWhatLoadsAsSomethingElse(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		path    string
+		want    error
+		notWant error
+	}{
+		{`/a/[\^x]`, apparmor.ErrInvalidGlob, apparmor.ErrUnquotablePath},
+		{"/etc/../passwd", apparmor.ErrDotComponent, nil},
+		{"/etc/./*", apparmor.ErrDotComponent, nil},
+		{`/a\000b`, apparmor.ErrNulInPath, nil},
+		{"/a/{", apparmor.ErrInvalidGlob, apparmor.ErrUnquotablePath},
+		{"/a/[]", apparmor.ErrInvalidGlob, apparmor.ErrUnquotablePath},
+		{"/a/{ b", apparmor.ErrUnquotablePath, nil},
+		{"/a/{ b", apparmor.ErrInvalidGlob, nil},
+		{oversizeGlob(), apparmor.ErrGlobTooComplex, apparmor.ErrInexactBaseline},
+	} {
+		profile := readOnly("/etc/hosts", test.path)
+
+		err := apparmor.ValidateBaseline(profile)
+		if !errors.Is(err, test.want) {
+			t.Errorf("ValidateBaseline(%q) = %v, want %v", test.path, err, test.want)
+		}
+
+		if test.notWant != nil && errors.Is(err, test.notWant) {
+			t.Errorf("ValidateBaseline(%q) = %v, which matches %v", test.path, err, test.notWant)
+		}
+
+		if err != nil && !strings.Contains(err.Error(), "filesystem.readOnlyPaths[1]") {
+			t.Errorf("ValidateBaseline(%q) = %q, want it to name the path", test.path, err)
+		}
+
+		if !errors.Is(apparmor.ValidateArtifact(profile), test.want) {
+			t.Errorf("ValidateArtifact(%q) does not report %v", test.path, test.want)
+		}
+	}
+
+	// The patterns and literals the merge models still pass.
+	err := apparmor.ValidateBaseline(readOnly("/etc/hosts", "/a/[^x]", "/a/{b,c}/*", `/a/\ b`))
+	if err != nil {
+		t.Errorf("ValidateBaseline of usable paths = %v, want nil", err)
+	}
+}
+
+// TestValidateArtifactCountsOnlyPatterns covers MaxArtifactPatternBytes,
+// which bounds the paths IsGlobPattern reports: a literal path escaping a
+// space is no pattern however many bytes such paths take, while the same
+// paths as patterns are counted.
+func TestValidateArtifactCountsOnlyPatterns(t *testing.T) {
+	t.Parallel()
+
+	profileOf := func(format string) *apparmor.Profile {
+		paths := make([]string, 0, 1000)
+		for idx := range 1000 {
+			paths = append(paths, fmt.Sprintf(format, idx, strings.Repeat("x", 40)))
+		}
+
+		return readOnly(paths...)
+	}
+
+	escaped := profileOf(`/home/user/My\ Documents/%04d-%s`)
+
+	if apparmor.IsGlobPattern(escaped.Filesystem.ReadOnlyPaths[0]) {
+		t.Fatalf("%q is a pattern", escaped.Filesystem.ReadOnlyPaths[0])
+	}
+
+	err := apparmor.ValidateArtifact(escaped)
+	if err != nil {
+		t.Errorf("ValidateArtifact of 1000 literals escaping a space = %v, want nil", err)
+	}
+
+	err = apparmor.ValidateArtifact(profileOf(`/home/user/My*Documents/%04d-%s`))
+	if !errors.Is(err, apparmor.ErrTooManyPatternBytes) {
+		t.Errorf("ValidateArtifact of 1000 patterns = %v, want ErrTooManyPatternBytes", err)
+	}
+}
+
 // TestValidateBaselineRefusesPatternsPastTheCompileBudget covers a baseline
 // whose glob patterns alone take the compile budget of a merge: Validate
 // accepts it and it intersects with itself exactly, but intersected with
@@ -831,37 +920,40 @@ func oversizeGlob() string {
 	return "/etc/{" + strings.Join(alternatives, ",") + "}"
 }
 
-// TestValidateDoesNotNormalizeExecutables pins what Validate normalizes:
-// only the filesystem rules, which its duplicate checks compare. The
-// executable and library paths are checked as written, so their number
-// does not change how often Validate allocates, even when every one of them
-// would need normalizing.
-//
-//nolint:paralleltest // testing.AllocsPerRun refuses to run in a parallel test
-func TestValidateDoesNotNormalizeExecutables(t *testing.T) {
-	allocations := func(count int) float64 {
-		paths := make([]string, 0, count)
-		for idx := range count {
-			paths = append(paths, fmt.Sprintf("/usr//bin/tool%d", idx))
-		}
+// TestMergesFoldDuplicateExecutables pins that a merge, which validates
+// its inputs without the checks for a path listed twice within one list,
+// still folds an executable or library listed twice, which Validate
+// reports, into one entry.
+func TestMergesFoldDuplicateExecutables(t *testing.T) {
+	t.Parallel()
 
-		profile := &apparmor.Profile{
-			Executable: &apparmor.ExecutableRules{
-				AllowedExecutables: paths, AllowedLibraries: paths,
-			},
-		}
+	profile := validationProfile(
+		[3][]string{}, [2][]string{{pathBinShell, "/bin//bash"}, {pathLibCStd, pathLibCStd}}, nil,
+	)
 
-		return testing.AllocsPerRun(10, func() {
-			err := apparmor.Validate(profile)
-			if err != nil {
-				t.Fatal(err)
-			}
-		})
+	err := apparmor.Validate(profile)
+	if !errors.Is(err, apparmor.ErrDuplicateExecutablePath) {
+		t.Fatalf("Validate = %v, want ErrDuplicateExecutablePath", err)
 	}
 
-	few, many := allocations(10), allocations(1000)
-	if many > few {
-		t.Errorf("Validate allocated %v times for 1000 executables, %v for 10", many, few)
+	for name, mergeFn := range map[string]func(...*apparmor.Profile) (*apparmor.Profile, error){
+		"Intersect": apparmor.Intersect,
+		"Union":     apparmor.Union,
+	} {
+		result, err := mergeFn(profile)
+		if err != nil {
+			t.Fatalf("%s = %v, want the duplicates folded", name, err)
+		}
+
+		if got := result.Executable; len(got.AllowedExecutables) != 1 ||
+			len(got.AllowedLibraries) != 1 {
+			t.Errorf("%s = %s, want one executable and one library", name, result)
+		}
+
+		err = apparmor.Validate(result)
+		if err != nil {
+			t.Errorf("Validate(%s) = %v, want nil", name, err)
+		}
 	}
 }
 

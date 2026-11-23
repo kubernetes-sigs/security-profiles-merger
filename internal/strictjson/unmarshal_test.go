@@ -306,10 +306,13 @@ func TestFindingsComeInOrderAndOnDemand(t *testing.T) {
 		return kinds
 	}
 
+	// The entry leaves out its action, which a syscall entry has to hold.
 	raw := []byte(`{"defaultAction":"A","bogus":1,` +
 		`"syscalls":[{"Names":["` + "\xff" + `"]}]}`)
 
-	want := []error{spm.ErrUnknownField, spm.ErrMisspelledField, spm.ErrInvalidUTF8}
+	want := []error{
+		spm.ErrUnknownField, spm.ErrMisspelledField, spm.ErrMissingField, spm.ErrInvalidUTF8,
+	}
 	if kinds := findingKinds(raw); !slices.Equal(kinds, want) {
 		t.Errorf("kinds = %v, want %v", kinds, want)
 	}
@@ -376,6 +379,56 @@ func TestUnmarshalStrictRequiresSeccompArgMembers(t *testing.T) {
 		err := decodeSeccomp(withArgs(args))
 		if err != nil {
 			t.Errorf("args %s = %v, want nil", args, err)
+		}
+	}
+}
+
+// TestUnmarshalStrictRequiresSeccompSyscallMembers covers a syscall entry
+// without the names or the action the runtime spec requires of one, and a
+// null entry, which decodes as an entry holding neither: each is refused
+// as missing them, as a null Landlock rule is refused as missing its path.
+func TestUnmarshalStrictRequiresSeccompSyscallMembers(t *testing.T) {
+	t.Parallel()
+
+	withSyscalls := func(syscalls string) []byte {
+		return []byte(`{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[` + syscalls + `]}`)
+	}
+
+	for syscalls, want := range map[string][]string{
+		`null`: {`"syscalls[0].names"`, `"syscalls[0].action"`},
+		`{"names":["read"],"action":"SCMP_ACT_ALLOW"},null`: {
+			`"syscalls[1].names"`, `"syscalls[1].action"`,
+		},
+		`{"names":["read"]}`:                              {`"syscalls[0].action"`},
+		`{"action":"SCMP_ACT_ALLOW"}`:                     {`"syscalls[0].names"`},
+		`{"names":null,"action":"SCMP_ACT_ALLOW"}`:        {`"syscalls[0].names"`},
+		`{"names":["read"],"action":null,"args":[]}`:      {`"syscalls[0].action"`},
+		`{"names":["read"],"action":"SCMP_ACT_ALLOW"},{}`: {`"syscalls[1].names"`},
+	} {
+		err := decodeSeccomp(withSyscalls(syscalls))
+		if !errors.Is(err, spm.ErrMissingField) {
+			t.Errorf("syscalls %s = %v, want %v", syscalls, err, spm.ErrMissingField)
+
+			continue
+		}
+
+		for _, path := range want {
+			if !strings.Contains(err.Error(), path) {
+				t.Errorf("syscalls %s = %v, want it to name %s", syscalls, err, path)
+			}
+		}
+	}
+
+	// Names the document gives, even none, are a value of their own, which
+	// Validate refuses instead.
+	for _, syscalls := range []string{
+		``,
+		`{"names":["read"],"action":"SCMP_ACT_ALLOW"}`,
+		`{"names":[],"action":"SCMP_ACT_ALLOW"}`,
+	} {
+		err := decodeSeccomp(withSyscalls(syscalls))
+		if err != nil {
+			t.Errorf("syscalls %s = %v, want nil", syscalls, err)
 		}
 	}
 }

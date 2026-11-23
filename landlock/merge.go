@@ -52,9 +52,11 @@ var (
 // rule paths among rules, and settling refer does so once per input over the
 // rule paths of every input, as the pairwise fold does over the result, so
 // the work grows with the number of inputs times the ancestors of all their
-// rule paths. The budget admits three inputs of MaxArtifactRules rules on
-// paths of MaxPathLen bytes and the most components such a path can hold,
-// or a few hundred recordings of a few dozen rules each.
+// rule paths. A union settling moves also counts the work of
+// moveSettlingWork. The budget admits three inputs of MaxArtifactRules
+// rules on paths of MaxPathLen bytes and the most components such a path
+// can hold, to a union only where they share no grant of refer, and a few
+// hundred recordings of a few dozen rules each.
 const maxMergeWork = 1 << 25
 
 // InputError is [spm.InputError], the error a merge, Diff or
@@ -77,7 +79,7 @@ type InputError = spm.InputError
 // ValidateArtifact first. The result shares no memory with the inputs, a
 // single input included.
 func Intersect(profiles ...*Profile) (*Profile, error) {
-	return foldProfiles(profiles, intersectTwo, finishIntersect)
+	return foldProfiles(profiles, intersectTwo, finishIntersect, false)
 }
 
 // Union returns a profile that permits access where any input permits it,
@@ -90,18 +92,21 @@ func Intersect(profiles ...*Profile) (*Profile, error) {
 // Inputs are validated, the cost is bounded, and the result is owned by the
 // caller, as for Intersect.
 func Union(profiles ...*Profile) (*Profile, error) {
-	return foldProfiles(profiles, unionTwo, finishUnion)
+	return foldProfiles(profiles, unionTwo, finishUnion, true)
 }
 
 // foldProfiles validates, normalizes and merges the profiles, then hands the
 // result to finish together with the normalized inputs. A move or link
 // depends on the rights of two paths at once, which a pairwise fold cannot
 // see, so finish settles it against every input at the end, and the result
-// does not depend on how the fold grouped them.
+// does not depend on how the fold grouped them. settlesMoves reports a
+// finish that settles moves as a union does (see unhandleMoveConflicts),
+// whose work the budget counts besides the lookups.
 func foldProfiles(
 	profiles []*Profile,
 	mergeTwo func(left, right *Profile) *Profile,
 	finish func(result *Profile, inputs []*Profile),
+	settlesMoves bool,
 ) (*Profile, error) {
 	// Validate the caller's profiles first, so errors name their own
 	// indices and paths, and so that a path past MaxPathLen is reported as
@@ -113,7 +118,7 @@ func foldProfiles(
 		return nil, err
 	}
 
-	err = checkMergeBudget(profiles)
+	err = checkMergeBudget(profiles, cleaned, settlesMoves)
 	if err != nil {
 		return nil, err
 	}
@@ -144,21 +149,170 @@ func foldProfiles(
 // checkMergeBudget refuses inputs whose merge would cost more than
 // maxMergeWork. It runs after validation and before anything is merged, and
 // it stops counting as soon as the budget is exceeded, so that the count
-// costs no more than the budget.
-func checkMergeBudget(profiles []*Profile) error {
+// costs no more than the budget. settlesMoves adds the work a union settling
+// moves does (see moveSettlingWork), for which cleaned holds the cleaned
+// rule paths of each input, as validation returns them.
+func checkMergeBudget(profiles []*Profile, cleaned [][]string, settlesMoves bool) error {
 	if len(profiles) == 0 {
 		return nil
 	}
 
 	inputs := uint64(len(profiles))
 
-	_, exceeded := mergeLookups(profiles, maxMergeWork/inputs)
+	lookups, exceeded := mergeLookups(profiles, maxMergeWork/inputs)
+	if !exceeded && settlesMoves {
+		// Past mergeLookups, the product is within maxMergeWork and the
+		// work of settling moves within a small multiple of it (see
+		// moveSettlingWork), so neither wraps.
+		exceeded = lookups*inputs+moveSettlingWork(profiles, cleaned) > maxMergeWork
+	}
+
 	if exceeded {
-		return fmt.Errorf("merge: %d inputs: %w (more than %d ancestor lookups)",
+		return fmt.Errorf("merge: %d inputs: %w (more than %d units of work)",
 			inputs, ErrBudgetExceeded, maxMergeWork)
 	}
 
 	return nil
+}
+
+// moveSettlingWork returns the work a union settling moves does besides the
+// ancestor lookups mergeLookups counts (see unhandleMoveConflicts and
+// moveSides), each map lookup or update counting one:
+//
+//   - once for the union, the walk up from every rule path and from its
+//     parent among the rules of the union, which every input shares;
+//   - for each input, the walk up from each of its rules granting refer,
+//     which finds the ones beneath no other, two binary searches of the
+//     rule paths for each of those, and, where there are any, the fixed
+//     cost of answering the sets of file rights of each version, with the
+//     rules on "/" and without them (see moveSets.conflicts);
+//   - for each input and each rule path of every input at or beneath a
+//     path that input grants refer on: the walk up from its parent among
+//     the input's rules, which takes at most the ancestors of the path,
+//     reading the union's rights at the path and at its parent, noting the
+//     path among the parent's children, and, at each version of
+//     referLevels, with the rules on "/" and without them, an update of the
+//     sources and the destinations for the path and of the sources for its
+//     parent, and reading the answer for the path as a destination.
+//
+// The walk up from the path itself among the input's rules is among the
+// lookups mergeLookups counts. A path or parent several inputs share, which
+// the merge reads once, is counted for each, and so is a grant of refer the
+// merge drops as unhandled, so the count errs high.
+//
+// An input's grants beneath another of its grants are left out, so that
+// the walk up from a path meets each input at most once. The count then
+// reads every ancestor of every rule path once, as mergeLookups does, and
+// counts at most every input for a path, which keeps it within a small
+// multiple of the inputs times the lookups mergeLookups admitted, so that
+// it does not wrap. cleaned holds the cleaned rule paths of each input.
+func moveSettlingWork(profiles []*Profile, cleaned [][]string) uint64 {
+	refer := referGrants(profiles, cleaned)
+	if refer.roots == 0 {
+		return 0
+	}
+
+	// Per version, with the rules on "/" and without them, two updates for
+	// the path, one for its parent and reading the path's answer; per path
+	// besides, reading the union's rights at the path and at the parent,
+	// and noting the path among the parent's children. Each root takes two
+	// binary searches, of fewer than 2^64 paths each, so of at most 64
+	// steps. The walks up from the paths are taken twice, once from the
+	// path and once from its parent, among the union's rules. Answering the
+	// sets of file rights takes, for each of the 64 subsets of the six file
+	// rights, a step to start and one per right to fold, and a step for
+	// each bucket, of which there are at most 64 too, with 32 to find the
+	// rights.
+	const (
+		updatesPerVersion = 2 * (2 + 1 + 1)
+		readsPerPath      = 3
+		stepsPerRoot      = 2 * 64
+		walksPerPath      = 2
+		fileRights        = 6
+		fileRightSets     = 1 << fileRights
+		answersPerSet     = fileRightSets*(1+fileRights) + fileRightSets + 32
+	)
+
+	perPath := uint64(updatesPerVersion*len(referLevels)) + readsPerPath
+	perInput := uint64(2 * answersPerSet * len(referLevels))
+
+	var walks, beneath uint64
+
+	for _, list := range cleaned {
+		for _, path := range list {
+			var depth, inputs uint64
+
+			for ancestor := range ancestors(path) {
+				depth++
+				inputs += refer.grants[ancestor]
+			}
+
+			walks += depth
+			beneath += inputs * (depth + perPath)
+		}
+	}
+
+	return walksPerPath*walks + refer.walks + refer.roots*stepsPerRoot +
+		refer.inputs*perInput + beneath
+}
+
+// referCount is what referGrants finds of the grants of refer of the inputs
+// of a union.
+type referCount struct {
+	// grants maps each cleaned path an input grants refer on, unless the
+	// input also grants it on an ancestor of that path, to the number of
+	// inputs that do.
+	grants map[string]uint64
+	// roots is the sum of those numbers, inputs the number of inputs that
+	// grant refer at all, and walks the ancestors of every path an input
+	// grants refer on, which finding the roots walks.
+	roots, inputs, walks uint64
+}
+
+// referGrants counts the grants of refer of the inputs of a union (see
+// referCount).
+func referGrants(profiles []*Profile, cleaned [][]string) referCount {
+	grants := make(map[string]uint64)
+
+	var roots, inputs, walks uint64
+
+	for idx, profile := range profiles {
+		own := make(map[string]struct{})
+
+		for ruleIdx, rule := range profile.PathRules {
+			if slices.Contains(rule.AccessFS, FSAccessRefer) {
+				own[cleaned[idx][ruleIdx]] = struct{}{}
+			}
+		}
+
+		for path := range own {
+			for range ancestors(path) {
+				walks++
+			}
+
+			if !beneathAny(path, own) {
+				grants[path]++
+				roots++
+			}
+		}
+
+		if len(own) > 0 {
+			inputs++
+		}
+	}
+
+	return referCount{grants: grants, roots: roots, inputs: inputs, walks: walks}
+}
+
+// beneathAny reports whether a proper ancestor of path is in paths.
+func beneathAny(path string, paths map[string]struct{}) bool {
+	for ancestor := range ancestors(path) {
+		if _, ok := paths[ancestor]; ok && ancestor != path {
+			return true
+		}
+	}
+
+	return false
 }
 
 // mergeLookups counts the paths every rule of every input has as itself or

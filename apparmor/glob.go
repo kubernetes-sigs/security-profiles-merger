@@ -608,13 +608,22 @@ func (cache *matcherCache) admit(path string, analyzed *globMatcher, fresh bool)
 	case fresh:
 		// Only an analysis no other call can see yet is compiled here: one
 		// the shared cache holds has been compiled already, or failed to.
+		attempted := analyzed.status == globUncompiled
+
 		compileMatcher(analyzed)
 
 		if analyzed.expr != nil {
 			cache.compileBudget -= cost
 		}
 
-		analyzed = storeSharedMatcher(path, analyzed)
+		// Only an analysis a compile was attempted on is shared, which is
+		// what saves another call work: any other costs one read of the
+		// path to analyze again. A literal that holds an escape, which no
+		// limit on patterns bounds, would otherwise fill the shared cache
+		// and evict the compiled patterns other calls rely on.
+		if attempted {
+			analyzed = storeSharedMatcher(path, analyzed)
+		}
 	default:
 		cache.compileBudget -= cost
 	}

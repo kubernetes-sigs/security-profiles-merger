@@ -52,17 +52,22 @@ var (
 	// capability name is empty.
 	ErrEmptyCapability = errors.New("empty capability")
 
-	// ErrDuplicateExecutablePath is returned by ValidateStrict when a path
-	// appears twice in AllowedExecutables or in AllowedLibraries.
+	// ErrDuplicateExecutablePath is returned by the validators when a path
+	// appears twice in AllowedExecutables or in AllowedLibraries, which a
+	// merge folds, as ErrDuplicatePathInCategory is for a filesystem
+	// category.
 	ErrDuplicateExecutablePath = errors.New("duplicate executable path")
 
-	// ErrGlobTooComplex is returned by ValidateArtifact and ValidateStrict
-	// when a pattern is past the matcher's limits and so never matches.
+	// ErrGlobTooComplex is returned by ValidateArtifact, ValidateStrict and
+	// ValidateBaseline when a pattern is past the matcher's limits and so
+	// never matches.
 	ErrGlobTooComplex = errors.New("glob pattern exceeds size or alternative limits")
 
-	// ErrInvalidGlob is returned by ValidateArtifact and ValidateStrict
-	// when apparmor_parser rejects a pattern or loads it as something else
-	// (see the Paths the validators reject section).
+	// ErrInvalidGlob is returned by ValidateArtifact, ValidateStrict and
+	// ValidateBaseline when apparmor_parser rejects a pattern or loads it as
+	// something else (see the Paths the validators reject section), and by
+	// QuotePath, together with ErrUnquotablePath, for such a pattern the
+	// merge reads as matching nothing.
 	ErrInvalidGlob = errors.New("invalid AppArmor path pattern")
 
 	// ErrPathTooLong is returned by every validator and merge when a path is
@@ -70,8 +75,9 @@ var (
 	// before it.
 	ErrPathTooLong = spm.ErrPathTooLong
 
-	// ErrDotComponent is returned by ValidateArtifact and ValidateStrict
-	// when a path has a "." or ".." component, which matches nothing.
+	// ErrDotComponent is returned by ValidateArtifact, ValidateStrict and
+	// ValidateBaseline when a path has a "." or ".." component, which
+	// matches nothing.
 	ErrDotComponent = errors.New(`path contains a "." or ".." component`)
 
 	// ErrUnsupportedVariable is returned by every validator and merge when a
@@ -86,11 +92,15 @@ var (
 	// ErrUnquotablePath is returned by ValidateArtifact, ValidateStrict,
 	// ValidateBaseline and QuotePath, not Validate, when a path holds a
 	// character a rule cannot hold unescaped or that does not print (see
-	// the Paths the validators reject section).
+	// the Paths the validators reject section). QuotePath also returns it,
+	// together with ErrInvalidGlob, for a pattern the merge reads as
+	// matching nothing, which no spelling renders, whatever characters it
+	// holds.
 	ErrUnquotablePath = errors.New("path contains a character that must be escaped")
 
-	// ErrNulInPath is spm.ErrNulInPath, returned by ValidateArtifact and
-	// ValidateStrict when a path holds a NUL byte or an escape denoting one.
+	// ErrNulInPath is spm.ErrNulInPath, returned by ValidateArtifact,
+	// ValidateStrict and ValidateBaseline when a path holds a NUL byte or an
+	// escape denoting one.
 	ErrNulInPath = spm.ErrNulInPath
 
 	// ErrInvalidCapabilityName is returned by ValidateArtifact,
@@ -103,8 +113,9 @@ var (
 	ErrTooManyPaths = merge.LimitError("too many paths")
 
 	// ErrTooManyPatternBytes is returned by ValidateArtifact and
-	// ValidateStrict when the glob patterns of a profile are longer than
-	// MaxArtifactPatternBytes in total.
+	// ValidateStrict when the glob patterns of a profile, the paths
+	// IsGlobPattern reports, are longer than MaxArtifactPatternBytes in
+	// total.
 	ErrTooManyPatternBytes = merge.LimitError("glob patterns too long in total")
 
 	// ErrTooManyCapabilities is returned by ValidateArtifact and
@@ -125,9 +136,11 @@ const MaxPathLen = spm.MaxPathLen
 const MaxArtifactPaths = 1024
 
 // MaxArtifactPatternBytes bounds the total length of the glob patterns, the
-// paths holding pattern syntax, of a profile accepted by ValidateArtifact
-// or ValidateStrict. A merge's compile budget is sized from it (see the
-// Cost bounds section).
+// paths IsGlobPattern reports as patterns, of a profile accepted by
+// ValidateArtifact or ValidateStrict. A literal path that escapes a
+// character, such as `/home/user/My\ Documents`, counts nothing, as the
+// merge compiles nothing for it. A merge's compile budget is sized from it
+// (see the Cost bounds section).
 const MaxArtifactPatternBytes = 64 << 10
 
 // MaxArtifactCapabilities bounds how many capability names a profile
@@ -183,7 +196,9 @@ func isKnownCapability(name string) bool {
 // Validate checks that a profile is well-formed, as the Validation and
 // Paths the validators reject sections describe: it reports a nil profile
 // (ErrNilProfile), paths that are too long, empty, relative or reference a
-// variable, a path listed in two filesystem categories or twice within one,
+// variable, a path listed in two filesystem categories or twice within one
+// (ErrDuplicatePath, ErrDuplicatePathInCategory), a path listed twice in
+// AllowedExecutables or in AllowedLibraries (ErrDuplicateExecutablePath),
 // and empty or repeated capability names. Paths are compared as the merge
 // matches them, so "/etc//passwd", "/etc/passwd" and `/etc/\passwd` are one
 // path. Failures are collected into one bounded report.
@@ -255,11 +270,13 @@ func newValidator(matchers *matcherCache) *validator {
 // normalizeProfile) its checks compared, which ValidateStrict,
 // ValidateArtifact and the merge read rather than normalizing every path
 // again, or nil when it stopped at an oversized path, which it normalizes
-// no further. Without it, as for Validate, it normalizes only the
-// filesystem rules it compares and returns nil. The pattern checks of
-// ValidateStrict and ValidateArtifact have nothing to work on once a path is
-// oversized. listDuplicates selects the checks for a path or capability
-// listed twice within one list, which a merge leaves out.
+// no further. Without it, as for Validate, it normalizes only the paths
+// its duplicate checks compare, the filesystem rules and, with
+// listDuplicates, the executables and libraries, and returns nil. The
+// pattern checks of ValidateStrict and ValidateArtifact have nothing to
+// work on once a path is oversized. listDuplicates selects the checks for a
+// path or capability listed twice within one list, which a merge leaves
+// out.
 func (check *validator) structure(
 	profile *Profile, listDuplicates, copyProfile bool,
 ) *Profile {
@@ -304,9 +321,7 @@ func (check *validator) structure(
 		check.reject(context, *paths, referencesVariable, ErrUnsupportedVariable, showQuoted)
 	}
 
-	if profile.Filesystem != nil {
-		check.filesystemDuplicates(profile.Filesystem, normalizedFs, listDuplicates)
-	}
+	check.duplicatePaths(profile, normalized, normalizedFs, listDuplicates)
 
 	if profile.Capabilities != nil {
 		caps := profile.Capabilities.AllowedCapabilities
@@ -349,16 +364,14 @@ func normalizeFilesystem(rules *FilesystemRules) *FilesystemRules {
 
 // ValidateStrict validates a profile a person wrote. It rejects everything
 // ValidateArtifact rejects, applying the same size limits first, plus
-// capability names outside the known set (ErrUnknownCapability) and a path
-// listed twice in AllowedExecutables or AllowedLibraries, compared as the
-// merge matches them (ErrDuplicateExecutablePath). A misspelled name is
-// reported once, by a failure that matches both ErrInvalidCapabilityName and
-// ErrUnknownCapability.
+// capability names outside the known set (ErrUnknownCapability). A
+// misspelled name is reported once, by a failure that matches both
+// ErrInvalidCapabilityName and ErrUnknownCapability.
 func ValidateStrict(profile *Profile) error {
 	check := newValidator(newMatcherCache())
 	check.strict = true
 
-	normalized, err := check.artifact(profile)
+	err := check.artifact(profile)
 	if err != nil {
 		return err
 	}
@@ -367,22 +380,35 @@ func ValidateStrict(profile *Profile) error {
 		check.capabilityNames(profile.Capabilities.AllowedCapabilities)
 	}
 
-	if profile.Executable != nil {
-		// Past an oversized path structure normalized nothing, and the
-		// duplicates are reported all the same, from the two lists alone.
-		executables, libraries := normalizedExecutables(profile, normalized)
+	return check.report.Err()
+}
 
-		check.listDuplicates(
-			allowedExecutablesPath, profile.Executable.AllowedExecutables,
-			executables, ErrDuplicateExecutablePath,
-		)
-		check.listDuplicates(
-			allowedLibrariesPath, profile.Executable.AllowedLibraries,
-			libraries, ErrDuplicateExecutablePath,
-		)
+// duplicatePaths reports the paths listed in two filesystem categories and,
+// with listDuplicates, the paths one list lists twice, filesystem category,
+// AllowedExecutables or AllowedLibraries alike, compared as the merge
+// matches them, read from the normalized copy where structure made one and
+// from normalizedFs, the normalized filesystem rules, otherwise.
+func (check *validator) duplicatePaths(
+	profile, normalized *Profile, normalizedFs *FilesystemRules, listDuplicates bool,
+) {
+	if profile.Filesystem != nil {
+		check.filesystemDuplicates(profile.Filesystem, normalizedFs, listDuplicates)
 	}
 
-	return check.report.Err()
+	if !listDuplicates || profile.Executable == nil {
+		return
+	}
+
+	executables, libraries := normalizedExecutables(profile, normalized)
+
+	check.listDuplicates(
+		allowedExecutablesPath, profile.Executable.AllowedExecutables,
+		executables, ErrDuplicateExecutablePath,
+	)
+	check.listDuplicates(
+		allowedLibrariesPath, profile.Executable.AllowedLibraries,
+		libraries, ErrDuplicateExecutablePath,
+	)
 }
 
 // ValidateArtifact validates an artifact, a profile the caller did not
@@ -393,13 +419,12 @@ func ValidateStrict(profile *Profile) error {
 // load, would silently drop or would render as further rules
 // (ErrInvalidGlob, ErrGlobTooComplex, ErrDotComponent, ErrNulInPath,
 // ErrUnquotablePath, ErrInvalidCapabilityName); see the Paths the
-// validators reject section. It accepts unknown capability names and
-// duplicate executable or library paths, and does not compare the profile
-// against a baseline.
+// validators reject section. It accepts unknown capability names, and does
+// not compare the profile against a baseline.
 func ValidateArtifact(profile *Profile) error {
 	check := newValidator(newMatcherCache())
 
-	_, err := check.artifact(profile)
+	err := check.artifact(profile)
 	if err != nil {
 		return err
 	}
@@ -412,17 +437,16 @@ func ValidateArtifact(profile *Profile) error {
 // profile it accepts is one ValidateArtifact accepts by construction rather
 // than by two functions being kept alike.
 //
-// It returns the normalized copy structure returns, and a failure that ends
-// validation on its own: a nil profile, or one past a size limit, which is
-// refused rather than scanned.
-func (check *validator) artifact(profile *Profile) (*Profile, error) {
+// It returns a failure that ends validation on its own: a nil profile, or
+// one past a size limit, which is refused rather than scanned.
+func (check *validator) artifact(profile *Profile) error {
 	if profile == nil {
-		return nil, ErrNilProfile
+		return ErrNilProfile
 	}
 
 	err := validatePathCount(profile)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	normalized := check.structure(profile, true, true)
@@ -432,10 +456,10 @@ func (check *validator) artifact(profile *Profile) (*Profile, error) {
 	}
 
 	if normalized != nil {
-		check.loadablePaths(profile, normalized)
+		check.loadablePaths(profile, normalized, true)
 	}
 
-	return normalized, nil
+	return nil
 }
 
 // validatePathCount reports a profile holding more paths than
@@ -443,26 +467,33 @@ func (check *validator) artifact(profile *Profile) (*Profile, error) {
 // MaxArtifactPatternBytes, or more capabilities than MaxArtifactCapabilities.
 // The message names the count and the limit it exceeds.
 //
-// Whether a path is a pattern is decided by the bytes it holds rather than
-// by compiling it, so that counting an over-large profile costs no more than
-// reading it.
+// Whether a path is a pattern is decided as IsGlobPattern decides it, by the
+// parser port alone, which is linear in the path and compiles nothing, so
+// that counting an over-large profile costs no more than reading it. A path
+// whose escapes leave no glob token, such as `/a/My\ Documents`, is no
+// pattern: the merge compiles nothing for it, which is what the limit
+// bounds. The paths are counted first, so that none of a profile past
+// MaxArtifactPaths is analyzed.
 func validatePathCount(profile *Profile) error {
 	count := 0
-	patternBytes := 0
 
 	for _, paths := range pathLists(profile) {
 		count += len(*paths)
-
-		for _, path := range *paths {
-			if strings.ContainsAny(path, patternSyntax) {
-				patternBytes += len(path)
-			}
-		}
 	}
 
 	if count > MaxArtifactPaths {
 		return fmt.Errorf("%s: %d paths: %w (max %d)",
 			pathListsScope, count, ErrTooManyPaths, MaxArtifactPaths)
+	}
+
+	patternBytes := 0
+
+	for _, paths := range pathLists(profile) {
+		for _, path := range *paths {
+			if IsGlobPattern(path) {
+				patternBytes += len(path)
+			}
+		}
 	}
 
 	if patternBytes > MaxArtifactPatternBytes {
@@ -482,9 +513,12 @@ func validatePathCount(profile *Profile) error {
 
 // loadablePaths reports the paths apparmor_parser would refuse and the glob
 // patterns the matcher drops, which ValidateStrict and ValidateArtifact both
-// check, given the normalized copy structure returned. Callers run it only
-// when no path is oversized, which structure has already reported.
-func (check *validator) loadablePaths(profile, normalizedProfile *Profile) {
+// check, given the normalized copy structure returned. ValidateBaseline runs
+// it without unquotable, the check of the characters a rule cannot hold
+// unescaped, since a baseline is rendered through QuotePath, whose spelling
+// it checks instead. Callers run it only when no path is oversized, which
+// structure has already reported.
+func (check *validator) loadablePaths(profile, normalizedProfile *Profile, unquotable bool) {
 	// The copy has the sections of the profile (see normalizeProfile), so
 	// pathLists yields the same lists of both in the same order, and they
 	// are paired by walking both. A list the copy does not pair, which only
@@ -517,7 +551,10 @@ func (check *validator) loadablePaths(profile, normalizedProfile *Profile) {
 
 		idx++
 
-		check.reject(context, paths, hasUnquotableChar, ErrUnquotablePath, showQuoted)
+		if unquotable {
+			check.reject(context, paths, hasUnquotableChar, ErrUnquotablePath, showQuoted)
+		}
+
 		check.reject(context, paths, hasNul, ErrNulInPath, showQuoted)
 		check.globStatus(context, normalized)
 		check.reject(context, normalized, func(path string) bool {
@@ -1083,7 +1120,9 @@ func capabilityWord(name string) bool {
 // limits, which never match. It runs on normalized patterns, the form the
 // merge matches, so it agrees with Intersect on what is dropped. A pattern
 // over the limits is left out of the message, since it has over 100
-// alternatives.
+// alternatives. A cache made by newKeyCache compiles nothing, so there a
+// pattern left uncompiled is one still to be compiled rather than one past
+// the compile budget, and is not reported.
 func (check *validator) globStatus(context string, paths []string) {
 	check.reject(context, paths, func(pattern string) bool {
 		matcher := check.matchers.matcher(pattern)
@@ -1094,7 +1133,8 @@ func (check *validator) globStatus(context string, paths []string) {
 	check.reject(context, paths, func(pattern string) bool {
 		matcher := check.matchers.matcher(pattern)
 
-		tooComplex := matcher.status == globTooComplex || matcher.status == globUncompiled
+		tooComplex := matcher.status == globTooComplex ||
+			matcher.status == globUncompiled && !check.matchers.keysOnly
 
 		return tooComplex && !matcher.misleading()
 	}, ErrGlobTooComplex, showNothing)

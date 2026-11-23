@@ -86,9 +86,13 @@ func TestDuplicateKeys(t *testing.T) {
 		{`{"":{"":1,"":2},"":3}`, []string{`[""][""]`, `[""]`}},
 		{`{"a":{"b":1,"b":2},"a.b":0,"a.b":9}`, []string{"a.b", `["a.b"]`}},
 		{`{"a":1e999,"a":"x"}`, []string{"a"}},
-		{`{"a":1,"A":2}`, []string{"A"}},
-		{`{"defaultAction":1,"DEFAULTACTION":2,"defaultaction":3}`, []string{"DEFAULTACTION"}},
-		{"{\"k\":1,\"\u212a\":2}", []string{"\u212a"}},
+		// Without a struct to decode into, names are compared exactly, as
+		// encoding/json folds case for struct fields alone (see
+		// TestDuplicateKeysFoldOnlyForStructs).
+		{`{"a":1,"A":2}`, nil},
+		{`{"defaultAction":1,"DEFAULTACTION":2,"defaultaction":3}`, nil},
+		{"{\"k\":1,\"\u212a\":2}", nil},
+		{`{"a":1,"A":2,"a":3}`, []string{"a"}},
 		{`{"ab":1,"a":2}`, nil},
 		{`"text"`, nil},
 		{`{"a":1,"a":`, []string{"a"}},
@@ -110,6 +114,48 @@ func TestDuplicateKeys(t *testing.T) {
 		if !slices.Equal(got, test.want) {
 			t.Errorf("duplicateKeys(%s) = %q, want %q", test.raw, got, test.want)
 		}
+	}
+}
+
+// TestDuplicateKeysFoldOnlyForStructs covers where names are compared
+// ignoring case: in an object decoding into a struct, whose fields
+// encoding/json matches that way, and nowhere else. Two names that differ
+// in case inside a member no field reads are two members, so the document
+// is reported for the unknown member, as it is when the names differ
+// otherwise, rather than for a repeated one; an exact repeat there is still
+// reported as one.
+func TestDuplicateKeysFoldOnlyForStructs(t *testing.T) {
+	t.Parallel()
+
+	type target struct {
+		A int `json:"a"`
+	}
+
+	for _, test := range []struct {
+		raw  string
+		want error
+		path string
+	}{
+		{`{"a":1,"A":2}`, spm.ErrDuplicateKey, `"A"`},
+		{`{"a":1,"x":{"Name":1,"name":2}}`, spm.ErrUnknownField, `"x"`},
+		{`{"a":1,"x":{"Name":1,"other":2}}`, spm.ErrUnknownField, `"x"`},
+		{`{"a":1,"x":[{"k":1,"K":2}]}`, spm.ErrUnknownField, `"x"`},
+		{`{"a":1,"x":{"name":1,"name":2}}`, spm.ErrDuplicateKey, `"x.name"`},
+	} {
+		var decoded target
+
+		err := Unmarshal([]byte(test.raw), &decoded)
+		if !errors.Is(err, test.want) || !strings.Contains(err.Error(), test.path) {
+			t.Errorf("Unmarshal(%s) = %v, want %v naming %s", test.raw, err, test.want, test.path)
+		}
+	}
+
+	// A map keeps every key as written, so keys differing in case are two.
+	var values map[string]int
+
+	err := Unmarshal([]byte(`{"k":1,"K":2}`), &values)
+	if err != nil || len(values) != 2 {
+		t.Errorf("Unmarshal into a map = %v, %v, want both keys", values, err)
 	}
 }
 
@@ -304,15 +350,16 @@ func FuzzDuplicateKeys(f *testing.F) {
 		checkPathsAreDistinctAndPresent(t, raw, paths)
 
 		// Re-encoding the decoded document emits every member once, so the
-		// scan must find nothing in it, unless two of its member names fold
-		// together the way encoding/json folds them.
+		// scan must find nothing in it: without a struct to decode into, it
+		// compares names exactly, so two names that fold together are two
+		// members.
 		var document any
 		if json.Unmarshal([]byte(raw), &document) != nil {
 			return
 		}
 
 		encoded, err := json.Marshal(document)
-		if err != nil || foldsMemberNames(document) {
+		if err != nil {
 			return
 		}
 
@@ -428,32 +475,6 @@ func skipBracketed(path string, idx int) int {
 	}
 
 	return idx
-}
-
-// foldsMemberNames reports whether any object of the document holds two
-// member names that fold to the same one, which duplicateKeys reports even
-// though the names differ.
-func foldsMemberNames(value any) bool {
-	switch typed := value.(type) {
-	case map[string]any:
-		folded := make(map[string]struct{}, len(typed))
-
-		for key, member := range typed {
-			if _, dup := folded[foldName(key)]; dup {
-				return true
-			}
-
-			folded[foldName(key)] = struct{}{}
-
-			if foldsMemberNames(member) {
-				return true
-			}
-		}
-	case []any:
-		return slices.ContainsFunc(typed, foldsMemberNames)
-	}
-
-	return false
 }
 
 // FuzzUnknownFields checks the unknown-member walk against a profile type:

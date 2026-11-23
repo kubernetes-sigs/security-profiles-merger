@@ -340,7 +340,10 @@ func TestIndexSetBeyondItsBits(t *testing.T) {
 // with two clauses whose filters cover each other, "a0 <= 0" and "a0 < 1":
 // with one result the one with the greater key goes, whatever their order,
 // and both go where a wider clause makes either dead; with different
-// results both stay, since they conflict and the set collapses as a whole.
+// results the stricter goes, whatever their order, since the looser decides
+// every call both match, and with actions that differ only in errno the
+// one with the errno of the earlier clause stays, as the leftmost input
+// decides an errno where actions tie.
 func TestPruneDominatedOnEquivalentFilters(t *testing.T) {
 	t.Parallel()
 
@@ -350,6 +353,9 @@ func TestPruneDominatedOnEquivalentFilters(t *testing.T) {
 	lt1 := func(action specs.LinuxSeccompAction) clause {
 		return clauseOn(action, 0, specs.OpLessThan, 1)
 	}
+
+	// ENOENT, where an unset errnoRet is EPERM.
+	enoent := uint(2)
 
 	for name, test := range map[string]struct {
 		clauses []clause
@@ -375,9 +381,40 @@ func TestPruneDominatedOnEquivalentFilters(t *testing.T) {
 				{Index: 0, Value: 1, ValueTwo: 0, Op: specs.OpMaskedEqual},
 			}}},
 		},
-		"different results keep both": {
+		"different results keep the looser": {
 			clauses: []clause{le0(specs.ActErrno), lt1(specs.ActAllow)},
-			want:    []clause{le0(specs.ActErrno), lt1(specs.ActAllow)},
+			want:    []clause{lt1(specs.ActAllow)},
+		},
+		"different results keep the looser in the other order": {
+			clauses: []clause{le0(specs.ActAllow), lt1(specs.ActTrap)},
+			want:    []clause{le0(specs.ActAllow)},
+		},
+		"different errno values keep the first errno": {
+			clauses: []clause{
+				le0(specs.ActErrno),
+				{action: specs.ActErrno, errnoRet: &enoent, args: lt1(specs.ActErrno).args},
+			},
+			want: []clause{le0(specs.ActErrno)},
+		},
+		"different errno values keep the first errno in the other order": {
+			clauses: []clause{
+				{action: specs.ActErrno, errnoRet: &enoent, args: lt1(specs.ActErrno).args},
+				le0(specs.ActErrno),
+			},
+			want: []clause{
+				{action: specs.ActErrno, errnoRet: &enoent, args: lt1(specs.ActErrno).args},
+			},
+		},
+		// The first errno decides before the key, so of three twins, two
+		// of them with the first errno, one stays: the one of those two
+		// with the smaller key.
+		"three twins keep one": {
+			clauses: []clause{
+				lt1(specs.ActErrno),
+				{action: specs.ActErrno, errnoRet: &enoent, args: le0(specs.ActErrno).args},
+				clauseOn(specs.ActErrno, 0, specs.OpEqualTo, 0),
+			},
+			want: []clause{clauseOn(specs.ActErrno, 0, specs.OpEqualTo, 0)},
 		},
 		"a strictly wider clause with one result prunes the narrower": {
 			clauses: []clause{
