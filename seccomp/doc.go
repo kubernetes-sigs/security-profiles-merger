@@ -35,7 +35,8 @@ limitations under the License.
 // What the merges, [Diff] and the artifact checks return depends on the
 // native architecture of the node that loads the result. The functions
 // assume the node the program runs on; the methods of [Options] take another
-// (see the Architectures section).
+// (see the Architectures section). CONTRIBUTING.md records how the claims
+// below about libseccomp, runc and crun were checked.
 //
 // # Action order
 //
@@ -59,19 +60,10 @@ limitations under the License.
 // argument index as one rule per condition. The rules of one syscall are
 // what this package calls its clauses.
 //
-// libseccomp compiles the clauses of a syscall into a decision tree that
-// runs first-match in an order of its own, by argument index (highest
-// first), operator class and value, whatever the actions. Two conditions on
-// one argument that compare a 32-bit half against the same value with a
-// different operator of one class (SCMP_CMP_LT and SCMP_CMP_LE, or
-// SCMP_CMP_GT and SCMP_CMP_GE) or a different mask keep the order they were
-// added in instead: under default SCMP_ACT_ERRNO, KILL if a0 < 5 and LOG if
-// a0 <= 5 decide read(3) by whichever comes first in the profile. libseccomp
-// refuses some clause sets with EEXIST, and releases before 2.6.2 compile
-// some to programs that match none of the clauses (GHSA-35x7-vh54-jvqf) and
-// never return from adding others (GHSA-qxh5-4cq9-6mjx). The package
-// therefore relies on the compiled program only for clause sets in a safe
-// shape:
+// libseccomp evaluates the clauses of a syscall in an order of its own,
+// whatever the actions, refuses some clause sets, and before 2.6.2 compiles
+// others wrongly. The package therefore relies on the compiled program only
+// for clause sets in a safe shape:
 //
 //   - (a) unconditional: libseccomp drops every conditional clause of a
 //     syscall that has an unconditional one, whichever is added first, and
@@ -105,25 +97,24 @@ limitations under the License.
 // with it denies every socket call. [ValidateArtifact] names such a syscall
 // in a baseline as it does in an artifact ([ErrConflictingEntries]).
 //
-// Unless the default action is SCMP_ACT_ALLOW, SCMP_ACT_LOG or
-// SCMP_ACT_TRACE, runc makes a call whose number lies above the highest
-// syscall the profile names fail with ENOSYS. A merge result can name fewer
-// syscalls than an input, since a rule equal to the default is dropped; a
-// syscall above them then gets ENOSYS where the input applied its default,
-// which denies it either way.
-//
 // Merge results only contain safe shapes, and never an unconditional entry
 // next to conditional entries for the same syscall. Where the merged rules
 // of a syscall would need both, a single filtered entry with exactly one
 // condition whose operator has a complement (any but SCMP_CMP_MASKED_EQ) is
 // kept and the unconditional rule becomes an entry for the complementary
-// condition (arg0 == 1 and arg0 != 1), which is exact. An unconditional rule
-// that differs from the default only by errno is dropped when filtered
-// entries with a different action remain, so the calls it decided, including
-// those of filtered entries with its action and errno, get the default's
-// errno instead. Anything else collapses to one unconditional entry with the
-// most restrictive (intersection) or least restrictive (union) action
-// involved.
+// condition (arg0 == 1 and arg0 != 1), which is exact; the filtered entry is
+// left out where it equals the default, which then decides its calls. An
+// unconditional rule that differs from the default only by errno is dropped
+// when filtered entries with a different action remain, so the calls it
+// decided, including those of filtered entries with its action and errno,
+// get the default's errno instead. Anything else collapses to one
+// unconditional entry with the most restrictive (intersection) or least
+// restrictive (union) action involved. No entry of a result equals the
+// default, so a result can name fewer syscalls than an input. Unless the
+// default action is SCMP_ACT_ALLOW, SCMP_ACT_LOG or SCMP_ACT_TRACE, runc
+// fails a call above the highest syscall a profile names with ENOSYS, so
+// such a call can get ENOSYS where an input applied its default, which
+// denies it either way.
 //
 // Merge results pass [Validate]. They are not meant to pass
 // [ValidateStrict], since a result often lists one syscall in several
@@ -152,17 +143,15 @@ limitations under the License.
 // neither implies the other, the affected calls fall back to the more
 // restrictive surrounding action. The result never permits a call that any
 // input denies, as libseccomp 2.5.4 to 2.6.2 evaluates the inputs and the
-// result. The lost-rules check knows the syscalls of those releases; a rule
-// on a syscall only a later release knows is not checked (see the
-// Architectures section).
+// result, with the limits the Architectures section names.
 //
-// Where Intersect drops an architecture from the list (see the Architectures
-// section), libseccomp answers every call of it with its action for an
-// unlisted architecture, SCMP_ACT_KILL. That denies the call, but where the
-// inputs answer it with SCMP_ACT_KILL_PROCESS, the result kills only the
-// thread, since a profile has no member for the action on an unlisted
-// architecture. An architecture of another byte order than the native one is
-// never dropped; Intersect refuses the input listing it.
+// Where Intersect drops an architecture from the list, libseccomp answers
+// every call of it with its action for an unlisted architecture,
+// SCMP_ACT_KILL. That denies the call, but where the inputs answer it with
+// SCMP_ACT_KILL_PROCESS, the result kills only the thread, since a profile
+// has no member for the action on an unlisted architecture. An architecture
+// of another byte order than the native one is never dropped; Intersect
+// refuses the input listing it.
 //
 // The result is conservative rather than exact where filters interact: a
 // conditional entry is lowered by every overlapping entry of the other side,
@@ -176,8 +165,8 @@ limitations under the License.
 // raised to the least restrictive action any input applies to calls matching
 // its filter. Where the exact union is not expressible, or would not form a
 // safe shape, the result over-approximates in the permissive direction. It
-// never denies a call that any input permits, as libseccomp 2.5.4 to 2.6.2
-// evaluates them, with the same limit of the lost-rules check as Intersect.
+// never denies a call that any input permits, with the limits of Intersect's
+// guarantee.
 //
 // Both directions are conservative where filters interact. Intersecting
 // read: ALLOW if arg0 == 1 under default ERRNO with read: ERRNO if arg0 < 5
@@ -211,21 +200,20 @@ limitations under the License.
 // given the errno of the first of them, so the action still applies to every
 // call one of them matches. Two clauses that apply one action to the same
 // calls, spelled differently, such as a0 < 1 and a0 == 0, are one clause,
-// and the merge keeps the errno the leftmost input gives it. A clause set that is already a safe shape keeps
-// its errno values as written, and [ValidateArtifact] reports such clauses
-// in one profile as conflicting rather than unifying them.
+// and the merge keeps the errno the leftmost input gives it. A clause set
+// that is already a safe shape keeps its errno values as written, and
+// [ValidateArtifact] reports such clauses in one profile as conflicting
+// rather than unifying them.
 //
 // [Validate] does not range-check errnoRet. [ValidateStrict] and
-// [ValidateArtifact] reject the values libseccomp refuses, with which a
-// runtime fails to load the profile: 4095 (MAX_ERRNO) and above on
-// SCMP_ACT_ERRNO, and above 65535 on SCMP_ACT_TRACE, whose value is a 16-bit
-// message for the tracer. runc and crun load only the lower 16 bits of
-// errnoRet, and the merges and [Diff] read a value the same way: 65537 is
-// EPERM, so an entry carrying it against a default errno of 1 equals the
-// default and hides no other rule. Results spell an errno as it is loaded.
-// Diff reports a syscall errno as loaded, and compares a default errno as
-// loaded but reports one wider than 16 bits as written, since its lower bits
-// name a value the profile never holds.
+// [ValidateArtifact] reject the values libseccomp refuses: 4095 (MAX_ERRNO)
+// and above on SCMP_ACT_ERRNO, and above 65535 on SCMP_ACT_TRACE, whose
+// value is a 16-bit message for the tracer. runc and crun load only the
+// lower 16 bits of errnoRet, and the merges and [Diff] read it the same way:
+// 65537 is EPERM, so an entry carrying it against a default errno of 1
+// equals the default. Results and Diff spell an errno as it is loaded,
+// except that Diff reports a default errno wider than 16 bits as written,
+// since its lower bits name a value the profile never holds.
 //
 // # Architectures
 //
@@ -233,14 +221,12 @@ limitations under the License.
 // architectures are added to it, as runc and crun load them: an empty list
 // means "native only", a list need not name the native architecture, and one
 // listing only foreign architectures is valid. [Validate] accepts every
-// architecture the runtime-spec names. runc knows no parisc, m68k or sh and
-// refuses a profile listing one, while crun resolves the name through
-// libseccomp.
+// architecture the runtime-spec names, although runc refuses parisc, m68k
+// and sh, which crun loads.
 //
-// libseccomp keeps one byte order per filter and refuses an architecture of
-// the other one with EDOM, so a runtime fails to load a profile listing
-// s390x, ppc64, big-endian MIPS, parisc, m68k or sheb on a little-endian
-// node, or a little-endian architecture on a big-endian one.
+// libseccomp keeps one byte order per filter, so a runtime fails to load a
+// profile listing s390x, ppc64, big-endian MIPS, parisc, m68k or sheb on a
+// little-endian node, or a little-endian architecture on a big-endian one.
 // [ValidateArtifact] reports such an architecture ([ErrMixedByteOrder]), and
 // [Intersect] refuses an input listing one, as an [InputError] wrapping
 // ErrMixedByteOrder, rather than apply rules written for another
@@ -263,39 +249,31 @@ limitations under the License.
 // below are read for each architecture a profile lists and for the native
 // architecture, which the merges and [Diff] take to be the one of the
 // running program (see [NativeArchitecture]) unless [Options] names another.
-// The merges are sound for a node linking libseccomp 2.5.4 to 2.6.2, the
-// releases checked; 2.5.2 evaluates some rule sets differently and is not
-// supported. The lost-rules check below knows the syscalls of those
-// releases, and Validate accepts names it does not know, so a rule on a
-// syscall only a later release knows is not checked. CONTRIBUTING.md
-// records how each claim was checked.
+// The merges are sound for a node linking libseccomp 2.5.4 to 2.6.2; 2.5.2
+// evaluates some rule sets differently and is not supported. The lost-rules
+// check below knows the syscalls of those releases, and Validate accepts
+// names it does not know, so a rule on a syscall only a later release knows
+// is not checked.
 //
-// Lost rules: libseccomp 2.5.2, 2.5.4, 2.5.5, 2.6.0 and 2.6.1 (2.5.3 was not
-// examined), sorting syscalls by priority (crun always, runc up to 32 syscall
-// names), lose every rule of an architecture, which then applies the default
-// to every call, when the syscall its block tests first does not exist there.
-// That takes a profile in which every rule on a syscall the architecture has
-// is conditional and a rule on one it lacks is cheaper, as "socketcall" with
-// one unconditional rule and "socket" with a conditional one are on x86_64;
-// x86_64 and x32 share one block. Allowlists, which name a syscall every
-// covered architecture has in an unconditional rule, are not affected.
-// Intersect and Union check every covered architecture of their result
-// against a table of where libseccomp places each syscall, which errs safe
-// for every supported release, and drop a rule on a syscall no covered
-// architecture has, which is exact. Otherwise Intersect drops x32 where it
-// pairs with x86_64, x86_64 where x32 is native, the affected architecture
-// where it is not native, and otherwise the listed architectures on which the
-// offending syscall applies. It refuses with [ErrLostRules] where it can drop
-// none: where the affected architecture is native and the syscall applies
-// there too, or, where the native architecture is not known, the affected one
-// is the last listed. [Union] refuses such a result with ErrLostRules. Where
-// the native architecture is not known, each architecture a runtime can be
-// native on is checked as native and an architecture is dropped only where
-// that helps whichever is native, so the merge is refused more often.
-// [ValidateArtifact] and [ValidateStrict] report the shape as written
-// (ErrLostRules); the merges settle the rules first and may accept it.
-// libseccomp 2.6.2 no longer loses the rules (GHSA-q75f-27j4-2h7j), and the
-// merges guard against it for the earlier releases they support.
+// Lost rules: libseccomp before 2.6.2 can lose every rule of an
+// architecture, which then applies the default to every call, where every
+// rule on a syscall the architecture has is conditional and a rule on one it
+// lacks is cheaper, as "socketcall" with one unconditional rule and "socket"
+// with a conditional one are on x86_64. Allowlists, which name a syscall
+// every covered architecture has in an unconditional rule, are not affected.
+// Intersect and Union check every covered architecture of their result,
+// erring safe for every supported release, and drop a rule on a syscall no
+// covered architecture has, which is exact. Otherwise Intersect drops x32
+// where it pairs with x86_64, x86_64 where x32 is native, the affected
+// architecture where it is not native, and otherwise the listed
+// architectures on which the offending syscall applies. It refuses with
+// [ErrLostRules] where it can drop none: where the affected architecture is
+// native and the syscall applies there too, or, where the native
+// architecture is not known, the affected one is the last listed; such a node
+// is checked as each architecture it may be, so the merge is refused more
+// often. [Union] refuses such a result with ErrLostRules. [ValidateArtifact]
+// and [ValidateStrict] report the shape as written (ErrLostRules); the
+// merges settle the rules first and may accept it.
 //
 // 32-bit values: on a 32-bit architecture (x86, x32, arm, 32-bit and n32
 // MIPS, ppc, s390, parisc, m68k, sh), libseccomp compares only the lower 32
@@ -309,13 +287,12 @@ limitations under the License.
 // affected syscalls as one unconditional rule instead, as it reads a rule
 // set outside the safe shapes. Union always does the latter, in its
 // direction. A rule whose every condition is a SCMP_CMP_MASKED_EQ with only
-// upper mask bits holds for every call there, and libseccomp keeps the first
-// unconditional rule of a syscall, so such a rule added before the syscall's
-// unconditional one decides every call on a 32-bit architecture while the
-// unconditional one decides them elsewhere. Wherever a result covers a
-// 32-bit architecture, both merges read such a syscall as its one
-// unconditional rule: the more restrictive of the two for Intersect, the
-// less restrictive for Union, even where Intersect keeps the 32-bit
+// upper mask bits holds for every call there, so where it comes before the
+// syscall's unconditional rule it decides every call on a 32-bit
+// architecture, and the unconditional one decides them elsewhere. Wherever a
+// result covers a 32-bit architecture, both merges read such a syscall as
+// its one unconditional rule: the more restrictive of the two for Intersect,
+// the less restrictive for Union, even where Intersect keeps the 32-bit
 // architectures.
 //
 // Multiplexers: on x86, 32-bit MIPS, ppc, ppc64, ppc64le, s390, s390x, m68k
@@ -331,29 +308,17 @@ limitations under the License.
 //
 // libseccomp adds every rule of such a syscall to the multiplexer a second
 // time, with the condition on the first argument replaced by the sub-call
-// number and the others kept: socket ALLOW if a0 == 2 allows every socket(2)
-// made through socketcall. Two copies with the same filter and different
-// results, errno included, are refused with EEXIST, and an unconditional
-// rule on the multiplexer decides all of its calls. Where neither profile
-// has multiplexer rules and no rule of the syscall tests the first argument,
-// the path decides each call as the syscall does. Otherwise the merges read
-// each input's path as the set of results a call can get there: with an
-// unconditional multiplexer rule, that rule; with conditional multiplexer
-// rules, the results of those, of every syscall the multiplexer carries and
-// of the default; and otherwise the results of the syscall's rules, and the
-// default unless one of them matches the whole sub-call. They settle a
-// result that would permit more (Intersect) or less (Union) on that path
-// than an input, or that holds rules libseccomp may refuse there (different
-// results for one of these syscalls where a rule matches the whole sub-call
-// or the rules form no safe shape without the first argument, or conditional
-// rules on the multiplexer). Intersect drops the multiplexing architectures
-// where the native architecture does not multiplex. Otherwise, and always
-// for Union, the multiplexer and each affected syscall collapse to one
-// unconditional rule in the merge direction, combining their actions with
-// what the inputs apply on that path, which also removes the filters from
-// the direct syscall. An unconditional multiplexer rule that differs from
-// the default only in its errno, and would hide multiplexed rules, is
-// dropped instead where those rules then decide every sub-call safely.
+// number: socket ALLOW if a0 == 2 allows every socket(2) made through
+// socketcall. The merges settle a result that would permit more
+// (Intersect) or less (Union) on that path than an input, or that holds
+// rules libseccomp may refuse there. Intersect drops the multiplexing
+// architectures where the native architecture does not multiplex.
+// Otherwise, and always for Union, the multiplexer and each affected
+// syscall collapse to one unconditional rule in the merge direction, which
+// also removes the filters from the direct syscall, except that an
+// unconditional multiplexer rule differing from the default only in its
+// errno is dropped where the multiplexed rules then decide every sub-call
+// safely.
 //
 // Where the profile covers a multiplexing architecture, ValidateArtifact
 // reports (ErrConflictingEntries) the rules of a multiplexed syscall whose
@@ -367,9 +332,8 @@ limitations under the License.
 // on the native architecture. [Options] names the node: another node's
 // architecture, the running program's, which the plain functions assume, or
 // one that is not known, which the merges and validators read as possibly
-// any architecture a runtime can be native on: every architecture this
-// package knows, since crun also runs natively on x32, MIPS n32, ppc, s390,
-// sh, m68k and parisc, where no Go program does.
+// any architecture this package knows, since crun runs natively on some
+// that no Go program does.
 //
 // # Flags
 //
@@ -395,33 +359,26 @@ limitations under the License.
 // # Listener
 //
 // ListenerPath, ListenerMetadata and SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV
-// are taken from the first input that sets a ListenerPath, which for
-// [Intersect] is always the first input. runc refuses to create a container
-// whose filter notifies without a listenerPath, and the action a merge
-// carries into the result may come from any input, so [Validate] requires a
-// listenerPath from every profile that notifies
-// ([ErrNotifyWithoutListener]). Neither merge rewrites an action to keep the
-// two together: a supervised syscall comes back supervised, and a merge
-// refuses with ErrNotifyWithoutListener rather than emit a result that would
-// notify into nothing.
+// come from the first input that sets a ListenerPath. A filter hands every
+// notification to one listener, so inputs naming different listeners are
+// refused with [ErrConflictingListener]: different non-empty listenerPath
+// values, or one listenerPath with different listenerMetadata, even where
+// only one input notifies. [Intersect] takes the listener from its first
+// input only, the baseline the runtime trusts, since an artifact naming a
+// node-local socket would choose who answers the workload's calls: a later
+// input sets neither member or both exactly as the first input does, and is
+// otherwise refused with ErrConflictingListener, also where the first input
+// sets none. [Union], whose inputs are peers, takes the listener from
+// whichever input sets one and ignores the listenerMetadata of an input
+// without a listenerPath.
 //
-// A filter hands every notification to one listener, so inputs naming
-// different listeners are refused with [ErrConflictingListener]: different
-// non-empty listenerPath values, or one listenerPath with different
-// listenerMetadata, even where only one input notifies.
-//
-// Intersect takes the listener from its first input only, the baseline the
-// runtime trusts, since an artifact naming a node-local socket would choose
-// who answers the workload's calls. A later input that sets neither
-// listenerPath nor listenerMetadata leaves the listener to the first input;
-// one that sets either without setting both exactly as the first input does
-// is refused with ErrConflictingListener, also where the first input sets
-// none and where a later one repeats the path without the metadata. [Union],
-// whose inputs are peers, takes the listener from whichever input sets one
-// and ignores the listenerMetadata of an input without a listenerPath.
-//
-// [Validate] rejects SCMP_ACT_NOTIFY where runc refuses it outright, as the
-// default action or on the write syscall ([ErrNotifyUnsupported]).
+// runc refuses a filter that notifies without a listenerPath, so [Validate]
+// requires one from every profile that notifies ([ErrNotifyWithoutListener])
+// and rejects SCMP_ACT_NOTIFY where runc refuses it outright, as the default
+// action or on the write syscall ([ErrNotifyUnsupported]). Neither merge
+// rewrites an action to keep the two together: a supervised syscall comes
+// back supervised, and a merge refuses with ErrNotifyWithoutListener rather
+// than emit a result that would notify into nothing.
 //
 // The kernel refuses SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV without the flag
 // that creates the listener, which runc sets only for a filter with a notify
@@ -459,17 +416,17 @@ limitations under the License.
 // rule libseccomp's order never reaches. Architectures are compared with the
 // native architecture implied on both sides.
 //
-// Where libseccomp keeps the profile order for rules outside the safe shapes
-// whose results differ (see the Evaluation model section), the syscall is
-// also compared by the order in which the rules of each such pair are added;
-// where that differs, it is reported as changed with each side's rules in
-// the order a runtime adds them rather than sorted. Which pairs count
-// follows a 64-bit native architecture: Diff may report an order difference
-// that a 32-bit node's filter does not depend on, and misses none it does
-// depend on, since it pairs conditions by their lower halves as well.
-// Outside that case Diff does not check whether libseccomp accepts the
-// rules: two profiles holding the same rules in a different order compare
-// equal although libseccomp may refuse one of them with EEXIST.
+// Where libseccomp keeps the profile order for two rules outside the safe
+// shapes with different results (two conditions on one argument comparing
+// the same value with SCMP_CMP_LT and SCMP_CMP_LE, with SCMP_CMP_GT and
+// SCMP_CMP_GE, or with different masks), Diff also compares the order in
+// which a runtime adds them, and reports a syscall where that differs with
+// each side's rules in that order rather than sorted. It pairs the rules as
+// for a 64-bit native architecture, so it may report an order a 32-bit
+// node's filter does not depend on, and misses none it does depend on.
+// Otherwise Diff does not check whether libseccomp accepts the rules: two
+// profiles holding the same rules in a different order compare equal
+// although libseccomp may refuse one of them.
 //
 // Diff(p, Intersect(p)) is equal only when every syscall of p is in a safe
 // shape, nothing needed settling for a multiplexing architecture, no syscall
@@ -496,52 +453,43 @@ limitations under the License.
 //
 // # Cost bounds
 //
-// The merge work is bounded by three internal budgets. Past any of them, a
-// syscall is read or merged as the one unconditional clause a collapse
-// picks, the most restrictive of its actions for intersection and the least
-// restrictive for union, so [Intersect] still never permits more than any
-// input and [Union] never less.
+// The merges and [Diff] bound their work with internal budgets: on the
+// product of the filtered rules two inputs hold for one syscall, for
+// [Union] also on their sum, and on the rules one input loads in all, the
+// read budget, which a small document can push into the millions since an
+// entry loads a rule per name and, repeating an argument index, per
+// condition. Past a budget a syscall is read or merged as the one
+// unconditional clause a collapse picks, the most restrictive of its
+// actions for intersection and the least restrictive for union, so
+// [Intersect] still never permits more than any input and [Union] never
+// less. Past the read budget, the syscalls of that input loading the most
+// rules, ties broken by name, are read that way until the rest fit. For
+// [Intersect], a side without filtered rules for a syscall adds no work, so
+// a large artifact against a baseline that allows or denies the syscall
+// unconditionally is merged precisely.
 //
-//   - Pair budget: a syscall collapses once the product of the filtered rule
-//     counts of both sides exceeds it. A side without filtered rules adds no
-//     work, so a large artifact against a baseline that allows or denies the
-//     syscall unconditionally is merged precisely. The budget admits
-//     [MaxArtifactRulesPerSyscall] rules against a dozen filtered rules on
-//     the other side.
-//   - Combined budget (union only): a syscall also collapses once the
-//     filtered rules of both sides together exceed it, even when one side
-//     has none, as with several hundred filtered rules on one side.
-//   - Read budget: an entry loads one rule per name, and one per condition
-//     per name when it repeats an argument index, so 441 KB of JSON can load
-//     ten million rules. Past this budget on one input, the syscalls loading
-//     the most rules (ties by name) are read as the clause a collapse picks
-//     until the rest fit, at the cost of one pass over their entries. The
-//     multiplexer path reads such a syscall in that form too, taking its
-//     rules there to be ones libseccomp may refuse wherever their results
-//     differ. This is what bounds [Diff], which validates nothing.
+// The read budget keeps Diff, which validates nothing, and the merges
+// linear in the size of a profile that skipped validation, but not cheap:
+// Diff of such a profile allocates around 150 times its size in JSON.
+// Validate an artifact with ValidateArtifact before anything else looks at
+// it.
 //
 // [ValidateArtifact] bounds an artifact so that it reports one too large to
 // merge precisely instead of the merge silently collapsing a syscall, each
 // limit with its own error matching [ErrArtifactTooLarge]:
 // [MaxArtifactEntriesPerSyscall] and [MaxArtifactRulesPerSyscall] bound one
 // syscall, [MaxArtifactNamesPerEntry] the names of one entry,
-// [MaxArtifactRules] the rules of the whole profile, well inside the read
-// budget, so an accepted artifact is always read rule by rule, and
-// [MaxArtifactEntries] the entries, which only entries loading no rule can
-// exceed. Rules are counted the way runtimes add them: one per entry naming
-// the syscall, one per condition for an entry repeating an argument index,
-// none for an entry equal to the default, so the rule limits also bound the
-// conditions of such an entry. The limits on the whole
-// profile are checked first and reported on their own. An accepted artifact
-// stays inside the pair budget against a baseline with up to a dozen
-// filtered rules for a syscall; a baseline with more can still collapse it.
-// [Validate] enforces none of the limits, since a runtime loads a profile
-// past them.
-//
-// The read budget keeps Diff and the merges linear in the size of a profile
-// that skipped validation, but not cheap: Diff of such a profile allocates
-// around 150 times its size in JSON. Validate an artifact with
-// ValidateArtifact before anything else looks at it.
+// [MaxArtifactRules] the rules of the whole profile and [MaxArtifactEntries]
+// its entries, which only entries loading no rule can exceed. Rules are
+// counted the way runtimes add them: one per entry naming the syscall, one
+// per condition for an entry repeating an argument index, none for an entry
+// equal to the default, so the rule limits also bound the conditions of
+// such an entry. The limits on the whole profile are checked first
+// and reported on their own. An accepted artifact is read rule by rule, and
+// merged precisely against a baseline with up to a dozen filtered rules for
+// a syscall; a baseline with more, or a union with several hundred filtered
+// rules for one syscall, can still collapse it. [Validate] enforces none of
+// the limits, since a runtime loads a profile past them.
 //
 // # Conflicting rules
 //

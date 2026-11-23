@@ -307,8 +307,12 @@ func TestDiffReportsChanges(t *testing.T) {
 			right: profileOf(specs.ActErrno,
 				filtered(syscallRead, specs.ActLog), filtered(syscallClose, specs.ActAllow)),
 			want: seccomp.ProfileDiff{Syscalls: &seccomp.SyscallsDiff{
-				Added:   []seccomp.SyscallEntry{{Name: syscallClose, Action: specs.ActAllow}},
-				Removed: []seccomp.SyscallEntry{{Name: syscallWrite, Action: specs.ActAllow}},
+				Added: []seccomp.SyscallEntry{{
+					Name: syscallClose, SyscallDetail: seccomp.SyscallDetail{Action: specs.ActAllow},
+				}},
+				Removed: []seccomp.SyscallEntry{{
+					Name: syscallWrite, SyscallDetail: seccomp.SyscallDetail{Action: specs.ActAllow},
+				}},
 				Changed: []seccomp.SyscallChange{{
 					Name:  syscallRead,
 					Left:  []seccomp.SyscallDetail{{Action: specs.ActAllow}},
@@ -432,7 +436,9 @@ func TestDiffReportsChanges(t *testing.T) {
 			}),
 			right: profileOf(specs.ActErrno, filtered(syscallRead, specs.ActAllow)),
 			want: seccomp.ProfileDiff{Syscalls: &seccomp.SyscallsDiff{
-				Removed: []seccomp.SyscallEntry{{Name: syscallWrite, Action: specs.ActAllow}},
+				Removed: []seccomp.SyscallEntry{{
+					Name: syscallWrite, SyscallDetail: seccomp.SyscallDetail{Action: specs.ActAllow},
+				}},
 			}},
 		},
 		{
@@ -604,8 +610,12 @@ func TestDiffListsReports(t *testing.T) {
 			left:  readAllowed,
 			right: []specs.LinuxSyscall{filtered("write", specs.ActAllow)},
 			want: &seccomp.SyscallsDiff{
-				Added:   []seccomp.SyscallEntry{{Name: "write", Action: specs.ActAllow}},
-				Removed: []seccomp.SyscallEntry{{Name: "read", Action: specs.ActAllow}},
+				Added: []seccomp.SyscallEntry{{
+					Name: "write", SyscallDetail: seccomp.SyscallDetail{Action: specs.ActAllow},
+				}},
+				Removed: []seccomp.SyscallEntry{{
+					Name: "read", SyscallDetail: seccomp.SyscallDetail{Action: specs.ActAllow},
+				}},
 			},
 		},
 		{

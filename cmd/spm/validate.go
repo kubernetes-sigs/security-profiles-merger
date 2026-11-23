@@ -176,7 +176,7 @@ func (opts *validateOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) i
 // back.
 func validateInputs(opts *validateOptions, inv *invocation) int {
 	inv.checks = &inputChecks{
-		modes: slices.Repeat([]validateMode{opts.mode()}, len(inv.inputs)), strategy: "",
+		modes: slices.Repeat([]validateMode{opts.mode()}, len(inv.inputs)),
 	}
 
 	// --quiet promises a silent stderr on success, so it implies

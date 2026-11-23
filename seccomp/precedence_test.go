@@ -38,6 +38,8 @@ func TestIntersectUnconditionalDoesNotShadowConditionalDeny(t *testing.T) {
 	// Left denies ioctl(arg0 == 1); right logs ioctl unconditionally.
 	// Emitting "ioctl -> LOG" next to "ioctl(arg0 == 1) -> ERRNO" would
 	// let libseccomp drop the conditional entry and permit the denied call.
+	// The complement carries LOG, and the denied call falls through to the
+	// default, so the entry denying it would be dead.
 	left := &specs.LinuxSeccomp{
 		DefaultAction: specs.ActAllow,
 		Syscalls: []specs.LinuxSyscall{
@@ -61,12 +63,68 @@ func TestIntersectUnconditionalDoesNotShadowConditionalDeny(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		want := "Profile{default:SCMP_ACT_ERRNO " +
-			"ioctl([0]SCMP_CMP_EQ:1)->SCMP_ACT_ERRNO " +
-			"ioctl([0]SCMP_CMP_NE:1)->SCMP_ACT_LOG}"
+		want := "Profile{default:SCMP_ACT_ERRNO ioctl([0]SCMP_CMP_NE:1)->SCMP_ACT_LOG}"
 		if got := seccomp.FormatProfile(result); got != want {
 			t.Errorf("Intersect = %s, want %s", got, want)
 		}
+	}
+}
+
+func TestComplementRewriteDropsOnlyTheClauseEqualToTheDefault(t *testing.T) {
+	t.Parallel()
+
+	errno := func(value uint) *uint { return &value }
+
+	for _, test := range []struct {
+		name     string
+		errnoRet *uint
+		want     string
+	}{
+		{
+			// The clause gives what the default gives, so only its
+			// complement is emitted.
+			name: "same result as the default",
+			want: "Profile{default:SCMP_ACT_ERRNO read([0]SCMP_CMP_NE:40)->SCMP_ACT_ALLOW}",
+		},
+		{
+			// Another errno is another result, so the clause stays.
+			name:     "another errno than the default",
+			errnoRet: errno(13),
+			want: "Profile{default:SCMP_ACT_ERRNO " +
+				"read([0]SCMP_CMP_EQ:40)->SCMP_ACT_ERRNO(errno:13) " +
+				"read([0]SCMP_CMP_NE:40)->SCMP_ACT_ALLOW}",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			left := &specs.LinuxSeccomp{
+				DefaultAction: specs.ActAllow,
+				Syscalls: []specs.LinuxSyscall{{
+					Names:    []string{"read"},
+					Action:   specs.ActErrno,
+					ErrnoRet: test.errnoRet,
+					Args:     []specs.LinuxSeccompArg{argEq(0, 40)},
+				}},
+			}
+			right := &specs.LinuxSeccomp{
+				DefaultAction: specs.ActErrno,
+				Syscalls: []specs.LinuxSyscall{
+					{Names: []string{"read"}, Action: specs.ActAllow},
+				},
+			}
+
+			for _, order := range [][]*specs.LinuxSeccomp{{left, right}, {right, left}} {
+				result, err := seccomp.Intersect(order...)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+
+				if got := seccomp.FormatProfile(result); got != test.want {
+					t.Errorf("Intersect = %s, want %s", got, test.want)
+				}
+			}
+		})
 	}
 }
 

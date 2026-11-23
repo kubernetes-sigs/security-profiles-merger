@@ -64,6 +64,7 @@ unknown architecture matches `ErrUnknownArch` as well.
 | `ErrTooManyClauses`, `MaxArtifactClausesPerSyscall` | `ErrTooManyRulesPerSyscall`, `MaxArtifactRulesPerSyscall` |
 | `ErrTooManyProfileClauses`, `MaxArtifactClauses` | `ErrTooManyRules`, `MaxArtifactRules` |
 | `ErrTooManyNames` | `ErrTooManyNamesPerEntry` |
+| `SyscallEntry{Name: n, Action: a, ErrnoRet: e, Args: args}` | `SyscallEntry{Name: n, SyscallDetail: SyscallDetail{Action: a, ErrnoRet: e, Args: args}}`: the entry embeds the detail, so reading `entry.Action` and the JSON are unchanged |
 
 - **`Validate` refuses runtime-spec fields it does not read**
   (`ErrUnsupportedSpecField`) and a `listenerPath` or `listenerMetadata`
@@ -81,6 +82,11 @@ unknown architecture matches `ErrUnknownArch` as well.
   `a0 == 0`: it keeps the same one whichever input comes first. With three
   or more inputs, which merge pairwise, the order can still change how
   tight a result of either merge is, never its guarantee.
+- **A complement rewrite no longer emits the clause equal to the
+  default**: where a merge splits a syscall into a one-condition clause
+  and its complement, it leaves out the half whose result is the
+  default, which matched only calls the default answers the same way.
+  Results compare equal under `Diff`, but stored merge results change.
 - **Write a result with `seccomp.Marshal`**, which keeps an empty
   `"flags": []` that `json.Marshal` drops (see
   [Extra steps after Intersect](integration.md#extra-steps-after-intersect)).
@@ -169,7 +175,7 @@ The JSON of a diff follows the fields of `Profile` too:
   `refer` on a directory they share: about 115 such recordings, and two
   inputs of `MaxArtifactRules` rules on the deepest paths rather than
   three.
-- **`LatestABIVersion` is `ABIV11`**, and the validators reject a trailing
+- **`LatestABIVersion` is `ABIV12`**, and the validators reject a trailing
   slash (`ErrTrailingSlash`) and a path that is not valid UTF-8
   (`ErrInvalidUTF8Path`) in an artifact.
 - **The JSON of a changed rule leaves out** an empty `"left"` or

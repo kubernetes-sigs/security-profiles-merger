@@ -125,7 +125,7 @@ func Decode[T any](data []byte, target *T) (Hint, error) {
 	// one with data behind it, is refused with its error.
 	if !json.Valid(data) {
 		//nolint:wrapcheck // fails as json.Unmarshal fails
-		return Hint{unknown: "", found: false}, json.Unmarshal(data, target)
+		return Hint{}, json.Unmarshal(data, target)
 	}
 
 	hint, _, err := decodeFirst(data, target)

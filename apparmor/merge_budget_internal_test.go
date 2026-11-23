@@ -375,19 +375,22 @@ func TestIntersectPastItsBudgetFailsForExecutables(t *testing.T) {
 
 	strategy := intersectStrategy{matchers: newMatcherCache(), exceeded: false}
 
-	got := strategy.mergePaths(
-		left.Executable.AllowedExecutables,
-		right.Executable.AllowedExecutables,
-	)
+	got := permittedPaths(strategy.mergePerms(
+		readPerms(left.Executable.AllowedExecutables),
+		readPerms(right.Executable.AllowedExecutables),
+	))
 	if !strategy.exceeded || !slices.Equal(got, []string{shared}) {
-		t.Errorf("mergePaths past the budget = %q, exceeded %t, want only %q",
+		t.Errorf("mergePerms past the budget = %q, exceeded %t, want only %q",
 			got, strategy.exceeded, shared)
 	}
 
 	// Once a list ran past the budget the merge fails, so the lists after
 	// it are not matched at all.
-	if got := strategy.mergePaths([]string{shared}, []string{shared}); got != nil {
-		t.Errorf("mergePaths after the budget ran out = %q, want nothing matched", got)
+	if got := strategy.mergePerms(
+		readPerms([]string{shared}),
+		readPerms([]string{shared}),
+	); got != nil {
+		t.Errorf("mergePerms after the budget ran out = %v, want nothing matched", got)
 	}
 
 	if !errors.Is(strategy.budgetErr(), ErrBudgetExceeded) {

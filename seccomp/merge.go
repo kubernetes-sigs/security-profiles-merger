@@ -90,10 +90,10 @@ type InputError = spm.InputError
 // ([Options.Intersect] names another node). It passes Validate but often
 // not ValidateStrict, equal inputs give equal output, and it shares no
 // memory with the inputs, a single input included. The guarantee holds for
-// libseccomp 2.5.4 to 2.6.2 and the syscalls they know (see the
-// Intersection section). See the Evaluation model, Intersection, Errno
-// values, Architectures, Flags, Listener, Single profiles and Cost bounds
-// sections.
+// libseccomp 2.5.4 to 2.6.2 and the syscalls they know; the Evaluation
+// model and Intersection sections give the model and its limits. See also
+// the Errno values, Architectures, Flags, Listener, Single profiles and Cost
+// bounds sections.
 func Intersect(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 	return ForHost().Intersect(profiles...)
 }
@@ -116,7 +116,8 @@ func Intersect(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 // The result depends on the native architecture ([Options.Union]). It
 // passes Validate and shares no memory with the inputs, as Intersect's
 // does, and its guarantee has the limits of Intersect's. See the Union,
-// Architectures, Flags and Cost bounds sections.
+// Errno values, Architectures, Flags, Listener, Single profiles and Cost
+// bounds sections.
 func Union(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 	return ForHost().Union(profiles...)
 }

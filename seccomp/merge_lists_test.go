@@ -25,8 +25,9 @@ import (
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
 
-// TestListMerges merges syscall lists with the helpers of lists_test.go. want
-// is the merged list as FormatProfile spells its entries.
+// TestListMerges merges syscall lists with the list helpers of
+// helpers_test.go. want is the merged list as FormatProfile spells its
+// entries.
 func TestListMerges(t *testing.T) {
 	t.Parallel()
 

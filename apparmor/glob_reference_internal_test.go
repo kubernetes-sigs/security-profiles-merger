@@ -17,7 +17,6 @@ limitations under the License.
 package apparmor
 
 import (
-	"math/rand/v2"
 	"slices"
 	"strings"
 	"sync"
@@ -240,29 +239,103 @@ func refRecord(merged map[string]fsPermission, key string, perm fsPermission) {
 	merged[key] = perm
 }
 
-// refCorpus mixes literals, globs of every token kind, "**" expansions at
-// several depths, globs that also match their own prefix, byte-oriented
-// patterns, and an escaped literal, so that generated path lists hit the
-// cases the index treats differently. Every glob matches at least one
+// refPathCases are the path lists the indexed intersection is checked
+// against the reference on. They mix literals, globs of every token kind,
+// "**" expansions at several depths, globs that also match their own
+// prefix, byte-oriented patterns and an escaped literal, so that they hit
+// the cases the index treats differently: a literal under a pattern of the
+// other side or outside it, a "**" pattern including a narrower glob or
+// another "**" pattern, two globs neither of which includes the other, a
+// glob whose prefix holds alternation or a class and so is no "**" pattern,
+// and a path several pairs grant at once. Every glob matches at least one
 // probe, as the reference would treat one matching none as included in
 // everything.
-var refCorpus = []string{
-	"/etc/passwd", "/etc/", "/etc/**", "/etc/*", "/etc/*.conf", "/etc/foo/*.conf",
-	"/**", "/*", "/var/log/**", "/var/log/app.log", "/usr/bin/sh", "/usr/bin/*",
-	"/usr/**", "/a/b/c", "/a/**", "/a/*/c", "/x{1,2}/y", "/q?/z", "/e[a-c]/f",
-	`/esc/\*`, "/var/", "/var/data", "/a/b/**", "/",
-	"/etc/{,**}", "/etc/{,foo}", "/{,etc}", "/etc/**foo", "/etc/[!a]", "/etc/{a,}",
-	"/tmp/?", "/tmp/??", "/tmp/é", "/etc/{**,x}", "/{etc,var}/**", "/etc/foo/**",
-	"/etc/*/**", "/tmp/**",
+var refPathCases = []struct {
+	left, right []string
+}{
+	{nil, nil},
+	{[]string{"/etc/passwd"}, nil},
+	{[]string{"/etc/passwd"}, []string{"/etc/passwd"}},
+	{[]string{"/etc/passwd"}, []string{"/etc/*"}},
+	{[]string{"/etc/passwd"}, []string{"/etc/*.conf"}},
+	{[]string{"/etc/passwd", "/var/data"}, []string{"/**"}},
+	{[]string{"/etc/"}, []string{"/etc/**"}},
+	{[]string{"/etc/"}, []string{"/etc/{,**}"}},
+	{[]string{"/etc/", "/"}, []string{"/{,etc}"}},
+	{[]string{"/etc/"}, []string{"/etc/*"}},
+	{[]string{"/"}, []string{"/*", "/**"}},
+	{[]string{"/etc/**"}, []string{"/etc/*.conf"}},
+	{[]string{"/etc/**"}, []string{"/etc/foo/*.conf", "/etc/foo/**"}},
+	{[]string{"/**"}, []string{"/var/log/**", "/usr/bin/*"}},
+	{[]string{"/a/**"}, []string{"/a/b/**", "/a/*/c"}},
+	{[]string{"/a/b/c", "/a/b/**"}, []string{"/a/*/c"}},
+	{[]string{"/etc/*"}, []string{"/etc/*.conf"}},
+	{[]string{"/etc/*/**"}, []string{"/etc/foo/**"}},
+	{[]string{"/etc/*/**"}, []string{"/etc/**"}},
+	{[]string{"/etc/**foo"}, []string{"/etc/**", "/etc/*"}},
+	{[]string{"/etc/{**,x}"}, []string{"/etc/**"}},
+	{[]string{"/etc/{**,x}"}, []string{"/etc/passwd", "/etc/x"}},
+	{[]string{"/etc/{,foo}", "/etc/{a,}"}, []string{"/etc/", "/etc/**"}},
+	{[]string{"/etc/[!a]"}, []string{"/etc/*", "/etc/{a,}"}},
+	{[]string{"/{etc,var}/**"}, []string{"/etc/**", "/var/log/app.log"}},
+	{[]string{"/{etc,var}/**"}, []string{"/var/", "/usr/**"}},
+	{[]string{"/x{1,2}/y", "/q?/z", "/e[a-c]/f"}, []string{"/**"}},
+	{[]string{"/x{1,2}/y", "/q?/z", "/e[a-c]/f"}, []string{"/*"}},
+	{[]string{`/esc/\*`}, []string{"/**"}},
+	{[]string{`/esc/\*`}, []string{"/*"}},
+	{[]string{"/tmp/é"}, []string{"/tmp/?"}},
+	{[]string{"/tmp/é"}, []string{"/tmp/??"}},
+	{[]string{"/tmp/**"}, []string{"/tmp/?", "/tmp/??", "/tmp/é"}},
+	{[]string{"/usr/bin/sh", "/usr/bin/*"}, []string{"/usr/**", "/usr/bin/sh"}},
+	{[]string{"/var/log/**", "/var/log/app.log"}, []string{"/var/log/**", "/var/"}},
 }
 
-func refRandPaths(rnd *rand.Rand) []string {
-	paths := make([]string, 0, len(refCorpus))
-	for range rnd.IntN(6) {
-		paths = append(paths, refCorpus[rnd.IntN(len(refCorpus))])
-	}
+// refFsCases are the filesystem rules the indexed merge is checked against
+// the reference on: on top of what refPathCases cover, the permissions two
+// matching entries share, a path two pairs grant different permissions,
+// which the merge joins, and matching entries sharing no permission.
+var refFsCases = []struct {
+	left, right *FilesystemRules
+}{
+	{
+		&FilesystemRules{ReadOnlyPaths: []string{"/a/b/c"}},
+		&FilesystemRules{WriteOnlyPaths: []string{"/a/b/c"}},
+	},
+	{
+		&FilesystemRules{ReadOnlyPaths: []string{"/a/b/c"}, WriteOnlyPaths: []string{"/a/*/c"}},
+		&FilesystemRules{ReadWritePaths: []string{"/a/b/c"}},
+	},
+	{
+		&FilesystemRules{ReadOnlyPaths: []string{"/etc/**"}, WriteOnlyPaths: []string{"/etc/*"}},
+		&FilesystemRules{ReadWritePaths: []string{"/etc/passwd", "/etc/*.conf"}},
+	},
+	{
+		&FilesystemRules{ReadWritePaths: []string{"/**"}},
+		&FilesystemRules{
+			ReadOnlyPaths:  []string{"/var/log/**"},
+			WriteOnlyPaths: []string{"/etc/*.conf"},
+			ReadWritePaths: []string{"/tmp/é"},
+		},
+	},
+	{
+		&FilesystemRules{
+			ReadOnlyPaths:  []string{"/etc/**"},
+			ReadWritePaths: []string{"/etc/{,**}"},
+		},
+		&FilesystemRules{WriteOnlyPaths: []string{"/etc/", "/etc/foo/**"}},
+	},
+	{
+		&FilesystemRules{
+			WriteOnlyPaths: []string{"/{etc,var}/**"},
+			ReadOnlyPaths:  []string{"/var/"},
+		},
+		&FilesystemRules{ReadWritePaths: []string{"/var/**", "/var/data"}},
+	},
+}
 
-	return paths
+// refFsPaths lists the paths of filesystem rules.
+func refFsPaths(rules *FilesystemRules) []string {
+	return slices.Concat(rules.ReadOnlyPaths, rules.WriteOnlyPaths, rules.ReadWritePaths)
 }
 
 func sortedClone(paths []string) []string {
@@ -272,16 +345,25 @@ func sortedClone(paths []string) []string {
 	return cloned
 }
 
-// TestRefCorpusGlobsMatchProbes guards the reference's premise: a corpus
-// glob matching no probe would count as included in every "**" pattern.
-func TestRefCorpusGlobsMatchProbes(t *testing.T) {
+// TestRefCaseGlobsMatchProbes guards the reference's premise: a glob of the
+// cases matching no probe would count as included in every "**" pattern.
+func TestRefCaseGlobsMatchProbes(t *testing.T) {
 	t.Parallel()
 
-	for _, pattern := range refCorpus {
+	var paths []string
+	for _, tc := range refPathCases {
+		paths = slices.Concat(paths, tc.left, tc.right)
+	}
+
+	for _, tc := range refFsCases {
+		paths = slices.Concat(paths, refFsPaths(tc.left), refFsPaths(tc.right))
+	}
+
+	for _, pattern := range paths {
 		if IsGlobPattern(pattern) && !slices.ContainsFunc(refProbes, func(probe string) bool {
 			return matchGlob(pattern, probe)
 		}) {
-			t.Errorf("corpus glob %q matches no probe", pattern)
+			t.Errorf("case glob %q matches no probe", pattern)
 		}
 	}
 }
@@ -289,18 +371,17 @@ func TestRefCorpusGlobsMatchProbes(t *testing.T) {
 func TestIntersectPathsMatchesReference(t *testing.T) {
 	t.Parallel()
 
-	rnd := rand.New(rand.NewPCG(11, 11))
+	for _, tc := range refPathCases {
+		for _, sides := range [][2][]string{{tc.left, tc.right}, {tc.right, tc.left}} {
+			left, right := sides[0], sides[1]
+			strategy := intersectStrategy{matchers: newMatcherCache()}
 
-	for range 60000 {
-		left, right := refRandPaths(rnd), refRandPaths(rnd)
+			got := permittedPaths(strategy.mergePerms(readPerms(left), readPerms(right)))
+			want := sortedClone(refIntersectPaths(left, right))
 
-		strategy := intersectStrategy{matchers: newMatcherCache(), exceeded: false}
-
-		got := sortedClone(strategy.mergePaths(left, right))
-		want := sortedClone(refIntersectPaths(left, right))
-
-		if !slices.Equal(got, want) {
-			t.Fatalf("mergePaths(%q, %q) = %q, want %q", left, right, got, want)
+			if !slices.Equal(got, want) {
+				t.Errorf("intersecting %q with %q = %q, want %q", left, right, got, want)
+			}
 		}
 	}
 }
@@ -308,37 +389,27 @@ func TestIntersectPathsMatchesReference(t *testing.T) {
 func TestMergeFilesystemMatchesReference(t *testing.T) {
 	t.Parallel()
 
-	rnd := rand.New(rand.NewPCG(23, 23))
+	for _, tc := range refFsCases {
+		for _, sides := range [][2]*FilesystemRules{{tc.left, tc.right}, {tc.right, tc.left}} {
+			left, right := sides[0], sides[1]
+			strategy := intersectStrategy{matchers: newMatcherCache()}
 
-	for range 60000 {
-		left := &FilesystemRules{
-			ReadOnlyPaths:  refRandPaths(rnd),
-			WriteOnlyPaths: refRandPaths(rnd),
-			ReadWritePaths: refRandPaths(rnd),
-		}
-		right := &FilesystemRules{
-			ReadOnlyPaths:  refRandPaths(rnd),
-			WriteOnlyPaths: refRandPaths(rnd),
-			ReadWritePaths: refRandPaths(rnd),
-		}
+			got := collapseFsPerms(strategy.mergePerms(expandFsPerms(left), expandFsPerms(right)))
+			want := refMergeFilesystem(left, right)
 
-		strategy := intersectStrategy{matchers: newMatcherCache(), exceeded: false}
-
-		got := strategy.mergeFilesystem(left, right)
-		want := refMergeFilesystem(left, right)
-
-		for _, category := range []struct {
-			name      string
-			got, want []string
-		}{
-			{"ReadOnlyPaths", got.ReadOnlyPaths, want.ReadOnlyPaths},
-			{"WriteOnlyPaths", got.WriteOnlyPaths, want.WriteOnlyPaths},
-			{"ReadWritePaths", got.ReadWritePaths, want.ReadWritePaths},
-		} {
-			if !slices.Equal(sortedClone(category.got), sortedClone(category.want)) {
-				t.Fatalf("mergeFilesystem(%+v, %+v) %s = %q, want %q",
-					left, right, category.name,
-					sortedClone(category.got), sortedClone(category.want))
+			for _, category := range []struct {
+				name      string
+				got, want []string
+			}{
+				{"ReadOnlyPaths", got.ReadOnlyPaths, want.ReadOnlyPaths},
+				{"WriteOnlyPaths", got.WriteOnlyPaths, want.WriteOnlyPaths},
+				{"ReadWritePaths", got.ReadWritePaths, want.ReadWritePaths},
+			} {
+				if !slices.Equal(sortedClone(category.got), sortedClone(category.want)) {
+					t.Errorf("intersecting %+v with %+v: %s = %q, want %q",
+						left, right, category.name,
+						sortedClone(category.got), sortedClone(category.want))
+				}
 			}
 		}
 	}

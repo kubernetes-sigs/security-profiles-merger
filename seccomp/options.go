@@ -89,13 +89,13 @@ func ForArch(arch specs.Arch) Options {
 // ForHost returns the Options of the node this program runs on, which the
 // plain functions of this package assume.
 func ForHost() Options {
-	return Options{node: nodeHost, arch: ""}
+	return Options{node: nodeHost}
 }
 
 // ForAnyArch returns the Options of a node whose native architecture is not
 // known (see Options).
 func ForAnyArch() Options {
-	return Options{node: nodeAnyArch, arch: ""}
+	return Options{node: nodeAnyArch}
 }
 
 // Intersect is Intersect for the node the options name.

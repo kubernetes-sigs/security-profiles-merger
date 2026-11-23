@@ -124,9 +124,7 @@ func stripRefer(rules []PathRule, paths map[string]struct{}, inputs []*Profile) 
 			continue
 		}
 
-		kept := slices.DeleteFunc(slices.Clone(rule.AccessFS), func(right FSAccessRight) bool {
-			return right == FSAccessRefer
-		})
+		kept := deleteRefer(slices.Clone(rule.AccessFS))
 		if len(kept) > 0 {
 			result = append(result, newPathRule(rule.Path, kept))
 		}
@@ -299,10 +297,7 @@ func settleLateRefer(result *Profile, inputs []*Profile) {
 	if rulesGrantRefer(result.PathRules) {
 		result.HandledAccessFS = nil
 	} else {
-		result.HandledAccessFS = slices.DeleteFunc(
-			result.HandledAccessFS,
-			func(right FSAccessRight) bool { return right == FSAccessRefer },
-		)
+		result.HandledAccessFS = deleteRefer(result.HandledAccessFS)
 	}
 
 	pruneUnhandledRights(result)

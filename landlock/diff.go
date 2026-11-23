@@ -126,7 +126,6 @@ func Diff(left, right *Profile) (*ProfileDiff, error) {
 	normRight := canonicalProfile(right)
 
 	diff := &ProfileDiff{
-		Equal:            false,
 		HandledAccessFS:  merge.NewSliceDiff(normLeft.HandledAccessFS, normRight.HandledAccessFS),
 		HandledAccessNet: merge.NewSliceDiff(normLeft.HandledAccessNet, normRight.HandledAccessNet),
 		Scoped:           merge.NewSliceDiff(normLeft.Scoped, normRight.Scoped),

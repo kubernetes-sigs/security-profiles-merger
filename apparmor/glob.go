@@ -230,16 +230,11 @@ func literalMatcher(path string) *globMatcher {
 	name := filterSlashes(path)
 
 	return &globMatcher{
-		expr:    nil,
-		kind:    kindLiteral,
-		status:  globUsable,
-		literal: name,
-		prefix:  name[:strings.LastIndexByte(name, '/')+1],
-
-		escapedNegation: false,
-		fragment:        "",
-		relative:        relativePath(path),
-		starStarForm:    false,
+		kind:     kindLiteral,
+		status:   globUsable,
+		literal:  name,
+		prefix:   name[:strings.LastIndexByte(name, '/')+1],
+		relative: relativePath(path),
 	}
 }
 
@@ -249,14 +244,6 @@ func literalMatcher(path string) *globMatcher {
 // left to the check that reports it.
 func relativePath(path string) bool {
 	return path != "" && path[0] != '/'
-}
-
-// relativeLiteral reports a literal whose text does not start with "/",
-// which names no file however its escapes decode (see globMatcher.relative):
-// it matches no pattern, equals no absolute path, and an intersection drops
-// it, as it drops a relative pattern.
-func (matcher *globMatcher) relativeLiteral() bool {
-	return matcher.kind == kindLiteral && matcher.relative
 }
 
 // analyzePattern runs a path through the parser port and translates the
@@ -281,15 +268,9 @@ func analyzeWithin(pattern string, maxLen int) *globMatcher {
 	conv := convertPattern(filterSlashes(decodeEscapes(pattern)))
 
 	matcher := &globMatcher{
-		expr:    nil,
-		kind:    conv.kind,
-		status:  globInvalid,
-		literal: "",
-		prefix:  "",
-
+		kind:            conv.kind,
+		status:          globInvalid,
 		escapedNegation: conv.escapedNegation,
-		fragment:        "",
-		relative:        false,
 		starStarForm:    conv.starStarOnly,
 	}
 
@@ -505,7 +486,6 @@ func newMatcherCache() *matcherCache {
 		entries:       make(map[string]*globMatcher),
 		compileBudget: maxCallCompileBytes,
 		literalBudget: maxCallLiteralBytes,
-		keysOnly:      false,
 	}
 }
 
@@ -735,7 +715,7 @@ func matcherKey(path string, matcher *globMatcher) pathKey {
 	case matcher.fragment != "":
 		return pathKey{kind: keyExpression, relative: matcher.relative, text: matcher.fragment}
 	default:
-		return pathKey{kind: keyText, relative: false, text: path}
+		return pathKey{kind: keyText, text: path}
 	}
 }
 
@@ -808,7 +788,7 @@ type matchBudget struct {
 // newMatchBudget returns the budget for matching two sides against each
 // other: unlimited where their totals are inside the budgets.
 func newMatchBudget(left, right *fsSide) *matchBudget {
-	return &matchBudget{pairs: 0, work: 0, limited: exceedsPairBudget(left.size(), right.size())}
+	return &matchBudget{limited: exceedsPairBudget(left.size(), right.size())}
 }
 
 // charge counts comparisons and work, and reports whether the budget still
@@ -854,9 +834,7 @@ type prefixIndex struct {
 }
 
 func newPrefixIndex() prefixIndex {
-	return prefixIndex{
-		patterns: make(map[string][]string), bytes: make(map[string]int), lengths: nil,
-	}
+	return prefixIndex{patterns: make(map[string][]string), bytes: make(map[string]int)}
 }
 
 func (index *prefixIndex) add(prefix, pattern string) {
@@ -964,14 +942,10 @@ func (side *fsSide) size() sideSize {
 }
 
 // grants returns the permissions the globs of the side grant the literal,
-// and false where matching stopped past the budget.
+// and false where matching stopped past the budget. The literal is absolute,
+// since the merges refuse a relative path before they match anything.
 func (side *fsSide) grants(literal fsPathEntry, budget *matchBudget) (fsPermission, bool) {
 	var granted fsPermission
-
-	// A relative literal names no file, so no pattern covers it.
-	if literal.matcher.relativeLiteral() {
-		return granted, true
-	}
 
 	within := side.byPrefix.candidates(literal.matcher.literal, budget, func(pattern string) bool {
 		entry := side.globs[pattern]
@@ -992,10 +966,6 @@ func buildFsSide(perms map[string]fsPermission, matchers *matcherCache) fsSide {
 		verbatim: make(map[string]fsPathEntry),
 		byPrefix: newPrefixIndex(),
 		starStar: newPrefixIndex(),
-
-		literalBytes: 0,
-		globBytes:    0,
-		globPerms:    fsPermission{read: false, write: false},
 	}
 
 	for path, perm := range perms {
@@ -1011,7 +981,7 @@ func buildFsSide(perms map[string]fsPermission, matchers *matcherCache) fsSide {
 		}
 
 		if matcher.verbatimOnly() {
-			side.verbatim[path] = fsPathEntry{path: path, perm: perm, matcher: matcher, mapped: ""}
+			side.verbatim[path] = fsPathEntry{path: path, perm: perm, matcher: matcher}
 
 			continue
 		}
@@ -1024,7 +994,7 @@ func buildFsSide(perms map[string]fsPermission, matchers *matcherCache) fsSide {
 
 		side.globBytes += len(path)
 		side.globPerms = side.globPerms.union(perm)
-		side.globs[path] = fsPathEntry{path: path, perm: perm, matcher: matcher, mapped: ""}
+		side.globs[path] = fsPathEntry{path: path, perm: perm, matcher: matcher}
 		side.byPrefix.add(matcher.prefix, path)
 		side.starStar.addStarStar(path, matcher)
 	}
@@ -1033,22 +1003,16 @@ func buildFsSide(perms map[string]fsPermission, matchers *matcherCache) fsSide {
 }
 
 // dropUnusablePaths returns the paths without the glob patterns that match
-// nothing and the relative literals, which name no file, reusing the slice
-// when there are none. It returns nil when it drops every path, as a
-// pairwise intersection does. A pattern only matched word for word is kept,
-// as a pairwise intersection keeps it with itself.
+// nothing, reusing the slice when there are none. It returns nil when it
+// drops every path, as a pairwise intersection does. A pattern only matched
+// word for word is kept, as a pairwise intersection keeps it with itself.
+// Every literal is kept: the merge validates its inputs first, which
+// refuses the relative literals that would name no file.
 func dropUnusablePaths(paths []string, matchers *matcherCache) []string {
 	unusable := func(path string) bool {
 		matcher := matchers.matcher(path)
 
-		// The merge validates its inputs first, which refuses a relative
-		// path, so this keeps every literal there. It stays as a defensive
-		// check: a relative literal names no file.
-		if matcher.kind == kindLiteral {
-			return matcher.relativeLiteral()
-		}
-
-		return !matcher.usable() && !matcher.verbatimOnly()
+		return matcher.kind != kindLiteral && !matcher.usable() && !matcher.verbatimOnly()
 	}
 
 	if !slices.ContainsFunc(paths, unusable) {

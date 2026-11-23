@@ -238,7 +238,6 @@ func seccompOps(opts seccomp.Options) kindOps[specs.LinuxSeccomp, seccomp.Profil
 			modeArtifact: opts.ValidateArtifact,
 			modeBaseline: opts.ValidateBaseline,
 		},
-		checksABI:  false,
 		format:     humanSeccomp,
 		diff:       opts.Diff,
 		formatDiff: humanSeccompDiff,
@@ -323,7 +322,6 @@ func apparmorOps() kindOps[apparmor.Profile, apparmor.ProfileDiff] {
 			modeArtifact: apparmor.ValidateArtifact,
 			modeBaseline: apparmor.ValidateBaseline,
 		},
-		checksABI:  false,
 		format:     humanAppArmor,
 		diff:       apparmor.Diff,
 		formatDiff: humanAppArmorDiff,
@@ -355,22 +353,18 @@ var profileTypes = []profileType{
 		name:    typeSeccomp,
 		target:  reflect.TypeFor[specs.LinuxSeccomp](),
 		hasArch: true,
-		hasABI:  false,
 		kind:    func(node nodeOptions) profileKind { return seccompOps(node.arch.value) },
 	},
 	{
-		name:    typeAppArmor,
-		target:  reflect.TypeFor[apparmor.Profile](),
-		hasArch: false,
-		hasABI:  false,
-		kind:    func(nodeOptions) profileKind { return apparmorOps() },
+		name:   typeAppArmor,
+		target: reflect.TypeFor[apparmor.Profile](),
+		kind:   func(nodeOptions) profileKind { return apparmorOps() },
 	},
 	{
-		name:    typeLandlock,
-		target:  reflect.TypeFor[landlock.Profile](),
-		hasArch: false,
-		hasABI:  true,
-		kind:    func(node nodeOptions) profileKind { return landlockOps(node.abi) },
+		name:   typeLandlock,
+		target: reflect.TypeFor[landlock.Profile](),
+		hasABI: true,
+		kind:   func(node nodeOptions) profileKind { return landlockOps(node.abi) },
 	},
 }
 
@@ -694,7 +688,7 @@ func detectProfileType(inputs []profileInput, report *inputReport) (string, []ty
 	}
 
 	if len(revealed) > 1 {
-		conflicts = append(conflicts, typeConflict{types: revealed, input: "", index: -1})
+		conflicts = append(conflicts, typeConflict{types: revealed, index: -1})
 	}
 
 	if len(revealed) == 0 {

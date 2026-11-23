@@ -142,9 +142,9 @@ const (
 	netRulesName  = "netRules"
 )
 
-func handledFSRef() fieldRef  { return fieldRef{rules: "", rule: 0, field: "handledAccessFs"} }
-func handledNetRef() fieldRef { return fieldRef{rules: "", rule: 0, field: "handledAccessNet"} }
-func scopedRef() fieldRef     { return fieldRef{rules: "", rule: 0, field: "scoped"} }
+func handledFSRef() fieldRef  { return fieldRef{field: "handledAccessFs"} }
+func handledNetRef() fieldRef { return fieldRef{field: "handledAccessNet"} }
+func scopedRef() fieldRef     { return fieldRef{field: "scoped"} }
 
 func pathRuleRef(idx int) fieldRef {
 	return fieldRef{rules: pathRulesName, rule: idx, field: "accessFs"}
@@ -154,11 +154,8 @@ func netRuleRef(idx int) fieldRef {
 	return fieldRef{rules: netRulesName, rule: idx, field: "accessNet"}
 }
 
-// rulePath returns the JSON path of a member of the rule at idx of the rule
-// list rules, such as "pathRules[1].path".
-func rulePath(rules string, idx int, member string) string {
-	return fmt.Sprintf("%s[%d].%s", rules, idx, member)
-}
+func pathRef(idx int) fieldRef { return fieldRef{rules: pathRulesName, rule: idx, field: "path"} }
+func portRef(idx int) fieldRef { return fieldRef{rules: netRulesName, rule: idx, field: "port"} }
 
 // Validate checks what the merge needs, and is what Intersect and Union run
 // on every input: known access rights (ErrUnknownRight) and paths that are
@@ -238,7 +235,7 @@ func collectProfile(report *merge.Collector, profile *Profile, tier validationTi
 		if problem != pathValid {
 			report.Report(func() error {
 				return fmt.Errorf(
-					"%s: %w", rulePath(pathRulesName, idx, "path"), problem.err(rule.Path),
+					"%s: %w", pathRef(idx), problem.err(rule.Path),
 				)
 			})
 		}
@@ -280,16 +277,16 @@ func validateDuplicates(report *merge.Collector, profile *Profile, cleaned []str
 		func(idx int) (string, bool) { return cleaned[idx], cleaned[idx] != "" },
 		func(idx, first int) error {
 			return fmt.Errorf("%s: %s: %w (also at %s)",
-				rulePath(pathRulesName, idx, "path"),
+				pathRef(idx),
 				merge.QuoteBounded(profile.PathRules[idx].Path), ErrDuplicateRule,
-				rulePath(pathRulesName, first, "path"))
+				pathRef(first))
 		})
 	merge.ReportDuplicates(report, len(profile.NetRules),
 		func(idx int) (uint16, bool) { return profile.NetRules[idx].Port, true },
 		func(idx, first int) error {
 			return fmt.Errorf("%s: %d: %w (also at %s)",
-				rulePath(netRulesName, idx, "port"), profile.NetRules[idx].Port,
-				ErrDuplicateRule, rulePath(netRulesName, first, "port"))
+				portRef(idx), profile.NetRules[idx].Port,
+				ErrDuplicateRule, portRef(first))
 		})
 }
 
@@ -494,7 +491,10 @@ func ValidateArtifact(profile *Profile) error {
 // a rule granting a right its profile does not handle (ErrUnhandledRight)
 // or none (ErrEmptyRule), and a profile that handles and scopes nothing
 // (ErrEmptyRuleset). It applies no MaxArtifactRules and checks no ABI
-// version; a runtime calls Options.ValidateBaseline at config load.
+// version; a runtime calls Options.ValidateBaseline at config load. Nor can
+// it see that the kernel also rejects a rule on a path that is not a
+// directory granting a right that applies to directories only (see
+// PathRule), which depends on the file system.
 //
 // Unlike the seccomp and apparmor ValidateBaseline, it does not compare the
 // baseline with Intersect of the baseline alone, which changes how rules
@@ -655,8 +655,6 @@ func (o Options) Downgrade(profile *Profile) (*Profile, error) {
 		HandledAccessFS:  supportedRights(profile.HandledAccessFS, abi, fsAccessABI),
 		HandledAccessNet: supportedRights(profile.HandledAccessNet, abi, netAccessABI),
 		Scoped:           supportedRights(profile.Scoped, abi, scopeABI),
-		PathRules:        nil,
-		NetRules:         nil,
 	}
 
 	for _, rule := range profile.PathRules {
@@ -831,11 +829,7 @@ func validateLoadablePath(report *merge.Collector, idx int, path string) {
 			report.Report(func() error {
 				return fmt.Errorf(
 					"%s: %s: %w",
-					rulePath(
-						pathRulesName,
-						idx,
-						"path",
-					),
+					pathRef(idx),
 					merge.QuoteBounded(path),
 					problem.sentinel,
 				)
@@ -879,13 +873,6 @@ func validateHandled[T ~string](
 // validateDuplicateRights reports every right of the list that an earlier
 // one repeats.
 func validateDuplicateRights[T ~string](report *merge.Collector, context fieldRef, rights []T) {
-	merge.ReportDuplicates(report, len(rights),
-		func(idx int) (T, bool) { return rights[idx], true },
-		func(idx, first int) error {
-			return fmt.Errorf(
-				"%s: %s: %w (also at %s)",
-				context.at(idx), merge.QuoteBounded(string(rights[idx])), ErrDuplicateRight,
-				context.at(first),
-			)
-		})
+	merge.ReportDuplicateValues(report, context, rights,
+		func(idx int) T { return rights[idx] }, ErrDuplicateRight)
 }

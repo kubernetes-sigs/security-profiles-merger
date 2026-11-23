@@ -139,17 +139,13 @@ type profileInput struct {
 // newInput returns the input of a document read whole, from a file or
 // stdin.
 func newInput(name string, data []byte) profileInput {
-	return profileInput{
-		name: name, data: data, source: nil, offset: 0, inArray: false, members: nil, err: nil,
-	}
+	return profileInput{name: name, data: data}
 }
 
 // failedInput returns the input of a file or of stdin that could not be
 // read, and why.
 func failedInput(name string, err error) profileInput {
-	return profileInput{
-		name: name, data: nil, source: nil, offset: 0, inArray: false, members: nil, err: err,
-	}
+	return profileInput{name: name, err: err}
 }
 
 // anyUnread reports whether an input could not be read, or held an array
@@ -665,8 +661,6 @@ func splitArray(name string, data []byte) ([]profileInput, error) {
 			source:  data,
 			offset:  start,
 			inArray: true,
-			members: nil,
-			err:     nil,
 		})
 
 		// Past the comma, if one follows, to the next element or the

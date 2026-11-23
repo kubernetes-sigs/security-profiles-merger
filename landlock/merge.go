@@ -73,6 +73,14 @@ type InputError = spm.InputError
 // LoweredRulePaths or enforces the inputs as separate layers. See the
 // Handled access, Rule paths and Lowered rule paths sections.
 //
+// Unlike Union, the result can lose access once downgraded: Options.Downgrade
+// of the result can deny what Intersect of the downgraded inputs permits,
+// which is the safe direction. Where one input handles refer and grants
+// it on /x and another handles only truncate, the result handles refer and
+// truncate without a rule; downgraded to ABIV2 it handles refer alone and
+// denies every move, while the downgraded second input handles nothing,
+// so their intersection keeps the rule granting refer on /x.
+//
 // Every input that is nil or fails Validate is reported as an InputError;
 // inputs past the budget are refused with ErrBudgetExceeded before anything
 // is merged. Validate counts no rules, so an artifact must pass
@@ -394,8 +402,14 @@ func dropImplicitRefer(result *Profile) {
 		return
 	}
 
-	result.HandledAccessFS = slices.DeleteFunc(
-		result.HandledAccessFS,
+	result.HandledAccessFS = deleteRefer(result.HandledAccessFS)
+}
+
+// deleteRefer removes FSAccessRefer from the rights in place, as
+// slices.DeleteFunc does, and returns the shortened slice.
+func deleteRefer(rights []FSAccessRight) []FSAccessRight {
+	return slices.DeleteFunc(
+		rights,
 		func(right FSAccessRight) bool { return right == FSAccessRefer },
 	)
 }
@@ -419,25 +433,28 @@ const rootPath = "/"
 // even when it does not list it: a rule granting it there is not loadable,
 // and the merge ignores the grant.
 func pruneUnhandledRights(profile *Profile) {
-	profile.PathRules = pruneRules(profile.PathRules, profile.HandledAccessFS, pathKind())
-	profile.NetRules = pruneRules(profile.NetRules, profile.HandledAccessNet, netKind())
+	profile.PathRules = pruneRules(profile.PathRules, profile.HandledAccessFS, fsBits, pathKind())
+	profile.NetRules = pruneRules(profile.NetRules, profile.HandledAccessNet, netBits, netKind())
 }
 
-func pruneRules[Rule any, Key cmp.Ordered, Right comparable](
-	rules []Rule, handled []Right, kind ruleKind[Rule, Key, Right],
+// pruneRules keeps of each rule the rights in handled, in their order, and
+// the rules left with any. The rules passed Validate, so every right has a
+// bit.
+func pruneRules[Rule any, Key, Right cmp.Ordered](
+	rules []Rule, handled []Right, numbered rightBits[Right], kind ruleKind[Rule, Key, Right],
 ) []Rule {
 	if len(rules) == 0 {
 		return nil
 	}
 
-	handledSet := toSet(handled)
+	handledMask := numbered.mask(handled)
 	result := make([]Rule, 0, len(rules))
 
 	for _, rule := range rules {
 		kept := make([]Right, 0, len(kind.access(rule)))
 
 		for _, right := range kind.access(rule) {
-			if _, ok := handledSet[right]; ok {
+			if numbered.of(right)&handledMask != 0 {
 				kept = append(kept, right)
 			}
 		}
@@ -920,8 +937,13 @@ type LoweredPath struct {
 // through its own rule on the path, once each, sorted by path, or nil when
 // no grant was lowered. Inputs are read as the merge reads them: paths
 // cleaned, rules for one path folded, unhandled rights dropped. A caller
-// opens these paths as the Lowered rule paths section says; for a Union
-// result the answer is informational.
+// opens these paths as the Lowered rule paths section says.
+//
+// The answer means something only for a result of Intersect. Union never
+// lowers a grant: it keeps every input rule on its own path, so a rule
+// beneath another input's ancestor rule is that input's own grant. The
+// function cannot tell, and for Union of /etc(read_file) and
+// /etc/passwd(read_file) it reports /etc/passwd as lowered from /etc.
 //
 // The result is checked with Validate first and reported on its own as a
 // *ResultError, never an InputError. Each input that is nil or fails

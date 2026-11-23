@@ -186,17 +186,9 @@ func newScanState(
 	onValue func(stack []*scanFrame, after, end int64) bool,
 ) *scanState {
 	return &scanState{
-		stack:        nil,
 		target:       target,
 		checkMissing: checkMissing,
 		onValue:      onValue,
-		scan: documentScan{
-			duplicates: pathCollector{paths: nil, wants: nil, omitted: 0},
-			unknown:    pathCollector{paths: nil, wants: nil, omitted: 0},
-			misspelled: pathCollector{paths: nil, wants: nil, omitted: 0},
-			missing:    pathCollector{paths: nil, wants: nil, omitted: 0},
-			failed:     false,
-		},
 	}
 }
 
@@ -379,10 +371,7 @@ func isClosing(delim json.Delim) bool {
 // newFrame opens an object or array whose value decodes into typ, or whose
 // type is not followed where typ is nil.
 func (state *scanState) newFrame(object bool, typ reflect.Type) *scanFrame {
-	frame := &scanFrame{
-		keys: nil, first: "", member: "", folded: "", index: 0, object: object, wantKey: object,
-		typ: nil, named: nil, field: "", child: nil,
-	}
+	frame := &scanFrame{object: object, wantKey: object}
 
 	for typ != nil && typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()

@@ -321,7 +321,10 @@ verify-go-floor: ## Verify go.mod's go line is the supported floor, GO_FLOOR
 
 # The seccomp merges read the native architecture, so some code is only
 # compiled for some of them, and go test runs only a few vet checks. These
-# are the Linux architectures the tests run on besides amd64.
+# are the Linux architectures the tests run on besides amd64. The module has
+# no architecture-specific files, so the type checker sees only the word
+# size and alignment of an architecture, and each of the others
+# seccomp/arch.go maps repeats those of one listed here.
 VET_ARCHES = 386 arm arm64 s390x ppc64le
 
 # The BSDs the build tags of cmd/spm name, which no test runs on. NetBSD

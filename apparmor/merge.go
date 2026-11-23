@@ -73,7 +73,7 @@ type InputError = spm.InputError
 func Intersect(profiles ...*Profile) (*Profile, error) {
 	matchers := newMatcherCache()
 
-	return foldProfiles(profiles, matchers, &intersectStrategy{matchers: matchers, exceeded: false})
+	return foldProfiles(profiles, matchers, &intersectStrategy{matchers: matchers})
 }
 
 // Union merges profiles so that the result permits an operation where any
@@ -272,9 +272,11 @@ func baselinePatternBytes(profile *Profile) int {
 
 type strategy interface {
 	mergeStrings(left, right []string) []string
-	mergePaths(left, right []string) []string
+	// mergePerms merges two path lists read as permission maps (see
+	// permLists), so that the executable lists and the filesystem rules
+	// are narrowed, budgeted and fallen back by one implementation.
+	mergePerms(left, right map[string]fsPermission) map[string]fsPermission
 	mergeBool(left, right *bool) *bool
-	mergeFilesystem(left, right *FilesystemRules) *FilesystemRules
 	// prepare adjusts a normalized copy of an input before it is merged.
 	prepare(profile *Profile)
 	// budgetErr reports a merge step that ran past the budget and would
@@ -443,13 +445,26 @@ func sortProfile(profile *Profile) {
 	}
 }
 
+// mergeTwo merges two profiles. A section only one of them holds is taken
+// as it is, and the path lists of a section both hold are merged as
+// permission maps (see permLists).
 func mergeTwo(left, right *Profile, mergeStrategy strategy) *Profile {
-	return &Profile{
-		Executable:   mergeExecutable(left.Executable, right.Executable, mergeStrategy),
-		Filesystem:   mergeFilesystem(left.Filesystem, right.Filesystem, mergeStrategy),
+	merged := &Profile{
+		Executable: mergeOptional(left.Executable, right.Executable, cloneExecutable,
+			func(_, _ *ExecutableRules) *ExecutableRules { return new(ExecutableRules) }),
+		Filesystem: mergeOptional(left.Filesystem, right.Filesystem, cloneFilesystem,
+			func(_, _ *FilesystemRules) *FilesystemRules { return new(FilesystemRules) }),
 		Network:      mergeNetwork(left.Network, right.Network, mergeStrategy),
 		Capabilities: mergeCapabilities(left.Capabilities, right.Capabilities, mergeStrategy),
 	}
+
+	for _, list := range permLists {
+		if list.held(left) && list.held(right) {
+			list.store(merged, mergeStrategy.mergePerms(list.perms(left), list.perms(right)))
+		}
+	}
+
+	return merged
 }
 
 func mergeOptional[T any](
@@ -466,30 +481,6 @@ func mergeOptional[T any](
 	}
 
 	return mergeFn(left, right)
-}
-
-func mergeExecutable(left, right *ExecutableRules, mergeStrategy strategy) *ExecutableRules {
-	return mergeOptional(
-		left,
-		right,
-		cloneExecutable,
-		func(lhs, rhs *ExecutableRules) *ExecutableRules {
-			return &ExecutableRules{
-				AllowedExecutables: mergeStrategy.mergePaths(
-					lhs.AllowedExecutables,
-					rhs.AllowedExecutables,
-				),
-				AllowedLibraries: mergeStrategy.mergePaths(
-					lhs.AllowedLibraries,
-					rhs.AllowedLibraries,
-				),
-			}
-		},
-	)
-}
-
-func mergeFilesystem(left, right *FilesystemRules, mergeStrategy strategy) *FilesystemRules {
-	return mergeOptional(left, right, cloneFilesystem, mergeStrategy.mergeFilesystem)
 }
 
 func mergeNetwork(left, right *NetworkRules, mergeStrategy strategy) *NetworkRules {
@@ -540,10 +531,10 @@ func (op *intersectStrategy) budgetErr() error {
 	return nil
 }
 
-// intersect intersects the permissions of two lists, recording whether the
+// mergePerms intersects the permissions of two lists, recording whether the
 // budget cut the matching short. Once one has, the merge fails, so the lists
 // after it are not matched.
-func (op *intersectStrategy) intersect(
+func (op *intersectStrategy) mergePerms(
 	left, right map[string]fsPermission,
 ) map[string]fsPermission {
 	if op.exceeded {
@@ -563,10 +554,8 @@ func (op *intersectStrategy) intersect(
 // It also drops the glob patterns that match nothing, so that no glob of
 // the other side matches one and intersecting a single profile gives what
 // intersecting it with itself gives (see keepGrantedLiterals for the
-// literals). The relative literals it would drop as well never reach it,
-// since Validate refuses them (see dropUnusablePaths). A pattern past the
-// call's compile budget is kept, as a pairwise intersection keeps it where
-// both sides list it.
+// literals). A pattern past the call's compile budget is kept, as a
+// pairwise intersection keeps it where both sides list it.
 func (op *intersectStrategy) prepare(profile *Profile) {
 	populateEmpty(profile)
 
@@ -594,12 +583,17 @@ func (op *intersectStrategy) mergeAll(profiles []*Profile) (*Profile, error) {
 }
 
 // permLists are the lists a merge matches separately, each read as a
-// permission map and written back from one.
+// permission map and written back from one: the executable lists read every
+// path as granting read, so that they merge like filesystem rules. held
+// reports whether a profile holds the list's section, which perms and store
+// need.
 var permLists = []struct {
+	held  func(profile *Profile) bool
 	perms func(profile *Profile) map[string]fsPermission
 	store func(profile *Profile, perms map[string]fsPermission)
 }{
 	{
+		held: holdsExecutable,
 		perms: func(profile *Profile) map[string]fsPermission {
 			return readPerms(profile.Executable.AllowedExecutables)
 		},
@@ -608,6 +602,7 @@ var permLists = []struct {
 		},
 	},
 	{
+		held: holdsExecutable,
 		perms: func(profile *Profile) map[string]fsPermission {
 			return readPerms(profile.Executable.AllowedLibraries)
 		},
@@ -616,6 +611,7 @@ var permLists = []struct {
 		},
 	},
 	{
+		held: func(profile *Profile) bool { return profile.Filesystem != nil },
 		perms: func(profile *Profile) map[string]fsPermission {
 			return expandFsPerms(profile.Filesystem)
 		},
@@ -624,6 +620,8 @@ var permLists = []struct {
 		},
 	},
 }
+
+func holdsExecutable(profile *Profile) bool { return profile.Executable != nil }
 
 // keepGrantedLiterals makes the result of a fold grant every literal path
 // an input lists in one list (the executables, the libraries or the
@@ -642,6 +640,11 @@ var permLists = []struct {
 // the other input already, so the pass can add only where an input grants
 // a literal it lists more through its own patterns, and a list in which no
 // input holds both a literal and a pattern is left as the fold returned it.
+// With any number of inputs, a list in which no input holds a pattern that
+// can match anything is left as well: every literal is then granted what
+// the entries of every input list for it, which the fold computes exactly,
+// so the pass would only look up every literal in every input to add
+// nothing.
 //
 // The pass charges its comparisons to a budget of its own, as the fold
 // charges each step (see matchBudget), and leaves a list as the fold
@@ -654,7 +657,8 @@ func keepGrantedLiterals(result *Profile, inputs []*Profile, matchers *matcherCa
 			perms[idx] = list.perms(input)
 		}
 
-		if len(inputs) == 2 && !slices.ContainsFunc(perms, matchers.holdsLiteralAndPattern) {
+		if !slices.ContainsFunc(perms, matchers.holdsUsablePattern) ||
+			len(inputs) == 2 && !slices.ContainsFunc(perms, matchers.holdsLiteralAndPattern) {
 			continue
 		}
 
@@ -665,6 +669,19 @@ func keepGrantedLiterals(result *Profile, inputs []*Profile, matchers *matcherCa
 			list.store(result, addPerms(kept, missing))
 		}
 	}
+}
+
+// holdsUsablePattern reports whether a list holds a pattern that can match
+// something. A pattern past the call's compile budget, which matches only
+// its own spelling, grants no literal anything.
+func (cache *matcherCache) holdsUsablePattern(perms map[string]fsPermission) bool {
+	for path := range perms {
+		if cache.isGlob(path) && cache.matcher(path).usable() {
+			return true
+		}
+	}
+
+	return false
 }
 
 // holdsLiteralAndPattern reports whether a list holds a literal path and a
@@ -712,7 +729,7 @@ func missingLiteralGrants(
 	}
 
 	keptSide := buildFsSide(kept, matchers)
-	budget := &matchBudget{pairs: 0, work: 0, limited: true}
+	budget := &matchBudget{limited: true}
 	// missing holds every literal visited, the ones that need nothing
 	// included until the end.
 	missing := make(map[string]fsPermission)
@@ -799,7 +816,7 @@ func literalGrant(
 
 		byGlobs, within := chargedGrants(&sides[idx], literal, budget)
 		if !within {
-			return fsPermission{read: false, write: false}, false
+			return fsPermission{}, false
 		}
 
 		possible = possible.intersect(byGlobs)
@@ -815,7 +832,7 @@ func literalGrant(
 
 		byGlobs, within := chargedGrants(&sides[idx], literal, budget)
 		if !within {
-			return fsPermission{read: false, write: false}, false
+			return fsPermission{}, false
 		}
 
 		perm = perm.intersect(own.union(byGlobs))
@@ -833,7 +850,7 @@ func anyPerm(perm fsPermission) bool {
 // looking at the side at all.
 func chargedGrants(side *fsSide, literal fsPathEntry, budget *matchBudget) (fsPermission, bool) {
 	if !budget.charge(1, 0) {
-		return fsPermission{read: false, write: false}, false
+		return fsPermission{}, false
 	}
 
 	return side.grants(literal, budget)
@@ -844,21 +861,19 @@ func chargedGrants(side *fsSide, literal fsPathEntry, budget *matchBudget) (fsPe
 // absent section means to AppArmor.
 func populateEmpty(profile *Profile) {
 	if profile.Executable == nil {
-		profile.Executable = &ExecutableRules{AllowedExecutables: nil, AllowedLibraries: nil}
+		profile.Executable = &ExecutableRules{}
 	}
 
 	if profile.Filesystem == nil {
-		profile.Filesystem = &FilesystemRules{
-			ReadOnlyPaths: nil, WriteOnlyPaths: nil, ReadWritePaths: nil,
-		}
+		profile.Filesystem = &FilesystemRules{}
 	}
 
 	if profile.Capabilities == nil {
-		profile.Capabilities = &CapabilityRules{AllowedCapabilities: nil}
+		profile.Capabilities = &CapabilityRules{}
 	}
 
 	if profile.Network == nil {
-		profile.Network = &NetworkRules{AllowRaw: nil, Protocols: nil}
+		profile.Network = &NetworkRules{}
 	}
 
 	if profile.Network.AllowRaw == nil {
@@ -866,7 +881,7 @@ func populateEmpty(profile *Profile) {
 	}
 
 	if profile.Network.Protocols == nil {
-		profile.Network.Protocols = &AllowedProtocols{AllowTCP: nil, AllowUDP: nil}
+		profile.Network.Protocols = &AllowedProtocols{}
 	}
 
 	if profile.Network.Protocols.AllowTCP == nil {
@@ -880,14 +895,6 @@ func populateEmpty(profile *Profile) {
 
 func (*intersectStrategy) mergeStrings(left, right []string) []string {
 	return merge.IntersectSlice(left, right)
-}
-
-// mergePaths intersects two plain path lists through the permission merge,
-// reading every path as granting one permission, so that the executable
-// lists and the filesystem rules are narrowed, budgeted and fallen back by
-// one implementation.
-func (op *intersectStrategy) mergePaths(left, right []string) []string {
-	return permittedPaths(op.intersect(readPerms(left), readPerms(right)))
 }
 
 // mergeBool never sees nil, since prepare populated every boolean.
@@ -909,10 +916,6 @@ func mergeBoolPtr(left, right *bool, combine func(lhs, rhs bool) bool) *bool {
 	val := combine(*left, *right)
 
 	return &val
-}
-
-func (op *intersectStrategy) mergeFilesystem(left, right *FilesystemRules) *FilesystemRules {
-	return collapseFsPerms(op.intersect(expandFsPerms(left), expandFsPerms(right)))
 }
 
 // intersectPerms returns the permissions both sides grant, per path, and
@@ -1150,7 +1153,7 @@ func literalsOnly(profiles []*Profile, matchers *matcherCache) bool {
 // hold is returned in the form a merge of two gives it. The other sections
 // are folded, as they hold a few values each.
 func unionLiterals(profiles []*Profile, union unionStrategy) *Profile {
-	result := &Profile{Executable: nil, Filesystem: nil, Network: nil, Capabilities: nil}
+	result := &Profile{}
 	executables := make(map[string]fsPermission)
 	libraries := make(map[string]fsPermission)
 	filesystem := make(map[string]fsPermission)
@@ -1205,16 +1208,12 @@ func (unionStrategy) mergeStrings(left, right []string) []string {
 	return merge.UnionSlice(left, right)
 }
 
-func (op unionStrategy) mergePaths(left, right []string) []string {
-	return permittedPaths(unionPerms(readPerms(left), readPerms(right), op.matchers))
+func (op unionStrategy) mergePerms(left, right map[string]fsPermission) map[string]fsPermission {
+	return unionPerms(left, right, op.matchers)
 }
 
 func (unionStrategy) mergeBool(left, right *bool) *bool {
 	return mergeBoolPtr(left, right, func(lhs, rhs bool) bool { return lhs || rhs })
-}
-
-func (op unionStrategy) mergeFilesystem(left, right *FilesystemRules) *FilesystemRules {
-	return collapseFsPerms(unionPerms(expandFsPerms(left), expandFsPerms(right), op.matchers))
 }
 
 // readPerms maps every path of a list to the read permission, so that a

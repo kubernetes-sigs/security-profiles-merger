@@ -270,6 +270,14 @@ func TestMergeRules(t *testing.T) {
 			intersect: "Profile{net:bind_tcp,connect_tcp :80(connect_tcp)}",
 		},
 		{
+			name: "unhandled network right survives a matched rule",
+			inputs: []*landlock.Profile{
+				netProfile(bind, landlock.NetRule{Port: 80, AccessNet: bind}),
+				netProfile(bindConnect, landlock.NetRule{Port: 80, AccessNet: bindConnect}),
+			},
+			intersect: "Profile{net:bind_tcp,connect_tcp :80(bind_tcp,connect_tcp)}",
+		},
+		{
 			name: "network rules on shared and new ports",
 			inputs: []*landlock.Profile{
 				netProfile(bindConnect, landlock.NetRule{Port: 80, AccessNet: bind}),
@@ -382,6 +390,55 @@ func TestMergePaths(t *testing.T) {
 	}
 
 	checkMergeResults(t, []mergeCase{
+		{
+			name: "ancestor rule covers a descendant",
+			inputs: []*landlock.Profile{
+				fsProfile(read, rule("/", read)),
+				fsProfile(read, rule(pathEtc, read)),
+			},
+			intersect: "Profile{fs:read_file /etc(read_file)}",
+		},
+		{
+			name: "descendant rule under an ancestor rule",
+			inputs: []*landlock.Profile{
+				fsProfile(read, rule(pathEtc, read)),
+				fsProfile(read, rule("/", read)),
+			},
+			intersect: "Profile{fs:read_file /etc(read_file)}",
+		},
+		{
+			// Under /var/data the first input grants read through /var and
+			// write through /var/data, so both survive. /var itself is not
+			// readable in the second.
+			name: "nested rules accumulate",
+			inputs: []*landlock.Profile{
+				fsProfile(
+					readWrite,
+					rule(pathVar, read),
+					rule("/var/data", fsRights{landlock.FSAccessWriteFile}),
+				),
+				fsProfile(readWrite, rule("/var/data", readWrite)),
+			},
+			intersect: "Profile{fs:read_file,write_file /var/data(read_file,write_file)}",
+		},
+		{
+			name: "a prefix is no ancestor",
+			inputs: []*landlock.Profile{
+				fsProfile(read, rule(pathEtc, read)),
+				fsProfile(read, rule("/etcetera", read)),
+			},
+			intersect: "Profile{fs:read_file}",
+		},
+		{
+			// The first input does not handle write_file, so it never
+			// restricts it, and the second allows it under /etc.
+			name: "unhandled right survives a matched rule",
+			inputs: []*landlock.Profile{
+				fsProfile(read, rule(pathEtc, read)),
+				fsProfile(readWrite, rule(pathEtc, readWrite)),
+			},
+			intersect: "Profile{fs:read_file,write_file /etc(read_file,write_file)}",
+		},
 		{
 			name: "rules on one path after cleaning",
 			inputs: []*landlock.Profile{
@@ -713,6 +770,20 @@ func TestMergePrunesUnhandledRights(t *testing.T) {
 }
 
 type fsRights = []landlock.FSAccessRight
+
+func fsProfile(handled []landlock.FSAccessRight, rules ...landlock.PathRule) *landlock.Profile {
+	return &landlock.Profile{
+		HandledAccessFS: handled,
+		PathRules:       rules,
+	}
+}
+
+func netProfile(handled []landlock.NetAccessRight, rules ...landlock.NetRule) *landlock.Profile {
+	return &landlock.Profile{
+		HandledAccessNet: handled,
+		NetRules:         rules,
+	}
+}
 
 func assertMergeFormat(
 	t *testing.T,

@@ -13,13 +13,16 @@ run:
     - runtime
 linters:
   # Every linter, so that one a new release adds is enabled by the bump
-  # rather than by someone remembering to list it. exhaustruct, gomodguard
-  # and wsl are deprecated; exhaustruct_v5, gomodguard_v2 and wsl_v5
-  # replace them. gochecknoglobals is off: the module's globals are lookup
-  # tables and caches, which a nolint on each only restated.
+  # rather than by someone remembering to list it. gomodguard and wsl are
+  # deprecated; gomodguard_v2 and wsl_v5 replace them. gochecknoglobals is
+  # off: the module's globals are lookup tables and caches, which a nolint
+  # on each only restated. exhaustruct and exhaustruct_v5 are off: they made
+  # every literal spell out its zero values, which hid the fields a literal
+  # actually sets.
   default: all
   disable:
     - exhaustruct
+    - exhaustruct_v5
     - gochecknoglobals
     - gomodguard
     - wsl
@@ -55,9 +58,6 @@ linters:
       local-replace-directives: true
       allowed:
         - module: github.com/opencontainers/runtime-spec
-    exhaustruct_v5:
-      ignore-patterns:
-        - 'github\.com/opencontainers/runtime-spec/specs-go\..*'
     gocritic:
       enable-all: true
       disabled-checks:
@@ -84,7 +84,6 @@ linters:
   exclusions:
     rules:
       - linters:
-          - exhaustruct_v5
           - funlen
           - goconst
           - gosec

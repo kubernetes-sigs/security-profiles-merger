@@ -268,8 +268,14 @@ jobs:
   # on amd64, and so does 2.6.1, the newest that loses rules (see the
   # Architectures section of the seccomp package documentation), until it
   # is no longer supported.
+  #
+  # libseccomp sorts the syscalls of a filter by priority unless asked for
+  # a binary tree, which is what runc asks for above 32 syscall names, and
+  # so for every profile of a realistic size. The model has to hold for the
+  # programs of both, so every combination runs at both optimization
+  # levels, as jobs of their own rather than one after the other in a job.
   test-libseccomp:
-    name: test-libseccomp / ${{ matrix.version }}${{ matrix.arch != 'amd64' && format(' / {0}', matrix.arch) || '' }}
+    name: test-libseccomp / ${{ matrix.version }}${{ matrix.arch != 'amd64' && format(' / {0}', matrix.arch) || '' }}${{ matrix.optimize == '2' && ' / binary tree' || '' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     env:
@@ -277,42 +283,33 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        version: ["2.5.4", "2.5.5", "2.6.0", "2.6.1", "2.6.2"]
+        arch: [amd64, arm64, "386"]
+        # 0 keeps libseccomp's default, 2 asks for a binary tree.
+        optimize: ["0", "2"]
+        exclude:
+          - {version: "2.5.4", arch: arm64}
+          - {version: "2.5.4", arch: "386"}
+          - {version: "2.5.5", arch: arm64}
+          - {version: "2.5.5", arch: "386"}
+          - {version: "2.6.0", arch: arm64}
+          - {version: "2.6.0", arch: "386"}
         include:
           - version: "2.5.4"
             sha256: d82902400405cf0068574ef3dc1fe5f5926207543ba1ae6f8e7a1576351dcbdb
-            arch: amd64
-            runner: ubuntu-latest
           - version: "2.5.5"
             sha256: 248a2c8a4d9b9858aa6baf52712c34afefcf9c9e94b76dce02c1c9aa25fb3375
-            arch: amd64
-            runner: ubuntu-latest
           - version: "2.6.0"
             sha256: 83b6085232d1588c379dc9b9cae47bb37407cf262e6e74993c61ba72d2a784dc
-            arch: amd64
-            runner: ubuntu-latest
           - version: "2.6.1"
             sha256: 501f66c667225d53791b97e1d7cf85ab764c297d04881f60f38f451c4b0ee1be
-            arch: amd64
+          - version: "2.6.2"
+            sha256: 6b845d352c6d7887d8d134c43d86850d40f5dcee11ad1675c18197ae4d869d42
+          - arch: amd64
             runner: ubuntu-latest
-          - version: "2.6.1"
-            sha256: 501f66c667225d53791b97e1d7cf85ab764c297d04881f60f38f451c4b0ee1be
-            arch: arm64
+          - arch: arm64
             runner: ubuntu-24.04-arm
-          - version: "2.6.1"
-            sha256: 501f66c667225d53791b97e1d7cf85ab764c297d04881f60f38f451c4b0ee1be
-            arch: "386"
-            runner: ubuntu-latest
-          - version: "2.6.2"
-            sha256: 6b845d352c6d7887d8d134c43d86850d40f5dcee11ad1675c18197ae4d869d42
-            arch: amd64
-            runner: ubuntu-latest
-          - version: "2.6.2"
-            sha256: 6b845d352c6d7887d8d134c43d86850d40f5dcee11ad1675c18197ae4d869d42
-            arch: arm64
-            runner: ubuntu-24.04-arm
-          - version: "2.6.2"
-            sha256: 6b845d352c6d7887d8d134c43d86850d40f5dcee11ad1675c18197ae4d869d42
-            arch: "386"
+          - arch: "386"
             runner: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -367,18 +364,7 @@ jobs:
       - name: Run the model against libseccomp ${{ matrix.version }}
         env:
           LIBSECCOMP_VERSION: ${{ matrix.version }}
-          PKG_CONFIG_PATH: ${{ env.LIBSECCOMP_PREFIX }}/lib/pkgconfig
-          LD_LIBRARY_PATH: ${{ env.LIBSECCOMP_PREFIX }}/lib
-        run: make test-libseccomp
-      # libseccomp sorts the syscalls of a filter by priority unless asked
-      # for a binary tree, which is what runc asks for above 32 syscall
-      # names, and so for every profile of a realistic size. The model has
-      # to hold for the programs of both. make test-libseccomp runs only the
-      # tests the libseccomp tag adds, so the same selection runs again.
-      - name: Run the model against libseccomp ${{ matrix.version }}, binary tree
-        env:
-          LIBSECCOMP_VERSION: ${{ matrix.version }}
-          SPM_LIBSECCOMP_OPTIMIZE: "2"
+          SPM_LIBSECCOMP_OPTIMIZE: ${{ matrix.optimize }}
           PKG_CONFIG_PATH: ${{ env.LIBSECCOMP_PREFIX }}/lib/pkgconfig
           LD_LIBRARY_PATH: ${{ env.LIBSECCOMP_PREFIX }}/lib
         run: make test-libseccomp
@@ -411,6 +397,8 @@ jobs:
   # The library handles Linux profile paths on every host and binaries are
   # released for these platforms, so the packages are tested there too, on
   # the floor and on the Go the binaries are built with.
+  # macos-latest is arm64 and windows-latest amd64, so the Intel macOS and
+  # arm64 Windows runners cover the other two platforms the releases ship.
   test-cross:
     name: test / ${{ matrix.os }} / ${{ matrix.go }} go
     runs-on: ${{ matrix.os }}
@@ -418,7 +406,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [macos-latest, macos-26-intel, windows-latest, windows-11-arm]
         go: [floor, release]
     steps:
       - run: git config --global core.autocrlf false

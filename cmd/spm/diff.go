@@ -155,7 +155,7 @@ func diffInputs(opts *diffOptions, inv *invocation) int {
 	// is checked under its mode first, which also bounds what a profile can
 	// make the comparison hold in memory (see the artifact limits).
 	if opts.validate != "" {
-		inv.checks = &inputChecks{modes: inv.validateModes(opts.validate), strategy: ""}
+		inv.checks = &inputChecks{modes: inv.validateModes(opts.validate)}
 	}
 
 	// Exit code 1 means "different" for diff, so unparsable input is a

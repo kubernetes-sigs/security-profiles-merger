@@ -18,6 +18,7 @@ package landlock
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -59,6 +60,22 @@ func TestAncestorsMatchRelation(t *testing.T) {
 			}
 		}
 	}
+}
+
+// isAncestorOrSelf reports whether ancestor is path itself or one of its
+// parent directories. Paths are expected to be cleaned. This states the
+// hierarchy relation ancestors enumerates; the merge uses the enumeration,
+// and TestAncestorsMatchRelation keeps the two in agreement.
+func isAncestorOrSelf(ancestor, path string) bool {
+	if ancestor == path {
+		return true
+	}
+
+	if ancestor == "/" {
+		return strings.HasPrefix(path, "/")
+	}
+
+	return strings.HasPrefix(path, ancestor+"/")
 }
 
 // TestCleanPathTable pins the canonical form of a rule path against written

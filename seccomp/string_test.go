@@ -266,8 +266,8 @@ func TestSyscallEntryString(t *testing.T) {
 	t.Parallel()
 
 	entry := seccomp.SyscallEntry{
-		Name:   syscallRead,
-		Action: specs.ActAllow,
+		Name:          syscallRead,
+		SyscallDetail: seccomp.SyscallDetail{Action: specs.ActAllow},
 	}
 
 	const want = "read->SCMP_ACT_ALLOW"
@@ -281,9 +281,11 @@ func TestSyscallEntryStringWithArgs(t *testing.T) {
 	t.Parallel()
 
 	entry := seccomp.SyscallEntry{
-		Name:   syscallClone,
-		Action: specs.ActAllow,
-		Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 0x10000, Op: specs.OpEqualTo}},
+		Name: syscallClone,
+		SyscallDetail: seccomp.SyscallDetail{
+			Action: specs.ActAllow,
+			Args:   []specs.LinuxSeccompArg{{Index: 0, Value: 0x10000, Op: specs.OpEqualTo}},
+		},
 	}
 
 	const want = "clone([0]SCMP_CMP_EQ:65536)->SCMP_ACT_ALLOW"
@@ -298,9 +300,8 @@ func TestSyscallEntryStringWithErrnoRet(t *testing.T) {
 
 	errnoRet := uint(1)
 	entry := seccomp.SyscallEntry{
-		Name:     syscallRead,
-		Action:   specs.ActErrno,
-		ErrnoRet: &errnoRet,
+		Name:          syscallRead,
+		SyscallDetail: seccomp.SyscallDetail{Action: specs.ActErrno, ErrnoRet: &errnoRet},
 	}
 
 	const want = "read->SCMP_ACT_ERRNO(errno:1)"
@@ -432,13 +433,19 @@ func TestFormattersAreBounded(t *testing.T) {
 		"FormatProfile(loaded)":      func() string { return seccomp.FormatProfile(loaded) },
 		"ProfileDiff.String(loaded)": func() string { return diff.String() },
 		"SyscallEntry.String": func() string {
-			return seccomp.SyscallEntry{Name: "read", Action: specs.ActAllow, ErrnoRet: nil, Args: manyArgs}.String()
+			return seccomp.SyscallEntry{
+				Name:          "read",
+				SyscallDetail: seccomp.SyscallDetail{Action: specs.ActAllow, Args: manyArgs},
+			}.String()
 		},
 		"SyscallDetail.String": func() string {
 			return seccomp.SyscallDetail{Action: specs.ActAllow, ErrnoRet: nil, Args: manyArgs}.String()
 		},
 		"SyscallEntry.String(long name)": func() string {
-			return seccomp.SyscallEntry{Name: longName, Action: specs.ActAllow, ErrnoRet: nil, Args: nil}.String()
+			return seccomp.SyscallEntry{
+				Name:          longName,
+				SyscallDetail: seccomp.SyscallDetail{Action: specs.ActAllow},
+			}.String()
 		},
 	} {
 		testutil.CheckTruncated(t, name, format())

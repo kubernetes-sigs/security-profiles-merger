@@ -120,7 +120,7 @@ func sharedMemory(result any, inputs ...any) ([]string, []string) {
 }
 
 func walkMemory(value reflect.Value, path string) *memoryWalk {
-	walk := &memoryWalk{ranges: nil, visited: map[visit]bool{}, opaque: nil}
+	walk := &memoryWalk{visited: map[visit]bool{}}
 	walk.value(value, path)
 
 	return walk
@@ -174,7 +174,7 @@ func (w *memoryWalk) reference(value reflect.Value, path string) {
 	}
 
 	kind := value.Kind()
-	key := visit{ptr: value.Pointer(), typ: value.Type(), capacity: 0}
+	key := visit{ptr: value.Pointer(), typ: value.Type()}
 
 	if kind == reflect.Slice {
 		key.capacity = value.Cap()

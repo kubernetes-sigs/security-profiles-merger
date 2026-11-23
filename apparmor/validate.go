@@ -210,7 +210,7 @@ func Validate(profile *Profile) error {
 	// Nothing Validate checks matches a name against a pattern, so it
 	// identifies paths without compiling them.
 	check := newValidator(newKeyCache())
-	check.structure(profile, true, false)
+	check.structure(profile, true)
 
 	return check.report.Err()
 }
@@ -228,7 +228,7 @@ func validateMergeInput(profile *Profile, matchers *matcherCache) (*Profile, err
 	}
 
 	check := newValidator(matchers)
-	normalized := check.structure(profile, false, true)
+	normalized, _ := check.structure(profile, false)
 
 	err := check.report.Err()
 	if err != nil {
@@ -262,26 +262,22 @@ type validator struct {
 }
 
 func newValidator(matchers *matcherCache) *validator {
-	return &validator{report: merge.Collector{}, matchers: matchers, strict: false}
+	return &validator{matchers: matchers}
 }
 
-// structure runs the checks of Validate on a non-nil profile. With
-// copyProfile it returns the normalized copy of the profile (see
-// normalizeProfile) its checks compared, which ValidateStrict,
-// ValidateArtifact and the merge read rather than normalizing every path
-// again, or nil when it stopped at an oversized path, which it normalizes
-// no further. Without it, as for Validate, it normalizes only the paths
-// its duplicate checks compare, the filesystem rules and, with
-// listDuplicates, the executables and libraries, and returns nil. The
-// pattern checks of ValidateStrict and ValidateArtifact have nothing to
-// work on once a path is oversized. listDuplicates selects the checks for a
-// path or capability listed twice within one list, which a merge leaves
-// out.
+// structure runs the checks of Validate on a non-nil profile and returns
+// the normalized copy of the profile (see normalizeProfile) its checks
+// compared, which ValidateStrict, ValidateArtifact and the merge read rather
+// than normalizing every path again. Where a path is oversized it returns
+// nil and false: that is reported on its own, before anything is
+// normalized, and the other checks have nothing to work on then.
+// listDuplicates selects the checks for a path or capability listed twice
+// within one list, which a merge leaves out.
 func (check *validator) structure(
-	profile *Profile, listDuplicates, copyProfile bool,
-) *Profile {
-	// Oversized paths are reported on their own: every other check scans
-	// the paths.
+	profile *Profile, listDuplicates bool,
+) (*Profile, bool) {
+	// Oversized paths are reported on their own, before anything is
+	// normalized: every other check scans the paths.
 	var lengths merge.Collector
 
 	for context, paths := range pathLists(profile) {
@@ -294,20 +290,10 @@ func (check *validator) structure(
 	if err != nil {
 		check.report.Add(err)
 
-		return nil
+		return nil, false
 	}
 
-	// The duplicate checks compare the filesystem rules normalized. Only a
-	// caller that goes on to read the other lists normalized has the whole
-	// profile copied; Validate normalizes no more than it compares.
-	var normalized *Profile
-
-	normalizedFs := normalizeFilesystem(profile.Filesystem)
-
-	if copyProfile {
-		normalized = normalizeProfile(profile)
-		normalizedFs = normalized.Filesystem
-	}
+	normalized := normalizeProfile(profile)
 
 	for context, paths := range pathLists(profile) {
 		check.reject(context, *paths, func(path string) bool {
@@ -321,7 +307,7 @@ func (check *validator) structure(
 		check.reject(context, *paths, referencesVariable, ErrUnsupportedVariable, showQuoted)
 	}
 
-	check.duplicatePaths(profile, normalized, normalizedFs, listDuplicates)
+	check.duplicatePaths(profile, normalized, listDuplicates)
 
 	if profile.Capabilities != nil {
 		caps := profile.Capabilities.AllowedCapabilities
@@ -333,33 +319,7 @@ func (check *validator) structure(
 		}
 	}
 
-	return normalized
-}
-
-// normalizedExecutables returns the executable and library paths of the
-// profile normalized, read from the normalized copy when there is one and
-// normalized from the profile's own lists otherwise.
-func normalizedExecutables(profile, normalized *Profile) ([]string, []string) {
-	if normalized != nil && normalized.Executable != nil {
-		return normalized.Executable.AllowedExecutables, normalized.Executable.AllowedLibraries
-	}
-
-	return normalizePaths(profile.Executable.AllowedExecutables),
-		normalizePaths(profile.Executable.AllowedLibraries)
-}
-
-// normalizeFilesystem returns the filesystem rules with their paths
-// normalized, or nil for nil rules.
-func normalizeFilesystem(rules *FilesystemRules) *FilesystemRules {
-	if rules == nil {
-		return nil
-	}
-
-	return &FilesystemRules{
-		ReadOnlyPaths:  normalizePaths(rules.ReadOnlyPaths),
-		WriteOnlyPaths: normalizePaths(rules.WriteOnlyPaths),
-		ReadWritePaths: normalizePaths(rules.ReadWritePaths),
-	}
+	return normalized, true
 }
 
 // ValidateStrict validates a profile a person wrote. It rejects everything
@@ -386,28 +346,23 @@ func ValidateStrict(profile *Profile) error {
 // duplicatePaths reports the paths listed in two filesystem categories and,
 // with listDuplicates, the paths one list lists twice, filesystem category,
 // AllowedExecutables or AllowedLibraries alike, compared as the merge
-// matches them, read from the normalized copy where structure made one and
-// from normalizedFs, the normalized filesystem rules, otherwise.
-func (check *validator) duplicatePaths(
-	profile, normalized *Profile, normalizedFs *FilesystemRules, listDuplicates bool,
-) {
+// matches them, read from normalized, the normalized copy of the profile.
+func (check *validator) duplicatePaths(profile, normalized *Profile, listDuplicates bool) {
 	if profile.Filesystem != nil {
-		check.filesystemDuplicates(profile.Filesystem, normalizedFs, listDuplicates)
+		check.filesystemDuplicates(profile.Filesystem, normalized.Filesystem, listDuplicates)
 	}
 
 	if !listDuplicates || profile.Executable == nil {
 		return
 	}
 
-	executables, libraries := normalizedExecutables(profile, normalized)
-
 	check.listDuplicates(
 		allowedExecutablesPath, profile.Executable.AllowedExecutables,
-		executables, ErrDuplicateExecutablePath,
+		normalized.Executable.AllowedExecutables, ErrDuplicateExecutablePath,
 	)
 	check.listDuplicates(
 		allowedLibrariesPath, profile.Executable.AllowedLibraries,
-		libraries, ErrDuplicateExecutablePath,
+		normalized.Executable.AllowedLibraries, ErrDuplicateExecutablePath,
 	)
 }
 
@@ -449,13 +404,13 @@ func (check *validator) artifact(profile *Profile) error {
 		return err
 	}
 
-	normalized := check.structure(profile, true, true)
+	normalized, scanned := check.structure(profile, true)
 
 	if profile.Capabilities != nil {
 		check.capabilitySpelling(profile.Capabilities.AllowedCapabilities)
 	}
 
-	if normalized != nil {
+	if scanned {
 		check.loadablePaths(profile, normalized, true)
 	}
 
@@ -513,18 +468,15 @@ func validatePathCount(profile *Profile) error {
 
 // loadablePaths reports the paths apparmor_parser would refuse and the glob
 // patterns the matcher drops, which ValidateStrict and ValidateArtifact both
-// check, given the normalized copy structure returned. ValidateBaseline runs
-// it without unquotable, the check of the characters a rule cannot hold
-// unescaped, since a baseline is rendered through QuotePath, whose spelling
-// it checks instead. Callers run it only when no path is oversized, which
-// structure has already reported.
+// check, given the profile's normalized copy (see normalizeProfile).
+// ValidateBaseline runs it without unquotable, the check of the characters a
+// rule cannot hold unescaped, since a baseline is rendered through
+// QuotePath, whose spelling it checks instead. Callers run it only when no
+// path is oversized, which structure has already reported.
 func (check *validator) loadablePaths(profile, normalizedProfile *Profile, unquotable bool) {
-	// The copy has the sections of the profile (see normalizeProfile), so
-	// pathLists yields the same lists of both in the same order, and they
-	// are paired by walking both. A list the copy does not pair, which only
-	// a change to normalizeProfile could bring about, is normalized here
-	// instead, so that such a change costs work rather than a panic on an
-	// untrusted profile.
+	// The copy has the sections of the profile, each list normalized
+	// element by element, so pathLists yields the same lists of both in the
+	// same order.
 	var normalizedLists [][]string
 
 	for _, list := range pathLists(normalizedProfile) {
@@ -539,16 +491,7 @@ func (check *validator) loadablePaths(profile, normalizedProfile *Profile, unquo
 		// escaped slashes from a run of slashes, so those checks read the
 		// raw paths and report them as written. The pattern checks apply to
 		// the normalized form, which is what the merge matches.
-		paths := *list
-
-		var normalized []string
-
-		if idx < len(normalizedLists) && len(normalizedLists[idx]) == len(paths) {
-			normalized = normalizedLists[idx]
-		} else {
-			normalized = normalizePaths(paths)
-		}
-
+		paths, normalized := *list, normalizedLists[idx]
 		idx++
 
 		if unquotable {

@@ -298,6 +298,26 @@ func TestLoweredRulePathsInputErrors(t *testing.T) {
 	}
 }
 
+// TestLoweredRulePathsMisreadUnion pins why LoweredRulePaths means nothing
+// for a Union result: Union keeps every input rule on its own path, yet the
+// function reports the deeper rule as lowered from the other input's
+// ancestor rule.
+func TestLoweredRulePathsMisreadUnion(t *testing.T) {
+	t.Parallel()
+
+	read := fsRights{landlock.FSAccessReadFile}
+	etc := fsProfile(read, landlock.PathRule{Path: "/etc", AccessFS: read})
+	passwd := fsProfile(read, landlock.PathRule{Path: "/etc/passwd", AccessFS: read})
+
+	result := assertMergeFormat(t, "Union", landlock.Union,
+		"Profile{fs:read_file /etc(read_file) /etc/passwd(read_file)}", etc, passwd)
+
+	want := []string{"/etc/passwd"}
+	if got := loweredPaths(t, result, etc, passwd); !slices.Equal(got, want) {
+		t.Errorf("LoweredRulePaths = %v, want %v", got, want)
+	}
+}
+
 // loweredPaths returns the paths LoweredRulePaths reports, failing the test
 // on an error.
 func loweredPaths(t *testing.T, result *landlock.Profile, inputs ...*landlock.Profile) []string {

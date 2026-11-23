@@ -227,14 +227,18 @@ func ReportDuplicates[Key comparable](
 // an earlier value has, as in `field[3]: "x": <sentinel> (also at
 // field[1])`, quoting the value with QuoteBounded. key returns the key of
 // the value at idx.
-func ReportDuplicateValues[T ~string, Key comparable](
-	collector *Collector, field string, values []T, key func(idx int) Key, sentinel error,
+//
+// field is a string or a fmt.Stringer, formatted only for a failure the
+// report has room for, so a caller validating many lists can pass a
+// Stringer that builds the name then rather than a string per list.
+func ReportDuplicateValues[T ~string, Key comparable, Field any](
+	collector *Collector, field Field, values []T, key func(idx int) Key, sentinel error,
 ) {
 	ReportDuplicates(collector, len(values),
 		func(idx int) (Key, bool) { return key(idx), true },
 		func(idx, first int) error {
 			return fmt.Errorf(
-				"%s[%d]: %s: %w (also at %s[%d])",
+				"%v[%d]: %s: %w (also at %v[%d])",
 				field, idx, QuoteBounded(string(values[idx])), sentinel, field, first,
 			)
 		})
