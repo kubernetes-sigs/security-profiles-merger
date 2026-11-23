@@ -380,6 +380,54 @@ func TestLoweredRulePathsNameTheAncestor(t *testing.T) {
 	}
 }
 
+// TestLoweredRulePathsRelativeAncestor checks the ancestor reported for a
+// relative rule path, which "/" is no ancestor of: a grant the input also
+// carries on "/" is still lowered from the relative ancestor, never from
+// "/", and InRoot stays false.
+func TestLoweredRulePathsRelativeAncestor(t *testing.T) {
+	t.Parallel()
+
+	read := fsRights{landlock.FSAccessReadFile}
+	result := fsProfile(read, landlock.PathRule{Path: "a/b", AccessFS: read})
+
+	tests := map[string]struct {
+		inputs []*landlock.Profile
+		want   []landlock.LoweredPath
+	}{
+		"granted on the root and a relative ancestor": {
+			inputs: []*landlock.Profile{
+				fsProfile(read,
+					landlock.PathRule{Path: "/", AccessFS: read},
+					landlock.PathRule{Path: "a", AccessFS: read}),
+			},
+			want: []landlock.LoweredPath{{Path: "a/b", Ancestor: "a", Input: 0, InRoot: false}},
+		},
+		"granted on a relative ancestor": {
+			inputs: []*landlock.Profile{
+				fsProfile(read, landlock.PathRule{Path: "a", AccessFS: read}),
+			},
+			want: []landlock.LoweredPath{{Path: "a/b", Ancestor: "a", Input: 0, InRoot: false}},
+		},
+		"granted on the root only": {
+			inputs: []*landlock.Profile{
+				fsProfile(read, landlock.PathRule{Path: "/", AccessFS: read}),
+			},
+			want: nil,
+		},
+	}
+
+	for name, test := range tests {
+		got, err := landlock.LoweredRulePaths(result, test.inputs...)
+		if err != nil {
+			t.Fatalf("%s: LoweredRulePaths: %v", name, err)
+		}
+
+		if !slices.Equal(got, test.want) {
+			t.Errorf("%s: LoweredRulePaths = %v, want %v", name, got, test.want)
+		}
+	}
+}
+
 // requiredABI returns RequiredABIVersion, failing the test on an error.
 func requiredABI(t *testing.T, profile *landlock.Profile) landlock.ABIVersion {
 	t.Helper()

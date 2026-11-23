@@ -187,9 +187,9 @@ func (c *ruleChecker) conflict(idx int, name string) {
 }
 
 // skip reports whether a syscall needs no further rules: it has been
-// reported already, or it is over the rule bound, which checkCounts reports
-// on its own. forEachClause consults it per name, so the rules of an
-// over-bound syscall are never expanded.
+// reported already, or it is over the rule bound, which validateRuleCount
+// reports on its own. forEachClause consults it per name, so the rules of
+// an over-bound syscall are never expanded.
 func (c *ruleChecker) skip(name string) bool {
 	_, done := c.reported[name]
 

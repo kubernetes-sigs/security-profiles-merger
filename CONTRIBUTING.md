@@ -28,14 +28,16 @@ We have full documentation on how to get started contributing here:
 - The libseccomp headers (`libseccomp-dev` on Debian and Ubuntu), for
   `make lint` and `make test-libseccomp`; see
   [Local Development](#local-development).
-- Nothing else for the Makefile: it runs the pinned golangci-lint through
-  `go run` (which needs Go 1.26 or newer, see below), and mdtoc,
-  govulncheck, zeitgeist, actionlint and gorelease through `go tool` from
-  their own module, `hack/tools/go.mod`. The targets that run those tools
-  need a Go at least as new as that module's `go` line, since the go
-  command picks its toolchain from `go.mod` alone. CI runs them with the Go
-  in `.go-version`, so a tools update that raises that `go` line has to
-  raise `.go-version` too.
+- shellcheck, for `make lint-shell`, which `make verify` runs.
+- Nothing else for the Makefile: it installs the pinned golangci-lint into
+  `build/` with `go install` (which needs Go 1.26 or newer, see below), and
+  runs mdtoc, govulncheck, zeitgeist, actionlint and gorelease through
+  `go tool` from their own module, `hack/tools/go.mod`. That module's `go`
+  line can be newer than the one in `go.mod`, and the go command picks its
+  toolchain from `go.mod` alone, so the Makefile runs those tools with
+  `GOTOOLCHAIN` set to the Go in `.go-version`, which the go command
+  downloads when it is not the one on `PATH`. A tools update that raises
+  that module's `go` line has to raise `.go-version` too.
 
 Fill in the `release-note` block of the pull request template in every pull
 request, with `NONE` if a consumer sees no change. The release notes are
@@ -178,17 +180,21 @@ binary would take the name of the `spm` package directory.
 What `make help` does not say:
 
 - `make lint` loads the cgo bridge behind the `libseccomp` build tag, which
-  `.golangci.yml` sets along with `apparmor_parser`, so any libseccomp
-  headers do. The default `make` target and `make verify` run `lint`, so
-  they need the headers too.
-- `make lint` builds golangci-lint from source with `go run`, and its
-  `go.mod` requires Go 1.26: it needs that Go or a newer one on `PATH`, or a
-  `GOTOOLCHAIN` that lets the go command fetch it. CI installs the release
-  binary of the same version instead.
+  `.golangci.yml` sets along with `apparmor_parser` and `runtime`, so any
+  libseccomp headers do. The default `make` target and `make verify` run
+  `lint`, so they need the headers too.
+- `make lint` builds golangci-lint from source with `go install` into
+  `build/golangci-lint-v<version>`, and its `go.mod` requires Go 1.26: it
+  needs that Go or a newer one on `PATH`, or a `GOTOOLCHAIN` that lets the
+  go command fetch it. It then lints `cmd/spm` once more for each of
+  `LINT_OSES` (`make lint-cmd-oses`). CI installs the release binary of the
+  same version instead and hands it to `make lint-cmd-oses`.
 - `make verify-coverage` fails below 95% coverage by default; set
   `COVERAGE_THRESHOLD` to change it.
 - `make test-libseccomp` runs only the tests the `libseccomp` tag adds, and
   takes `LIBSECCOMP_VERSION` to require a particular version, as CI does.
+  `make test-apparmor-parser` likewise runs only the tests the
+  `apparmor_parser` tag adds.
 - `make verify` runs its steps one at a time even under `make -j`, since it
   rewrites files in place before checking that nothing changed.
 - `make verify-syscalls` downloads with `curl`.
@@ -202,9 +208,10 @@ Windows, macOS and NetBSD), `vet-arch` (`go vet` for the Linux architectures
 the tests run on besides amd64, and for the BSDs), `build`,
 `verify-go-floor` (go.mod's go line is exactly `GO_FLOOR`), `verify-tidy`,
 `verify-mdtoc`, `verify-golden`, `verify-syscalls`, `verify-dependencies`,
-`govulncheck`, `lint-actions` and `test-api-check` in one command, with
-the Go on your `PATH`. These CI jobs need something the Makefile does not
-install or a machine it does not have:
+`govulncheck`, `lint-actions`, `lint-shell` and `test-api-check` in one
+command, with the Go on your `PATH` (and the Go in `.go-version` for the
+tools of `hack/tools/go.mod`). These CI jobs need something the Makefile
+does not install or a machine it does not have:
 
 | CI job | Local equivalent | Needs |
 |--------|------------------|-------|
@@ -214,12 +221,12 @@ install or a machine it does not have:
 | `test / linux-386` | `GOARCH=386 CGO_ENABLED=0 make test-wall-clock` | nothing more on amd64, and a machine that runs little else |
 | `test / linux-arm64` | `CGO_ENABLED=0 go test -count=1 ./...` | an arm64 machine |
 | `test / linux-<arch> (qemu)` | `GOARCH=<arch> CGO_ENABLED=0 go test -count=1 ./...` | qemu-user with binfmt_misc for s390x, ppc64le or arm |
-| `test / release go` | `make test-wall-clock` (the suite one package at a time, with the wall-clock bounds on) | the Go in `.go-version`, and a machine that runs little else |
+| `test / release go` | `make test-wall-clock` (the suite one package at a time, with the wall-clock bounds on), then `go test -run='^$' -bench=. -benchtime=1x ./...` (each benchmark once) | the Go in `.go-version`, and a machine that runs little else |
 | `fuzz / <target>` | `make fuzz` | time |
 | `test-libseccomp / <version>`, `test-libseccomp / <version> / <arch>` | `make test-libseccomp`, then `SPM_LIBSECCOMP_OPTIMIZE=2 make test-libseccomp` | cgo and that libseccomp version, built for arm64 or for 386 (`GOARCH=386 CC="gcc -m32"`) |
 | `test / runtime` | `make test-runtime` | Linux with Landlock, runc or crun, strace and unprivileged user namespaces; without them the tests skip |
 | `api / gorelease` | `make api-report` | a clean working tree; it fails on an incompatible change only from v1.0.0 on |
-| `apparmor-parser` | `go test -count=1 -tags apparmor_parser -run TestTranslationAgreesWithApparmorParser ./apparmor/` | `apparmor_parser` on `PATH` or named by `SPM_APPARMOR_PARSER` |
+| `apparmor-parser` | `make test-apparmor-parser` | `apparmor_parser` on `PATH` or named by `SPM_APPARMOR_PARSER`; without it the tests skip |
 
 ### Golden files
 
@@ -275,15 +282,15 @@ merge should keep all four passing:
   permits more than an input libseccomp loads, and `Union` never less. An
   evaluator written from a mistaken reading of libseccomp would agree with the
   merge and still be wrong; this is what catches that. CI runs these tests
-  against libseccomp 2.5.4, 2.5.5, 2.6.0, 2.6.1 and 2.6.2 on amd64, and
-  against 2.6.1, the newest release that loses rules, and 2.6.2 on arm64
-  and 386 as well, each built from a checksum-pinned release tarball, and
-  `TestLibseccompVersion` reads the version out of the loaded library and
-  fails unless it is the one that was built, so a run always names the
-  version that answered. On a 386 build the tests whose
-  expectations come from the evaluator skip, since it models a 64-bit
-  native architecture that calls every syscall directly; the merge
-  differentials run there as everywhere. libseccomp 2.5.2 is left out (see
+  against every release in its `test-libseccomp` matrix on amd64, and
+  against the newest release and 2.6.1, the newest that loses rules, on
+  arm64 and 386 as well, each built from a checksum-pinned release tarball,
+  and `TestLibseccompVersion` reads the version out of the loaded library
+  and fails unless it is the one that was built, so a run always names the
+  version that answered. On a 386 build the tests whose expectations come
+  from the evaluator skip, since it models a 64-bit native architecture
+  that calls every syscall directly; the merge differentials run there as
+  everywhere. libseccomp 2.5.2 is left out (see
   [below](#seccomp-architectures-and-libseccomp-releases)).
 - `make test-runtime` (`internal/runtimetest`, behind the `runtime` tag)
   checks a handful of results against what is really loaded: Landlock
@@ -310,13 +317,13 @@ those statements were established, which a change to them has to redo:
   ppc64, s390, s390x, m68k, sheb) are big-endian, which libseccomp does not
   combine with a little-endian architecture in one filter, so they are
   inferred from the probed ones.
-- The evaluation model is checked against libseccomp 2.5.4, 2.5.5, 2.6.0,
-  2.6.1 and 2.6.2. libseccomp 2.5.2 compiles some rule sets into a binary
-  tree that evaluates differently from those releases, so a merge result
-  can permit more (intersection) or less (union) than an input there, which
-  is why releases older than 2.5.4 are not supported. The table of where each
-  release places a syscall also covers 2.5.2, which only makes the check
-  for lost rules more cautious.
+- The evaluation model is checked against the releases in the
+  `test-libseccomp` matrix of CI. libseccomp 2.5.2 compiles some rule sets
+  into a binary tree that evaluates differently from those releases, so a
+  merge result can permit more (intersection) or less (union) than an input
+  there, which is why releases older than 2.5.4 are not supported. The
+  table of where each release places a syscall also covers 2.5.2, which
+  only makes the check for lost rules more cautious.
 - The defect: libseccomp 2.5.2, 2.5.4, 2.5.5, 2.6.0 and 2.6.1 load the
   syscall number in the code of the syscall they test first in an
   architecture's block, and leave that code out when the architecture lacks
@@ -340,9 +347,9 @@ those statements were established, which a change to them has to redo:
   in the same release, applied alone to 2.6.1, removes the defect too, so a
   distribution backporting either one no longer has it.
 - The placement table, `seccomp/syscalls.go`, is generated from the
-  syscall tables of libseccomp 2.5.2, 2.5.4, 2.5.5, 2.6.0, 2.6.1 and 2.6.2
-  and combined so that it errs safe for all of them (see
-  `make verify-syscalls`).
+  syscall tables of the releases `SYSCALL_CSVS` in the Makefile lists,
+  those of the `test-libseccomp` matrix and 2.5.2, and combined so that it
+  errs safe for all of them (see `make verify-syscalls`).
 - A node whose native architecture is not known may be any architecture
   libseccomp resolves as native, not only those Go runs on: crun is written
   in C and runs natively on x32, MIPS n32, ppc, s390, sh, m68k and parisc.

@@ -285,15 +285,17 @@ means stdout, as `-` means stdin for an input:
 - On Unix, a regular file is left with mode `0600` regardless of the umask,
   since a merged profile can name node-local paths.
 - On Unix, a symbolic link as the final path component is refused rather
-  than followed, so `--output /dev/stdout` is refused as well, and so are
-  `/dev/fd/N` and a process substitution such as `>(cmd)`, which the shell
-  passes as one: use `--output -`, shell redirection or a pipe for those. A
-  symlinked *directory* in the path is followed; the guard is about the file
-  `--output` names, not about the route to it, and a loop of symbolic links
-  on that route is reported as a loop rather than as a refused link. The
-  path is used as written, never cleaned, so `link/../out.json` names the
-  file beside the directory `link` points to, as it does for a shell
-  redirection.
+  than followed, so `--output /dev/stdout` is refused as well. On Linux so
+  are `/dev/fd/N` and a process substitution such as `>(cmd)`, which the
+  shell passes as one: use `--output -`, shell redirection or a pipe for
+  those. On macOS `/dev/fd/N` is the open file itself rather than a link to
+  it, so the pipe of a process substitution, or a terminal, is written to in
+  place. A symlinked *directory* in the path is followed; the guard is about
+  the file `--output` names, not about the route to it, and a loop of
+  symbolic links on that route is reported as a loop rather than as a
+  refused link. The path is used as written, never cleaned, so
+  `link/../out.json` names the file beside the directory `link` points to,
+  as it does for a shell redirection.
 - Elsewhere the file keeps the permissions the platform gives it and a
   symbolic link is followed to the file it names.
 

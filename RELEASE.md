@@ -42,6 +42,16 @@ fork carries the tags it forked, and pushing one there must not start a release
 under someone else's name, so the job is skipped outside this repository; the
 gate still runs, which is what makes a fork useful for testing the flow.
 
+Signing runs only for a tag; the snapshot build in CI skips it. Before a
+release that follows a change to how it signs, such as a cosign or
+goreleaser update, anyone with write access to the repository can run the
+release workflow by hand from a branch (OWNERS files grant no GitHub
+permissions): its `sign-dry-run` job builds a snapshot, signs its checksums
+with cosign keyless and verifies the signature against the workflow's
+identity at that branch. It creates no release and attests or uploads
+nothing, though keyless signing records the signature in the public Rekor
+transparency log.
+
 The binaries are built with the Go in `.go-version`, a current stable release
 that CI also tests and scans with govulncheck, rather than with the `go` line
 of `go.mod`, which is the oldest Go the library supports. `dependencies.yaml`
