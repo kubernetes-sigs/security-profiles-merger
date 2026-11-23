@@ -45,6 +45,12 @@ func TestOutputOverMountPointIsWrittenInPlace(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The umask may have cleared bits WriteFile asked for.
+	err = os.Chmod(target, 0o640)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	busy := func(oldPath, newPath string) error {
 		return &os.LinkError{Op: "rename", Old: oldPath, New: newPath, Err: syscall.EBUSY}
 	}

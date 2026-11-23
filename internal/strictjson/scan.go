@@ -46,12 +46,13 @@ import (
 // many values under a long name. A path is built from the stack only when a
 // finding is reported.
 type scanFrame struct {
-	// keys holds the folded names of the members seen so far in an object,
-	// mapped to whether they were already reported as repeated. It is made
-	// at the second member: most objects of a profile hold one member or
-	// none, and the name of the first is kept in first until then.
+	// keys holds the names of the members seen so far in an object, folded
+	// unless the object decodes into a map (see addKey), mapped to whether
+	// they were already reported as repeated. It is made at the second
+	// member: most objects of a profile hold one member or none, and the
+	// name of the first is kept in first until then.
 	keys map[string]bool
-	// first is the folded name of the first member of an object.
+	// first is the name of the first member of an object, as keys holds it.
 	first string
 	// member is the name of the object member whose value comes next, and
 	// folded the same name folded.
@@ -99,16 +100,17 @@ type documentScan struct {
 // looked for where checkMissing is set. A nil target follows no type and
 // finds only repeated members.
 //
-// Repeated members are compared the way encoding/json matches names to
-// struct fields, ignoring case, because a case-sensitive parser reads
+// Repeated members are compared the way encoding/json matches names to struct
+// fields, ignoring case, because a case-sensitive parser reads
 // "defaultAction" and "DefaultAction" as different members where
-// encoding/json fills one field from both. encoding/json decodes each
-// occurrence into what the one before it filled, so a later scalar or array
-// replaces the earlier one while a later object merges into it field by
-// field, and other parsers keep the first or the last occurrence: a profile
-// with repeated members means different things to different readers, and
-// the other findings, which read every occurrence on its own, are only
-// worth reporting for a document without one.
+// encoding/json fills one field from both. The keys of an object decoding
+// into a map are compared as written, as encoding/json keeps them.
+// encoding/json decodes each occurrence into what the one before it filled,
+// so a later scalar or array replaces the earlier one while a later object
+// merges into it field by field, and other parsers keep the first or the last
+// occurrence: a profile with repeated members means different things to
+// different readers, and the other findings, which read every occurrence on
+// its own, are only worth reporting for a document without one.
 //
 // Members are matched to fields the way encoding/json does: by the exact
 // JSON name first, by the folded name otherwise. A misspelled member is one
@@ -441,25 +443,32 @@ func (frame *scanFrame) expectsKey() bool {
 }
 
 // addKey records a member name and reports whether this is the first time
-// the name repeats, which is when its path is collected.
+// the name repeats, which is when its path is collected. Names repeat when
+// they fold alike, as encoding/json matches them to struct fields, except
+// in an object decoding into a map, which keeps each key as written.
 func (frame *scanFrame) addKey(key string) bool {
 	frame.member = key
 	frame.wantKey = false
 	frame.folded = foldName(key)
 	frame.index++
 
+	name := frame.folded
+	if frame.typ != nil && frame.typ.Kind() == reflect.Map {
+		name = key
+	}
+
 	switch {
 	case frame.index == 1:
-		frame.first = frame.folded
+		frame.first = name
 
 		return false
 	case frame.keys == nil:
 		frame.keys = map[string]bool{frame.first: false}
 	}
 
-	reported, seen := frame.keys[frame.folded]
+	reported, seen := frame.keys[name]
 	if !seen {
-		frame.keys[frame.folded] = false
+		frame.keys[name] = false
 
 		return false
 	}
@@ -468,7 +477,7 @@ func (frame *scanFrame) addKey(key string) bool {
 		return false
 	}
 
-	frame.keys[frame.folded] = true
+	frame.keys[name] = true
 
 	return true
 }

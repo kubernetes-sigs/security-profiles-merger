@@ -71,7 +71,8 @@ var (
 	ErrRelativePath = spm.ErrRelativePath
 
 	// ErrTrailingSlash is returned by ValidateBaseline, ValidateArtifact and
-	// ValidateStrict when a path rule other than "/" ends in "/" or "/.".
+	// ValidateStrict when a path rule ends in "/" or "/." without naming the
+	// root, as "/", "/." and "//" do.
 	ErrTrailingSlash = errors.New(`path ends in "/" or "/."`)
 
 	// ErrInvalidUTF8Path is returned by ValidateBaseline, ValidateArtifact
@@ -488,7 +489,7 @@ func ValidateArtifact(profile *Profile) error {
 
 // ValidateBaseline validates the profile a runtime trusts: every check of
 // Validate, and what a kernel could not load: a relative path
-// (ErrRelativePath), a path other than "/" ending in "/" or "/."
+// (ErrRelativePath), a path ending in "/" or "/." without naming the root
 // (ErrTrailingSlash), a path that is not valid UTF-8 (ErrInvalidUTF8Path),
 // a rule granting a right its profile does not handle (ErrUnhandledRight)
 // or none (ErrEmptyRule), and a profile that handles and scopes nothing
@@ -846,8 +847,8 @@ func validateLoadablePath(report *merge.Collector, idx int, path string) {
 // hasTrailingSlash reports whether an absolute path names its last
 // component as a directory, by ending in "/" or "/.", without being the
 // root, which is a directory anyway. A relative path is reported as
-// relative only, and a path Validate rejects for what it holds is reported
-// by Validate only, so neither is looked at here.
+// relative, and a path Validate rejects for what it holds as Validate
+// reports it, rather than as either ending in a slash.
 func hasTrailingSlash(path string) bool {
 	if !strings.HasSuffix(path, "/") && !strings.HasSuffix(path, "/.") {
 		return false

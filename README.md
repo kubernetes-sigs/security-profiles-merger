@@ -132,7 +132,7 @@ native architecture and its Landlock ABI version.
 - **[spm](docs/api.md#spm)** - What the three have in common, such as
   `SliceDiff`, `InputError`, `Problems` and the shared sentinel errors. Each
   package re-exports every shared sentinel it returns under its own name,
-  so no import is needed.
+  so only `Problems` needs the import.
 
 See [Concurrency](docs/api.md#concurrency) for calling the functions from
 several goroutines at once.
@@ -182,8 +182,7 @@ major version ([RELEASE.md](RELEASE.md#compatibility-checks)), and:
   accepts and constants for them.
 - **Dependencies.** A minor release may raise the required runtime-spec
   version, which can add fields `seccomp.Validate` then reads instead of
-  rejecting (`ErrUnsupportedSpecField`), or the minimum Go version, which
-  follows the Go releases the Go team supports.
+  rejecting (`ErrUnsupportedSpecField`), or the minimum Go version.
 - **No `context.Context`.** No function takes one, since every merge is
   bounded by budgets of its own rather than by its caller. A cancellable
   variant would be added beside the current functions as methods taking a

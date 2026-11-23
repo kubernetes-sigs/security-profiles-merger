@@ -97,20 +97,20 @@ The codebase is organized in layers:
   of the documentation (see [Documentation](#documentation)).
 - `seccomp/`, `apparmor/`, `landlock/` each expose the same public API
   surface: `Intersect`, `Union`, `Validate`, `ValidateStrict`,
-  `ValidateArtifact`, `UnmarshalStrict`, `DecodeArtifact` and `Diff`, and
-  `String` methods on the profile and diff types (`seccomp.FormatProfile`
-  for `specs.LinuxSeccomp`, which is not its own). `seccomp` and `apparmor`
-  add `ValidateBaseline`. `seccomp` adds an `Options` type naming a node's
-  native architecture and `landlock` one naming a kernel ABI version; each
-  has a method for every validator and for every other operation whose
-  result depends on the node, and its zero value is an error. Each package
-  defines its own types (seccomp uses OCI runtime-spec types, apparmor and
-  landlock define their own) and implements profile-specific normalization,
-  deduplication, and merge logic on top of `internal/merge/`. The seccomp
-  package merges syscalls through a clause model (`rules.go`, `args.go`) that
-  reasons about argument filter regions. It relies on libseccomp's evaluation
-  only for the safe shapes described in the package documentation, reads
-  every other rule set conservatively, and only emits safe shapes.
+  `ValidateArtifact`, `ValidateBaseline`, `UnmarshalStrict`, `DecodeArtifact`
+  and `Diff`, and `String` methods on the profile and diff types
+  (`seccomp.FormatProfile` for `specs.LinuxSeccomp`, which is not its own).
+  `seccomp` adds an `Options` type naming a node's native architecture and
+  `landlock` one naming a kernel ABI version; each has a method for every
+  validator and for every other operation whose result depends on the node,
+  and its zero value is an error. Each package defines its own types (seccomp
+  uses OCI runtime-spec types, apparmor and landlock define their own) and
+  implements profile-specific normalization, deduplication, and merge logic on
+  top of `internal/merge/`. The seccomp package merges syscalls through a
+  clause model (`rules.go`, `args.go`) that reasons about argument filter
+  regions. It relies on libseccomp's evaluation only for the safe shapes
+  described in the package documentation, reads every other rule set
+  conservatively, and only emits safe shapes.
 - `internal/libseccomp/` is a test aid, built only with the `libseccomp` build
   tag: it compiles a profile with libseccomp itself so that tests can check the
   seccomp evaluation model against the filter a kernel would run.

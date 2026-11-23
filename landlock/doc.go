@@ -147,10 +147,10 @@ limitations under the License.
 // trailing slashes are removed, so "/etc", "/etc/" and "//etc/." are one
 // rule. Profile paths are Linux paths on every host. Every validator
 // rejects ".." components, which the kernel resolves against the file
-// system. The stricter ones also reject a path other than "/" ending in "/"
-// or "/.", which the kernel opens only as a directory while its cleaned
-// form loads for a file too, and invalid UTF-8, which JSON cannot carry and
-// Validate accepts, since the merge compares paths as bytes.
+// system. The stricter ones also reject a path ending in "/" or "/." that
+// does not name the root, which the kernel opens only as a directory while
+// its cleaned form loads for a file too, and invalid UTF-8, which JSON cannot
+// carry and Validate accepts, since the merge compares paths as bytes.
 //
 // # Lowered rule paths
 //

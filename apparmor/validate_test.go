@@ -455,6 +455,8 @@ func TestValidateRejectsEscapedVariables(t *testing.T) {
 		// name, so the backslash there escapes nothing, and the second
 		// "@{" opens a name it refuses (VAR_INVAL_START).
 		`/@{\@{\}`,
+		// Every comma form before a variable is read past.
+		"/" + strings.Repeat("@{a,b", 50) + "}/@{HOME}",
 	} {
 		profile := readOnly(path)
 
@@ -479,6 +481,8 @@ func TestValidateRejectsEscapedVariables(t *testing.T) {
 		// "@".
 		`/a/\@{HOME}`, `/a/\x40\x7bHOME}`, "/a/@{x", "/a/@{a,b}",
 		`/a/@{HOME\}`, "/a/@{a_1,b}",
+		// Many names no "}" closes, or that close as comma forms.
+		"/" + strings.Repeat("@{x", 50), "/" + strings.Repeat("@{a,b", 50) + "}",
 	} {
 		err := apparmor.Validate(readOnly(path))
 		if errors.Is(err, apparmor.ErrUnsupportedVariable) {
