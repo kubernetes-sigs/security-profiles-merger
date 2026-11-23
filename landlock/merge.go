@@ -166,17 +166,12 @@ func checkMergeBudget(profiles []*Profile) error {
 // path, and one for a network rule. Merging costs that count times the
 // number of inputs. It stops as soon as the count exceeds limit and reports
 // whether it did, so that neither the count nor the product can wrap
-// however many inputs or rules there are. A nil input counts nothing;
-// the merges validate their inputs before counting, which reports it, and a
-// caller counting without validating gets no answer for it.
+// however many inputs or rules there are. The inputs must not be nil, which
+// validation ensures.
 func mergeLookups(profiles []*Profile, limit uint64) (uint64, bool) {
 	var lookups uint64
 
 	for _, profile := range profiles {
-		if profile == nil {
-			continue
-		}
-
 		lookups += uint64(len(profile.NetRules))
 		if lookups > limit {
 			return lookups, true
@@ -496,6 +491,14 @@ var (
 	fsBits  = newRightBits(fsRightsByBit)
 	netBits = newRightBits(slices.Sorted(maps.Keys(netAccessABI)))
 )
+
+// fileAccessFS is the mask of the rights that apply to a file that is not a
+// directory, ACCESS_FILE in the kernel. Moving or linking such a file
+// compares only these between the two directories.
+var fileAccessFS = fsBits.mask([]FSAccessRight{
+	FSAccessExecute, FSAccessWriteFile, FSAccessReadFile,
+	FSAccessTruncate, FSAccessIOCTLDev, FSAccessResolveUnix,
+})
 
 // newRightBits numbers the rights, which are sorted, in their order.
 func newRightBits[Right cmp.Ordered](rights []Right) rightBits[Right] {

@@ -101,8 +101,9 @@ func validateLostRules(profile *specs.LinuxSeccomp, native specs.Arch) error {
 // runs this only after validateProfileSize, which checks that bound, has
 // passed.
 func validateSyscallRules(
-	profile *specs.LinuxSeccomp, native specs.Arch, counts map[string]uint64,
-) error {
+	errs *merge.Collector, profile *specs.LinuxSeccomp, native specs.Arch,
+	counts map[string]uint64,
+) {
 	def := defaultClause(profile)
 
 	checker := &ruleChecker{
@@ -110,7 +111,7 @@ func validateSyscallRules(
 		truncate: loadsWideValue(profile),
 		states:   make(map[string]*syscallRuleState),
 		reported: make(map[string]struct{}),
-		errs:     merge.Collector{},
+		errs:     errs,
 	}
 
 	forEachClause(profile.Syscalls, def, checker.skip, checker.record)
@@ -119,8 +120,6 @@ func validateSyscallRules(
 	if coversAny(profile.Architectures, multiplexingArchitectures, native) {
 		checker.checkMultiplexed(profile.Syscalls, def)
 	}
-
-	return checker.errs.Err()
 }
 
 // ruleChecker carries the state of validateSyscallRules.
@@ -129,7 +128,7 @@ type ruleChecker struct {
 	truncate bool
 	states   map[string]*syscallRuleState
 	reported map[string]struct{}
-	errs     merge.Collector
+	errs     *merge.Collector
 }
 
 // validateRuleCount reports every syscall over the rule bound
@@ -138,7 +137,7 @@ type ruleChecker struct {
 // expanding the entries. Only the names it reports are sorted: a profile
 // may name as many syscalls as it has bytes for, while the ones it can put
 // over the bound are limited by the rules it loads.
-func validateRuleCount(counts map[string]uint64) error {
+func validateRuleCount(errs *merge.Collector, counts map[string]uint64) {
 	var over []string
 
 	for name, count := range counts {
@@ -149,8 +148,6 @@ func validateRuleCount(counts map[string]uint64) error {
 
 	slices.Sort(over)
 
-	var errs merge.Collector
-
 	for _, name := range over {
 		errs.Report(func() error {
 			return fmt.Errorf(
@@ -160,8 +157,6 @@ func validateRuleCount(counts map[string]uint64) error {
 			)
 		})
 	}
-
-	return errs.Err()
 }
 
 func (c *ruleChecker) conflict(idx int, name string) {
@@ -227,15 +222,10 @@ func (c *ruleChecker) record(idx int, name string, next clause) {
 
 // track records next in the trackers of the syscall, which loads total
 // rules, and reports whether it conflicts with a rule before it. No further
-// rule of the syscall is recorded after its last one, nor after it is
-// reported, which skip stops, so the trackers are dropped then.
+// rule of the syscall is recorded after its last one, since clauseCounts
+// counts the rules forEachClause visits, nor after it is reported, which
+// skip stops, so the trackers are dropped then.
 func (s *syscallRuleState) track(next clause, total uint64) bool {
-	if s.trackers[0] == nil {
-		// Unreachable: clauseCounts counts the rules forEachClause visits,
-		// so none comes after the last.
-		return false
-	}
-
 	s.recorded++
 
 	conflict := s.trackers[0].record(next)

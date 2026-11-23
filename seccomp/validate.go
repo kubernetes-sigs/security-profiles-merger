@@ -370,7 +370,7 @@ func ValidateStrict(profile *specs.LinuxSeccomp) error {
 // a node with the given native architecture: those of ValidateArtifact and
 // its own.
 func strictChecks(native specs.Arch) []profileCheck {
-	return append(artifactChecks(native), validateDuplicateNames, validateUnusedValueTwo)
+	return append(artifactChecks(native), validateDuplicateSyscallNames, validateUnusedValueTwo)
 }
 
 // ValidateArtifact checks an artifact, a profile from an untrusted source
@@ -422,8 +422,12 @@ func artifactChecks(native specs.Arch) []profileCheck {
 		validateNoNotify,
 		validateNoListener,
 		validateUnusedErrnoRet,
-		func(profile *specs.LinuxSeccomp) error { return validateValueWidth(profile, native) },
-		func(profile *specs.LinuxSeccomp) error { return validateByteOrder(profile, native) },
+		func(errs *merge.Collector, profile *specs.LinuxSeccomp) {
+			validateValueWidth(errs, profile, native)
+		},
+		func(errs *merge.Collector, profile *specs.LinuxSeccomp) {
+			validateByteOrder(errs, profile, native)
+		},
 	}
 }
 
@@ -433,9 +437,7 @@ func artifactChecks(native specs.Arch) []profileCheck {
 // once for the list, naming those of each (see ErrMixedByteOrder). Validate
 // reports the architectures this package does not know, whose byte order
 // it cannot tell.
-func validateByteOrder(profile *specs.LinuxSeccomp, native specs.Arch) error {
-	var errs merge.Collector
-
+func validateByteOrder(errs *merge.Collector, profile *specs.LinuxSeccomp, native specs.Arch) {
 	listed := make(map[byteOrder][]specs.Arch)
 	seen := make(map[specs.Arch]bool)
 
@@ -467,8 +469,6 @@ func validateByteOrder(profile *specs.LinuxSeccomp, native specs.Arch) error {
 			littleEndian, quoteArchs(listed[littleEndian]),
 		)
 	}
-
-	return errs.Err()
 }
 
 // quoteArchs renders architectures as a comma-separated list of quoted
@@ -486,12 +486,10 @@ func quoteArchs(archs []specs.Arch) string {
 // the filter covers a 32-bit architecture (see ErrValueTooWide). Values are
 // read as libseccomp reads them, so a valueTwo it ignores or masks away does
 // not count. native is the architecture the runtime adds to the filter.
-func validateValueWidth(profile *specs.LinuxSeccomp, native specs.Arch) error {
+func validateValueWidth(errs *merge.Collector, profile *specs.LinuxSeccomp, native specs.Arch) {
 	if !coversAny(profile.Architectures, narrowArchitectures, native) {
-		return nil
+		return
 	}
-
-	var errs merge.Collector
 
 	for idx := range profile.Syscalls {
 		for argIdx, arg := range profile.Syscalls[idx].Args {
@@ -505,11 +503,10 @@ func validateValueWidth(profile *specs.LinuxSeccomp, native specs.Arch) error {
 			}
 		}
 	}
-
-	return errs.Err()
 }
 
-type profileCheck func(profile *specs.LinuxSeccomp) error
+// profileCheck reports what it refuses in a profile to errs.
+type profileCheck func(errs *merge.Collector, profile *specs.LinuxSeccomp)
 
 // validateWith runs validateProfileSize, and where the profile is within its
 // bounds the per-syscall limits, Validate and every check, collecting all
@@ -537,18 +534,18 @@ func validateWith(profile *specs.LinuxSeccomp, native specs.Arch, checks []profi
 
 	var errs merge.Collector
 
-	errs.Add(validateEntryCount(profile))
-	errs.Add(validateRuleCount(counts))
+	validateEntryCount(&errs, profile)
+	validateRuleCount(&errs, counts)
 
 	err = Validate(profile)
 	errs.Add(err)
 
 	for _, check := range checks {
-		errs.Add(check(profile))
+		check(&errs, profile)
 	}
 
 	if err == nil {
-		errs.Add(validateSyscallRules(profile, native, counts))
+		validateSyscallRules(&errs, profile, native, counts)
 		errs.Add(validateLostRules(profile, native))
 	}
 
@@ -558,21 +555,15 @@ func validateWith(profile *specs.LinuxSeccomp, native specs.Arch, checks []profi
 // validateWellFormed runs the checks shared by ValidateStrict and
 // ValidateArtifact that do not depend on trust: duplicate architectures and
 // flags, and out-of-range errno values.
-func validateWellFormed(profile *specs.LinuxSeccomp) error {
-	var errs merge.Collector
-
-	reportDuplicates(&errs, "architectures", profile.Architectures, ErrDuplicateArch)
-	reportDuplicates(&errs, "flags", profile.Flags, ErrDuplicateFlag)
-	errs.Add(validateErrnoRange(profile))
-
-	return errs.Err()
+func validateWellFormed(errs *merge.Collector, profile *specs.LinuxSeccomp) {
+	reportDuplicates(errs, "architectures", profile.Architectures, ErrDuplicateArch)
+	reportDuplicates(errs, "flags", profile.Flags, ErrDuplicateFlag)
+	validateErrnoRange(errs, profile)
 }
 
 // validateErrnoRange checks errno values where a runtime reads them; values
 // on other actions are reported through validateUnusedErrnoRet instead.
-func validateErrnoRange(profile *specs.LinuxSeccomp) error {
-	var errs merge.Collector
-
+func validateErrnoRange(errs *merge.Collector, profile *specs.LinuxSeccomp) {
 	ret := profile.DefaultErrnoRet
 	if limit, ok := errnoLimit(profile.DefaultAction); ok && ret != nil && *ret > limit {
 		errs.Reportf(
@@ -601,8 +592,6 @@ func validateErrnoRange(profile *specs.LinuxSeccomp) error {
 			})
 		}
 	}
-
-	return errs.Err()
 }
 
 // errnoLimit returns the largest errnoRet libseccomp accepts for action,
@@ -621,9 +610,7 @@ func errnoLimit(action specs.LinuxSeccompAction) (uint, bool) {
 	return maxErrno, true
 }
 
-func validateUnusedValueTwo(profile *specs.LinuxSeccomp) error {
-	var errs merge.Collector
-
+func validateUnusedValueTwo(errs *merge.Collector, profile *specs.LinuxSeccomp) {
 	for idx := range profile.Syscalls {
 		for argIdx, arg := range profile.Syscalls[idx].Args {
 			if arg.ValueTwo != 0 && arg.Op != specs.OpMaskedEqual {
@@ -640,13 +627,9 @@ func validateUnusedValueTwo(profile *specs.LinuxSeccomp) error {
 			}
 		}
 	}
-
-	return errs.Err()
 }
 
-func validateUnusedErrnoRet(profile *specs.LinuxSeccomp) error {
-	var errs merge.Collector
-
+func validateUnusedErrnoRet(errs *merge.Collector, profile *specs.LinuxSeccomp) {
 	if profile.DefaultErrnoRet != nil && !errnoSignificant(profile.DefaultAction) {
 		errs.Reportf(
 			"defaultErrnoRet: %d: %w (defaultAction %s)",
@@ -669,12 +652,6 @@ func validateUnusedErrnoRet(profile *specs.LinuxSeccomp) error {
 			})
 		}
 	}
-
-	return errs.Err()
-}
-
-func validateDuplicateNames(profile *specs.LinuxSeccomp) error {
-	return validateDuplicateSyscallNames(profile.Syscalls)
 }
 
 // validateProfileSize bounds the profile as a whole: the entries it may
@@ -723,9 +700,7 @@ func validateProfileSize(profile *specs.LinuxSeccomp) error {
 // name is either and which JSON cannot carry: written out, it reads as
 // another name. A name holding a NUL is left to Validate, which reports it
 // for every profile.
-func validateSyscallNameSpelling(profile *specs.LinuxSeccomp) error {
-	var errs merge.Collector
-
+func validateSyscallNameSpelling(errs *merge.Collector, profile *specs.LinuxSeccomp) {
 	for idx := range profile.Syscalls {
 		for nameIdx, name := range profile.Syscalls[idx].Names {
 			if (hasControlByte(name) || !utf8.ValidString(name)) && !hasNUL(name) {
@@ -733,8 +708,6 @@ func validateSyscallNameSpelling(profile *specs.LinuxSeccomp) error {
 			}
 		}
 	}
-
-	return errs.Err()
 }
 
 // hasNUL reports whether a name holds a NUL, which ends the name in the C
@@ -755,9 +728,7 @@ func hasControlByte(name string) bool {
 	return false
 }
 
-func validateNoNotify(profile *specs.LinuxSeccomp) error {
-	var errs merge.Collector
-
+func validateNoNotify(errs *merge.Collector, profile *specs.LinuxSeccomp) {
 	if profile.DefaultAction == specs.ActNotify {
 		errs.Reportf("defaultAction: %w", ErrNotifyNotAllowed)
 	}
@@ -769,11 +740,9 @@ func validateNoNotify(profile *specs.LinuxSeccomp) error {
 			})
 		}
 	}
-
-	return errs.Err()
 }
 
-func validateEntryCount(profile *specs.LinuxSeccomp) error {
+func validateEntryCount(errs *merge.Collector, profile *specs.LinuxSeccomp) {
 	counts := make(map[string]int)
 
 	for idx := range profile.Syscalls {
@@ -781,8 +750,6 @@ func validateEntryCount(profile *specs.LinuxSeccomp) error {
 			counts[name]++
 		}
 	}
-
-	var errs merge.Collector
 
 	for _, name := range slices.Sorted(maps.Keys(counts)) {
 		if counts[name] > MaxArtifactEntriesPerSyscall {
@@ -795,13 +762,9 @@ func validateEntryCount(profile *specs.LinuxSeccomp) error {
 			})
 		}
 	}
-
-	return errs.Err()
 }
 
-func validateNoListener(profile *specs.LinuxSeccomp) error {
-	var errs merge.Collector
-
+func validateNoListener(errs *merge.Collector, profile *specs.LinuxSeccomp) {
 	if profile.ListenerPath != "" {
 		errs.Reportf("listenerPath: %w", ErrListenerNotAllowed)
 	}
@@ -817,8 +780,6 @@ func validateNoListener(profile *specs.LinuxSeccomp) error {
 			ErrListenerNotAllowed,
 		)
 	}
-
-	return errs.Err()
 }
 
 // validateDuplicateSyscallNames reports each syscall name several entries
@@ -827,14 +788,12 @@ func validateNoListener(profile *specs.LinuxSeccomp) error {
 // than one per entry naming it, keeps a name an artifact repeats in every
 // entry from crowding the other problems out of the bounded report. The
 // reports come in the order of the entries and of the names within each.
-func validateDuplicateSyscallNames(syscalls []specs.LinuxSyscall) error {
+func validateDuplicateSyscallNames(errs *merge.Collector, profile *specs.LinuxSeccomp) {
 	// The entry that names each name first, or -1 once the name has been
 	// reported as named by several entries.
 	first := make(map[string]int)
 
-	var errs merge.Collector
-
-	for idx, sc := range syscalls {
+	for idx, sc := range profile.Syscalls {
 		// Each name of the entry, mapped to whether it was reported as
 		// repeated within the entry.
 		inEntry := make(map[string]bool, len(sc.Names))
@@ -874,8 +833,6 @@ func validateDuplicateSyscallNames(syscalls []specs.LinuxSyscall) error {
 			}
 		}
 	}
-
-	return errs.Err()
 }
 
 // isKnownAction reports whether this package knows the action.
@@ -924,12 +881,6 @@ func isKnownFlag(flag specs.LinuxSeccompFlag) bool {
 // reportDuplicates reports every value of the list field that repeats an
 // earlier one, matching sentinel.
 func reportDuplicates[T ~string](errs *merge.Collector, field string, values []T, sentinel error) {
-	merge.ReportDuplicates(errs, len(values),
-		func(idx int) (T, bool) { return values[idx], true },
-		func(idx, first int) error {
-			return fmt.Errorf(
-				"%s[%d]: %s: %w (also at %s[%d])",
-				field, idx, merge.QuoteBounded(string(values[idx])), sentinel, field, first,
-			)
-		})
+	merge.ReportDuplicateValues(errs, field, values,
+		func(idx int) T { return values[idx] }, sentinel)
 }

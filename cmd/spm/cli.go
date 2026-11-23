@@ -99,12 +99,6 @@ func (opts *commonOptions) bind(flags *flag.FlagSet, help commonHelp) {
 	)
 }
 
-// checkFlags checks the common flags (see commandOptions), which are all
-// the flags diff takes; the other commands check theirs as well.
-func (opts *commonOptions) checkFlags(_ *flag.FlagSet, stderr io.Writer) int {
-	return opts.check(stderr)
-}
-
 // checkEmpty refuses --type and --output given an empty value, which would
 // otherwise read as the flag left out: an unset variable in a script that
 // meant to name a file would write to stdout, and one that meant to name a
@@ -337,16 +331,16 @@ func takesValue(flags *flag.FlagSet, arg string) bool {
 // flag. Commands run this before checking their flag values, since a flag
 // the parser never saw would otherwise be reported as missing.
 func checkFlagOrder(args []string, separated bool, stderr io.Writer) int {
+	// After "--" the caller has said these are file names, whatever they
+	// start with, so a missing one is a missing file rather than a
+	// misplaced flag. flag.Args() no longer records the separator, so the
+	// caller passes it through (see argsSeparated).
+	if separated {
+		return 0
+	}
+
 	for _, arg := range args {
 		if arg == stdinArg || !strings.HasPrefix(arg, "-") {
-			continue
-		}
-
-		// After "--" the caller has said these are file names, whatever
-		// they start with, so a missing one is a missing file rather than a
-		// misplaced flag. flag.Args() no longer records the separator, so
-		// the caller passes it through (see argsSeparated).
-		if separated {
 			continue
 		}
 

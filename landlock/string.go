@@ -30,47 +30,19 @@ func (p *Profile) String() string {
 		return "Profile{<nil>}"
 	}
 
-	var out merge.Builder
-
-	out.WriteString("Profile{")
-
-	parts := merge.NewJoiner(&out, " ")
-
-	writeRightsPart(&out, &parts, "fs:", p.HandledAccessFS)
-	writeRightsPart(&out, &parts, "net:", p.HandledAccessNet)
-	writeRightsPart(&out, &parts, "scoped:", p.Scoped)
-
-	for idx := range p.PathRules {
-		if out.Full() {
-			break
-		}
-
-		parts.Next()
-		p.PathRules[idx].writeTo(&out)
-	}
-
-	for idx := range p.NetRules {
-		if out.Full() {
-			break
-		}
-
-		parts.Next()
-		p.NetRules[idx].writeTo(&out)
-	}
-
-	out.WriteString("}")
-
-	return out.String()
+	return merge.Framed("Profile{", func(out *merge.Builder, parts *merge.Joiner) {
+		merge.WriteList(out, parts, "fs:", p.HandledAccessFS)
+		merge.WriteList(out, parts, "net:", p.HandledAccessNet)
+		merge.WriteList(out, parts, "scoped:", p.Scoped)
+		writeRules(out, parts, "", p.PathRules)
+		writeRules(out, parts, "", p.NetRules)
+	})
 }
 
 // String returns a human-readable representation of the path rule, quoted
 // and bounded as Profile.String is.
 func (r PathRule) String() string {
-	var out merge.Builder
-
-	r.writeTo(&out)
-
-	return out.String()
+	return merge.Render(r.writeTo)
 }
 
 func (r PathRule) writeTo(out *merge.Builder) {
@@ -83,11 +55,7 @@ func (r PathRule) writeTo(out *merge.Builder) {
 // String returns a human-readable representation of the network rule,
 // quoted and bounded as Profile.String is.
 func (r NetRule) String() string {
-	var out merge.Builder
-
-	r.writeTo(&out)
-
-	return out.String()
+	return merge.Render(r.writeTo)
 }
 
 func (r NetRule) writeTo(out *merge.Builder) {
@@ -96,21 +64,4 @@ func (r NetRule) writeTo(out *merge.Builder) {
 	out.WriteString("(")
 	merge.WriteTexts(out, r.AccessNet, ",")
 	out.WriteString(")")
-}
-
-// writeRightsPart writes a set of rights after its prefix, as a part of the
-// profile, unless it is empty.
-func writeRightsPart[T ~string](
-	out *merge.Builder,
-	parts *merge.Joiner,
-	prefix string,
-	rights []T,
-) {
-	if len(rights) == 0 {
-		return
-	}
-
-	parts.Next()
-	out.WriteString(prefix)
-	merge.WriteTexts(out, rights, ",")
 }

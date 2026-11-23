@@ -127,6 +127,16 @@ func NewSliceDiff[T cmp.Ordered](left, right []T) *spm.SliceDiff[T] {
 	return &spm.SliceDiff[T]{Added: added, Removed: removed}
 }
 
+// NewValueDiff returns the two values as a ValueDiff, or nil when they are
+// equal, which is how every diff of this module reports an unchanged value.
+func NewValueDiff[T comparable](left, right T) *spm.ValueDiff[T] {
+	if left == right {
+		return nil
+	}
+
+	return &spm.ValueDiff[T]{Left: left, Right: right}
+}
+
 // IntersectSlice returns the elements present in both left and right, each
 // once, in the order left holds them, or nil when there are none, whether
 // a side is empty or the two are disjoint.

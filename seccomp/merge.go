@@ -209,7 +209,11 @@ func (m ruleMerger) checkInput(profile *specs.LinuxSeccomp) error {
 		return err
 	}
 
-	return validateByteOrder(profile, m.native)
+	var errs merge.Collector
+
+	validateByteOrder(&errs, profile, m.native)
+
+	return errs.Err()
 }
 
 // normalizeProfile returns the profile in the form a merge result takes,
@@ -249,7 +253,7 @@ func mergeTwo(
 	// The merged default follows the same tie-break as every other clause:
 	// the left side wins when the actions are equivalent, so its errno
 	// survives.
-	mergedDefault := pickClause(*defaultClause(left), *defaultClause(right), rules.pick)
+	mergedDefault := rules.pickClause(*defaultClause(left), *defaultClause(right))
 
 	// The listener comes from the first profile that provides one rather
 	// than from the left unconditionally: the action lattice can carry
@@ -518,13 +522,11 @@ func resolveListener(profile *specs.LinuxSeccomp) error {
 	return fmt.Errorf("merge: %w", ErrNotifyWithoutListener)
 }
 
-// regroupSyscalls drops entries without names, merges entries sharing the
-// same action, errno, and argument filters into one multi-name entry, and
-// sorts the result by first name, then by argument filter, action, and
-// errno, which is a total order over the result.
-//
-// Every entry it is given carries exactly one name, so the name check only
-// guards the sort below, which reads the first name of each group.
+// regroupSyscalls merges entries sharing the same action, errno, and
+// argument filters into one multi-name entry, and sorts the result by first
+// name, then by argument filter, action, and errno, which is a total order
+// over the result. Every entry it is given carries exactly one name, so
+// every group has a first name to sort by.
 func regroupSyscalls(syscalls []specs.LinuxSyscall) []specs.LinuxSyscall {
 	type group struct {
 		entry   specs.LinuxSyscall
@@ -536,9 +538,6 @@ func regroupSyscalls(syscalls []specs.LinuxSyscall) []specs.LinuxSyscall {
 
 	for idx := range syscalls {
 		entry := &syscalls[idx]
-		if len(entry.Names) == 0 {
-			continue
-		}
 
 		args := sortedArgs(entry.Args)
 		key := resultKey(entry.Action, entry.ErrnoRet, args)

@@ -568,7 +568,10 @@ func ungroupedDotComponent(pattern string) bool {
 
 // dotScanner holds the state of ungroupedDotComponent.
 type dotScanner struct {
-	component strings.Builder
+	// dots counts the "." characters of the current component, and other
+	// reports that it holds any other character, which rules it out.
+	dots  int
+	other bool
 	// grouped reports that the current component holds part of an
 	// alternation or class.
 	grouped bool
@@ -598,10 +601,20 @@ func (scan *dotScanner) step(char byte) bool {
 	case char == '/':
 		return scan.endComponent()
 	default:
-		scan.component.WriteByte(char)
+		scan.add(char)
 	}
 
 	return false
+}
+
+// add records a character of the current component outside every
+// alternation and class.
+func (scan *dotScanner) add(char byte) {
+	if char == '.' {
+		scan.dots++
+	} else {
+		scan.other = true
+	}
 }
 
 // nest tracks the classes and alternations an unescaped character opens or
@@ -623,13 +636,13 @@ func (scan *dotScanner) nest(char byte) {
 // endComponent ends the current component and reports whether it is an
 // ungrouped "." or "..".
 func (scan *dotScanner) endComponent() bool {
-	text := scan.component.String()
-	grouped := scan.grouped
+	dot := !scan.grouped && !scan.other && (scan.dots == 1 || scan.dots == 2)
 
-	scan.component.Reset()
+	scan.dots = 0
+	scan.other = false
 	scan.grouped = false
 
-	return !grouped && (text == "." || text == "..")
+	return dot
 }
 
 // dotComponent reports whether a slash-separated text has a component that
@@ -1158,15 +1171,8 @@ func (check *validator) emptyCapabilities(caps []string) {
 }
 
 func (check *validator) duplicateCapabilities(caps []string) {
-	merge.ReportDuplicates(&check.report, len(caps),
-		func(idx int) (string, bool) { return asciiLower(caps[idx]), true },
-		func(idx, first int) error {
-			return fmt.Errorf(
-				"%s[%d]: %s: %w (also at %s[%d])",
-				allowedCapabilitiesPath, idx, merge.QuoteBounded(caps[idx]),
-				ErrDuplicateCapability, allowedCapabilitiesPath, first,
-			)
-		})
+	merge.ReportDuplicateValues(&check.report, allowedCapabilitiesPath, caps,
+		func(idx int) string { return asciiLower(caps[idx]) }, ErrDuplicateCapability)
 }
 
 // capabilityNames reports the names outside the known set. A name that is
@@ -1194,12 +1200,6 @@ func (check *validator) capabilityNames(caps []string) {
 // paths of raw normalized, which is what is compared, while raw is what is
 // reported.
 func (check *validator) listDuplicates(context string, raw, normalized []string, sentinel error) {
-	merge.ReportDuplicates(&check.report, len(normalized),
-		func(idx int) (pathKey, bool) { return check.matchers.key(normalized[idx]), true },
-		func(idx, first int) error {
-			return fmt.Errorf(
-				"%s[%d]: %s: %w (also at %s[%d])",
-				context, idx, merge.QuoteBounded(raw[idx]), sentinel, context, first,
-			)
-		})
+	merge.ReportDuplicateValues(&check.report, context, raw,
+		func(idx int) pathKey { return check.matchers.key(normalized[idx]) }, sentinel)
 }

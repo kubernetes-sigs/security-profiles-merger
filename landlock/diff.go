@@ -221,84 +221,55 @@ func canonicalProfile(profile *Profile) *Profile {
 // is. Diff returns a non-nil diff whenever its error is nil; called through
 // a nil pointer, String panics.
 func (d ProfileDiff) String() string {
-	diff := &d
-
-	if diff.Equal {
+	if d.Equal {
 		return "Diff{equal}"
 	}
 
-	var out merge.Builder
+	return merge.Framed("Diff{", func(out *merge.Builder, parts *merge.Joiner) {
+		merge.WriteSliceDiff(out, parts, "fs", d.HandledAccessFS)
+		merge.WriteSliceDiff(out, parts, "net", d.HandledAccessNet)
+		merge.WriteSliceDiff(out, parts, "scoped", d.Scoped)
 
-	out.WriteString("Diff{")
+		if d.PathRules != nil {
+			writePathRulesDiff(out, parts, d.PathRules)
+		}
 
-	parts := merge.NewJoiner(&out, " ")
-
-	merge.WriteSliceDiff(&out, &parts, "fs", diff.HandledAccessFS)
-	merge.WriteSliceDiff(&out, &parts, "net", diff.HandledAccessNet)
-	merge.WriteSliceDiff(&out, &parts, "scoped", diff.Scoped)
-
-	if diff.PathRules != nil {
-		writePathRulesDiff(&out, &parts, diff.PathRules)
-	}
-
-	if diff.NetRules != nil {
-		writeNetRulesDiff(&out, &parts, diff.NetRules)
-	}
-
-	out.WriteString("}")
-
-	return out.String()
+		if d.NetRules != nil {
+			writeNetRulesDiff(out, parts, d.NetRules)
+		}
+	})
 }
 
 func writePathRulesDiff(out *merge.Builder, parts *merge.Joiner, pathRulesDiff *PathRulesDiff) {
 	writeRules(out, parts, "-", pathRulesDiff.Removed)
 	writeRules(out, parts, "+", pathRulesDiff.Added)
 
-	for idx := range pathRulesDiff.Changed {
-		if out.Full() {
-			return
-		}
-
+	merge.WriteParts(out, parts, len(pathRulesDiff.Changed), "~", func(idx int) {
 		change := &pathRulesDiff.Changed[idx]
 
-		parts.Next()
-		out.WriteString("~")
 		out.WriteText(change.Path)
 		writeRightsChange(out, change.Left, change.Right)
-	}
+	})
 }
 
 func writeNetRulesDiff(out *merge.Builder, parts *merge.Joiner, netRulesDiff *NetRulesDiff) {
 	writeRules(out, parts, "-", netRulesDiff.Removed)
 	writeRules(out, parts, "+", netRulesDiff.Added)
 
-	for idx := range netRulesDiff.Changed {
-		if out.Full() {
-			return
-		}
-
+	merge.WriteParts(out, parts, len(netRulesDiff.Changed), "~:", func(idx int) {
 		change := &netRulesDiff.Changed[idx]
 
-		parts.Next()
-		out.WriteString("~:")
 		out.WriteUint(uint64(change.Port))
 		writeRightsChange(out, change.Left, change.Right)
-	}
+	})
 }
 
-// writeRules writes each rule as its String method renders it, after sign.
+// writeRules writes each rule as its String method renders it, after sign,
+// as a part of a list.
 func writeRules[R interface{ writeTo(out *merge.Builder) }](
 	out *merge.Builder, parts *merge.Joiner, sign string, rules []R,
 ) {
-	for idx := range rules {
-		if out.Full() {
-			return
-		}
-
-		parts.Next()
-		out.WriteString(sign)
-		rules[idx].writeTo(out)
-	}
+	merge.WriteParts(out, parts, len(rules), sign, func(idx int) { rules[idx].writeTo(out) })
 }
 
 // writeRightsChange writes the rights a changed rule holds on each side, as

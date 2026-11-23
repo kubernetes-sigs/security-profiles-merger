@@ -223,6 +223,23 @@ func ReportDuplicates[Key comparable](
 	}
 }
 
+// ReportDuplicateValues reports each value of the list at field whose key
+// an earlier value has, as in `field[3]: "x": <sentinel> (also at
+// field[1])`, quoting the value with QuoteBounded. key returns the key of
+// the value at idx.
+func ReportDuplicateValues[T ~string, Key comparable](
+	collector *Collector, field string, values []T, key func(idx int) Key, sentinel error,
+) {
+	ReportDuplicates(collector, len(values),
+		func(idx int) (Key, bool) { return key(idx), true },
+		func(idx, first int) error {
+			return fmt.Errorf(
+				"%s[%d]: %s: %w (also at %s[%d])",
+				field, idx, QuoteBounded(string(values[idx])), sentinel, field, first,
+			)
+		})
+}
+
 // CheckInputs runs check on every profile, in order, and returns the
 // failures as one error, each an *spm.InputError naming the profile's
 // index: nil when every profile passed, the InputError itself when one

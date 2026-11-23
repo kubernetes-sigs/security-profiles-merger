@@ -687,10 +687,10 @@ func (o Options) validate(profile *Profile, tier validationTier) error {
 		return err
 	}
 
-	// validateProfile returns no cleaned paths for a nil profile and for
-	// one past MaxArtifactRules, whose error stands on its own.
-	cleaned, err := validateProfile(profile, tier)
-	if cleaned == nil {
+	// A nil profile and one past MaxArtifactRules, which only
+	// validateRuleCount reports, are reported on their own.
+	_, err = validateProfile(profile, tier)
+	if profile == nil || errors.Is(err, ErrTooManyRules) {
 		return err
 	}
 

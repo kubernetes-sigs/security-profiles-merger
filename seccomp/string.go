@@ -95,11 +95,7 @@ func writeFlags(out *merge.Builder, flags []specs.LinuxSeccompFlag) {
 // String returns a human-readable representation of the syscall entry,
 // quoted and bounded as FormatProfile is.
 func (e SyscallEntry) String() string {
-	var out merge.Builder
-
-	e.writeTo(&out)
-
-	return out.String()
+	return merge.Render(e.writeTo)
 }
 
 // writeTo renders the entry: its name, the arguments it applies to and its
@@ -112,11 +108,7 @@ func (e SyscallEntry) writeTo(out *merge.Builder) {
 // String returns a human-readable representation of the syscall detail,
 // quoted and bounded as FormatProfile is.
 func (d SyscallDetail) String() string {
-	var out merge.Builder
-
-	d.writeTo(&out)
-
-	return out.String()
+	return merge.Render(d.writeTo)
 }
 
 // writeTo renders the detail: its result, after the arguments it applies

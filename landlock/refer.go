@@ -374,28 +374,13 @@ func (s moveSets) add(side moveSide, destination bool) {
 // buckets that pass, that leaves the rights the union misses on at least one
 // of them, which are the ones missing from the rights it grants on all.
 func (s moveSets) conflicts() uint32 {
-	conflicting, _ := s.settle()
-
-	return conflicting
-}
-
-// settle returns what conflicts does, and how many times it compared a
-// bucket of sources with a destination, which a test counts to pin that the
-// work grows with the destinations rather than with sources times
-// destinations.
-func (s moveSets) settle() (uint32, int) {
-	var (
-		conflicting uint32
-		comparisons int
-	)
+	var conflicting uint32
 
 	for dst := range s.destinations {
 		needed := dst.input & s.files
 		common, passed := ^uint32(0), false
 
 		for key, granted := range s.sources {
-			comparisons++
-
 			if needed&^key == 0 {
 				common &= granted
 				passed = true
@@ -407,7 +392,7 @@ func (s moveSets) settle() (uint32, int) {
 		}
 	}
 
-	return conflicting, comparisons
+	return conflicting
 }
 
 // moveConflicts returns the rights through which the union could deny a
@@ -457,13 +442,12 @@ func moveSides(
 		}
 	}
 
-	files := fsBits.mask(fileAccessFS())
 	sets := make([]moveLevel, len(levels))
 
 	for idx, known := range levels {
 		sets[idx] = moveLevel{
-			withRoot:    newMoveSets(files & known),
-			withoutRoot: newMoveSets(files & known),
+			withRoot:    newMoveSets(fileAccessFS & known),
+			withoutRoot: newMoveSets(fileAccessFS & known),
 		}
 	}
 
@@ -515,14 +499,4 @@ func maskAt(path string, masks map[string]uint32) (uint32, uint32) {
 	}
 
 	return below, root
-}
-
-// fileAccessFS returns the rights that apply to a file that is not a
-// directory, ACCESS_FILE in the kernel. Moving or linking such a file
-// compares only these between the two directories.
-func fileAccessFS() []FSAccessRight {
-	return []FSAccessRight{
-		FSAccessExecute, FSAccessWriteFile, FSAccessReadFile,
-		FSAccessTruncate, FSAccessIOCTLDev, FSAccessResolveUnix,
-	}
 }

@@ -318,6 +318,39 @@ func TestMergeRules(t *testing.T) {
 			)},
 			intersect: "Profile{net:bind_tcp,connect_tcp :80(bind_tcp,connect_tcp)}",
 		},
+		{
+			// Rules on one cleaned path or port are folded before the
+			// rights the profile does not handle, refer among them, are
+			// dropped, and a rule left with none disappears.
+			name: "rules on one path and port granting unhandled rights",
+			inputs: []*landlock.Profile{{
+				HandledAccessFS:  fsRights{landlock.FSAccessReadFile, landlock.FSAccessExecute},
+				HandledAccessNet: bind,
+				PathRules: []landlock.PathRule{
+					rule(pathEtc, write),
+					rule(pathVar, fsRights{landlock.FSAccessRefer}),
+					rule(pathEtc+"/", readExecute),
+					rule(pathEtc, readWrite),
+				},
+				NetRules: []landlock.NetRule{
+					{Port: 443, AccessNet: connect},
+					{Port: 80, AccessNet: connect},
+					{Port: 80, AccessNet: bind},
+				},
+			}},
+			intersect: "Profile{fs:execute,read_file net:bind_tcp " +
+				"/etc(execute,read_file) :80(bind_tcp)}",
+		},
+		{
+			// A union keeps a rule on a path only one side names.
+			name: "union of rules on paths one side lacks",
+			inputs: []*landlock.Profile{
+				fsProfile(readWriteExecute, rule(pathEtc, readExecute), rule(pathTmp, write)),
+				fsProfile(readWriteExecute, rule(pathEtc, write), rule(pathVar, read)),
+			},
+			union: "Profile{fs:execute,read_file,write_file " +
+				"/etc(execute,read_file,write_file) /tmp(write_file) /var(read_file)}",
+		},
 	})
 }
 

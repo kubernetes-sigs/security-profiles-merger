@@ -113,17 +113,7 @@ func runMerge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 // mergeInputs validates, merges and writes the profiles that were read.
 func mergeInputs(opts *mergeOptions, inv *invocation) int {
-	// The mode count is checked against the inputs, which a "-" argument
-	// may expand into several, so this waits until they are read. A count
-	// that does not match is refused once the inputs are checked, under the
-	// weakest mode listed (see parseValidateModes). Stdin that could not be
-	// read held no number of profiles anyone knows, so the count is not
-	// refused then: its failure is the answer.
-	modes, err := parseValidateModes(opts.validate, len(inv.inputs))
-	if err != nil && !inv.stdinUnread {
-		inv.refusals = append(inv.refusals, err)
-	}
-
+	modes := inv.validateModes(opts.validate)
 	inv.checks = &inputChecks{modes: modes, strategy: opts.strategy}
 
 	code := resolveKind(inv, opts.profileType, 1, opts.noDetectNote)
@@ -190,15 +180,41 @@ func parseValidateModes(value string, inputs int) ([]validateMode, error) {
 	return parsed, nil
 }
 
-// checkFlags checks the merge flags (see commandOptions).
-func (opts *mergeOptions) checkFlags(_ *flag.FlagSet, stderr io.Writer) int {
-	// The modes are parsed again once the inputs are known; this reports a
-	// misspelled one before anything is read.
-	_, err := parseValidateModes(opts.validate, 1)
-	if err != nil && errors.Is(err, errUnknownValidateMode) {
+// validateModes returns the mode of each input a --validate value names.
+// The mode count is checked against the inputs, which a "-" argument may
+// expand into several, so this waits until they are read. A count that
+// does not match is refused once the inputs are checked, under the weakest
+// mode listed (see parseValidateModes). Stdin that could not be read held
+// no number of profiles anyone knows, so the count is not refused then:
+// its failure is the answer.
+func (inv *invocation) validateModes(value string) []validateMode {
+	modes, err := parseValidateModes(value, len(inv.inputs))
+	if err != nil && !inv.stdinUnread {
+		inv.refusals = append(inv.refusals, err)
+	}
+
+	return modes
+}
+
+// checkValidateModes reports a --validate value that names an unknown
+// mode. The modes are parsed again once the inputs are known (see
+// invocation.validateModes); this reports a misspelled one before anything
+// is read.
+func checkValidateModes(value string, stderr io.Writer) int {
+	_, err := parseValidateModes(value, 1)
+	if errors.Is(err, errUnknownValidateMode) {
 		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 
 		return exitUsage
+	}
+
+	return 0
+}
+
+// checkFlags checks the merge flags (see commandOptions).
+func (opts *mergeOptions) checkFlags(_ *flag.FlagSet, stderr io.Writer) int {
+	if code := checkValidateModes(opts.validate, stderr); code != 0 {
+		return code
 	}
 
 	strategy := opts.strategy

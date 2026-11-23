@@ -61,13 +61,9 @@ func sortedArgs(args []specs.LinuxSeccompArg) []specs.LinuxSeccompArg {
 		cloned[idx] = canonicalArg(arg)
 	}
 
-	sortArgs(cloned)
+	slices.SortFunc(cloned, compareArg)
 
 	return cloned
-}
-
-func sortArgs(args []specs.LinuxSeccompArg) {
-	slices.SortFunc(args, compareArg)
 }
 
 // compareArg orders two conditions by index, value, valueTwo and operator.
@@ -203,7 +199,7 @@ func sortedForRuns(args []specs.LinuxSeccompArg) []specs.LinuxSeccompArg {
 	}
 
 	sorted := slices.Clone(args)
-	sortArgs(sorted)
+	slices.SortFunc(sorted, compareArg)
 
 	return sorted
 }
