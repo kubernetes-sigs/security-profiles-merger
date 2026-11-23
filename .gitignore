@@ -1,6 +1,6 @@
-build/
-dist/
-fuzz.log
+/build/
+/dist/
+/fuzz.log
 # What the CI jobs leave in the checkout, so that make api-report, which
 # refuses a working tree with untracked files, runs after them too: the
 # libseccomp build of test-libseccomp and the upstream report of

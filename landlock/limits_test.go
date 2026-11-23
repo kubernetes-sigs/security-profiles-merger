@@ -28,12 +28,9 @@ import (
 	"sigs.k8s.io/security-profiles-merger/landlock"
 )
 
-// TestArtifactLimitsAtTheirBoundary covers the two size limits at the value
-// a caller sizing a profile against them produces: the limit is accepted and
-// one more is rejected.
-func TestArtifactLimitsAtTheirBoundary(t *testing.T) {
-	t.Parallel()
-
+// artifactLimits returns the two size limits for the contract test, which
+// checks each at the value a caller sizing a profile against it produces.
+func artifactLimits() []testutil.LimitCase[landlock.Profile] {
 	rules := func(count int) *landlock.Profile {
 		list := make([]landlock.PathRule, 0, count)
 		for idx := range count {
@@ -59,47 +56,16 @@ func TestArtifactLimitsAtTheirBoundary(t *testing.T) {
 		}
 	}
 
-	for _, testCase := range []struct {
-		name     string
-		limit    int
-		build    func(int) *landlock.Profile
-		sentinel error
-	}{
-		{"rules", landlock.MaxArtifactRules, rules, landlock.ErrTooManyRules},
-		{"path length", landlock.MaxPathLen, pathLength, landlock.ErrPathTooLong},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-
-			for name, validate := range map[string]func(*landlock.Profile) error{
-				"ValidateArtifact": landlock.ValidateArtifact,
-				"ValidateStrict":   landlock.ValidateStrict,
-			} {
-				err := validate(testCase.build(testCase.limit))
-				if errors.Is(err, testCase.sentinel) {
-					t.Errorf("%s at the limit = %v, want it accepted", name, err)
-				}
-
-				err = validate(testCase.build(testCase.limit + 1))
-				if !errors.Is(err, testCase.sentinel) {
-					t.Errorf("%s one past the limit = %v, want %v", name, err, testCase.sentinel)
-				}
-			}
-		})
-	}
-
 	// The rule count is an artifact bound; Validate is the merge
 	// precondition and counts nothing. A path length is not: it is what the
 	// matcher and the kernel accept, so every validator rejects it.
-	err := landlock.Validate(rules(landlock.MaxArtifactRules + 1))
-	if errors.Is(err, landlock.ErrTooManyRules) {
-		t.Errorf("Validate = %v, want no rule count check", err)
-	}
-
-	err = landlock.Validate(pathLength(landlock.MaxPathLen + 1))
-	if !errors.Is(err, landlock.ErrPathTooLong) {
-		t.Errorf("Validate = %v, want ErrPathTooLong", err)
-	}
+	return []testutil.LimitCase[landlock.Profile]{{
+		Name: "rules", Limit: landlock.MaxArtifactRules, Build: rules,
+		Sentinel: landlock.ErrTooManyRules, FirstValidator: "ValidateArtifact",
+	}, {
+		Name: "path length", Limit: landlock.MaxPathLen, Build: pathLength,
+		Sentinel: landlock.ErrPathTooLong, FirstValidator: "Validate",
+	}}
 }
 
 // portsProfile is a profile of count network rules, which the merge budget

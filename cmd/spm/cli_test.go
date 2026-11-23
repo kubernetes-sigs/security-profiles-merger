@@ -838,7 +838,7 @@ func TestFlagErrorIsEscaped(t *testing.T) {
 	}
 }
 
-// TestFlagErrorsSpellFlagsWithTwoDashes covers the errors the flag package
+// TestFlagErrorsSpellFlagsAsWritten covers the errors the flag package
 // writes, which name a flag with one dash however the caller wrote it. They
 // are written as the caller wrote them, and with two dashes, as the usage
 // and the documentation spell a flag, where the arguments do not show them.

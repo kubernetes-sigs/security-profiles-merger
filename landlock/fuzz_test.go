@@ -25,6 +25,7 @@ import (
 	"unicode/utf8"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 	"sigs.k8s.io/security-profiles-merger/landlock"
 )
 
@@ -1441,14 +1442,19 @@ func FuzzLandlockDiff(f *testing.F) {
 			t.Error("Diff(L,R).Equal != Diff(R,L).Equal")
 		}
 
-		assertRightsDiffSwapped(t, "HandledAccessFS", diff.HandledAccessFS, reverse.HandledAccessFS)
-		assertRightsDiffSwapped(
+		testutil.SliceDiffSwapped(
+			t,
+			"HandledAccessFS",
+			diff.HandledAccessFS,
+			reverse.HandledAccessFS,
+		)
+		testutil.SliceDiffSwapped(
 			t,
 			"HandledAccessNet",
 			diff.HandledAccessNet,
 			reverse.HandledAccessNet,
 		)
-		assertRightsDiffSwapped(t, "Scoped", diff.Scoped, reverse.Scoped)
+		testutil.SliceDiffSwapped(t, "Scoped", diff.Scoped, reverse.Scoped)
 		assertRulesDiffSwapped(t, "PathRules", diff.PathRules, reverse.PathRules)
 		assertNetRulesDiffSwapped(t, diff.NetRules, reverse.NetRules)
 
@@ -1461,31 +1467,6 @@ func FuzzLandlockDiff(f *testing.F) {
 			t.Error("Diff(X, X) must be equal")
 		}
 	})
-}
-
-func assertRightsDiffSwapped[T comparable](
-	t *testing.T, label string,
-	fwd, rev *landlock.SliceDiff[T],
-) {
-	t.Helper()
-
-	if (fwd == nil) != (rev == nil) {
-		t.Errorf("%s: nil mismatch", label)
-
-		return
-	}
-
-	if fwd == nil {
-		return
-	}
-
-	if !slices.Equal(fwd.Added, rev.Removed) {
-		t.Errorf("%s: forward Added != reverse Removed", label)
-	}
-
-	if !slices.Equal(fwd.Removed, rev.Added) {
-		t.Errorf("%s: forward Removed != reverse Added", label)
-	}
 }
 
 // assertDiffFormat checks the rendered diff, which a caller reads to learn

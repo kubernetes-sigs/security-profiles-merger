@@ -84,7 +84,6 @@ linters:
   exclusions:
     rules:
       - linters:
-          - dupl
           - exhaustruct_v5
           - funlen
           - goconst

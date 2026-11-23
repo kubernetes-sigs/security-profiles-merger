@@ -54,6 +54,51 @@ func validationProfile(fsLists [3][]string, exec [2][]string, caps []string) *ap
 	return profile
 }
 
+// validationCorpus holds profiles, valid and invalid, covering what the
+// validators check, for the lattice the contract test checks.
+func validationCorpus() map[string]*apparmor.Profile {
+	none := [3][]string{}
+	caps := func(names ...string) *apparmor.Profile {
+		return validationProfile(none, [2][]string{}, names)
+	}
+
+	return map[string]*apparmor.Profile{
+		"no section": caps(),
+		"every section": validationProfile(
+			[3][]string{{pathEtcConfig}, {pathTmp}, {pathVarLog}},
+			[2][]string{{pathBinShell, pathBinSh}, {pathLibCStd, pathLibMStd}},
+			[]string{capNetAdmin},
+		),
+		"nil":              nil,
+		"empty path":       readOnly(""),
+		"relative path":    readOnly("etc/config"),
+		"dot component":    readOnly("/etc/../config"),
+		"variable":         readOnly("@{HOME}/x"),
+		"escaped nul":      readOnly(`/tmp/\000`),
+		"unquotable":       readOnly("/tmp/a b"),
+		"invalid glob":     readOnly("/etc/{a,b"),
+		"glob too complex": readOnly(nestedAlternation(50)),
+		"long path":        readOnly("/" + strings.Repeat("a", apparmor.MaxPathLen)),
+		"path in two lists": validationProfile(
+			[3][]string{{pathTmp}, {pathTmp}},
+			[2][]string{},
+			nil,
+		),
+		"path twice in a list": readOnly(pathTmp, pathTmp),
+		"executable twice":     execProfile(pathBinShell, pathBinShell),
+		"library twice": validationProfile(
+			none,
+			[2][]string{nil, {pathLibC, pathLibC}},
+			nil,
+		),
+		"empty capability":        caps(""),
+		"capability twice":        caps(capChown, capChown),
+		"invalid capability name": caps("cap_chown"),
+		"unknown capability":      caps("made_up"),
+		"lowercase capability":    caps(capChown),
+	}
+}
+
 // TestValidateAccepts covers profiles the validators accept, among them
 // what Validate leaves to ValidateStrict: duplicate executables and
 // libraries, and capability names in any case.

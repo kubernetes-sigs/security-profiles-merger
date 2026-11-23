@@ -50,6 +50,48 @@ type Contract[T, D any] struct {
 	Valid func() *T
 	// Cases are merges whose results the package pins.
 	Cases []MergeCase[T]
+	// UnmarshalStrict is the strict decode, which must reject a nil profile
+	// with ErrNilProfile.
+	UnmarshalStrict func(data []byte, profile *T) error
+	// BadInputs are the inputs of one merge, some failing the checks every
+	// merge makes on its inputs.
+	BadInputs []BadInput[T]
+	// Lattice names validators of Validators in the order they are
+	// documented in, the merge precondition first: each must reject every
+	// profile of LatticeProfiles the one before it rejects. Callers pick a
+	// validator by how much they trust a profile, which means something
+	// only if a stricter one never accepts what a weaker one refuses.
+	Lattice []string
+	// LatticeProfiles holds profiles, valid ones among them, covering what
+	// the validators of Lattice check: for each validator after the first,
+	// at least one profile it rejects and the one before it accepts.
+	LatticeProfiles map[string]*T
+	// Limits are the documented size limits.
+	Limits []LimitCase[T]
+}
+
+// BadInput is one input of Contract.BadInputs and the sentinel every merge
+// must report it with, or nil for one the merges accept.
+type BadInput[T any] struct {
+	Profile  *T
+	Sentinel error
+}
+
+// LimitCase is one documented size limit. Build returns a profile of the
+// given number of items. At Limit items every validator of
+// Contract.Lattice accepts it, up to AcceptedThrough where that names one,
+// and none fails with Sentinel; at Limit+1 every validator from
+// FirstValidator on fails with Sentinel, and none before that one.
+type LimitCase[T any] struct {
+	Name           string
+	Limit          int
+	Build          func(count int) *T
+	Sentinel       error
+	FirstValidator string
+	// AcceptedThrough names the last validator that must accept the
+	// profile at the limit, for a limit no profile reaches that the
+	// stricter validators accept; empty for all of them.
+	AcceptedThrough string
 }
 
 // MergeCase is one merge of the profiles Inputs returns, which Intersect and
@@ -64,19 +106,22 @@ type MergeCase[T any] struct {
 
 // CheckContract checks the behavior every package shares: no profiles is
 // ErrNoProfiles behind "merge: ", a nil profile is an *spm.InputError
-// naming its position that wraps ErrNilProfile, and every validator
-// rejects nil with ErrNilProfile. Each case must merge to the profiles it
-// gives, leave its inputs as they were and share no memory with them (see
-// NoSharedMemory), so a caller writing to the result cannot reach an input;
-// every Diff of its first and last input and every copy of each input must
-// do the same. A contract without cases, diffs or validators, or with a
-// variant named after one of the merges, fails the test rather than check
-// less than it seems to.
+// naming its position that wraps ErrNilProfile, and every validator and
+// UnmarshalStrict reject nil with ErrNilProfile. Each case must merge to
+// the profiles it gives, leave its inputs as they were and share no memory
+// with them (see NoSharedMemory), so a caller writing to the result cannot
+// reach an input; every Diff of its first and last input and every copy of
+// each input must do the same. Every merge reports the bad inputs as
+// CheckInputErrors describes, the validators of the lattice reject in its
+// order, and each limit holds at its boundary. A contract leaving out any
+// of these, or with a variant named after one of the merges, fails the test
+// rather than check less than it seems to.
 func CheckContract[T, D any](t *testing.T, contract *Contract[T, D]) {
 	t.Helper()
 
-	if len(contract.Cases) == 0 || len(contract.Diffs) == 0 || len(contract.Validators) == 0 {
-		t.Fatal("the contract names no cases, diffs or validators")
+	if !contract.complete() {
+		t.Fatal("the contract leaves out cases, diffs, validators, UnmarshalStrict, " +
+			"bad inputs, a lattice or limits")
 	}
 
 	intersects := mergesNamed(t, "Intersect", contract.Intersect, contract.Intersects)
@@ -85,11 +130,207 @@ func CheckContract[T, D any](t *testing.T, contract *Contract[T, D]) {
 	for _, merges := range []map[string]func(...*T) (*T, error){intersects, unions} {
 		for name, merge := range merges {
 			checkMergeInputs(t, name, merge, contract.Valid)
+			checkBadInputs(t, name, merge, contract.BadInputs)
 		}
 	}
 
 	checkNilProfiles(t, contract)
 	checkCases(t, contract, intersects, unions)
+
+	lattice := latticeOf(t, contract)
+	checkLattice(t, contract, lattice)
+	checkLimits(t, contract, lattice)
+}
+
+// complete reports whether the contract names everything CheckContract
+// checks.
+func (contract *Contract[T, D]) complete() bool {
+	badInput := slices.ContainsFunc(contract.BadInputs, func(input BadInput[T]) bool {
+		return input.Sentinel != nil
+	})
+
+	return len(contract.Cases) > 0 && len(contract.Diffs) > 0 && len(contract.Validators) > 0 &&
+		contract.UnmarshalStrict != nil && badInput &&
+		len(contract.Lattice) > 1 && len(contract.LatticeProfiles) > 0 &&
+		len(contract.Limits) > 0
+}
+
+// latticeOf returns the validators the lattice of the contract names, in
+// its order, and fails the test for a name that is no validator.
+func latticeOf[T, D any](t *testing.T, contract *Contract[T, D]) []func(*T) error {
+	t.Helper()
+
+	lattice := make([]func(*T) error, len(contract.Lattice))
+	for idx, name := range contract.Lattice {
+		validate, ok := contract.Validators[name]
+		if !ok {
+			t.Fatalf("the lattice names %q, which is no validator", name)
+		}
+
+		lattice[idx] = validate
+	}
+
+	return lattice
+}
+
+// checkBadInputs checks that merge reports the inputs failing its checks as
+// CheckInputErrors describes.
+func checkBadInputs[T any](
+	t *testing.T, name string, merge func(...*T) (*T, error), inputs []BadInput[T],
+) {
+	t.Helper()
+
+	t.Run(name+"/bad inputs", func(t *testing.T) {
+		t.Parallel()
+
+		profiles := make([]*T, len(inputs))
+
+		var (
+			indices   []int
+			sentinels []error
+		)
+
+		for idx, input := range inputs {
+			profiles[idx] = input.Profile
+
+			if input.Sentinel != nil {
+				indices = append(indices, idx)
+				sentinels = append(sentinels, input.Sentinel)
+			}
+		}
+
+		_, err := merge(profiles...)
+		CheckInputErrors(t, name, err, indices, sentinels)
+	})
+}
+
+// CheckInputErrors checks that err joins one *spm.InputError per index, in
+// that order, each matching its sentinel, and that errors.As finds the
+// first. It takes at least one index and a sentinel for each.
+func CheckInputErrors(t *testing.T, name string, err error, indices []int, sentinels []error) {
+	t.Helper()
+
+	var first *spm.InputError
+	if !errors.As(err, &first) || first.Index != indices[0] {
+		t.Fatalf("%s: errors.As = %v, want the InputError of input %d", name, err, indices[0])
+	}
+
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		t.Fatalf("%s: %v joins no errors", name, err)
+	}
+
+	errs := joined.Unwrap()
+	if len(errs) != len(indices) {
+		t.Fatalf("%s: %d errors, want %d: %v", name, len(errs), len(indices), err)
+	}
+
+	for idx, each := range errs {
+		var inputErr *spm.InputError
+		if !errors.As(each, &inputErr) || inputErr.Index != indices[idx] ||
+			!errors.Is(inputErr, sentinels[idx]) {
+			t.Errorf("%s: error %d = %v, want input %d with %v",
+				name, idx, each, indices[idx], sentinels[idx])
+		}
+	}
+}
+
+// checkLattice checks that each validator of lattice rejects every profile
+// of the contract the one before it rejects, and that the profiles tell
+// each validator from the one before it, so the order is checked at all.
+func checkLattice[T, D any](t *testing.T, contract *Contract[T, D], lattice []func(*T) error) {
+	t.Helper()
+
+	stricter := make([]bool, len(lattice))
+
+	for name, profile := range contract.LatticeProfiles {
+		var weaker error
+
+		for idx, validate := range lattice {
+			err := validate(profile)
+
+			switch {
+			case idx == 0:
+			case weaker != nil && err == nil:
+				t.Errorf("lattice/%s: %s accepts what %s rejects: %v",
+					name, contract.Lattice[idx], contract.Lattice[idx-1], weaker)
+			case weaker == nil && err != nil:
+				stricter[idx] = true
+			}
+
+			weaker = err
+		}
+	}
+
+	for idx := 1; idx < len(lattice); idx++ {
+		if !stricter[idx] {
+			t.Errorf("no lattice profile that %s rejects and %s accepts",
+				contract.Lattice[idx], contract.Lattice[idx-1])
+		}
+	}
+}
+
+// checkLimits checks every limit of the contract at its boundary, where an
+// off-by-one in a check would reject a profile the package promises to
+// accept while every test that stays well clear of the bound passes.
+func checkLimits[T, D any](t *testing.T, contract *Contract[T, D], lattice []func(*T) error) {
+	t.Helper()
+
+	for _, limit := range contract.Limits {
+		from := latticeIndex(t, contract, limit.Name, limit.FirstValidator)
+
+		accepted := len(lattice) - 1
+		if limit.AcceptedThrough != "" {
+			accepted = latticeIndex(t, contract, limit.Name, limit.AcceptedThrough)
+		}
+
+		t.Run("limit/"+limit.Name, func(t *testing.T) {
+			t.Parallel()
+
+			atLimit, pastLimit := limit.Build(limit.Limit), limit.Build(limit.Limit+1)
+
+			for idx, validate := range lattice {
+				checkBoundary(t, contract.Lattice[idx], validate(atLimit), validate(pastLimit),
+					limit.Sentinel, idx <= accepted, idx >= from)
+			}
+		})
+	}
+}
+
+// checkBoundary checks what the named validator returned for a profile at
+// a limit and one past it: at the limit no sentinel, and nothing at all
+// where accept is set; past it the sentinel exactly where enforce is set.
+func checkBoundary(
+	t *testing.T,
+	name string,
+	atLimit, pastLimit, sentinel error,
+	accept, enforce bool,
+) {
+	t.Helper()
+
+	if (accept && atLimit != nil) || errors.Is(atLimit, sentinel) {
+		t.Errorf("%s at the limit = %v, want it accepted", name, atLimit)
+	}
+
+	switch reported := errors.Is(pastLimit, sentinel); {
+	case enforce && !reported:
+		t.Errorf("%s one past the limit = %v, want %v", name, pastLimit, sentinel)
+	case !enforce && reported:
+		t.Errorf("%s one past the limit = %v, want no size check", name, pastLimit)
+	}
+}
+
+// latticeIndex returns the position of the named validator in the lattice
+// of the contract, and fails the test where the limit names one it lacks.
+func latticeIndex[T, D any](t *testing.T, contract *Contract[T, D], limit, name string) int {
+	t.Helper()
+
+	idx := slices.Index(contract.Lattice, name)
+	if idx < 0 {
+		t.Fatalf("limit %s names %q, which the lattice does not name", limit, name)
+	}
+
+	return idx
 }
 
 // checkCases runs every case of the contract through every merge, Diff and
@@ -175,8 +416,8 @@ func checkCopies[T any](
 }
 
 // checkNilProfiles checks that every Diff reports a nil profile on either
-// side as checkNilInput describes, and every validator rejects nil with
-// ErrNilProfile.
+// side as checkNilInput describes, and every validator and UnmarshalStrict
+// reject nil with ErrNilProfile.
 func checkNilProfiles[T, D any](t *testing.T, contract *Contract[T, D]) {
 	t.Helper()
 
@@ -215,6 +456,20 @@ func checkNilProfiles[T, D any](t *testing.T, contract *Contract[T, D]) {
 			}
 		})
 	}
+
+	t.Run("UnmarshalStrict/nil", func(t *testing.T) {
+		t.Parallel()
+
+		data, err := json.Marshal(valid)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = contract.UnmarshalStrict(data, nil)
+		if !errors.Is(err, spm.ErrNilProfile) {
+			t.Errorf("UnmarshalStrict(nil) = %v, want ErrNilProfile", err)
+		}
+	})
 }
 
 // checkDiffInputs checks that diff leaves the first and the last of the

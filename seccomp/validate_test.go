@@ -1025,11 +1025,8 @@ func TestValidateArtifactConflictingEntries(t *testing.T) {
 }
 
 // latticeCorpus returns profiles covering what the three validators look at,
-// valid ones included, for the ordering assertion below.
-func latticeCorpus() []struct {
-	name    string
-	profile *specs.LinuxSeccomp
-} {
+// valid ones included, for the ordering the contract test checks.
+func latticeCorpus() map[string]*specs.LinuxSeccomp {
 	errno := uint(13)
 	huge := uint(70000)
 
@@ -1053,75 +1050,72 @@ func latticeCorpus() []struct {
 		manyNames = append(manyNames, fmt.Sprintf("sys%d", idx))
 	}
 
-	return []struct {
-		name    string
-		profile *specs.LinuxSeccomp
-	}{
-		{"empty", &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}},
-		{"plain allowlist", &specs.LinuxSeccomp{
+	return map[string]*specs.LinuxSeccomp{
+		"empty": {DefaultAction: specs.ActErrno},
+		"plain allowlist": {
 			DefaultAction: specs.ActErrno,
 			Syscalls: []specs.LinuxSyscall{
 				{Names: []string{syscallRead, syscallWrite}, Action: specs.ActAllow},
 			},
-		}},
-		{"unknown action", &specs.LinuxSeccomp{DefaultAction: actInvalid}},
-		{"unknown operator", &specs.LinuxSeccomp{
+		},
+		"unknown action": {DefaultAction: actInvalid},
+		"unknown operator": {
 			DefaultAction: specs.ActErrno,
 			Syscalls: []specs.LinuxSyscall{{
 				Names: []string{syscallRead}, Action: specs.ActAllow,
 				Args: []specs.LinuxSeccompArg{{Index: 0, Op: "SCMP_CMP_BOGUS"}},
 			}},
-		}},
-		{"arg index out of range", &specs.LinuxSeccomp{
+		},
+		"arg index out of range": {
 			DefaultAction: specs.ActErrno,
 			Syscalls: []specs.LinuxSyscall{{
 				Names: []string{syscallRead}, Action: specs.ActAllow,
 				Args: []specs.LinuxSeccompArg{{Index: 9, Op: specs.OpEqualTo}},
 			}},
-		}},
-		{"empty names", &specs.LinuxSeccomp{
+		},
+		"empty names": {
 			DefaultAction: specs.ActErrno,
 			Syscalls:      []specs.LinuxSyscall{{Names: nil, Action: specs.ActAllow}},
-		}},
-		{"notify default", &specs.LinuxSeccomp{DefaultAction: specs.ActNotify}},
-		{"notify on write", &specs.LinuxSeccomp{
+		},
+		"notify default": {DefaultAction: specs.ActNotify},
+		"notify on write": {
 			DefaultAction: specs.ActErrno,
 			Syscalls: []specs.LinuxSyscall{
 				{Names: []string{syscallWrite}, Action: specs.ActNotify},
 			},
-		}},
-		{"notify elsewhere", &specs.LinuxSeccomp{
+		},
+		"notify elsewhere": {
 			DefaultAction: specs.ActErrno,
 			ListenerPath:  "/run/seccomp-agent.sock",
 			Syscalls: []specs.LinuxSyscall{
 				{Names: []string{syscallRead}, Action: specs.ActNotify},
 			},
-		}},
-		{"listener metadata", &specs.LinuxSeccomp{
+		},
+		"listener metadata": {
 			DefaultAction: specs.ActErrno, ListenerMetadata: "opaque",
-		}},
-		{"listener flag", &specs.LinuxSeccomp{
+		},
+		"listener flag": {
 			DefaultAction: specs.ActErrno,
 			Flags:         []specs.LinuxSeccompFlag{specs.LinuxSeccompFlagWaitKillableRecv},
-		}},
-		{"duplicate names", &specs.LinuxSeccomp{
+		},
+		"duplicate names": {
 			DefaultAction: specs.ActErrno,
 			Syscalls: []specs.LinuxSyscall{
 				{Names: []string{syscallRead}, Action: specs.ActAllow},
 				{Names: []string{syscallRead}, Action: specs.ActLog},
 			},
-		}},
-		{"duplicate architecture", &specs.LinuxSeccomp{
+		},
+		"duplicate architecture": {
 			DefaultAction: specs.ActErrno,
 			Architectures: []specs.Arch{specs.ArchX86_64, specs.ArchX86_64},
-		}},
-		{"errno out of range", &specs.LinuxSeccomp{
+		},
+		"errno out of range": {
 			DefaultAction: specs.ActErrno, DefaultErrnoRet: &huge,
-		}},
-		{"unused errnoRet", &specs.LinuxSeccomp{
+		},
+		"unused errnoRet": {
 			DefaultAction: specs.ActAllow, DefaultErrnoRet: &errno,
-		}},
-		{"unused valueTwo", &specs.LinuxSeccomp{
+		},
+		"unused valueTwo": {
 			DefaultAction: specs.ActErrno,
 			Syscalls: []specs.LinuxSyscall{{
 				Names: []string{syscallRead}, Action: specs.ActAllow,
@@ -1129,51 +1123,23 @@ func latticeCorpus() []struct {
 					{Index: 0, Value: 1, ValueTwo: 2, Op: specs.OpEqualTo},
 				},
 			}},
-		}},
-		{"conflicting entries", &specs.LinuxSeccomp{
+		},
+		"conflicting entries": {
 			DefaultAction: specs.ActErrno,
 			Syscalls: []specs.LinuxSyscall{
 				{Names: []string{syscallRead}, Action: specs.ActAllow},
 				{Names: []string{syscallRead}, Action: specs.ActLog},
 			},
-		}},
-		{"too many entries", &specs.LinuxSeccomp{
+		},
+		"too many entries": {
 			DefaultAction: specs.ActErrno, Syscalls: manyEntries,
-		}},
-		{"too many names in one entry", &specs.LinuxSeccomp{
+		},
+		"too many names in one entry": {
 			DefaultAction: specs.ActErrno,
 			Syscalls: []specs.LinuxSyscall{
 				{Names: manyNames, Action: specs.ActAllow},
 			},
-		}},
-	}
-}
-
-// TestValidationLattice asserts the ordering the three validators promise,
-// which the apparmor and landlock packages promise as well: whatever
-// Validate rejects, ValidateArtifact rejects, and whatever ValidateArtifact
-// rejects, ValidateStrict rejects. Callers pick a validator by how much they
-// trust the profile, and that choice only means something if the stricter
-// one never accepts what a weaker one refuses.
-func TestValidationLattice(t *testing.T) {
-	t.Parallel()
-
-	for _, testCase := range latticeCorpus() {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-
-			loadable := seccomp.Validate(testCase.profile)
-			artifact := seccomp.ValidateArtifact(testCase.profile)
-			strict := seccomp.ValidateStrict(testCase.profile)
-
-			if loadable != nil && artifact == nil {
-				t.Errorf("ValidateArtifact accepts what Validate rejects: %v", loadable)
-			}
-
-			if artifact != nil && strict == nil {
-				t.Errorf("ValidateStrict accepts what ValidateArtifact rejects: %v", artifact)
-			}
-		})
+		},
 	}
 }
 
@@ -1709,15 +1675,6 @@ func TestValidateArtifactReportsLostRulesOfRepeatedIndices(t *testing.T) {
 		if !errors.Is(err, seccomp.ErrLostRules) {
 			t.Errorf("%s: Options{aarch64}.ValidateArtifact = %v, want ErrLostRules", name, err)
 		}
-	}
-}
-
-func TestUnmarshalStrictNilProfile(t *testing.T) {
-	t.Parallel()
-
-	err := seccomp.UnmarshalStrict([]byte(`{"defaultAction":"SCMP_ACT_ERRNO"}`), nil)
-	if !errors.Is(err, seccomp.ErrNilProfile) {
-		t.Errorf("UnmarshalStrict(nil) = %v, want ErrNilProfile", err)
 	}
 }
 

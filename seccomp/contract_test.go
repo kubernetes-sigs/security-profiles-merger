@@ -84,12 +84,27 @@ func TestContract(t *testing.T) {
 			"Validate":                 seccomp.Validate,
 			"ValidateStrict":           seccomp.ValidateStrict,
 			"ValidateArtifact":         seccomp.ValidateArtifact,
+			"ValidateBaseline":         seccomp.ValidateBaseline,
+			"Options.Validate":         seccomp.ForAnyArch().Validate,
 			"Options.ValidateStrict":   seccomp.ForAnyArch().ValidateStrict,
 			"Options.ValidateArtifact": seccomp.ForAnyArch().ValidateArtifact,
+			"Options.ValidateBaseline": seccomp.ForAnyArch().ValidateBaseline,
 		},
 		Valid: func() *specs.LinuxSeccomp {
 			return profile(specs.ActErrno, allow(syscallRead))
 		},
+		UnmarshalStrict: seccomp.UnmarshalStrict,
+		BadInputs: []testutil.BadInput[specs.LinuxSeccomp]{
+			{Profile: profile(actInvalid), Sentinel: seccomp.ErrUnknownAction},
+			{Profile: profile(specs.ActErrno), Sentinel: nil},
+			{Profile: &specs.LinuxSeccomp{
+				DefaultAction: specs.ActErrno, Architectures: []specs.Arch{"SCMP_ARCH_BOGUS"},
+			}, Sentinel: seccomp.ErrUnknownArch},
+			{Profile: nil, Sentinel: seccomp.ErrNilProfile},
+		},
+		Lattice:         []string{"Validate", "ValidateArtifact", "ValidateStrict"},
+		LatticeProfiles: latticeCorpus(),
+		Limits:          artifactLimits(),
 		Cases: []testutil.MergeCase[specs.LinuxSeccomp]{{
 			// A runtime loads the lower 16 bits of an errno, so 65538 loads
 			// as 2, while Diff reports it as written, which it must copy.

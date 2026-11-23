@@ -23,17 +23,13 @@ import (
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
 
-// TestArtifactLimitsAtTheirBoundary covers each exported limit at the value
-// a caller sizing a profile against it will produce: the limit itself must
-// be accepted and one more rejected. Every other test stays well clear of
-// these bounds, so an off-by-one in a check would pass unnoticed while
-// rejecting a profile the documentation promises to accept.
-func TestArtifactLimitsAtTheirBoundary(t *testing.T) {
-	t.Parallel()
-
+// artifactLimits returns the exported limits for the contract test, which
+// checks each at the value a caller sizing a profile against it produces.
+func artifactLimits() []testutil.LimitCase[specs.LinuxSeccomp] {
 	names := func(count int) []string {
 		list := make([]string, 0, count)
 		for idx := range count {
@@ -53,9 +49,8 @@ func TestArtifactLimitsAtTheirBoundary(t *testing.T) {
 		}
 	}
 
-	// One name carrying the given number of conditional rules, which is one
-	// rule per entry.
-	clausesPerSyscall := func(count int) *specs.LinuxSeccomp {
+	// One name in the given number of entries, each a rule of its own.
+	entriesPerSyscall := func(count int) *specs.LinuxSeccomp {
 		entries := make([]specs.LinuxSyscall, 0, count)
 		for idx := range count {
 			entries = append(entries, specs.LinuxSyscall{
@@ -69,61 +64,76 @@ func TestArtifactLimitsAtTheirBoundary(t *testing.T) {
 		return &specs.LinuxSeccomp{DefaultAction: specs.ActErrno, Syscalls: entries}
 	}
 
-	// Rules spread over many syscalls, one each, which only the profile-wide
-	// bound counts.
-	profileClauses := func(count int) *specs.LinuxSeccomp {
-		return &specs.LinuxSeccomp{
-			DefaultAction: specs.ActErrno,
-			Syscalls: []specs.LinuxSyscall{
-				{Names: names(count), Action: specs.ActAllow},
-			},
+	// One name carrying the given number of rules: each entry compares one
+	// argument twice, which loads a rule per comparison, so the entries
+	// stay within their own limit.
+	clausesPerSyscall := func(count int) *specs.LinuxSeccomp {
+		entries := make([]specs.LinuxSyscall, 0, (count+1)/2)
+		for first := 0; first < count; first += 2 {
+			args := []specs.LinuxSeccompArg{
+				{Index: 0, Op: specs.OpEqualTo, Value: uint64(first)},
+			}
+			if first+1 < count {
+				args = append(args, specs.LinuxSeccompArg{
+					Index: 0, Op: specs.OpEqualTo, Value: uint64(first + 1),
+				})
+			}
+
+			entries = append(entries, specs.LinuxSyscall{
+				Names: []string{syscallRead}, Action: specs.ActAllow, Args: args,
+			})
 		}
+
+		return &specs.LinuxSeccomp{DefaultAction: specs.ActErrno, Syscalls: entries}
 	}
 
-	for _, testCase := range []struct {
-		name     string
-		limit    int
-		build    func(int) *specs.LinuxSeccomp
-		sentinel error
-	}{
-		{
-			"names per entry", seccomp.MaxArtifactNamesPerEntry, namesPerEntry,
-			seccomp.ErrTooManyNamesPerEntry,
-		},
-		{
-			"clauses per syscall", seccomp.MaxArtifactRulesPerSyscall, clausesPerSyscall,
-			seccomp.ErrTooManyRulesPerSyscall,
-		},
-		{
-			"clauses per profile", seccomp.MaxArtifactRules, profileClauses,
-			seccomp.ErrTooManyRules,
-		},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
+	// Syscalls in entries of at most perEntry names, one rule each, which
+	// only the profile-wide bounds count.
+	spread := func(count, perEntry int) *specs.LinuxSeccomp {
+		all := names(count)
+		entries := make([]specs.LinuxSyscall, 0, (count+perEntry-1)/perEntry)
 
-			for name, validate := range map[string]func(*specs.LinuxSeccomp) error{
-				"ValidateArtifact": seccomp.ValidateArtifact,
-				"ValidateStrict":   seccomp.ValidateStrict,
-			} {
-				err := validate(testCase.build(testCase.limit))
-				if errors.Is(err, testCase.sentinel) {
-					t.Errorf("%s at the limit = %v, want it accepted", name, err)
-				}
+		for len(all) > 0 {
+			size := min(perEntry, len(all))
+			entries = append(entries, specs.LinuxSyscall{Names: all[:size], Action: specs.ActAllow})
+			all = all[size:]
+		}
 
-				err = validate(testCase.build(testCase.limit + 1))
-				if !errors.Is(err, testCase.sentinel) {
-					t.Errorf("%s one past the limit = %v, want %v", name, err, testCase.sentinel)
-				}
-			}
-
-			// Validate is the merge precondition and counts nothing.
-			err := seccomp.Validate(testCase.build(testCase.limit + 1))
-			if errors.Is(err, testCase.sentinel) {
-				t.Errorf("Validate = %v, want no size check", err)
-			}
-		})
+		return &specs.LinuxSeccomp{DefaultAction: specs.ActErrno, Syscalls: entries}
 	}
+
+	profileClauses := func(count int) *specs.LinuxSeccomp {
+		return spread(count, seccomp.MaxArtifactNamesPerEntry)
+	}
+
+	profileEntries := func(count int) *specs.LinuxSeccomp {
+		return spread(count, 1)
+	}
+
+	// Validate is the merge precondition and counts nothing.
+	return []testutil.LimitCase[specs.LinuxSeccomp]{{
+		Name: "names per entry", Limit: seccomp.MaxArtifactNamesPerEntry,
+		Build: namesPerEntry, Sentinel: seccomp.ErrTooManyNamesPerEntry,
+		FirstValidator: "ValidateArtifact",
+	}, {
+		// ValidateStrict refuses a syscall named in several entries.
+		Name: "entries per syscall", Limit: seccomp.MaxArtifactEntriesPerSyscall,
+		Build: entriesPerSyscall, Sentinel: seccomp.ErrTooManyEntriesPerSyscall,
+		FirstValidator: "ValidateArtifact", AcceptedThrough: "ValidateArtifact",
+	}, {
+		Name: "entries per profile", Limit: seccomp.MaxArtifactEntries,
+		Build: profileEntries, Sentinel: seccomp.ErrTooManyEntries,
+		FirstValidator: "ValidateArtifact",
+	}, {
+		// ValidateStrict refuses a syscall named in several entries.
+		Name: "clauses per syscall", Limit: seccomp.MaxArtifactRulesPerSyscall,
+		Build: clausesPerSyscall, Sentinel: seccomp.ErrTooManyRulesPerSyscall,
+		FirstValidator: "ValidateArtifact", AcceptedThrough: "ValidateArtifact",
+	}, {
+		Name: "clauses per profile", Limit: seccomp.MaxArtifactRules,
+		Build: profileClauses, Sentinel: seccomp.ErrTooManyRules,
+		FirstValidator: "ValidateArtifact",
+	}}
 }
 
 // TestPerSyscallLimitsOutlastAFullReport covers a profile past a

@@ -86,11 +86,31 @@ func TestContract(t *testing.T) {
 			"Validate":                 landlock.Validate,
 			"ValidateStrict":           landlock.ValidateStrict,
 			"ValidateArtifact":         landlock.ValidateArtifact,
+			"ValidateBaseline":         landlock.ValidateBaseline,
 			"Options.Validate":         landlock.Options{ABI: landlock.ABIV1}.Validate,
 			"Options.ValidateStrict":   landlock.Options{ABI: landlock.ABIV1}.ValidateStrict,
 			"Options.ValidateArtifact": landlock.Options{ABI: landlock.ABIV1}.ValidateArtifact,
+			"Options.ValidateBaseline": landlock.Options{ABI: landlock.ABIV1}.ValidateBaseline,
 		},
-		Valid: func() *landlock.Profile { return etc(read) },
+		Valid:           func() *landlock.Profile { return etc(read) },
+		UnmarshalStrict: landlock.UnmarshalStrict,
+		BadInputs: []testutil.BadInput[landlock.Profile]{
+			{
+				Profile: fsProfile(fsRights{read},
+					landlock.PathRule{Path: "/a/../b", AccessFS: fsRights{read}}),
+				Sentinel: landlock.ErrParentPath,
+			},
+			{Profile: etc(read), Sentinel: nil},
+			{Profile: fsProfile(fsRights{"fly"}), Sentinel: landlock.ErrUnknownRight},
+		},
+		// Validate checks what the merge needs, ValidateBaseline adds what
+		// a kernel could not load, ValidateArtifact adds MaxArtifactRules,
+		// and ValidateStrict adds the duplicate checks.
+		Lattice: []string{
+			"Validate", "ValidateBaseline", "ValidateArtifact", "ValidateStrict",
+		},
+		LatticeProfiles: validationCorpus(),
+		Limits:          artifactLimits(),
 		Cases: []testutil.MergeCase[landlock.Profile]{{
 			Name:      "single profile",
 			Inputs:    func() []*landlock.Profile { return []*landlock.Profile{single()} },
