@@ -25,6 +25,7 @@ import (
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
 
@@ -720,8 +721,8 @@ func FuzzDiff(f *testing.F) {
 			t.Error("Diff(L,R).Equal != Diff(R,L).Equal")
 		}
 
-		assertSliceDiffSwapped(t, "Architectures", diff.Architectures, reverse.Architectures)
-		assertSliceDiffSwapped(t, "Flags", diff.Flags, reverse.Flags)
+		testutil.SliceDiffSwapped(t, "Architectures", diff.Architectures, reverse.Architectures)
+		testutil.SliceDiffSwapped(t, "Flags", diff.Flags, reverse.Flags)
 		assertSyscallsDiffSwapped(t, diff.Syscalls, reverse.Syscalls)
 
 		selfDiff, err := seccomp.Diff(left, left)
@@ -733,31 +734,6 @@ func FuzzDiff(f *testing.F) {
 			t.Error("Diff(X, X) must be equal")
 		}
 	})
-}
-
-func assertSliceDiffSwapped[T comparable](
-	t *testing.T, label string,
-	fwd, rev *seccomp.SliceDiff[T],
-) {
-	t.Helper()
-
-	if (fwd == nil) != (rev == nil) {
-		t.Errorf("%s: nil mismatch", label)
-
-		return
-	}
-
-	if fwd == nil {
-		return
-	}
-
-	if !slices.Equal(fwd.Added, rev.Removed) {
-		t.Errorf("%s: forward Added != reverse Removed", label)
-	}
-
-	if !slices.Equal(fwd.Removed, rev.Added) {
-		t.Errorf("%s: forward Removed != reverse Added", label)
-	}
 }
 
 func assertSyscallsDiffSwapped(
@@ -807,28 +783,12 @@ func nativeByteOrder(archs []specs.Arch, mask uint32) []specs.Arch {
 	})
 }
 
-// assertStrictOrdering checks ValidateStrict against what ValidateArtifact
-// returned for the profile: it accepts nothing ValidateArtifact rejects,
-// and where ValidateArtifact accepts, which is the only way to reach the
-// checks ValidateStrict adds, it rejects only for one of those.
-func assertStrictOrdering(t *testing.T, profile *specs.LinuxSeccomp, artifactErr error) {
-	t.Helper()
-
-	strictErr := seccomp.ValidateStrict(profile)
-
-	switch {
-	case artifactErr != nil && strictErr == nil:
-		t.Fatalf("ValidateStrict accepted a profile ValidateArtifact rejects: %v", artifactErr)
-	case artifactErr == nil && strictErr != nil &&
-		!errors.Is(strictErr, seccomp.ErrDuplicateSyscallName) &&
-		!errors.Is(strictErr, seccomp.ErrUnusedValueTwo):
-		t.Fatalf("ValidateStrict rejected an accepted artifact for a check of "+
-			"ValidateArtifact's: %v", strictErr)
-	}
-}
+// strictChecks are the sentinels of the checks ValidateStrict adds to those
+// of ValidateArtifact (see testutil.StrictOrdering).
+var strictChecks = []error{seccomp.ErrDuplicateSyscallName, seccomp.ErrUnusedValueTwo}
 
 // assertMixedByteOrder runs ValidateArtifact and ValidateStrict on a profile
-// whose architectures are left as drawn: the ordering assertStrictOrdering
+// whose architectures are left as drawn: the ordering testutil.StrictOrdering
 // checks holds, and where the list holds an architecture of another byte
 // order than the native one, both report it with ErrMixedByteOrder, unless
 // the report left failures out.
@@ -836,7 +796,8 @@ func assertMixedByteOrder(t *testing.T, profile *specs.LinuxSeccomp) {
 	t.Helper()
 
 	artifactErr := seccomp.ValidateArtifact(profile)
-	assertStrictOrdering(t, profile, artifactErr)
+	strictErr := seccomp.ValidateStrict(profile)
+	testutil.StrictOrdering(t, artifactErr, strictErr, strictChecks...)
 
 	native, known := seccomp.NativeArchitecture()
 	if !known || !slices.ContainsFunc(profile.Architectures, func(arch specs.Arch) bool {
@@ -847,7 +808,7 @@ func assertMixedByteOrder(t *testing.T, profile *specs.LinuxSeccomp) {
 
 	for name, err := range map[string]error{
 		"ValidateArtifact": artifactErr,
-		"ValidateStrict":   seccomp.ValidateStrict(profile),
+		"ValidateStrict":   strictErr,
 	} {
 		if !errors.Is(err, seccomp.ErrMixedByteOrder) && !errors.Is(err, seccomp.ErrMoreProblems) {
 			t.Fatalf("%s of %v = %v, want ErrMixedByteOrder", name, profile.Architectures, err)
@@ -966,7 +927,7 @@ func FuzzValidateArtifact(f *testing.F) {
 		profile.Architectures = nativeByteOrder(profile.Architectures, archMask)
 
 		err := seccomp.ValidateArtifact(profile)
-		assertStrictOrdering(t, profile, err)
+		testutil.StrictOrdering(t, err, seccomp.ValidateStrict(profile), strictChecks...)
 
 		if err != nil {
 			return

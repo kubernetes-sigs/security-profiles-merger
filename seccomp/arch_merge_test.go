@@ -24,6 +24,7 @@ import (
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
@@ -390,7 +391,7 @@ func TestIntersectRefusesOnlyForeignByteOrder(t *testing.T) {
 	}
 
 	_, err = amd64.Intersect(profile, seccomp.Clone(profile))
-	checkInputErrors(t, "Intersect(pair)", err, []int{0, 1},
+	testutil.CheckInputErrors(t, "Intersect(pair)", err, []int{0, 1},
 		[]error{seccomp.ErrMixedByteOrder, seccomp.ErrMixedByteOrder})
 }
 

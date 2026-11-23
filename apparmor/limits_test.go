@@ -17,22 +17,17 @@ limitations under the License.
 package apparmor_test
 
 import (
-	"errors"
 	"fmt"
 	"strings"
-	"testing"
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 )
 
-// TestArtifactLimitsAtTheirBoundary covers each documented limit at the
-// value a caller will actually generate: the limit itself. A profile of
-// exactly MaxArtifactPaths paths is one the package promises to accept, and
-// an off-by-one in the check would reject it while every test that stays
-// well clear of the bound passes.
-func TestArtifactLimitsAtTheirBoundary(t *testing.T) {
-	t.Parallel()
-
+// artifactLimits returns the documented limits for the contract test, which
+// checks each at the value a caller will actually generate: the limit
+// itself.
+func artifactLimits() []testutil.LimitCase[apparmor.Profile] {
 	paths := func(count int) *apparmor.Profile {
 		list := make([]string, 0, count)
 		for idx := range count {
@@ -42,17 +37,32 @@ func TestArtifactLimitsAtTheirBoundary(t *testing.T) {
 		return readOnly(list...)
 	}
 
+	// Patterns of the given total length, counted as written, each short
+	// enough for MaxPathLen.
 	patternBytes := func(total int) *apparmor.Profile {
-		// One pattern of the given length, counted as written.
-		const prefix = "/etc/*"
+		const chunk = 4000
 
-		return readOnly(prefix + strings.Repeat("a", total-len(prefix)))
+		var list []string
+
+		for idx := 0; total > 0; idx++ {
+			prefix := fmt.Sprintf("/p%d/*", idx)
+			size := min(chunk, total)
+			list = append(list, prefix+strings.Repeat("a", size-len(prefix)))
+			total -= size
+		}
+
+		return readOnly(list...)
 	}
 
+	pathLength := func(length int) *apparmor.Profile {
+		return readOnly("/" + strings.Repeat("a", length-1))
+	}
+
+	// Names of a valid spelling, which no kernel knows this many of.
 	caps := func(count int) *apparmor.Profile {
 		list := make([]string, 0, count)
 		for idx := range count {
-			list = append(list, fmt.Sprintf("CAP_%d", idx))
+			list = append(list, fmt.Sprintf("cap%d", idx))
 		}
 
 		return &apparmor.Profile{
@@ -61,45 +71,20 @@ func TestArtifactLimitsAtTheirBoundary(t *testing.T) {
 		}
 	}
 
-	for _, testCase := range []struct {
-		name     string
-		limit    int
-		build    func(int) *apparmor.Profile
-		sentinel error
-	}{
-		{"paths", apparmor.MaxArtifactPaths, paths, apparmor.ErrTooManyPaths},
-		{
-			"pattern bytes", apparmor.MaxArtifactPatternBytes, patternBytes,
-			apparmor.ErrTooManyPatternBytes,
-		},
-		{
-			"capabilities", apparmor.MaxArtifactCapabilities, caps,
-			apparmor.ErrTooManyCapabilities,
-		},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-
-			for name, validate := range map[string]validateFunc{
-				"ValidateArtifact": apparmor.ValidateArtifact,
-				"ValidateStrict":   apparmor.ValidateStrict,
-			} {
-				err := validate(testCase.build(testCase.limit))
-				if errors.Is(err, testCase.sentinel) {
-					t.Errorf("%s at the limit = %v, want it accepted", name, err)
-				}
-
-				err = validate(testCase.build(testCase.limit + 1))
-				if !errors.Is(err, testCase.sentinel) {
-					t.Errorf("%s one past the limit = %v, want %v", name, err, testCase.sentinel)
-				}
-			}
-
-			// Validate is the merge precondition and counts nothing.
-			err := apparmor.Validate(testCase.build(testCase.limit + 1))
-			if errors.Is(err, testCase.sentinel) {
-				t.Errorf("Validate = %v, want no size check", err)
-			}
-		})
-	}
+	// Validate is the merge precondition and counts nothing.
+	return []testutil.LimitCase[apparmor.Profile]{{
+		Name: "paths", Limit: apparmor.MaxArtifactPaths, Build: paths,
+		Sentinel: apparmor.ErrTooManyPaths, FirstValidator: "ValidateArtifact",
+	}, {
+		Name: "pattern bytes", Limit: apparmor.MaxArtifactPatternBytes, Build: patternBytes,
+		Sentinel: apparmor.ErrTooManyPatternBytes, FirstValidator: "ValidateArtifact",
+	}, {
+		// ValidateStrict refuses names no kernel knows.
+		Name: "capabilities", Limit: apparmor.MaxArtifactCapabilities, Build: caps,
+		Sentinel: apparmor.ErrTooManyCapabilities, FirstValidator: "ValidateArtifact",
+		AcceptedThrough: "ValidateArtifact",
+	}, {
+		Name: "path length", Limit: apparmor.MaxPathLen, Build: pathLength,
+		Sentinel: apparmor.ErrPathTooLong, FirstValidator: "Validate",
+	}}
 }

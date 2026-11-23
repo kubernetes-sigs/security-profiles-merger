@@ -290,9 +290,8 @@ func failureGoldenCases() []goldenCase {
 	}
 }
 
-func TestGolden(t *testing.T) {
-	t.Parallel()
-
+// goldenCases returns every golden case, those with a stderr golden marked.
+func goldenCases() []goldenCase {
 	cases := slices.Concat(basicGoldenCases(), richGoldenCases())
 
 	for _, testCase := range slices.Concat(detectionGoldenCases(), failureGoldenCases()) {
@@ -300,7 +299,13 @@ func TestGolden(t *testing.T) {
 		cases = append(cases, testCase)
 	}
 
-	for _, testCase := range cases {
+	return cases
+}
+
+func TestGolden(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range goldenCases() {
 		t.Run(testCase.stem, func(t *testing.T) {
 			t.Parallel()
 
@@ -332,6 +337,34 @@ func TestGolden(t *testing.T) {
 
 			compareGolden(t, testCase.stderrGoldenPath(), stderr)
 		})
+	}
+}
+
+// TestEveryGoldenFileHasACase covers a golden file left behind after its
+// case was removed, which neither TestGolden nor make verify-golden notice.
+func TestEveryGoldenFileHasACase(t *testing.T) {
+	t.Parallel()
+
+	used := make(map[string]bool)
+
+	for _, testCase := range goldenCases() {
+		used[testCase.goldenPath()] = true
+
+		if testCase.wantStderr {
+			used[testCase.stderrGoldenPath()] = true
+		}
+	}
+
+	files, err := filepath.Glob("testdata/*.golden")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, file := range files {
+		// Glob joins with the separator of the host, the cases with "/".
+		if !used[filepath.ToSlash(file)] {
+			t.Errorf("%s belongs to no golden case", file)
+		}
 	}
 }
 

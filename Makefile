@@ -350,16 +350,16 @@ govulncheck: ## Run govulncheck
 # against the release before it rather than against the tag itself.
 API_BASE ?= $(shell git describe --tags --abbrev=0 HEAD^ 2>/dev/null)
 
-# gorelease refuses a working tree with uncommitted changes. From v1.0.0
-# on, an incompatible change against a release of the same major version
-# fails; below v1 the report is advisory (see hack/api-check.sh and
-# RELEASE.md).
 # The decisions of hack/api-check.sh on reports written as gorelease writes
 # them, which needs no release tag and no clean tree.
 .PHONY: test-api-check
 test-api-check: ## Check what hack/api-check.sh decides for the reports in hack/testdata/api-check
 	hack/api-check-test.sh
 
+# gorelease refuses a working tree with uncommitted changes. From v1.0.0
+# on, an incompatible change against a release of the same major version
+# fails; below v1 the report is advisory (see hack/api-check.sh and
+# RELEASE.md).
 .PHONY: api-report
 api-report: ## Report API changes since the latest release and fail on incompatible ones from v1 on (needs a clean tree)
 	@if [ -z "$(API_BASE)" ]; then echo "no release tag to compare against"; exit 1; fi

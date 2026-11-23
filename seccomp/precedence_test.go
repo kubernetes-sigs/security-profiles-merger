@@ -316,43 +316,66 @@ func TestDiffListsIgnoresArgOrder(t *testing.T) {
 	}
 }
 
-func TestIntersectKeepsLeftmostErrnoOverCollapsedConditional(t *testing.T) {
+// TestMergesSettleAnErrnoAgainstAConditionalAllow merges an unconditional
+// ERRNO(38) for read with a conditional allow of it, both under an explicit
+// EPERM default, which the results spell as an unset errnoRet, the way
+// runtimes read it. arg0 is the value the conditional allow compares the
+// first argument with.
+func TestMergesSettleAnErrnoAgainstAConditionalAllow(t *testing.T) {
 	t.Parallel()
 
-	one, enosys := uint(1), uint(38)
-	left := &specs.LinuxSeccomp{
-		DefaultAction:   specs.ActErrno,
-		DefaultErrnoRet: &one,
-		Syscalls: []specs.LinuxSyscall{{
-			Names: []string{"read"}, Action: specs.ActErrno, ErrnoRet: &enosys,
-		}},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction:   specs.ActErrno,
-		DefaultErrnoRet: &one,
-		Syscalls: []specs.LinuxSyscall{
-			{
-				Names: []string{
-					"read",
+	for _, test := range []struct {
+		name  string
+		merge mergeFunc
+		arg0  uint64
+		want  string
+	}{{
+		// The conditional allow collapses to ERRNO(38), the same result as
+		// the unconditional entry, so the entry stays unconditional and read
+		// keeps returning ENOSYS for every argument.
+		name:  "Intersect",
+		merge: seccomp.Intersect,
+		arg0:  0,
+		want:  "Profile{default:SCMP_ACT_ERRNO read->SCMP_ACT_ERRNO(errno:38)}",
+	}, {
+		// The merged unconditional rule differs from the merged default
+		// only by errno, and keeping it would force the conditional allow
+		// to collapse, so the errno is given up instead: read(arg0 == 5)
+		// stays permitted and every other call gets the default's EPERM.
+		name:  "Union",
+		merge: seccomp.Union,
+		arg0:  5,
+		want:  "Profile{default:SCMP_ACT_ERRNO read([0]SCMP_CMP_EQ:5)->SCMP_ACT_ALLOW}",
+	}} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			eperm, enosys := uint(1), uint(38)
+			left := &specs.LinuxSeccomp{
+				DefaultAction:   specs.ActErrno,
+				DefaultErrnoRet: &eperm,
+				Syscalls: []specs.LinuxSyscall{
+					{Names: []string{"read"}, Action: specs.ActErrno, ErrnoRet: &enosys},
 				},
-				Action: specs.ActAllow,
-				Args:   []specs.LinuxSeccompArg{argEq(0, 0)},
-			},
-		},
-	}
+			}
+			right := &specs.LinuxSeccomp{
+				DefaultAction:   specs.ActErrno,
+				DefaultErrnoRet: &eperm,
+				Syscalls: []specs.LinuxSyscall{{
+					Names: []string{"read"}, Action: specs.ActAllow,
+					Args: []specs.LinuxSeccompArg{argEq(0, test.arg0)},
+				}},
+			}
 
-	result, err := seccomp.Intersect(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+			result, err := test.merge(left, right)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 
-	// The conditional allow collapses to ERRNO(38), the same result as the
-	// unconditional entry, so the entry stays unconditional and read keeps
-	// returning ENOSYS for every argument. The explicit EPERM default is
-	// spelled as unset, which runtimes read the same way.
-	want := "Profile{default:SCMP_ACT_ERRNO read->SCMP_ACT_ERRNO(errno:38)}"
-	if got := seccomp.FormatProfile(result); got != want {
-		t.Errorf("Intersect = %s, want %s", got, want)
+			if got := seccomp.FormatProfile(result); got != test.want {
+				t.Errorf("%s = %s, want %s", test.name, got, test.want)
+			}
+		})
 	}
 }
 
@@ -457,47 +480,6 @@ func TestIntersectPrunesDominatedConjunction(t *testing.T) {
 		"read([1]SCMP_CMP_EQ:2)->SCMP_ACT_ERRNO}"
 	if got := seccomp.FormatProfile(result); got != want {
 		t.Errorf("Intersect = %s, want %s", got, want)
-	}
-}
-
-// TestUnionDropsErrnoOnlyFallbackForConditional covers the case where the
-// merged unconditional rule differs from the merged default only by errno
-// and a conditional rule with a different action survives. Keeping the
-// unconditional rule would force the conditional one to collapse, so the
-// errno is given up instead and those calls get the default's errno.
-func TestUnionDropsErrnoOnlyFallbackForConditional(t *testing.T) {
-	t.Parallel()
-
-	eperm, enosys := uint(1), uint(38)
-	left := &specs.LinuxSeccomp{
-		DefaultAction:   specs.ActErrno,
-		DefaultErrnoRet: &eperm,
-		Syscalls: []specs.LinuxSyscall{
-			{Names: []string{"read"}, Action: specs.ActErrno, ErrnoRet: &enosys},
-		},
-	}
-	right := &specs.LinuxSeccomp{
-		DefaultAction:   specs.ActErrno,
-		DefaultErrnoRet: &eperm,
-		Syscalls: []specs.LinuxSyscall{
-			{
-				Names: []string{"read"}, Action: specs.ActAllow,
-				Args: []specs.LinuxSeccompArg{argEq(0, 5)},
-			},
-		},
-	}
-
-	result, err := seccomp.Union(left, right)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// read(arg0 == 5) stays permitted, which the union must keep; the
-	// ENOSYS the left profile returned for every other call gives way to
-	// the default's EPERM, spelled as an unset errnoRet.
-	want := "Profile{default:SCMP_ACT_ERRNO read([0]SCMP_CMP_EQ:5)->SCMP_ACT_ALLOW}"
-	if got := seccomp.FormatProfile(result); got != want {
-		t.Errorf("Union = %s, want %s", got, want)
 	}
 }
 

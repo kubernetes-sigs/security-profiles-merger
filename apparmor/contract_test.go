@@ -84,8 +84,18 @@ func TestContract(t *testing.T) {
 			"Validate":         apparmor.Validate,
 			"ValidateStrict":   apparmor.ValidateStrict,
 			"ValidateArtifact": apparmor.ValidateArtifact,
+			"ValidateBaseline": apparmor.ValidateBaseline,
 		},
-		Valid: func() *apparmor.Profile { return caps(capChown) },
+		Valid:           func() *apparmor.Profile { return caps(capChown) },
+		UnmarshalStrict: apparmor.UnmarshalStrict,
+		BadInputs: []testutil.BadInput[apparmor.Profile]{
+			{Profile: &apparmor.Profile{}, Sentinel: nil},
+			{Profile: caps(""), Sentinel: apparmor.ErrEmptyCapability},
+			{Profile: readOnly("@{HOME}/x"), Sentinel: apparmor.ErrUnsupportedVariable},
+		},
+		Lattice:         []string{"Validate", "ValidateArtifact", "ValidateStrict"},
+		LatticeProfiles: validationCorpus(),
+		Limits:          artifactLimits(),
 		Cases: []testutil.MergeCase[apparmor.Profile]{{
 			// A union defers to the other side for a section one side
 			// leaves out, which is where it would be easiest to return

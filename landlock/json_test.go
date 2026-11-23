@@ -209,11 +209,6 @@ func TestUnmarshalStrict(t *testing.T) {
 			t.Errorf("%s: UnmarshalStrict = %q, want it to name %s", name, err, test.where)
 		}
 	}
-
-	err := landlock.UnmarshalStrict([]byte(`{}`), nil)
-	if !errors.Is(err, landlock.ErrNilProfile) {
-		t.Errorf("UnmarshalStrict(nil) = %v, want ErrNilProfile", err)
-	}
 }
 
 // TestUnmarshalStrictEndOfDocument covers a document that ends before its

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -1076,9 +1077,9 @@ func TestOptionsValidateReportsNetworkRuleRights(t *testing.T) {
 	}
 }
 
-// validationCorpus holds profiles covering every check the three validators
-// make, valid and invalid, so the lattice below is asserted over shapes that
-// actually fail somewhere.
+// validationCorpus holds profiles covering every check the validators make,
+// valid and invalid, so the lattice the contract test checks is asserted
+// over shapes that actually fail somewhere.
 func validationCorpus() map[string]*landlock.Profile {
 	read := []landlock.FSAccessRight{landlock.FSAccessReadFile}
 	bind := []landlock.NetAccessRight{landlock.NetAccessBindTCP}
@@ -1109,38 +1110,33 @@ func validationCorpus() map[string]*landlock.Profile {
 			landlock.NetRule{Port: 80, AccessNet: bind},
 			landlock.NetRule{Port: 80, AccessNet: bind},
 		),
-		"nil": nil,
+		"nil":            nil,
+		"too many rules": fsProfile(read, manyRules(landlock.MaxArtifactRules+1)...),
 	}
 }
 
-// TestValidationLattice asserts the order the validators are documented
-// in: Validate checks what the merge needs, ValidateBaseline adds what a
-// kernel could not load, ValidateArtifact adds MaxArtifactRules, and
-// ValidateStrict adds the duplicate checks. So each rejects everything the
-// one before it rejects.
-func TestValidationLattice(t *testing.T) {
+// manyRules returns count rules on distinct paths.
+func manyRules(count int) []landlock.PathRule {
+	rules := make([]landlock.PathRule, count)
+	for idx := range rules {
+		rules[idx] = landlock.PathRule{
+			Path:     "/r" + strconv.Itoa(idx),
+			AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
+		}
+	}
+
+	return rules
+}
+
+// TestMergeFailsWhereValidateDoes covers the merge precondition: a profile
+// the merge takes is one Validate accepts, so the merge must fail exactly
+// where Validate does.
+func TestMergeFailsWhereValidateDoes(t *testing.T) {
 	t.Parallel()
 
 	for name, profile := range validationCorpus() {
 		base := landlock.Validate(profile)
-		baseline := landlock.ValidateBaseline(profile)
-		artifact := landlock.ValidateArtifact(profile)
-		strict := landlock.ValidateStrict(profile)
 
-		if base != nil && baseline == nil {
-			t.Errorf("%s: Validate = %v but ValidateBaseline accepted it", name, base)
-		}
-
-		if baseline != nil && artifact == nil {
-			t.Errorf("%s: ValidateBaseline = %v but ValidateArtifact accepted it", name, baseline)
-		}
-
-		if artifact != nil && strict == nil {
-			t.Errorf("%s: ValidateArtifact = %v but ValidateStrict accepted it", name, artifact)
-		}
-
-		// A profile the merge takes is one Validate accepts, so the merge
-		// must fail exactly where Validate does.
 		_, err := landlock.Intersect(profile)
 		if (err != nil) != (base != nil) {
 			t.Errorf("%s: Intersect = %v, Validate = %v, want both or neither", name, err, base)

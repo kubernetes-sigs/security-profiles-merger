@@ -27,6 +27,7 @@ import (
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 )
 
 func capsFromMask(mask uint64) []string {
@@ -657,85 +658,40 @@ func assertDiffSymmetry(
 	if (fwd.Executable == nil) != (rev.Executable == nil) {
 		t.Error("Executable: nil mismatch")
 	} else if fwd.Executable != nil {
-		assertStringDiffSwapped(t, "AllowedExecutables",
+		testutil.SliceDiffSwapped(t, "AllowedExecutables",
 			fwd.Executable.AllowedExecutables, rev.Executable.AllowedExecutables)
-		assertStringDiffSwapped(t, "AllowedLibraries",
+		testutil.SliceDiffSwapped(t, "AllowedLibraries",
 			fwd.Executable.AllowedLibraries, rev.Executable.AllowedLibraries)
 	}
 
 	if (fwd.Capabilities == nil) != (rev.Capabilities == nil) {
 		t.Error("Capabilities: nil mismatch")
 	} else if fwd.Capabilities != nil {
-		assertStringDiffSwapped(t, "AllowedCapabilities",
+		testutil.SliceDiffSwapped(t, "AllowedCapabilities",
 			fwd.Capabilities.AllowedCapabilities, rev.Capabilities.AllowedCapabilities)
 	}
 
 	if (fwd.Filesystem == nil) != (rev.Filesystem == nil) {
 		t.Error("Filesystem: nil mismatch")
 	} else if fwd.Filesystem != nil {
-		assertStringDiffSwapped(
+		testutil.SliceDiffSwapped(
 			t,
 			"ReadOnly",
 			fwd.Filesystem.ReadOnlyPaths,
 			rev.Filesystem.ReadOnlyPaths,
 		)
-		assertStringDiffSwapped(
+		testutil.SliceDiffSwapped(
 			t,
 			"WriteOnly",
 			fwd.Filesystem.WriteOnlyPaths,
 			rev.Filesystem.WriteOnlyPaths,
 		)
-		assertStringDiffSwapped(
+		testutil.SliceDiffSwapped(
 			t,
 			"ReadWrite",
 			fwd.Filesystem.ReadWritePaths,
 			rev.Filesystem.ReadWritePaths,
 		)
-	}
-}
-
-func assertStringDiffSwapped(
-	t *testing.T, label string,
-	fwd, rev *apparmor.SliceDiff[string],
-) {
-	t.Helper()
-
-	if (fwd == nil) != (rev == nil) {
-		t.Errorf("%s: nil mismatch", label)
-
-		return
-	}
-
-	if fwd == nil {
-		return
-	}
-
-	if !slices.Equal(fwd.Added, rev.Removed) {
-		t.Errorf("%s: forward Added != reverse Removed", label)
-	}
-
-	if !slices.Equal(fwd.Removed, rev.Added) {
-		t.Errorf("%s: forward Removed != reverse Added", label)
-	}
-}
-
-// assertStrictOrdering checks ValidateStrict against what ValidateArtifact
-// returned for the profile: it accepts nothing ValidateArtifact rejects,
-// and where ValidateArtifact accepts, which is the only way to reach the
-// checks ValidateStrict adds, it rejects only for one of those.
-func assertStrictOrdering(t *testing.T, profile *apparmor.Profile, artifactErr error) {
-	t.Helper()
-
-	strictErr := apparmor.ValidateStrict(profile)
-
-	switch {
-	case artifactErr != nil && strictErr == nil:
-		t.Fatalf("ValidateStrict accepted a profile ValidateArtifact rejects: %v", artifactErr)
-	case artifactErr == nil && strictErr != nil &&
-		!errors.Is(strictErr, apparmor.ErrUnknownCapability) &&
-		!errors.Is(strictErr, apparmor.ErrDuplicateExecutablePath):
-		t.Fatalf("ValidateStrict rejected an accepted artifact for a check of "+
-			"ValidateArtifact's: %v", strictErr)
 	}
 }
 
@@ -774,7 +730,8 @@ func FuzzAppArmorValidateArtifact(f *testing.F) {
 		)
 
 		err := apparmor.ValidateArtifact(profile)
-		assertStrictOrdering(t, profile, err)
+		testutil.StrictOrdering(t, err, apparmor.ValidateStrict(profile),
+			apparmor.ErrUnknownCapability, apparmor.ErrDuplicateExecutablePath)
 
 		// Validate checks relative paths itself, so it agrees with
 		// ValidateArtifact on them, and the merges refuse what neither
