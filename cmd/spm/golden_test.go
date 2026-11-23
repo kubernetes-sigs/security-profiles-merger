@@ -196,6 +196,20 @@ func richGoldenCases() []goldenCase {
 		goldenCmd("validate_seccomp_rich_human", 0, "validate --type seccomp --format human",
 			testdataSeccompRichA),
 		goldenCmd("validate_landlock_rich", 0, "validate --type landlock", testdataLandlockRichA),
+		// The human format writes a line per rule, for every section of
+		// each profile type and of its diff.
+		goldenCmd("validate_apparmor_rich_human", 0, "validate --type apparmor --format human",
+			testdataAppArmorRichA),
+		goldenCmd("validate_landlock_rich_human", 0, "validate --type landlock --format human",
+			testdataLandlockRichA),
+		goldenCmd("diff_apparmor_rich_human", exitDiff, "diff --type apparmor --format human",
+			testdataAppArmorRichA, testdataAppArmorRichB),
+		goldenCmd("diff_landlock_rich_human", exitDiff, "diff --type landlock --format human",
+			testdataLandlockRichA, testdataLandlockRichB),
+		// A file holding an array is read as a stdin array is, and
+		// validate writes it back as it read it.
+		goldenCmd("validate_seccomp_file_array", 0, "validate --type seccomp",
+			"testdata/seccomp_stdin.json"),
 	}
 }
 
@@ -214,6 +228,10 @@ func detectionGoldenCases() []goldenCase {
 		// goes to stdout, which is the one case where both streams carry
 		// something at once.
 		goldenCmd("merge_seccomp_unknown_field", 0, "merge --strategy union",
+			"testdata/seccomp_unknown_field.json"),
+		// Validate writes the profile as it read it, the member it warns
+		// about included, rather than the profile it decoded.
+		goldenCmd("validate_seccomp_unknown_field", 0, "validate",
 			"testdata/seccomp_unknown_field.json"),
 		// A lone surrogate escape in an element of a stdin array is named
 		// at its byte in the array, which the line and column of a decode

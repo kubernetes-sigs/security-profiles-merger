@@ -172,13 +172,20 @@ listed under [Every package](#every-package).
 
 ## The spm command
 
-- `spm validate` writes an array for several inputs and for a stdin array of
-  any length, and an object for one profile.
+- `spm validate` writes an array for several inputs and for an array of
+  any length, on stdin or in a file, and an object for one profile, each
+  profile as it was read, or as it decoded where readers would decode it
+  differently, such as for a member spelled in another case.
 - Every input that cannot be read, decoded or validated is reported, each
-  line naming the input, and the run exits 1; usage errors start with
-  `error:`.
+  line naming the input, and the run exits 1; a usage error exits 2 and is
+  followed by a hint at the help of the command.
 - `spm diff --format json` writes the diff JSON of each package, so it
   follows the renames above.
+- `--format human` writes one setting, rule or change per line, rather
+  than the one line the library's `String` writes for a log.
+- A flag given twice with different values, such as
+  `--strategy union --strategy intersect`, is a usage error rather than a
+  run of the last one.
 - A repeated JSON member is an error in every mode, an input of no known
   profile type is refused, and `--arch` names the node for `merge` and
   `validate`. [cli.md](cli.md) describes each.

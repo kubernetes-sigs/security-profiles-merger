@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -177,13 +178,13 @@ func TestInputsThatDisagreeAreEachChecked(t *testing.T) {
 			name: "validate, a valid mix",
 			args: []string{cmdValidate, seccompFile, apparmorFile},
 			code: exitUsage,
-			want: mix(typeSeccomp, typeAppArmor),
+			want: mix(typeSeccomp, typeAppArmor) + usageHintOf(cmdValidate),
 		},
 		{
 			name: "merge, a valid mix",
 			args: append(slices.Clone(merge), apparmorFile, seccompFile),
 			code: exitUsage,
-			want: mix(typeAppArmor, typeSeccomp),
+			want: mix(typeAppArmor, typeSeccomp) + usageHintOf(cmdMerge),
 		},
 	} {
 		code, stdout, stderr := runCapture(t, test.args, nil)
@@ -279,7 +280,8 @@ func TestMixedTypesNameEveryType(t *testing.T) {
 		cmdValidate, apparmorFile, landlockFile, seccompFile,
 	}, nil)
 
-	want := "error: inputs mix profile types (apparmor, landlock and seccomp), use --type\n"
+	want := "error: inputs mix profile types (apparmor, landlock and seccomp), use --type\n" +
+		usageHintOf(cmdValidate)
 	if code != exitUsage || stderr != want {
 		t.Errorf("exit code = %d, stderr = %q, want %d and %q", code, stderr, exitUsage, want)
 	}
@@ -294,9 +296,23 @@ func TestMixedTypesNameEveryType(t *testing.T) {
 	}
 }
 
+// TestNoDetectNoteBesideAnUnreadInput covers a run with an input that
+// could not be read: it fails whatever the type, so it does not note the
+// type the other inputs reveal.
+func TestNoDetectNoteBesideAnUnreadInput(t *testing.T) {
+	t.Parallel()
+
+	missing := filepath.Join(t.TempDir(), "missing.json")
+
+	code, _, stderr := runCapture(t, []string{cmdDiff, testdataSeccompA, missing}, nil)
+	if code != exitUsage || strings.Contains(stderr, "auto-detected") {
+		t.Errorf("exit code = %d, stderr = %q, want %d and no note", code, stderr, exitUsage)
+	}
+}
+
 // TestNoDetectNoteOnUsageErrors covers a run that a usage error stops once
 // the inputs are read: it does not note the type it detected, which it
-// never uses, so stderr holds the error alone.
+// never uses, so stderr holds the error alone, and the hint at the help.
 func TestNoDetectNoteOnUsageErrors(t *testing.T) {
 	t.Parallel()
 
@@ -308,11 +324,12 @@ func TestNoDetectNoteOnUsageErrors(t *testing.T) {
 	}{
 		{
 			[]string{cmdDiff, testdataSeccompA},
-			"error: got 1 file: " + errDiffRequiresTwo.Error() + "\n",
+			"error: got 1 profile from the file arguments: " + errDiffRequiresTwo.Error() + "\n" +
+				usageHintOf(cmdDiff),
 		},
 		{
 			[]string{cmdValidate, "--artifact", flagArch, "SCMP_ARCH_X86_64", apparmorFile},
-			"error: " + errArchNotApplicable.Error() + "\n",
+			"error: " + errArchNotApplicable.Error() + "\n" + usageHintOf(cmdValidate),
 		},
 	} {
 		code, _, stderr := runCapture(t, test.args, nil)

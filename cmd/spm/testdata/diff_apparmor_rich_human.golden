@@ -1,0 +1,14 @@
+exec:-/usr/bin/bash
+exec:-/usr/bin/tar
+exec:+/usr/bin/python
+lib:-/usr/lib/libz.so
+lib:+/usr/lib/libssl.so
+r:-/etc/config
+r:-/usr/share
+r:+/var/log
+w:+/var/log/audit.log
+rw:-/run/app
+net:raw:false->true
+net:udp:false->true
+caps:-sys_time
+caps:+setuid

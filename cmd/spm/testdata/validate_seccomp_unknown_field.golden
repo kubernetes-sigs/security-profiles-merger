@@ -1,0 +1,11 @@
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "comment": "a member the profile type has no field for",
+  "syscalls": [
+    {
+      "names": ["read", "write"],
+      "action": "SCMP_ACT_ALLOW",
+      "arg": [{"index": 0}]
+    }
+  ]
+}

@@ -193,7 +193,7 @@ func validateSlowWrite(t *testing.T, writer *os.File, path string) {
 	}()
 
 	code, stdout, stderr := runGuarded(t, []string{cmdValidate, flagType, typeSeccomp, path})
-	if code != 0 || stderr != "" || !strings.Contains(stdout, `"names": [`) {
+	if code != 0 || stderr != "" || !strings.Contains(stdout, `"names":[`) {
 		t.Errorf("exit code = %d, stdout = %q, stderr = %q, want 0, the profile and nothing",
 			code, stdout, stderr)
 	}
@@ -224,7 +224,7 @@ func TestStdinThatIsNoFileOrPipe(t *testing.T) {
 		stdin *os.File
 		want  string
 	}{
-		{[]string{stdinArg}, zero, "error: stdin: " + errNotRegularFile.Error() + "\n"},
+		{[]string{stdinArg}, zero, "error: stdin: " + errStdinDevice.Error() + "\n"},
 		{[]string{"/dev/zero"}, nil, "error: /dev/zero: " + errNotRegularFile.Error() + "\n"},
 		{[]string{stdinArg}, null, "error: stdin: " + errEmptyInput.Error() + "\n"},
 		{nil, null, "error: stdin: " + errEmptyInput.Error() + "\n"},
@@ -297,7 +297,7 @@ func TestStdinNamedTwice(t *testing.T) {
 
 	for _, test := range cases {
 		code, _, stderr := runCapture(t, append([]string{cmdDiff}, test.args...), test.stdin)
-		if code != exitUsage || stderr != test.want+"\n" {
+		if code != exitUsage || stderr != test.want+"\n"+usageHintOf(cmdDiff) {
 			t.Errorf("%q: exit code = %d, stderr = %q, want %d and %q",
 				test.args, code, stderr, exitUsage, test.want)
 		}
@@ -319,10 +319,12 @@ func pipeReachedThrough(t *testing.T, reader *os.File, path string) bool {
 	return err == nil && os.SameFile(info, pipe)
 }
 
-// TestRegularStdinReadThroughAnAlias covers stdin that is a regular file,
-// which an alias such as /dev/stdin opens afresh and reads whole, so naming
-// it twice is no mistake: only "-" twice is refused then.
-func TestRegularStdinReadThroughAnAlias(t *testing.T) {
+// TestRegularStdinNamedTwice covers stdin that is a regular file, named
+// twice through "-" and an alias such as /dev/stdin. Opening the alias
+// opens the file afresh on Linux, but on darwin and the BSDs it duplicates
+// the descriptor, which shares the offset the first read leaves at the end,
+// so it is refused wherever it runs, as it is for a pipe.
+func TestRegularStdinNamedTwice(t *testing.T) {
 	t.Parallel()
 
 	profile := writeTemp(t, seccompJSON(t, testSyscallRead))
@@ -342,26 +344,30 @@ func TestRegularStdinReadThroughAnAlias(t *testing.T) {
 		return "/dev/fd/" + strconv.Itoa(int(file.Fd()))
 	}
 
-	stdin := open()
-
-	err := checkPaths([]string{stdinArg, "/dev/stdin", "/dev/fd/0", viaFD(stdin)}, stdin)
-	if err != nil {
-		t.Errorf("checkPaths with a regular file on stdin = %v, want nil", err)
+	for _, test := range []struct {
+		paths []string
+		want  error
+	}{
+		{[]string{stdinArg, stdinArg}, errDuplicateStdin},
+		{[]string{stdinArg, "/dev/stdin"}, errDuplicateStdin},
+		{[]string{"/dev/fd/0", stdinArg}, errDuplicateStdin},
+		{[]string{"/dev/stdin", "/proc/self/fd/0"}, errStdinReadTwice},
+	} {
+		err := checkPaths(test.paths, open())
+		if !errors.Is(err, test.want) {
+			t.Errorf("checkPaths(%q) = %v, want %v", test.paths, err, test.want)
+		}
 	}
 
-	err = checkPaths([]string{stdinArg, stdinArg}, open())
-	if !errors.Is(err, errDuplicateStdin) {
-		t.Errorf("checkPaths(- -) = %v, want %v", err, errDuplicateStdin)
-	}
-
-	// The same file read through "-" and through a path that leads to it
-	// gives two profiles where opening /dev/fd/N opens the file afresh, as
-	// on Linux; elsewhere it may share the offset "-" has read to the end.
+	// The same file read through "-" and through another path that leads
+	// to it, which names no stdin, gives two profiles where opening
+	// /dev/fd/N opens the file afresh, as on Linux; elsewhere it may share
+	// the offset "-" has read to the end.
 	if runtime.GOOS != "linux" {
 		return
 	}
 
-	stdin = open()
+	stdin := open()
 
 	code, stdout, stderr := runCapture(t, []string{
 		cmdValidate, flagType, typeSeccomp, stdinArg, viaFD(stdin),

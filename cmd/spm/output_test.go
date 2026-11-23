@@ -19,8 +19,52 @@ package main
 import (
 	"errors"
 	"io/fs"
+	"os"
+	"strings"
 	"testing"
 )
+
+// TestOutputNamesAnInput covers --output naming one of the inputs, the
+// usual way to update a profile in place: the inputs are read whole before
+// anything is written, so the file is replaced with the result. Validate
+// writes the profile as it read it, so the file keeps a member the default
+// checks only warn about.
+func TestOutputNamesAnInput(t *testing.T) {
+	t.Parallel()
+
+	base := writeTemp(t, seccompJSON(t, testSyscallRead))
+	app := writeTemp(t, seccompJSON(t, testSyscallRead, "write"))
+
+	code, _, stderr := runCapture(t, []string{
+		cmdMerge, flagType, typeSeccomp, flagStrategy, strategyUnion, "--output", base, base, app,
+	}, nil)
+	if code != 0 {
+		t.Fatalf("merge: exit code = %d, want 0: %s", code, stderr)
+	}
+
+	merged, err := os.ReadFile(base)
+	if err != nil || !strings.Contains(string(merged), `"write"`) {
+		t.Errorf("merge: %s holds %q, %v, want the union", base, merged, err)
+	}
+
+	const profile = `{"defaultAction":"SCMP_ACT_ERRNO","comment":"kept"}` + "\n"
+
+	file := writeTemp(t, profile)
+
+	code, _, stderr = runCapture(
+		t,
+		[]string{cmdValidate, flagType, typeSeccomp, "--output", file, file},
+		nil,
+	)
+	if code != 0 || !strings.Contains(stderr, `unknown field "comment"`) {
+		t.Fatalf("validate: exit code = %d, stderr = %q, want 0 and the warning", code, stderr)
+	}
+
+	written, err := os.ReadFile(file)
+	if err != nil || string(written) != profile {
+		t.Errorf("validate: %s holds %q, %v, want %q", file, written, err, profile)
+	}
+}
 
 // errStepFailed is the failure failingTempFile injects.
 var errStepFailed = errors.New("step failed")

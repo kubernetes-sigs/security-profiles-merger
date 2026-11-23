@@ -22,7 +22,7 @@ import (
 	"strconv"
 )
 
-// isMountedFile reports whether file, opened from path (see openRegular),
+// isMountedFile reports whether file, opened from path (see openOutput),
 // is a mount point, which is the case when it sits on another mount than
 // the directory holding path. The kernel names the mount of an open file in
 // /proc/self/fdinfo. Where that cannot be read, the answer is no, and the

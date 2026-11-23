@@ -1,0 +1,1 @@
+[{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[{"names":["read"],"action":"SCMP_ACT_ALLOW"},{"names":["write"],"action":"SCMP_ACT_ALLOW"}]},{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[{"names":["read"],"action":"SCMP_ACT_ALLOW"},{"names":["close"],"action":"SCMP_ACT_ALLOW"}]}]

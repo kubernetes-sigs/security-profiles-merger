@@ -21,7 +21,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"slices"
 )
 
 const (
@@ -31,17 +30,21 @@ const (
 	diffUsage = `Usage: spm diff [options] <file1> <file2>
 
 Compare two security profiles and show their differences.
-Reads from stdin (as a JSON array of exactly 2 profiles) when no files are provided.
-A file argument of - reads stdin beside the other file.
-Flags must precede file arguments, and -- ends them.
+Reads from stdin (as a JSON array of exactly 2 profiles) when no files are
+provided. A file argument of - reads stdin beside the other file, and a
+single file argument may hold a JSON array of exactly 2 profiles.
+Flags must precede file arguments, and -- ends them; a flag that takes a
+value may be given twice only with the same value both times.
 Exit status: 0 when the profiles are equal, 1 when they differ, 2 on any
 error.
 
 Without --validate the profiles are not validated: two copies of an invalid
-profile compare equal. --validate names the checks to run on them first, as
-merge --validate does: one mode for both, or one mode per profile,
-separated by commas. --validate artifact also bounds what an untrusted
-profile can make the comparison hold in memory.
+profile compare equal. --validate names the checks to run on them first:
+one mode for both, or one mode per profile, separated by commas. Each mode
+runs the checks of validate in that mode, so default runs the library's
+Validate, not the merge of each input alone that merge --validate default
+runs, which depends on the merge strategy. --validate artifact also bounds
+what an untrusted profile can make the comparison hold in memory.
 
 --arch selects the seccomp architecture implied on both sides, which a node
 covers whether or not a profile lists it. It defaults to the architecture
@@ -82,9 +85,9 @@ func bindDiffFlags(flags *flag.FlagSet) *diffOptions {
 		abiFor: "of the kernel that loads the profiles, such as 6; the --validate checks " +
 			"refuse the rights it does not know",
 	})
-	flags.StringVar(
-		&opts.validate, "validate", "",
-		"checks to run on the profiles before comparing them: default, strict, "+
+	stringFlag(
+		flags, &opts.validate, "validate", "",
+		"`checks` to run on the profiles before comparing them: default, strict, "+
 			"artifact; or one mode per profile, comma separated (default: none)",
 	)
 
@@ -93,8 +96,18 @@ func bindDiffFlags(flags *flag.FlagSet) *diffOptions {
 
 // checkFlags checks the diff flags (see commandOptions).
 func (opts *diffOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) int {
+	// Every file argument brings one profile at least, so more than two
+	// are refused before any is read. Fewer may still bring two, as an
+	// array of them.
+	if flags.NArg() > diffProfileCount {
+		_, _ = fmt.Fprintf(stderr, "error: got %d file arguments: %v\n",
+			flags.NArg(), errDiffRequiresTwo)
+
+		return exitUsage
+	}
+
 	validate := flagNamed(flags, "validate")
-	if validate && checkValidateModes(opts.validate, stderr) != 0 {
+	if validate && checkValidateModes(opts.validate, flags.NArg(), stderr) != 0 {
 		return exitUsage
 	}
 
@@ -159,7 +172,7 @@ func diffInputs(opts *diffOptions, inv *invocation) int {
 
 	// Exit code 1 means "different" for diff, so a failed flush is a usage
 	// error like every other diff failure.
-	if inv.flushOutput(opts.output) != 0 {
+	if flushOutput(opts.output, inv.out.Bytes(), inv.stdout, inv.stderr) != 0 {
 		return exitUsage
 	}
 
@@ -168,35 +181,30 @@ func diffInputs(opts *diffOptions, inv *invocation) int {
 
 // checkDiffCount refuses a diff of another number of profiles than two,
 // once the inputs are checked, so that an input that cannot be read or
-// parsed is reported first. Stdin that could not be read brings one profile
-// at least, an unknown number of them, so it is counted as one, and only
-// too many profiles are refused then.
+// parsed is reported first. More than two file arguments were refused
+// before anything was read (see diffOptions.checkFlags); fewer may bring
+// two profiles, as the elements of an array. An input that could not be
+// read brings one profile at least, an unknown number of them, so it is
+// counted as one, and only too many profiles are refused then.
 func checkDiffCount(inv *invocation) {
 	count := len(inv.inputs)
-	if count == diffProfileCount || inv.stdinUnread && count < diffProfileCount {
+	if count == diffProfileCount || anyUnread(inv.inputs) && count < diffProfileCount {
 		return
 	}
 
-	noun, from := "profile", ""
-
-	switch {
-	case len(inv.paths) == 0:
+	from := " from the file arguments"
+	if len(inv.paths) == 0 {
 		from = " from stdin"
-	case slices.Contains(inv.paths, stdinArg):
-		from = " from stdin and the files"
-	default:
-		noun = "file"
 	}
 
 	inv.refusals = append(inv.refusals, fmt.Errorf(
-		"got %d %s%s: %w", count, plural(count, noun), from, errDiffRequiresTwo,
+		"got %d %s%s: %w", count, plural(count, "profile"), from, errDiffRequiresTwo,
 	))
 }
 
 // diffCommand compares two profiles, once each has passed the checks of its
 // --validate mode, if any.
 func (ops kindOps[T, D]) diffCommand(inv *invocation) int {
-	ops = ops.atNode(inv)
 	strict := make([]bool, len(inv.inputs))
 
 	if inv.checks != nil {
@@ -209,7 +217,7 @@ func (ops kindOps[T, D]) diffCommand(inv *invocation) int {
 
 	if inv.checks != nil {
 		checkInputs(profiles, inv.report, func(idx int, profile *T) error {
-			return ops.checker(inv.checks.modes[idx])(profile)
+			return ops.validators[inv.checks.modes[idx]](profile)
 		})
 	}
 

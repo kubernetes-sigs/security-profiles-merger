@@ -115,7 +115,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // after it is refused as runVersion refuses an argument.
 func runHelp(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		return printHelp(usage, stdout, stderr)
+		return writeStdout([]byte(usage), stdout, stderr)
 	}
 
 	if len(args) > 1 {
@@ -132,7 +132,7 @@ func runHelp(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case cmdHelp, flagHelp, "-h":
 		// "spm help --help" asks for the help of help, which is the
 		// overview, as "spm help help" does.
-		return printHelp(usage, stdout, stderr)
+		return writeStdout([]byte(usage), stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(
 			stderr,
@@ -157,7 +157,7 @@ func runVersion(args []string, stdout, stderr io.Writer) int {
 	if flags.NArg() > 0 {
 		_, _ = fmt.Fprintf(stderr, "error: unexpected argument: %s\n", merge.SafeName(flags.Arg(0)))
 
-		return usageHint(flags, stderr)
+		return usageHint(flags.Name(), stderr)
 	}
 
 	return writeStdout(

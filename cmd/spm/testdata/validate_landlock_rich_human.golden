@@ -1,0 +1,8 @@
+fs:read_file,write_file,read_dir,truncate
+net:bind_tcp,connect_tcp
+scoped:abstract_unix_socket,signal
+/etc(read_file,read_dir)
+/var/lib/app(read_file,write_file)
+/usr/share(read_file)
+:443(connect_tcp)
+:8080(bind_tcp,connect_tcp)

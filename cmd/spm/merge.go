@@ -33,8 +33,10 @@ const mergeUsage = `Usage: spm merge [options] [files...]
 Merge one or more security profiles using the given strategy.
 A single profile is normalized without merging.
 Reads from stdin when no files are provided: a single profile, or a JSON
-array of profiles. A file argument of - reads stdin beside the files.
-Flags must precede file arguments, and -- ends them.
+array of profiles, which a file may hold as well.
+A file argument of - reads stdin beside the files.
+Flags must precede file arguments, and -- ends them; a flag that takes a
+value may be given twice only with the same value both times.
 Exit status: 0 on success, 1 when a profile is invalid, of another type, or
 cannot be read, when the merge fails, or when the result cannot be written,
 2 on a usage error; 1 when a usage error comes up after a profile was found
@@ -87,12 +89,12 @@ func bindMergeFlags(flags *flag.FlagSet) *mergeOptions {
 		abiFor: "of the kernel that loads the result, such as 6; the input checks " +
 			"refuse the rights it does not know",
 	})
-	flags.StringVar(
-		&opts.strategy, "strategy", "", "merge strategy: intersect, union (required)",
+	stringFlag(
+		flags, &opts.strategy, "strategy", "", "merge `strategy`: intersect, union (required)",
 	)
-	flags.StringVar(
-		&opts.validate, "validate", modeNameDefault,
-		"checks to run on the inputs before merging: default, strict, artifact; "+
+	stringFlag(
+		flags, &opts.validate, "validate", modeNameDefault,
+		"`checks` to run on the inputs before merging: default, strict, artifact; "+
 			"or one mode per input, comma separated",
 	)
 
@@ -126,7 +128,7 @@ func mergeInputs(opts *mergeOptions, inv *invocation) int {
 		return code
 	}
 
-	return inv.flushOutput(opts.output)
+	return flushOutput(opts.output, inv.out.Bytes(), inv.stdout, inv.stderr)
 }
 
 var (
@@ -134,12 +136,9 @@ var (
 	errValidateModeCount   = errors.New("wrong number of validation modes")
 )
 
-// parseValidateModes turns a --validate value into one mode per input:
-// either a single mode for all of them, or exactly one each. For a list of
-// another length it returns the error together with the weakest mode listed
-// for every input, which the inputs are checked under before the run is
-// refused.
-func parseValidateModes(value string, inputs int) ([]validateMode, error) {
+// parseValidateModes turns a --validate value into the modes it lists, and
+// reports a name that is no mode.
+func parseValidateModes(value string) ([]validateMode, error) {
 	names := strings.Split(value, ",")
 
 	parsed := make([]validateMode, 0, len(names))
@@ -159,50 +158,66 @@ func parseValidateModes(value string, inputs int) ([]validateMode, error) {
 		parsed = append(parsed, mode)
 	}
 
-	if len(parsed) == 1 {
-		return slices.Repeat(parsed, inputs), nil
-	}
-
-	if len(parsed) != inputs {
-		// The weakest mode listed is the one every input is known to be
-		// meant for at least: each mode accepts only what the weaker ones
-		// accept, so an input that fails it fails whatever mode was meant.
-		weakest := slices.MinFunc(parsed, func(left, right validateMode) int {
-			return left.strength() - right.strength()
-		})
-
-		return slices.Repeat([]validateMode{weakest}, inputs), fmt.Errorf(
-			"%w: got %d for %d %s",
-			errValidateModeCount, len(parsed), inputs, plural(inputs, "profile"),
-		)
-	}
-
 	return parsed, nil
 }
 
-// validateModes returns the mode of each input a --validate value names.
-// The mode count is checked against the inputs, which a "-" argument may
-// expand into several, so this waits until they are read. A count that
-// does not match is refused once the inputs are checked, under the weakest
-// mode listed (see parseValidateModes). Stdin that could not be read held
-// no number of profiles anyone knows, so the count is not refused then:
-// its failure is the answer.
+// modeCountError returns the error of a --validate list of listed modes
+// for count profiles, of which there are more or fewer than it lists.
+func modeCountError(listed, count int, of string) error {
+	return fmt.Errorf(
+		"%w: got %d for %d %s", errValidateModeCount, listed, count, plural(count, of),
+	)
+}
+
+// validateModes returns the mode of each input a --validate value names:
+// either a single mode for all of them, or exactly one each. A list shorter
+// than the file arguments was refused before anything was read (see
+// checkValidateModes); a longer one is checked against the inputs here,
+// since a file argument may bring several, as the elements of an array. A
+// count that does not match is refused once the inputs are checked, under
+// the weakest mode listed, which is the one every input is known to be
+// meant for at least: each mode accepts only what the weaker ones accept,
+// so an input that fails it fails whatever mode was meant. An input that
+// could not be read brings an unknown number of profiles, one at least, so
+// only a list too short is refused then: its failure is the answer.
 func (inv *invocation) validateModes(value string) []validateMode {
-	modes, err := parseValidateModes(value, len(inv.inputs))
-	if err != nil && !inv.stdinUnread {
+	listed, err := parseValidateModes(value)
+	if err != nil {
+		// The flags were checked to name known modes.
 		inv.refusals = append(inv.refusals, err)
+
+		return slices.Repeat([]validateMode{modeDefault}, len(inv.inputs))
 	}
 
-	return modes
+	count := len(inv.inputs)
+
+	switch {
+	case len(listed) == 1:
+		return slices.Repeat(listed, count)
+	case len(listed) == count:
+		return listed
+	case len(listed) < count || !anyUnread(inv.inputs):
+		inv.refusals = append(inv.refusals, modeCountError(len(listed), count, "profile"))
+	}
+
+	weakest := slices.MinFunc(listed, func(left, right validateMode) int {
+		return left.strength() - right.strength()
+	})
+
+	return slices.Repeat([]validateMode{weakest}, count)
 }
 
 // checkValidateModes reports a --validate value that names an unknown
-// mode. The modes are parsed again once the inputs are known (see
-// invocation.validateModes); this reports a misspelled one before anything
-// is read.
-func checkValidateModes(value string, stderr io.Writer) int {
-	_, err := parseValidateModes(value, 1)
-	if errors.Is(err, errUnknownValidateMode) {
+// mode, or lists one mode each for fewer profiles than the args file
+// arguments bring at least, before anything is read. The modes are parsed
+// again once the inputs are known (see invocation.validateModes).
+func checkValidateModes(value string, args int, stderr io.Writer) int {
+	listed, err := parseValidateModes(value)
+	if err == nil && len(listed) > 1 && len(listed) < args {
+		err = modeCountError(len(listed), args, "file argument")
+	}
+
+	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 
 		return exitUsage
@@ -212,8 +227,8 @@ func checkValidateModes(value string, stderr io.Writer) int {
 }
 
 // checkFlags checks the merge flags (see commandOptions).
-func (opts *mergeOptions) checkFlags(_ *flag.FlagSet, stderr io.Writer) int {
-	if code := checkValidateModes(opts.validate, stderr); code != 0 {
+func (opts *mergeOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) int {
+	if code := checkValidateModes(opts.validate, flags.NArg(), stderr); code != 0 {
 		return code
 	}
 

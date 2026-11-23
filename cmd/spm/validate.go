@@ -17,27 +17,37 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"io"
 	"slices"
+
+	"sigs.k8s.io/security-profiles-merger/internal/strictjson"
+	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
 const validateUsage = `Usage: spm validate [options] [files...]
 
 Validate one or more security profiles.
 Reads from stdin when no files are provided: a single profile, or a JSON
-array of profiles. A file argument of - reads stdin beside the files.
-Flags must precede file arguments, and -- ends them.
+array of profiles, which a file may hold as well.
+A file argument of - reads stdin beside the files.
+Flags must precede file arguments, and -- ends them; a flag that takes a
+value may be given twice only with the same value both times.
 Exit status: 0 when every profile is valid, 1 when one is invalid, of
 another type, or cannot be read, or the output cannot be written, 2 on a
 usage error; 1 when a usage error comes up after a profile was found
 invalid.
-Writes the validated profiles on success, in the shape they came in: a
-single profile as an object, and several, or a JSON array on stdin even of
-one element, as an array. --quiet writes no profile and notes no
-auto-detected profile type, and --no-detect-note drops that note while
-still writing the profiles. Errors and warnings always go to stderr.
+Writes the validated profiles on success as they were read, unknown
+members included, but one that readers would decode differently, such as
+one holding a member spelled in another case, as it decoded: a single
+profile as an object, and several, or a JSON array even of one element,
+as an array.
+--format human writes them one rule per line instead, separated by "---"
+lines. --quiet writes no profile and notes no auto-detected profile type,
+and --no-detect-note drops that note while still writing the profiles.
+Errors and warnings always go to stderr.
 --quiet cannot be combined with --output or --format, and --artifact,
 --strict and --baseline cannot be combined with each other.
 
@@ -185,7 +195,7 @@ func validateInputs(opts *validateOptions, inv *invocation) int {
 		return 0
 	}
 
-	return inv.flushOutput(opts.output)
+	return flushOutput(opts.output, inv.out.Bytes(), inv.stdout, inv.stderr)
 }
 
 // mode maps the validate flags to a mode; the flags have already been
@@ -242,8 +252,7 @@ func checkModeFlags(opts *validateOptions, archNamed bool, stderr io.Writer) int
 // ambiguities unmarshalAll looks for, such as members the profile type does
 // not know, errors rather than warnings.
 func (ops kindOps[T, D]) validateCommand(inv *invocation, mode validateMode) int {
-	ops = ops.atNode(inv)
-	check := ops.checker(mode)
+	check := ops.validators[mode]
 
 	inputs, report := inv.inputs, inv.report
 	profiles := unmarshalAll[T](
@@ -256,53 +265,192 @@ func (ops kindOps[T, D]) validateCommand(inv *invocation, mode validateMode) int
 		return inv.stop(1)
 	}
 
+	if inv.format == formatHuman {
+		report.flush(inv.stderr)
+		writeHuman(inv, profiles, ops.format)
+
+		return 0
+	}
+
+	// The report is read for the warnings before it is flushed, which
+	// forgets them.
+	decoded, err := encodeAmbiguous(profiles, report)
 	report.flush(inv.stderr)
 
-	return writeValidated(inv, profiles, ops.format)
+	if err != nil {
+		_, _ = fmt.Fprintf(inv.stderr, "error: %v\n", err)
+
+		return 1
+	}
+
+	_, _ = inv.out.Write(escapeInvisible(validatedJSON(inv.inputs, decoded)))
+
+	return 0
+}
+
+// readAlike lists the findings of a decode (see strictjson.Findings) after
+// which a reader other than encoding/json may read the bytes otherwise
+// than validate judged them, so that validate writes the profile as it
+// decoded instead (see encodeAmbiguous):
+//
+//   - a member spelled in another case than its field, which encoding/json
+//     reads into the field, and a reader that does not fold case, such as
+//     jq or a runtime not written in Go, as an unknown member;
+//   - a byte that is not valid UTF-8, or a \u escape of half a surrogate
+//     pair, which encoding/json reads as U+FFFD, and other readers keep,
+//     refuse, or read as another rune;
+//   - a required member left out or null, which encoding/json reads as the
+//     zero value of its field, and another reader may refuse.
+//
+// Nothing else valid JSON holds is read two ways. A member repeated within
+// one object is refused in every mode. A number reads the same to every
+// reader that keeps it whole, and one that does not, such as a reader of
+// doubles, reads a value above 2^53 otherwise whatever validate writes,
+// since encoding/json writes the same digits. An unknown member is ignored
+// by a reader that does not refuse it, which is why it is kept.
+var readAlike = []error{spm.ErrMisspelledField, spm.ErrInvalidUTF8, spm.ErrMissingField}
+
+// encodeAmbiguous returns, for each profile whose decode found something a
+// reader other than encoding/json may read otherwise (see readAlike), the
+// profile as it decoded, encoded as the JSON format writes it, and nil for
+// every other one. Written as it was read, the profile validate judged and
+// the one another reader loads would differ. Members the profile type does
+// not know are dropped then, as the warning about them says.
+func encodeAmbiguous[T any](profiles []*T, report *inputReport) ([][]byte, error) {
+	decoded := make([][]byte, len(profiles))
+
+	for idx, profile := range profiles {
+		if profile == nil || !slices.ContainsFunc(readAlike, func(kind error) bool {
+			return report.warnedOf(idx, kind)
+		}) {
+			continue
+		}
+
+		var out bytes.Buffer
+
+		err := encodeJSON(&out, profile)
+		if err != nil {
+			return nil, err
+		}
+
+		decoded[idx] = out.Bytes()
+	}
+
+	return decoded, nil
 }
 
 // asArray reports whether validate writes the profiles of the inputs as an
 // array rather than as one object. The output mirrors the input: a single
 // profile read whole is written as an object, and anything else as an
-// array, a JSON array on stdin included however many elements it holds, so
-// that a pipeline reading the output need not count what went in.
+// array, a JSON array included however many elements it holds, so that a
+// pipeline reading the output need not count what went in.
 func asArray(inputs []profileInput) bool {
 	return len(inputs) != 1 || inputs[0].inArray
 }
 
-// writeValidated writes the validated profiles, as one object or as an
-// array (see asArray). The human format has no array: it writes the
-// profiles one after the other, as formatFn writes each, separated by "---"
-// lines.
-func writeValidated[T any](inv *invocation, profiles []*T, formatFn func(*T) string) int {
-	if !asArray(inv.inputs) {
-		return inv.write(profiles[0], func() string { return formatFn(profiles[0]) })
+// validatedJSON returns what validate writes in the JSON format: the
+// profiles as they were read, as one object or as an array (see asArray).
+// Validate checks a profile and passes it on; decoding it and encoding it
+// again would drop every member the profile type does not know, which the
+// default checks only warn about, so that "spm validate --output p.json
+// p.json" would rewrite the file without them. A profile read whole is
+// written byte for byte, and so is an array that every input came from;
+// for any other mix, the elements and the documents are written as read,
+// without the space around them, as the elements of a new array. A
+// profile decoded holds an encoding for (see encodeAmbiguous) is written
+// as that encoding instead, and an array it is an element of is then
+// written anew. A final newline is added where the output has none.
+// Escaping the runes that do not print as themselves (see escapeInvisible)
+// is all that is left to the caller, which changes no value the output
+// decodes to.
+func validatedJSON(inputs []profileInput, decoded [][]byte) []byte {
+	var whole []byte
+
+	switch {
+	case !asArray(inputs) && decoded[0] != nil:
+		return decoded[0]
+	case !asArray(inputs):
+		whole = inputs[0].data
+	case fromOneArray(inputs) && !slices.ContainsFunc(decoded, isWritten):
+		whole = inputs[0].source
 	}
 
-	switch inv.format {
-	case formatHuman:
-		humanStrs := make([]string, len(profiles))
+	if whole == nil {
+		return composeArray(inputs, decoded)
+	}
 
-		for idx, profile := range profiles {
-			humanStrs[idx] = formatFn(profile)
-			if idx > 0 {
-				_, _ = fmt.Fprintln(&inv.out, "---")
-			}
+	if bytes.HasSuffix(whole, []byte("\n")) {
+		return whole
+	}
 
-			_, _ = fmt.Fprintln(&inv.out, humanStrs[idx])
+	return append(slices.Clip(whole), '\n')
+}
+
+// composeArray returns a new array of the inputs, each as it was read,
+// without the space around it, or as decoded holds it (see validatedJSON).
+func composeArray(inputs []profileInput, decoded [][]byte) []byte {
+	var out bytes.Buffer
+
+	out.WriteString("[\n")
+
+	for idx, input := range inputs {
+		if idx > 0 {
+			out.WriteString(",\n")
 		}
 
-		warnTruncated(inv.stderr, humanStrs...)
-	default:
-		err := encodeJSON(&inv.out, profiles)
-		if err != nil {
-			_, _ = fmt.Fprintf(inv.stderr, "error: %v\n", err)
-
-			return 1
+		if decoded[idx] != nil {
+			out.Write(bytes.TrimSuffix(decoded[idx], []byte("\n")))
+		} else {
+			out.Write(bytes.Trim(input.data, strictjson.Space))
 		}
 	}
 
-	return 0
+	out.WriteString("\n]\n")
+
+	return out.Bytes()
+}
+
+// isWritten reports whether encodeAmbiguous encoded a profile.
+func isWritten(decoded []byte) bool {
+	return decoded != nil
+}
+
+// fromOneArray reports whether every input is an element of one array,
+// which is then all the run read: an array is read whole and split into
+// its elements in order (see splitArray), and the elements of one array
+// share the document they were read from.
+func fromOneArray(inputs []profileInput) bool {
+	first := &inputs[0]
+	if !first.inArray {
+		return false
+	}
+
+	for idx := range inputs {
+		input := &inputs[idx]
+		if !input.inArray || &input.source[0] != &first.source[0] {
+			return false
+		}
+	}
+
+	return true
+}
+
+// writeHuman writes the validated profiles in the human format, as
+// formatFn writes each. The human format has no array: several profiles
+// are written one after the other, separated by "---" lines.
+func writeHuman[T any](inv *invocation, profiles []*T, formatFn func(*T) string) {
+	humanStrs := make([]string, len(profiles))
+
+	for idx, profile := range profiles {
+		humanStrs[idx] = formatFn(profile)
+		if idx > 0 {
+			_, _ = fmt.Fprintln(&inv.out, "---")
+		}
+
+		_, _ = fmt.Fprintln(&inv.out, humanStrs[idx])
+	}
+
+	warnTruncated(inv.stderr, humanStrs...)
 }
 
 // checkInputs runs check on every profile that decoded, in input order,

@@ -99,7 +99,7 @@ func unmarshalOne[T any](input *profileInput, strict bool, warn func(error)) (*T
 }
 
 // utf8InSource returns err, and for an invalid UTF-8 finding of an element
-// of a stdin array the same finding at the offset of the byte in the array,
+// of an array the same finding at the offset of the byte in the array,
 // so that it counts bytes of what was read, as the line and column of a
 // decode error do (see profileInput.position).
 func (input *profileInput) utf8InSource(err error) error {
@@ -181,6 +181,14 @@ func (r *inputReport) warn(idx int, err error) {
 func (r *inputReport) fail(idx int, err error) {
 	r.lines[idx] = append(r.lines[idx], reportLine{level: "error", err: err})
 	r.failed[idx] = true
+}
+
+// warnedOf reports whether a warning about the input at idx is of the
+// given kind.
+func (r *inputReport) warnedOf(idx int, kind error) bool {
+	return slices.ContainsFunc(r.lines[idx], func(line reportLine) bool {
+		return !r.failed[idx] && errors.Is(line.err, kind)
+	})
 }
 
 // failedAt reports whether the input at idx failed.
