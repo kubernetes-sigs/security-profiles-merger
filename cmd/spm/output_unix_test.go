@@ -21,6 +21,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -230,10 +231,47 @@ func TestOutputNameAtTheLengthLimit(t *testing.T) {
 	}
 }
 
+// TestOutputSymlinkRefusedBeforeReading covers an --output path that is a
+// symlink, such as /dev/stdout, which is refused before any input is read,
+// as a usage error: a missing input beside it is not reported.
+func TestOutputSymlinkRefusedBeforeReading(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	link := filepath.Join(dir, "link.json")
+	missing := filepath.Join(dir, "missing.json")
+
+	err := os.Symlink(filepath.Join(dir, "target.json"), link)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	paths := []string{link}
+
+	for _, path := range []string{"/dev/stdout", "/dev/stderr"} {
+		info, err := os.Lstat(path)
+		if err == nil && info.Mode()&fs.ModeSymlink != 0 {
+			paths = append(paths, path)
+		}
+	}
+
+	for _, path := range paths {
+		code, stdout, stderr := runCapture(t, []string{cmdValidate, "--output", path, missing}, nil)
+
+		want := "error: --output " + path + ": " + errSymlinkRefused.Error() + "\n" +
+			usageHintOf(cmdValidate)
+		if code != exitUsage || stdout != "" || stderr != want {
+			t.Errorf("%s: exit code = %d, stdout = %q, stderr = %q, want %d and %q",
+				path, code, stdout, stderr, exitUsage, want)
+		}
+	}
+}
+
 // TestOutputRefusesDirectoryPaths covers an --output value whose last
 // element names a directory, however it is spelled. The result must not be
 // a regular file named after the directory, whether or not the directory
-// exists.
+// exists, and the value is refused before anything is read, as a usage
+// error.
 func TestOutputRefusesDirectoryPaths(t *testing.T) {
 	t.Parallel()
 
@@ -246,9 +284,9 @@ func TestOutputRefusesDirectoryPaths(t *testing.T) {
 		code, _, stderr := runCapture(t, []string{
 			cmdMerge, flagType, typeSeccomp, flagStrategy, strategyUnion, "--output", target, input,
 		}, nil)
-		if code != 1 || !strings.Contains(stderr, errDirectoryOutput.Error()) {
-			t.Errorf("%q: exit code = %d, stderr = %q, want 1 and %q",
-				suffix, code, stderr, errDirectoryOutput)
+		if code != exitUsage || !strings.Contains(stderr, errDirectoryOutput.Error()) {
+			t.Errorf("%q: exit code = %d, stderr = %q, want %d and %q",
+				suffix, code, stderr, exitUsage, errDirectoryOutput)
 		}
 
 		_, err := os.Lstat(filepath.Join(filepath.Dir(target), "missing"))
@@ -302,7 +340,7 @@ func TestPathsThroughSymlinkedDirectories(t *testing.T) {
 	assertEntries(t, root, "deep", "dl")
 	assertEntries(t, filepath.Join(root, "deep", "a"), "b", "in.json", "out.json")
 
-	if isMountedFile(openOutput(t, through("out.json")), through("out.json")) {
+	if isMountedFile(openTestOutput(t, through("out.json")), through("out.json")) {
 		t.Error("the output file is taken for a mount point")
 	}
 }
@@ -373,14 +411,14 @@ func TestOutputUnderASymlinkLoop(t *testing.T) {
 
 	path := filepath.Join(dir, "a", "out.json")
 
-	_, err := openRegular(path, 0)
+	_, err := openOutput(path, true, 0)
 	if !errors.Is(err, syscall.ELOOP) || errors.Is(err, errSymlinkOutput) {
-		t.Errorf("openRegular = %v, want %v and no symlink refusal", err, syscall.ELOOP)
+		t.Errorf("openOutput of a file = %v, want %v and no symlink refusal", err, syscall.ELOOP)
 	}
 
-	_, err = openSpecial(path)
+	_, err = openOutput(path, false, 0)
 	if !errors.Is(err, syscall.ELOOP) || errors.Is(err, errSymlinkOutput) {
-		t.Errorf("openSpecial = %v, want %v and no symlink refusal", err, syscall.ELOOP)
+		t.Errorf("openOutput of a device = %v, want %v and no symlink refusal", err, syscall.ELOOP)
 	}
 
 	err = writeOutputFile(path, []byte("{}"))
@@ -389,9 +427,9 @@ func TestOutputUnderASymlinkLoop(t *testing.T) {
 	}
 
 	// A symlink as the last element is still refused as one.
-	_, err = openRegular(filepath.Join(dir, "a"), 0)
+	_, err = openOutput(filepath.Join(dir, "a"), true, 0)
 	if !errors.Is(err, errSymlinkOutput) {
-		t.Errorf("openRegular of the symlink itself = %v, want %v", err, errSymlinkOutput)
+		t.Errorf("openOutput of the symlink itself = %v, want %v", err, errSymlinkOutput)
 	}
 }
 
@@ -411,12 +449,12 @@ func TestParentDir(t *testing.T) {
 	}
 }
 
-// openOutput opens the regular file at path as an output file is opened
+// openTestOutput opens the regular file at path as an output file is opened
 // before it is asked whether it is a mount point (see writeRegularFile).
-func openOutput(t *testing.T, path string) *os.File {
+func openTestOutput(t *testing.T, path string) *os.File {
 	t.Helper()
 
-	file, err := openRegular(path, 0)
+	file, err := openOutput(path, true, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

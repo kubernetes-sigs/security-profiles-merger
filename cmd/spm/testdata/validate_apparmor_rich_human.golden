@@ -1,0 +1,15 @@
+exec:/usr/bin/bash
+exec:/usr/bin/env
+exec:/usr/bin/tar
+lib:/usr/lib/libc.so
+lib:/usr/lib/libz.so
+r:/etc/config
+r:/etc/ssl/certs
+r:/usr/share
+w:/var/log/app.log
+rw:/tmp
+rw:/run/app
+net:!raw,tcp,!udp
+caps:NET_ADMIN
+caps:SYS_TIME
+caps:CHOWN

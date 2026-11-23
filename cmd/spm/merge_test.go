@@ -82,7 +82,7 @@ func TestMergeErrors(t *testing.T) {
 			args:       []string{cmdMerge, flagType, typeSeccomp, flagStrategy, strategyIntersect},
 			stdin:      strings.NewReader("[]"),
 			wantCode:   1,
-			wantStderr: testNoInput,
+			wantStderr: errEmptyArray.Error(),
 		},
 		{
 			name:       "missing flags",
@@ -263,7 +263,7 @@ func TestMergeSeccompHumanFormat(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 
-	if !strings.Contains(stdout, "Profile{") {
+	if !strings.Contains(stdout, "default:SCMP_ACT_ERRNO\n") {
 		t.Errorf("expected human-readable output, got: %s", stdout)
 	}
 }
@@ -524,9 +524,10 @@ func TestMergeOutputRefusesASymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The link is refused before anything is read, as a usage error.
 	code, stderr := mergeToOutputFile(t, link)
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1: %s", code, stderr)
+	if code != exitUsage {
+		t.Fatalf("exit code = %d, want %d: %s", code, exitUsage, stderr)
 	}
 
 	if !strings.Contains(stderr, "symbolic link") {
@@ -648,7 +649,8 @@ func TestMergeFileTooLarge(t *testing.T) {
 	}
 
 	// The error names the file as every error about an input does.
-	if want := "error: " + bigFile + ": file exceeds 10485760 byte limit\n"; stderr != want {
+	if want := "error: " + bigFile + ": file exceeds 10485760 byte limit\n" +
+		usageHintOf(cmdMerge); stderr != want {
 		t.Errorf("stderr = %q, want %q", stderr, want)
 	}
 }
@@ -869,7 +871,7 @@ func TestMergeOutputHumanFormat(t *testing.T) {
 		t.Fatalf("reading output file: %v", err)
 	}
 
-	if !strings.Contains(string(data), "Profile{") {
+	if !strings.Contains(string(data), "default:SCMP_ACT_ERRNO\n") {
 		t.Errorf("expected human-readable output in file, got: %s", data)
 	}
 }
@@ -1043,7 +1045,7 @@ func mergeKind(t *testing.T, profileType string, inputs []profileInput, strategy
 	t.Helper()
 
 	inv := testInvocation(inputs)
-	if !inv.useKind(profileType) {
+	if inv.useKind(profileType) == nil {
 		t.Fatalf("no profile kind %q", profileType)
 	}
 

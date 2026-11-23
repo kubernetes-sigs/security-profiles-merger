@@ -121,19 +121,21 @@ func parsedInputs(docs ...string) []profileInput {
 // the JSON format and both streams discarded.
 func testInvocation(inputs []profileInput) *invocation {
 	return &invocation{
-		inputs:      inputs,
-		paths:       nil,
-		stdinUnread: false,
-		report:      newInputReport(inputs),
-		kind:        nil,
-		checks:      nil,
-		arch:        archOption{named: false, value: seccomp.ForAnyArch()},
-		abi:         0,
-		format:      formatJSON,
-		out:         bytes.Buffer{},
-		stdout:      io.Discard,
-		stderr:      io.Discard,
-		refusals:    nil,
+		command: cmdMerge,
+		inputs:  inputs,
+		paths:   nil,
+		report:  newInputReport(inputs),
+		kind:    nil,
+		checks:  nil,
+		node: nodeOptions{
+			arch: archOption{named: false, value: seccomp.ForAnyArch()},
+			abi:  0,
+		},
+		format:   formatJSON,
+		out:      bytes.Buffer{},
+		stdout:   io.Discard,
+		stderr:   io.Discard,
+		refusals: nil,
 	}
 }
 

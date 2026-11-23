@@ -1,0 +1,9 @@
+fs:-read_dir
+fs:+execute
+net:+bind_udp
+scoped:-abstract_unix_socket
+-/usr/share(read_file)
++/opt/app(execute,read_file)
+~/etc:[read_dir,read_file]->[read_file]
+-:8080(bind_tcp,connect_tcp)
++:9090(bind_tcp)

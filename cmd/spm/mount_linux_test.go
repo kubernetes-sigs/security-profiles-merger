@@ -58,7 +58,7 @@ func TestIsMountedFileOfAnOrdinaryFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	file := openOutput(t, target)
+	file := openTestOutput(t, target)
 
 	if isMountedFile(file, target) {
 		t.Error("a file created in its directory is taken for a mount point")
@@ -94,7 +94,7 @@ func TestMountedFileComparesTheMounts(t *testing.T) {
 		}
 	}
 
-	file := openOutput(t, target)
+	file := openTestOutput(t, target)
 
 	if !mountedFileWith(file, target, mountsOf(2, true)) {
 		t.Error("a file on another mount than its directory is not taken for a mount point")

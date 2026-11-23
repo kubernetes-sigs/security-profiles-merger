@@ -28,6 +28,7 @@ import (
 
 	"sigs.k8s.io/security-profiles-merger/apparmor"
 	"sigs.k8s.io/security-profiles-merger/landlock"
+	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
 
 func TestValidateErrors(t *testing.T) {
@@ -122,7 +123,7 @@ func TestValidateErrors(t *testing.T) {
 			args:       []string{cmdValidate, flagType, typeSeccomp},
 			stdin:      strings.NewReader("[]"),
 			wantCode:   1,
-			wantStderr: testNoInput,
+			wantStderr: errEmptyArray.Error(),
 		},
 		{
 			name:       "invalid JSON seccomp",
@@ -263,7 +264,7 @@ func TestValidateMultipleProfilesHumanFormat(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 
-	if !strings.Contains(stdout, "Profile{") {
+	if !strings.Contains(stdout, "default:SCMP_ACT_ERRNO\n") {
 		t.Errorf("expected human-readable output, got: %s", stdout)
 	}
 
@@ -839,6 +840,173 @@ func TestValidateOutputMirrorsInput(t *testing.T) {
 	}
 }
 
+// TestValidateWritesWhatItRead covers the JSON validate writes: the
+// profiles as they were read, a member the profile type has no field for
+// included, which the default checks only warn about, rather than the
+// profiles they decode into. One array that is all the run read is written
+// as it was; any other mix as a new array of what each input held.
+func TestValidateWritesWhatItRead(t *testing.T) {
+	t.Parallel()
+
+	const (
+		first  = `{ "defaultAction": "SCMP_ACT_ERRNO", "comment": "kept" }`
+		second = `{"defaultAction":"SCMP_ACT_LOG"}`
+	)
+
+	file := writeTemp(t, "\n"+first)
+	array := " [ " + first + " ,\n" + second + " ]\n"
+	arrayFile := writeTemp(t, array)
+
+	for _, test := range []struct {
+		name  string
+		args  []string
+		stdin string
+		want  string
+	}{
+		{"one file", []string{file}, "", "\n" + first + "\n"},
+		{"one array on stdin", nil, array, array},
+		{"one array in a file", []string{arrayFile}, "", array},
+		{
+			"a file beside an array",
+			[]string{file, stdinArg},
+			array,
+			"[\n" + first + ",\n" + first + ",\n" + second + "\n]\n",
+		},
+		{"two files", []string{file, file}, "", "[\n" + first + ",\n" + first + "\n]\n"},
+	} {
+		var stdin io.Reader
+		if test.stdin != "" {
+			stdin = strings.NewReader(test.stdin)
+		}
+
+		code, stdout, stderr := runCapture(t,
+			append([]string{cmdValidate, flagType, typeSeccomp}, test.args...), stdin)
+		if code != 0 || stdout != test.want ||
+			!strings.Contains(stderr, `unknown field "comment"`) {
+			t.Errorf("%s: exit code = %d, stdout = %q, stderr = %q, want 0, %q and the warning",
+				test.name, code, stdout, stderr, test.want)
+		}
+	}
+}
+
+// TestValidateWritesAFoldedMemberAsDecoded covers a profile holding a member
+// spelled in another case than its field, which encoding/json reads into
+// the field and a reader that does not fold case reads as unknown: validate
+// writes it as it decoded, so that both read the profile validate judged,
+// and a member the type does not know is dropped from it. Any other
+// profile beside it is still written as it was read.
+func TestValidateWritesAFoldedMemberAsDecoded(t *testing.T) {
+	t.Parallel()
+
+	const (
+		folded = `{"DefaultAction":"SCMP_ACT_ALLOW","comment":"dropped",` +
+			`"syscalls":[{"Names":["read"],"action":"SCMP_ACT_ERRNO"}]}`
+		kept = `{"defaultAction":"SCMP_ACT_LOG","comment":"kept"}`
+	)
+
+	decoded := "{\n" +
+		"  \"defaultAction\": \"SCMP_ACT_ALLOW\",\n" +
+		"  \"syscalls\": [\n" +
+		"    {\n" +
+		"      \"names\": [\n" +
+		"        \"read\"\n" +
+		"      ],\n" +
+		"      \"action\": \"SCMP_ACT_ERRNO\"\n" +
+		"    }\n" +
+		"  ]\n" +
+		"}"
+
+	for _, test := range []struct {
+		name  string
+		stdin string
+		want  string
+	}{
+		{"one profile", folded, decoded + "\n"},
+		{"an array", "[" + folded + "," + kept + "]", "[\n" + decoded + ",\n" + kept + "\n]\n"},
+	} {
+		code, stdout, stderr := runCapture(t, []string{cmdValidate, flagType, typeSeccomp},
+			strings.NewReader(test.stdin))
+		if code != 0 || stdout != test.want || !strings.Contains(stderr, "misspelled field") {
+			t.Errorf("%s: exit code = %d, stdout = %q, stderr = %q, want 0, %q and the warning",
+				test.name, code, stdout, stderr, test.want)
+		}
+	}
+}
+
+// TestValidateArtifactMatchesDecodeArtifact covers what validate --artifact
+// accepts, which the CLI decides with a decoder of its own (see
+// unmarshalOne), against the DecodeArtifact of each package, which is what
+// a runtime decodes an artifact with: each document is accepted by both or
+// refused by both.
+func TestValidateArtifactMatchesDecodeArtifact(t *testing.T) {
+	t.Parallel()
+
+	const arch = "SCMP_ARCH_X86_64"
+
+	node := seccomp.ForArch(arch)
+
+	accepts := map[string]func([]byte) bool{
+		typeSeccomp: func(data []byte) bool {
+			_, err := node.DecodeArtifact(data)
+
+			return err == nil
+		},
+		typeAppArmor: func(data []byte) bool {
+			_, err := apparmor.DecodeArtifact(data)
+
+			return err == nil
+		},
+		typeLandlock: func(data []byte) bool {
+			_, err := landlock.DecodeArtifact(data)
+
+			return err == nil
+		},
+	}
+
+	for _, test := range []struct {
+		profileType string
+		doc         string
+		accepted    bool
+	}{
+		{typeSeccomp, `{"defaultAction":"SCMP_ACT_ERRNO"}`, true},
+		{typeSeccomp, `{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[{"names":["read"],` +
+			`"action":"SCMP_ACT_ALLOW","args":[{"index":0,"op":"SCMP_CMP_EQ"}]}]}`, true},
+		{typeSeccomp, `{"defaultAction":"SCMP_ACT_ERRNO","comment":"x"}`, false},
+		{typeSeccomp, `{"DefaultAction":"SCMP_ACT_ERRNO"}`, false},
+		{typeSeccomp, `{"defaultAction":"SCMP_ACT_ERRNO","defaultAction":"SCMP_ACT_ERRNO"}`, false},
+		{typeSeccomp, "{\"defaultAction\":\"SCMP_ACT_ERRNO\",\"listenerMetadata\":\"\xff\"}", false},
+		{typeSeccomp, `{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[{"names":["read"],` +
+			`"action":"SCMP_ACT_ALLOW","args":[{"op":"SCMP_CMP_EQ"}]}]}`, false},
+		{typeSeccomp, `{"defaultAction":"SCMP_ACT_ERRNO"} {}`, false},
+		{typeSeccomp, `{"defaultAction":"SCMP_ACT_BOGUS"}`, false},
+		{typeSeccomp, `{"defaultAction":"SCMP_ACT_NOTIFY"}`, false},
+		{typeAppArmor, `{"filesystem":{"readOnlyPaths":["/etc"]}}`, true},
+		{typeAppArmor, `{"filesystem":{"readOnlyPaths":["/etc"],"bogus":1}}`, false},
+		{typeAppArmor, `{"filesystem":{"ReadOnlyPaths":["/etc"]}}`, false},
+		{typeAppArmor, `{"filesystem":{"readOnlyPaths":["etc"]}}`, false},
+		{typeLandlock, `{"handledAccessFs":["read_file"],"pathRules":[{"path":"/etc",` +
+			`"accessFs":["read_file"]}]}`, true},
+		{typeLandlock, `{"handledAccessFs":["read_file"],"pathRules":[{"accessFs":["read_file"]}]}`, false},
+		{typeLandlock, `{"handledAccessNet":["bind_tcp"],"netRules":[{"accessNet":["bind_tcp"]}]}`, false},
+		{typeLandlock, `{"handledAccessFs":["read_file"],"pathRules":[{"path":"/etc",` +
+			`"accessFs":["write_file"]}]}`, false},
+	} {
+		args := []string{cmdValidate, "--artifact", "--quiet", flagType, test.profileType}
+		if test.profileType == typeSeccomp {
+			args = append(args, flagArch, arch)
+		}
+
+		code, _, stderr := runCapture(t, append(args, writeTemp(t, test.doc)), nil)
+		decoded := accepts[test.profileType]([]byte(test.doc))
+
+		if (code == 0) != test.accepted || decoded != test.accepted {
+			t.Errorf("%s %s: validate --artifact exit code = %d (%s), DecodeArtifact "+
+				"accepts it: %t, want both to accept it: %t",
+				test.profileType, test.doc, code, stderr, decoded, test.accepted)
+		}
+	}
+}
+
 // TestUsageErrorsAfterABadInput covers a usage error that comes up after an
 // input has failed: what was found is still written, in input order, and
 // the run exits 1, as it would for the bad input alone, rather than with
@@ -900,11 +1068,14 @@ func TestUsageErrorsAfterABadInput(t *testing.T) {
 // take or a --validate list of the wrong length, beside an input that is bad
 // in each way an input can be: every input is read, decoded and checked
 // before the run is refused, so the bad one is reported and the run exits
-// 1, however it is bad.
+// 1, however it is bad. The list is one mode each for the file arguments,
+// one of which is an array of two, so only the profiles they bring show it
+// is too short, even beside a file that cannot be read.
 func TestUsageErrorsAfterEveryKindOfBadInput(t *testing.T) {
 	t.Parallel()
 
 	good := writeTemp(t, `{"handledAccessFs":["read_file"]}`)
+	pair := writeTemp(t, `[{"handledAccessFs":["read_file"]},{"handledAccessFs":["read_file"]}]`)
 
 	const (
 		archRefusal  = "error: --arch only applies to seccomp profiles\n"
@@ -944,7 +1115,7 @@ func TestUsageErrorsAfterEveryKindOfBadInput(t *testing.T) {
 			{
 				name:    "merge --validate",
 				flags:   []string{cmdMerge, flagStrategy, strategyUnion, "--validate", "default,artifact"},
-				others:  []string{good, good},
+				others:  []string{pair},
 				refusal: countRefusal,
 			},
 		} {
@@ -963,12 +1134,15 @@ func TestUsageErrorsAfterEveryKindOfBadInput(t *testing.T) {
 						code, stdout, stderr, run.refusal)
 				}
 
-				// Without the bad input the refusal is a usage error.
+				// Without the bad input the refusal is a usage error, which
+				// ends with the hint at the help.
+				want := run.refusal + usageHintOf(run.flags[0])
+
 				code, _, stderr = runCapture(t,
 					slices.Concat(flags, []string{good}, run.others), nil)
-				if code != exitUsage || stderr != run.refusal {
+				if code != exitUsage || stderr != want {
 					t.Errorf("good inputs: exit code = %d, stderr = %q, want %d and %q",
-						code, stderr, exitUsage, run.refusal)
+						code, stderr, exitUsage, want)
 				}
 			})
 		}
@@ -1017,7 +1191,10 @@ func TestValidateListOfTheWrongLengthUsesItsWeakestMode(t *testing.T) {
 	}{
 		{"strict,strict,strict", 1, failure + count},
 		{"artifact,strict,artifact", 1, failure + count},
-		{"strict,default,strict", exitUsage, "warning: " + unknown + ": unknown field \"bogus\"\n" + count},
+		{
+			"strict,default,strict", exitUsage,
+			"warning: " + unknown + ": unknown field \"bogus\"\n" + count + usageHintOf(cmdMerge),
+		},
 	} {
 		code, _, stderr := runCapture(t, []string{
 			cmdMerge, flagType, typeAppArmor, flagStrategy, strategyUnion,
@@ -1201,7 +1378,7 @@ func TestABIForMergeAndDiff(t *testing.T) {
 			name:     "merge of another profile type",
 			args:     append(slices.Clone(merge), "--abi", "6", testdataSeccompA),
 			wantCode: exitUsage,
-			want:     "error: " + errABINotApplicable.Error() + "\n",
+			want:     "error: " + errABINotApplicable.Error() + "\n" + usageHintOf(cmdMerge),
 		},
 		{
 			name:     "merge with an --abi that names no version",
@@ -1239,7 +1416,7 @@ func TestABIForMergeAndDiff(t *testing.T) {
 			args: append(slices.Clone(diff), "--abi", "6", "--validate", "default",
 				testdataSeccompA, testdataSeccompA),
 			wantCode: exitUsage,
-			want:     "error: " + errABINotApplicable.Error() + "\n",
+			want:     "error: " + errABINotApplicable.Error() + "\n" + usageHintOf(cmdDiff),
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

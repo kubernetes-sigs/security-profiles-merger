@@ -30,8 +30,10 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
+	specs "github.com/opencontainers/runtime-spec/specs-go"
+
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
-	"sigs.k8s.io/security-profiles-merger/landlock"
+	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
 
 // newFlagSet returns a flag set for a subcommand. The flag package prints
@@ -43,6 +45,49 @@ func newFlagSet(name string) *flag.FlagSet {
 	flags.Usage = func() {}
 
 	return flags
+}
+
+// singleValue is a string flag that may be given twice only with the same
+// value both times: the flag package keeps the last of two values, so
+// "--strategy union --strategy intersect" would run an intersection
+// without a word about the union it was also asked for. The flag package
+// reports the error Set returns as a usage error, naming the flag.
+type singleValue struct {
+	target *string
+	set    bool
+}
+
+// errRepeatedFlag reports a flag given a second, different value.
+var errRepeatedFlag = errors.New("already given")
+
+// stringFlag declares a string flag of the given default value, which may
+// be given twice only with the same value (see singleValue). The usage
+// names the value in backquotes, as flag.UnquoteUsage reads it, since the
+// flag package names it "value" otherwise.
+func stringFlag(flags *flag.FlagSet, target *string, name, value, usage string) {
+	*target = value
+	flags.Var(&singleValue{target: target, set: false}, name, usage)
+}
+
+func (v *singleValue) String() string {
+	// The flag package calls String on a zero singleValue to tell whether
+	// the default is the zero value.
+	if v == nil || v.target == nil {
+		return ""
+	}
+
+	return *v.target
+}
+
+func (v *singleValue) Set(value string) error {
+	if v.set && value != *v.target {
+		return fmt.Errorf("%w as %s", errRepeatedFlag, merge.QuoteBounded(*v.target))
+	}
+
+	v.set = true
+	*v.target = value
+
+	return nil
 }
 
 // commonOptions holds the flags every command that reads profiles takes.
@@ -83,14 +128,14 @@ type commonHelp struct {
 func (opts *commonOptions) bind(flags *flag.FlagSet, help commonHelp) {
 	bindArchFlag(flags, &opts.arch, help.archFor)
 	bindABIFlag(flags, &opts.abi, help.abiFor)
-	flags.StringVar(
-		&opts.profileType, "type", "",
-		"profile type: "+strings.Join(typeNames(), ", ")+" (auto-detected if omitted)",
+	stringFlag(
+		flags, &opts.profileType, "type", "",
+		"profile `type`: "+strings.Join(typeNames(), ", ")+" (auto-detected if omitted)",
 	)
-	flags.StringVar(&opts.format, "format", formatJSON, "output format: json, human")
-	flags.StringVar(
-		&opts.output, "output", "",
-		"write output to file, or to stdout with - (default: "+help.outputDefault+")",
+	stringFlag(flags, &opts.format, "format", formatJSON, "output `format`: json, human")
+	stringFlag(
+		flags, &opts.output, "output", "",
+		"write output to `file`, or to stdout with - (default: "+help.outputDefault+")",
 	)
 	flags.BoolVar(
 		&opts.noDetectNote, "no-detect-note", false,
@@ -150,20 +195,20 @@ func parseFlags(
 	}
 
 	if errors.Is(err, flag.ErrHelp) {
-		return true, printHelp(usageWithFlags(flags, usageText), stdout, stderr)
+		return true, writeStdout([]byte(usageWithFlags(flags, usageText)), stdout, stderr)
 	}
 
 	_, _ = fmt.Fprintln(stderr, "error: "+flagAsWritten(err.Error(), args))
 
-	return true, usageHint(flags, stderr)
+	return true, usageHint(flags.Name(), stderr)
 }
 
-// usageHint follows the report of a usage error the arguments alone show
-// with where to find the usage, rather than with the usage itself, which
-// would bury the one line that says what went wrong, and returns the usage
-// exit code.
-func usageHint(flags *flag.FlagSet, stderr io.Writer) int {
-	_, _ = fmt.Fprintf(stderr, "Run 'spm %s --help' for usage.\n", flags.Name())
+// usageHint follows the report of a usage error of the named command with
+// where to find the usage, rather than with the usage itself, which would
+// bury the one line that says what went wrong, and returns the usage exit
+// code.
+func usageHint(command string, stderr io.Writer) int {
+	_, _ = fmt.Fprintf(stderr, "Run 'spm %s --help' for usage.\n", command)
 
 	return exitUsage
 }
@@ -243,11 +288,6 @@ func writtenFlag(name string, args []string) string {
 	}
 
 	return "--" + name
-}
-
-// printHelp writes help the caller asked for to stdout (see writeStdout).
-func printHelp(text string, stdout, stderr io.Writer) int {
-	return writeStdout([]byte(text), stdout, stderr)
 }
 
 // flagDefaultLine matches the start of a flag in what the flag package
@@ -395,12 +435,12 @@ func isInteractive(reader io.Reader) bool {
 // invocation is one run of a command that reads profiles, as it passes from
 // one step to the next.
 type invocation struct {
+	// command names the command, for the hint at its help that follows a
+	// usage error (see usageHint).
+	command string
 	// paths holds the file arguments, and inputs what they brought.
 	paths  []string
 	inputs []profileInput
-	// stdinUnread reports stdin read and not readable, which leaves the
-	// number of profiles unknown (see stdinUnread).
-	stdinUnread bool
 	// report holds what was found about the inputs so far; resolveKind
 	// creates it.
 	report *inputReport
@@ -409,9 +449,8 @@ type invocation struct {
 	// checks says how the command checks each input, which a run whose
 	// inputs disagree on the type needs before it has a kind.
 	checks *inputChecks
-	arch   archOption
-	// abi is the Landlock ABI version --abi names, or 0 for none.
-	abi    landlock.ABIVersion
+	// node is the node --arch and --abi describe.
+	node   nodeOptions
 	format string
 	// out holds what the command writes on success, which flushOutput then
 	// writes to stdout or to the --output file, so that a failed run never
@@ -440,45 +479,39 @@ func startCommand(
 
 	node, code := checkCommandLine(flags, opts, args, stdin, stderr)
 	if code != 0 {
-		return nil, usageHint(flags, stderr)
+		return nil, usageHint(flags.Name(), stderr)
 	}
 
 	inputs, err := readInputs(flags.Args(), stdin)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 
-		return nil, exitUsage
+		return nil, usageHint(flags.Name(), stderr)
 	}
 
 	return &invocation{
-		paths:       flags.Args(),
-		inputs:      inputs,
-		stdinUnread: stdinUnread(flags.Args(), inputs),
-		report:      nil,
-		kind:        nil,
-		checks:      nil,
-		arch:        node.arch,
-		abi:         node.abi,
-		format:      opts.common().format,
-		out:         bytes.Buffer{},
-		stdout:      stdout,
-		stderr:      stderr,
-		refusals:    nil,
+		command:  flags.Name(),
+		paths:    flags.Args(),
+		inputs:   inputs,
+		report:   nil,
+		kind:     nil,
+		checks:   nil,
+		node:     node,
+		format:   opts.common().format,
+		out:      bytes.Buffer{},
+		stdout:   stdout,
+		stderr:   stderr,
+		refusals: nil,
 	}, 0
 }
 
-// nodeOptions is the node --arch and --abi describe.
-type nodeOptions struct {
-	arch archOption
-	abi  landlock.ABIVersion
-}
-
 // checkCommandLine checks what the arguments alone show: the flag order,
-// then the flag values, --arch and --abi among them, and then that stdin is
-// no terminal where it is read. The flag order comes first, so that a flag
-// after the file arguments is reported as such rather than as missing. It
-// returns the node the flags describe, or the usage exit code once it has
-// reported why not.
+// then the flag values, --arch, --abi and --output among them, then the
+// file arguments (see checkPaths), and then that stdin is no terminal where
+// it is read. The flag order comes first, so that a flag after the file
+// arguments is reported as such rather than as missing. It returns the
+// node the flags describe, or the usage exit code once it has reported why
+// not.
 func checkCommandLine(
 	flags *flag.FlagSet, opts commandOptions, args []string, stdin io.Reader, stderr io.Writer,
 ) (nodeOptions, int) {
@@ -510,6 +543,20 @@ func checkCommandLine(
 		return node, code
 	}
 
+	err := checkOutputFlag(common.output)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "error: --output %s: %v\n", merge.SafeName(common.output), err)
+
+		return node, exitUsage
+	}
+
+	err = checkPaths(flags.Args(), stdin)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+
+		return node, exitUsage
+	}
+
 	return node, checkStdin(flags, stdin, stderr)
 }
 
@@ -522,9 +569,10 @@ func (inv *invocation) halted() bool {
 // stop ends a run that cannot go on. It writes what the report holds, then
 // the usage errors that came up once the inputs were read, and returns
 // failedExit when an input failed, since a bad input is the answer the
-// command was asked for, and the usage exit code otherwise. Every input is
-// checked before a run stops for such a usage error, so that its exit code
-// does not depend on how an input is bad.
+// command was asked for, and the usage exit code, after the hint at the
+// help every usage error ends with, otherwise. Every input is checked
+// before a run stops for such a usage error, so that its exit code does
+// not depend on how an input is bad.
 func (inv *invocation) stop(failedExit int) int {
 	inv.report.flush(inv.stderr)
 
@@ -536,12 +584,12 @@ func (inv *invocation) stop(failedExit int) int {
 		return failedExit
 	}
 
-	return exitUsage
+	return usageHint(inv.command, inv.stderr)
 }
 
 // write writes a command's result to out in the format --format names: for
-// the human one, what human returns, the result as its String or
-// FormatProfile writes it, which no other format needs computed.
+// the human one, what human returns (see human.go), which no other format
+// needs computed.
 func (inv *invocation) write(result any, human func() string) int {
 	switch inv.format {
 	case formatHuman:
@@ -560,12 +608,6 @@ func (inv *invocation) write(result any, human func() string) int {
 	}
 
 	return 0
-}
-
-// flushOutput writes what the command wrote to out to stdout, or to the
-// file path names.
-func (inv *invocation) flushOutput(path string) int {
-	return flushOutput(path, inv.out.Bytes(), inv.stdout, inv.stderr)
 }
 
 // plural returns noun with an "s" appended unless count is one.
@@ -602,9 +644,31 @@ func encodeJSON(writer io.Writer, value any) error {
 	return nil
 }
 
+// seccompOutput returns the value encodeJSON encodes: for a seccomp profile,
+// what seccomp.Marshal writes, as raw JSON, which keeps an empty flag list
+// apart from an absent one; any other value as it is. A nil profile is
+// written as null.
+func seccompOutput(value any) (any, error) {
+	profile, ok := value.(*specs.LinuxSeccomp)
+	if !ok {
+		return value, nil
+	}
+
+	if profile == nil {
+		return json.RawMessage("null"), nil
+	}
+
+	data, err := seccomp.Marshal(profile)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // encodeJSON wraps it
+	}
+
+	return json.RawMessage(data), nil
+}
+
 // escapingWriter passes what is written to it through escapeInvisible. The
 // encoder writes each value it encodes in one Write, so no rune is split
-// between two of them; one that were would be passed on as it is.
+// between two of them.
 type escapingWriter struct {
 	writer io.Writer
 }
@@ -618,16 +682,23 @@ func (w escapingWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-// escapeInvisible spells out, as \u escapes, the runes of encoded JSON that
-// do not print as themselves (see merge.PrintsAsItself). encoding/json
-// escapes the C0 controls but writes the C1 controls, the format characters
-// such as U+202E and the runes that render as nothing as they are, so that a
-// path of an artifact could reach a terminal reordered, or reading as
-// another path. Outside a string JSON holds nothing but ASCII, so every such
-// rune sits in a string, where the escape decodes to the same value. data is
-// returned itself when it holds none, and any other byte is kept as it is.
+// escapeInvisible spells out, as \u escapes, the runes of JSON that do not
+// print as themselves (see merge.PrintsAsItself), and writes a byte that is
+// not valid UTF-8 as \ufffd. encoding/json escapes the C0 controls but
+// writes the C1 controls, the format characters such as U+202E and the
+// runes that render as nothing as they are, so that a path of an artifact
+// could reach a terminal reordered, or reading as another path. It replaces
+// a byte that is not valid UTF-8 with U+FFFD when it encodes, and validate
+// writes a profile holding one as it decoded (see encodeAmbiguous), so no
+// such byte, 0x9b say, which a terminal may read as the start of a control
+// sequence, is expected here; one that came all the same would not reach
+// stdout as it is. Outside a string JSON holds nothing but ASCII, so every such
+// rune or byte sits in a string of JSON that parses, where the escape
+// decodes to the same value: encoding/json reads each byte that is not
+// valid UTF-8 as U+FFFD. data is returned itself when it holds none, and
+// any other byte is kept as it is.
 func escapeInvisible(data []byte) []byte {
-	first := bytes.IndexFunc(data, needsEscape)
+	first := firstToEscape(data)
 	if first < 0 {
 		return data
 	}
@@ -638,12 +709,14 @@ func escapeInvisible(data []byte) []byte {
 		char, size := utf8.DecodeRune(rest)
 
 		switch {
-		case !needsEscape(char):
+		case !needsEscape(char, size):
 			escaped = append(escaped, rest[:size]...)
 		case char > maxBMP:
 			first, second := utf16.EncodeRune(char)
 			escaped = fmt.Appendf(escaped, `\u%04x\u%04x`, first, second)
 		default:
+			// A byte that failed to decode reads as utf8.RuneError, which
+			// is U+FFFD.
 			escaped = fmt.Appendf(escaped, `\u%04x`, char)
 		}
 
@@ -653,14 +726,31 @@ func escapeInvisible(data []byte) []byte {
 	return escaped
 }
 
-// needsEscape reports whether a decoded rune is one escapeInvisible
-// escapes: DEL, which encoding/json leaves as it is while it escapes the
-// other ASCII controls, and a rune past ASCII that does not print as
-// itself. A byte that failed to decode reads as utf8.RuneError, which
-// prints as itself, so it is kept. A terminal shows nothing for DEL, so
-// "/a\x7fb" would read as "/ab".
-func needsEscape(char rune) bool {
-	return char == asciiDEL || char >= utf8.RuneSelf && !merge.PrintsAsItself(char)
+// firstToEscape returns the offset of the first rune or byte of data that
+// escapeInvisible escapes, or -1 for none.
+func firstToEscape(data []byte) int {
+	for offset := 0; offset < len(data); {
+		char, size := utf8.DecodeRune(data[offset:])
+		if needsEscape(char, size) {
+			return offset
+		}
+
+		offset += size
+	}
+
+	return -1
+}
+
+// needsEscape reports whether a rune decoded from size bytes is one
+// escapeInvisible escapes: DEL, which encoding/json leaves as it is while
+// it escapes the other ASCII controls, a rune past ASCII that does not
+// print as itself, and a byte that failed to decode, which reads as
+// utf8.RuneError from one byte. A terminal shows nothing for DEL, so
+// "/a\x7fb" would read as "/ab". U+FFFD itself, spelled in three bytes,
+// prints as itself and is kept.
+func needsEscape(char rune, size int) bool {
+	return char == asciiDEL || char == utf8.RuneError && size == 1 ||
+		char >= utf8.RuneSelf && !merge.PrintsAsItself(char)
 }
 
 // asciiDEL is the one ASCII control encoding/json does not escape.

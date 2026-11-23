@@ -46,6 +46,15 @@ const (
 	flagNameArch = "arch"
 )
 
+// nodeOptions is the node --arch and --abi describe, which the profile
+// kind of a run is bound to (see profileType.kind). Both are parsed before
+// any input is read, so that a value naming nothing is a usage error.
+type nodeOptions struct {
+	arch archOption
+	// abi is the Landlock ABI version --abi names, or 0 for none.
+	abi landlock.ABIVersion
+}
+
 // errUnknownArchName reports an --arch value that names no architecture
 // the seccomp package knows.
 var errUnknownArchName = errors.New("unknown architecture")
@@ -64,9 +73,9 @@ type archOption struct {
 // bindArchFlag declares --arch on the set. what says what the architecture
 // is for, which is all the help of the commands taking it differs in.
 func bindArchFlag(flags *flag.FlagSet, target *string, what string) {
-	flags.StringVar(
-		target, flagNameArch, archNative,
-		"seccomp architecture "+what+": native, none, or a name such as "+
+	stringFlag(
+		flags, target, flagNameArch, archNative,
+		"seccomp `architecture` "+what+": native, none, or a name such as "+
 			archPrefix+"X86_64",
 	)
 }
@@ -127,7 +136,7 @@ var errBadABI = errors.New("invalid Landlock ABI version")
 // and which checks refuse the rights it does not know, which is all the
 // help of the commands taking it differs in.
 func bindABIFlag(flags *flag.FlagSet, target *string, what string) {
-	flags.StringVar(target, flagNameABI, "", "Landlock ABI version "+what)
+	stringFlag(flags, target, flagNameABI, "", "Landlock ABI `version` "+what)
 }
 
 // parseABIFlag parses the --abi value of a command whose flags are parsed,

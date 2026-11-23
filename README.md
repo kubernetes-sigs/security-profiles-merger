@@ -381,7 +381,8 @@ The `spm` command-line tool merges, validates and diffs profiles without
 writing Go code:
 
 ```sh
-spm merge --type seccomp --strategy intersect baseline.json artifact.json
+spm merge --type seccomp --strategy intersect --validate default,artifact \
+  baseline.json artifact.json
 spm validate --artifact artifact.json
 spm diff baseline.json merged.json
 ```

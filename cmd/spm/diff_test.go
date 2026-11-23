@@ -64,14 +64,14 @@ func TestDiffErrors(t *testing.T) {
 			name:       "single file",
 			args:       []string{cmdDiff, seccompFile},
 			wantCode:   exitUsage,
-			wantStderr: "got 1 file: ",
+			wantStderr: "got 1 profile from the file arguments: ",
 		},
 		{
 			name:       "dash and stdin pair",
 			args:       []string{cmdDiff, seccompFile, "-"},
 			stdin:      strings.NewReader(stdinPair),
 			wantCode:   exitUsage,
-			wantStderr: "got 3 profiles from stdin and the files: ",
+			wantStderr: "got 3 profiles from the file arguments: ",
 		},
 		{
 			name:       "auto-detect type",
@@ -216,6 +216,46 @@ func TestDiffStdinArray(t *testing.T) {
 
 	if diff.Equal {
 		t.Error("expected different profiles")
+	}
+}
+
+// TestDiffOfOneFileArray covers diff given one file argument that holds
+// an array of two profiles, as stdin may: the two elements are compared,
+// and a --validate list of a mode each, longer than the file arguments,
+// is matched against them once they are read.
+func TestDiffOfOneFileArray(t *testing.T) {
+	t.Parallel()
+
+	read := seccompJSON(t, testSyscallRead)
+	pair := func(left, right string) string { return writeTemp(t, "["+left+","+right+"]") }
+
+	for _, test := range []struct {
+		name string
+		args []string
+		code int
+	}{
+		{"equal", []string{pair(read, read)}, 0},
+		{"different", []string{pair(read, seccompJSON(t, "write"))}, exitDiff},
+		{"a mode each", []string{"--validate", "default,artifact", pair(read, read)}, 0},
+	} {
+		args := append([]string{cmdDiff, flagType, typeSeccomp, flagArch, archNone}, test.args...)
+
+		code, stdout, stderr := runCapture(t, args, nil)
+		if code != test.code || stderr != "" || !strings.Contains(stdout, `"equal"`) {
+			t.Errorf("%s: exit code = %d, stdout = %q, stderr = %q, want %d and the diff",
+				test.name, code, stdout, stderr, test.code)
+		}
+	}
+
+	// A list of a mode each for three profiles is refused once the array
+	// shows there are two.
+	code, _, stderr := runCapture(t, []string{
+		cmdDiff, flagType, typeSeccomp, "--validate", "default,artifact,strict", pair(read, read),
+	}, nil)
+	if want := "error: wrong number of validation modes: got 3 for 2 profiles\n" +
+		usageHintOf(cmdDiff); code != exitUsage || stderr != want {
+		t.Errorf("a list too long: exit code = %d, stderr = %q, want %d and %q",
+			code, stderr, exitUsage, want)
 	}
 }
 
@@ -561,18 +601,14 @@ func TestDiffCommandReportsFailures(t *testing.T) {
 		},
 	} {
 		ops := kindOps[landlock.Profile, unencodableDiff]{
-			intersect:        nil,
-			union:            nil,
-			validate:         nil,
-			validateStrict:   nil,
-			validateArtifact: nil,
-			validateBaseline: nil,
-			format:           nil,
-			diff:             diffFn,
-			formatDiff:       func(*unencodableDiff) string { return "" },
-			equal:            func(*unencodableDiff) bool { return true },
-			forArch:          nil,
-			forABI:           nil,
+			intersect:  nil,
+			union:      nil,
+			validators: [modeCount]func(*landlock.Profile) error{},
+			checksABI:  false,
+			format:     nil,
+			diff:       diffFn,
+			formatDiff: func(*unencodableDiff) string { return "" },
+			equal:      func(*unencodableDiff) bool { return true },
 		}
 
 		var stderr strings.Builder
@@ -633,7 +669,8 @@ func TestDiffValidate(t *testing.T) {
 			name:     "a list of the wrong length",
 			args:     []string{"--validate", "artifact,artifact,artifact", testdataSeccompA, testdataSeccompB},
 			wantCode: exitUsage,
-			want:     "error: wrong number of validation modes: got 3 for 2 profiles\n",
+			want: "error: wrong number of validation modes: got 3 for 2 profiles\n" +
+				usageHintOf(cmdDiff),
 		},
 		{
 			name:     "an unknown mode",

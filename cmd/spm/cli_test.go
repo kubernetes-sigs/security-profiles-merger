@@ -18,6 +18,8 @@ package main
 
 import (
 	"os"
+	"path/filepath"
+	"reflect"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -26,8 +28,12 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	specs "github.com/opencontainers/runtime-spec/specs-go"
+
 	"sigs.k8s.io/security-profiles-merger/apparmor"
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/landlock"
+	"sigs.k8s.io/security-profiles-merger/seccomp"
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
 
@@ -227,11 +233,14 @@ func usageHintOf(command string) string {
 
 // TestUsageErrorsPointAtTheHelp covers every kind of usage error the
 // arguments alone show: each is one line, followed by the hint at the help
-// rather than by the help itself, which would bury it.
+// rather than by the help itself, which would bury it. Each is refused
+// before any input is read, so a missing file beside it is not reported.
 func TestUsageErrorsPointAtTheHelp(t *testing.T) {
 	t.Parallel()
 
 	file := writeTemp(t, seccompJSON(t, testSyscallRead))
+	missing := filepath.Join(t.TempDir(), "missing.json")
+	dir := t.TempDir()
 
 	for _, test := range []struct {
 		args []string
@@ -250,6 +259,56 @@ func TestUsageErrorsPointAtTheHelp(t *testing.T) {
 		},
 		{[]string{cmdValidate, "--abi", "0", file}, `invalid Landlock ABI version "0" (use a whole number from 1 on)`},
 		{[]string{cmdValidate, file, flagStrict}, "--strict is not a file (flags must precede file arguments)"},
+		{[]string{cmdValidate, ""}, errEmptyArgument.Error()},
+		{
+			[]string{cmdDiff, file, file, missing},
+			"got 3 file arguments: " + errDiffRequiresTwo.Error(),
+		},
+		{
+			[]string{
+				cmdMerge, flagStrategy, strategyUnion, "--validate", "default,artifact",
+				file, file, missing,
+			},
+			"wrong number of validation modes: got 2 for 3 file arguments",
+		},
+		{
+			[]string{cmdMerge, flagStrategy, strategyUnion, "--output", dir + "/", missing},
+			"--output " + dir + "/: " + errDirectoryOutput.Error(),
+		},
+		{
+			[]string{cmdValidate, "--output", dir, missing},
+			"--output " + dir + ": " + errDirectoryAtOutput.Error(),
+		},
+		{
+			[]string{
+				cmdMerge, flagStrategy, strategyUnion, flagStrategy, strategyIntersect, missing,
+			},
+			`invalid value "intersect" for flag --strategy: already given as "union"`,
+		},
+		{
+			[]string{cmdValidate, "--type=seccomp", "-type", typeAppArmor, missing},
+			`invalid value "apparmor" for flag --type: already given as "seccomp"`,
+		},
+		{
+			[]string{cmdDiff, "--validate", "default", "--validate", "strict", missing, missing},
+			`invalid value "strict" for flag --validate: already given as "default"`,
+		},
+		{
+			[]string{cmdValidate, flagFormat, formatJSON, flagFormat, formatHuman, missing},
+			`invalid value "human" for flag --format: already given as "json"`,
+		},
+		{
+			[]string{cmdValidate, "--output", "a.json", "--output=b.json", missing},
+			`invalid value "b.json" for flag --output: already given as "a.json"`,
+		},
+		{
+			[]string{cmdValidate, flagStrict, flagArch, archNone, flagArch, archNative, missing},
+			`invalid value "native" for flag --arch: already given as "none"`,
+		},
+		{
+			[]string{cmdValidate, "--abi", "1", "--abi", "01", missing},
+			`invalid value "01" for flag --abi: already given as "1"`,
+		},
 	} {
 		command := test.args[0]
 
@@ -259,6 +318,318 @@ func TestUsageErrorsPointAtTheHelp(t *testing.T) {
 		if code != exitUsage || stdout != "" || stderr != want {
 			t.Errorf("%v: code = %d, stdout = %q, stderr = %q, want %d, no output and %q",
 				test.args, code, stdout, stderr, exitUsage, want)
+		}
+	}
+}
+
+// TestRepeatedFlagWithTheSameValue covers a flag given twice with the same
+// value, which says one thing and is taken, while a boolean flag repeated
+// is left to the flag package, which takes the last.
+func TestRepeatedFlagWithTheSameValue(t *testing.T) {
+	t.Parallel()
+
+	file := writeTemp(t, seccompJSON(t, testSyscallRead))
+
+	code, stdout, stderr := runCapture(t, []string{
+		cmdValidate, flagType, typeSeccomp, "--type=" + typeSeccomp,
+		"--quiet=false", "--quiet", file,
+	}, nil)
+	if code != 0 || stdout != "" || stderr != "" {
+		t.Errorf("exit code = %d, stdout = %q, stderr = %q, want 0 and nothing",
+			code, stdout, stderr)
+	}
+
+	// An argument after "--" is a file name, even one that reads as the
+	// flag given again with another value.
+	code, _, stderr = runCapture(t, []string{
+		cmdValidate, flagType, typeSeccomp, "--", flagType + "=" + typeAppArmor,
+	}, nil)
+	if code != 1 || !strings.HasPrefix(stderr, "error: "+flagType+"="+typeAppArmor+": ") {
+		t.Errorf("a flag after --: exit code = %d, stderr = %q, want 1 and a missing file",
+			code, stderr)
+	}
+}
+
+// TestHumanFormatWritesALinePerRule covers what the library's one-line
+// String does not show apart: an empty profile, which is written as a line
+// saying so rather than as an empty one, an empty seccomp flag list, which
+// differs from an absent one, and an AppArmor capability list granting
+// nothing, which differs from one granting a capability named none.
+func TestHumanFormatWritesALinePerRule(t *testing.T) {
+	t.Parallel()
+
+	empty := []specs.LinuxSeccompFlag{}
+
+	for _, test := range []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"an empty AppArmor profile", humanAppArmor(&apparmor.Profile{}), noRules},
+		{"an empty Landlock profile", humanLandlock(&landlock.Profile{}), noRules},
+		{
+			"an empty flag list",
+			humanSeccomp(&specs.LinuxSeccomp{DefaultAction: specs.ActErrno, Flags: empty}),
+			"default:SCMP_ACT_ERRNO\nflags:none",
+		},
+		{
+			"no capability, and one named none",
+			humanAppArmor(&apparmor.Profile{Capabilities: &apparmor.CapabilityRules{}}) + "|" +
+				humanAppArmor(&apparmor.Profile{Capabilities: &apparmor.CapabilityRules{
+					AllowedCapabilities: []string{"none"},
+				}}),
+			`caps:none|caps:"none"`,
+		},
+		{
+			"a value holding a newline",
+			humanLandlock(&landlock.Profile{PathRules: []landlock.PathRule{{Path: "/a\nb"}}}),
+			`"/a\nb"()`,
+		},
+		{"an equal diff", humanSeccompDiff(&seccomp.ProfileDiff{Equal: true}), equalDiff},
+	} {
+		if test.got != test.want {
+			t.Errorf("%s: %q, want %q", test.name, test.got, test.want)
+		}
+	}
+}
+
+// TestHumanFormatShowsEveryField covers the human renderers against the
+// types they render, which they mirror field by field: each exported field
+// of a profile or a diff, down to the lists and values it holds, is set on
+// its own, and the output must show it, so that a field added to a type
+// later cannot go missing from --format human without a word. The fields
+// are found by reflection and set to a value of their type, so the test
+// does not depend on how the types nest.
+func TestHumanFormatShowsEveryField(t *testing.T) {
+	t.Parallel()
+
+	checkHumanFields(t, humanSeccomp)
+	checkHumanFields(t, humanSeccompDiff)
+	checkHumanFields(t, humanAppArmor)
+	checkHumanFields(t, humanAppArmorDiff)
+	checkHumanFields(t, humanLandlock)
+	checkHumanFields(t, humanLandlockDiff)
+}
+
+// checkHumanFields checks that render shows each field of T that holds a
+// value rather than a struct, set alone, in what it writes for the zero
+// value. The Equal of a diff is left out: it says there is nothing else.
+func checkHumanFields[T any](t *testing.T, render func(*T) string) {
+	t.Helper()
+
+	typ := reflect.TypeFor[T]()
+	empty := render(new(T))
+
+	leafFields(typ, nil, func(path []int) {
+		profile := new(T)
+		setField(reflect.ValueOf(profile).Elem(), path)
+
+		if got := render(profile); got == empty {
+			t.Errorf("%s field %v is not shown: %q", typ, fieldNames(typ, path), got)
+		}
+	})
+}
+
+// leafFields calls visit with the index path of every exported field of
+// typ, and of the structs it holds directly or through a pointer, whose
+// type is not such a struct.
+func leafFields(typ reflect.Type, path []int, visit func(path []int)) {
+	for idx := range typ.NumField() {
+		field := typ.Field(idx)
+		if !field.IsExported() || len(path) == 0 && field.Name == "Equal" {
+			continue
+		}
+
+		inner := field.Type
+		if inner.Kind() == reflect.Pointer {
+			inner = inner.Elem()
+		}
+
+		fieldPath := append(slices.Clone(path), idx)
+		if inner.Kind() == reflect.Struct {
+			leafFields(inner, fieldPath, visit)
+
+			continue
+		}
+
+		visit(fieldPath)
+	}
+}
+
+// setField sets the field at path within value to a filled value (see
+// filledValue), allocating the structs on the way.
+func setField(value reflect.Value, path []int) {
+	for _, idx := range path {
+		if value.Kind() == reflect.Pointer {
+			if value.IsNil() {
+				value.Set(reflect.New(value.Type().Elem()))
+			}
+
+			value = value.Elem()
+		}
+
+		value = value.Field(idx)
+	}
+
+	value.Set(filledValue(value.Type()))
+}
+
+// filledValue returns a value of typ that is not its zero value: a list of
+// one filled element, a struct of filled fields, "x" for a string, true and
+// one.
+func filledValue(typ reflect.Type) reflect.Value {
+	value := reflect.New(typ).Elem()
+
+	switch {
+	case typ.Kind() == reflect.Pointer:
+		value.Set(filledValue(typ.Elem()).Addr())
+	case typ.Kind() == reflect.Slice:
+		value.Set(reflect.Append(value, filledValue(typ.Elem())))
+	case typ.Kind() == reflect.Struct:
+		for idx := range typ.NumField() {
+			if typ.Field(idx).IsExported() {
+				value.Field(idx).Set(filledValue(typ.Field(idx).Type))
+			}
+		}
+	default:
+		fillScalar(value)
+	}
+
+	return value
+}
+
+// fillScalar sets a string to "x", a bool to true and a number to one.
+func fillScalar(value reflect.Value) {
+	switch {
+	case value.Kind() == reflect.String:
+		value.SetString("x")
+	case value.Kind() == reflect.Bool:
+		value.SetBool(true)
+	case value.CanUint():
+		value.SetUint(1)
+	case value.CanInt():
+		value.SetInt(1)
+	default:
+		panic("no filled value of " + value.Type().String())
+	}
+}
+
+// fieldNames returns the names of the fields along path within typ.
+func fieldNames(typ reflect.Type, path []int) []string {
+	names := make([]string, 0, len(path))
+
+	for _, idx := range path {
+		if typ.Kind() == reflect.Pointer {
+			typ = typ.Elem()
+		}
+
+		names = append(names, typ.Field(idx).Name)
+		typ = typ.Field(idx).Type
+	}
+
+	return names
+}
+
+// TestHumanFormatCutBetweenLines covers a human output past the bound,
+// which ends in the truncation marker on a line of its own, after whole
+// lines only: cut in the middle of a rule, the marker would read as that
+// rule's action.
+func TestHumanFormatCutBetweenLines(t *testing.T) {
+	t.Parallel()
+
+	const rules = 20000
+
+	profile := &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
+	for idx := range rules {
+		profile.Syscalls = append(profile.Syscalls, specs.LinuxSyscall{
+			Names: []string{"s" + strconv.Itoa(rules+idx)}, Action: specs.ActAllow,
+		})
+	}
+
+	got := humanSeccomp(profile)
+	if !merge.Truncated(got) {
+		t.Fatalf("%d rules were not cut", rules)
+	}
+
+	lines := strings.Split(got, "\n")
+	if last := lines[len(lines)-1]; last != merge.TruncationMarker {
+		t.Errorf("last line = %q, want the marker alone", last)
+	}
+
+	for _, line := range lines[1 : len(lines)-1] {
+		if !strings.HasPrefix(line, "s") || !strings.HasSuffix(line, "->SCMP_ACT_ALLOW") {
+			t.Errorf("line %q is not a whole rule", line)
+		}
+	}
+}
+
+// TestHumanFormatCutAtAnOversizedRule covers a rule longer than the bound
+// among others that fit: the output is cut at that rule, with the marker
+// on the last line and a warning on stderr, rather than carrying the
+// marker in place of that one rule, with the rules after it following and
+// no warning.
+func TestHumanFormatCutAtAnOversizedRule(t *testing.T) {
+	t.Parallel()
+
+	long := "/a" + strings.Repeat("x", 70<<10)
+	left := writeTemp(t, `{"handledAccessFs":["read_file"]}`)
+	right := writeTemp(t, `{"handledAccessFs":["read_file"],"pathRules":[`+
+		`{"path":"`+long+`","accessFs":["read_file"]},`+
+		`{"path":"/b","accessFs":["read_file"]},{"path":"/c","accessFs":["read_file"]}]}`)
+
+	code, stdout, stderr := runCapture(t, []string{
+		cmdDiff, flagType, typeLandlock, flagFormat, formatHuman, left, right,
+	}, nil)
+
+	want := merge.TruncationMarker + "\n"
+	if code != exitDiff || stdout != want || !strings.Contains(stderr, "human output cut") {
+		t.Errorf("exit code = %d, stdout = %q, stderr = %q, want %d, %q and the warning",
+			code, stdout, stderr, exitDiff, want)
+	}
+}
+
+// TestHumanTextKeepsWholeLinesUpToTheBound covers the boundary of the
+// human output, which bounds the lines and puts the marker after them:
+// lines that end exactly at merge.MaxFormattedBytes are written whole and
+// not cut, and one more line cuts the output after them, whether the
+// newline before it would have taken the last byte of the bound or one
+// past it, with the marker on a line of its own past the bound.
+func TestHumanTextKeepsWholeLinesUpToTheBound(t *testing.T) {
+	t.Parallel()
+
+	const width = 1000
+
+	full := strings.Repeat("x", width)
+	count := merge.MaxFormattedBytes / (width + 1)
+
+	for _, short := range []int{0, 1} {
+		last := strings.Repeat("y", merge.MaxFormattedBytes-count*(width+1)-short)
+		lines := strings.Repeat(full+"\n", count) + last
+
+		render := func(extra ...string) string {
+			var text humanText
+
+			for range count {
+				text.line(func(out *merge.Builder) { out.WriteString(full) })
+			}
+
+			for _, line := range append([]string{last}, extra...) {
+				text.line(func(out *merge.Builder) { out.WriteString(line) })
+			}
+
+			return text.String()
+		}
+
+		if got := render(); got != lines {
+			t.Errorf("%d bytes short of the bound: %d bytes, cut: %t, want the %d whole",
+				short, len(got), merge.Truncated(got), len(lines))
+		}
+
+		want := lines + "\n" + merge.TruncationMarker
+		if got := render("z"); got != want {
+			t.Errorf("%d bytes short of the bound, then a line: %d bytes ending in %q, "+
+				"want %d ending in %q", short, len(got), got[max(len(got)-40, 0):],
+				len(want), want[len(want)-40:])
 		}
 	}
 }
@@ -276,13 +647,6 @@ func TestJSONOutputFormatsNoText(t *testing.T) {
 
 	if code := testInvocation(nil).write(new(int), computed); code != 0 {
 		t.Errorf("write: exit code = %d, want 0", code)
-	}
-
-	inv := testInvocation(rawInputs("{}", "{}"))
-	if code := writeValidated(inv, []*int{new(int), new(int)}, func(*int) string {
-		return computed()
-	}); code != 0 {
-		t.Errorf("writeValidated: exit code = %d, want 0", code)
 	}
 }
 
@@ -570,7 +934,8 @@ func TestInputLimitsAtTheirBoundary(t *testing.T) {
 		code, _, stderr = runCapture(t, []string{
 			cmdValidate, flagType, typeSeccomp, "--quiet",
 		}, strings.NewReader(profileOf(maxInputSize+1)))
-		if want := "error: stdin: input exceeds 10485760 byte limit\n"; code != exitUsage ||
+		if want := "error: stdin: input exceeds 10485760 byte limit\n" +
+			usageHintOf(cmdValidate); code != exitUsage ||
 			stderr != want {
 			t.Errorf("one past the limit: exit %d, stderr %q, want %d and %q",
 				code, stderr, exitUsage, want)
@@ -633,7 +998,7 @@ func TestOutOfRangeNumberKeepsChecks(t *testing.T) {
 
 	code, _, stderr = runCapture(t, []string{cmdValidate, flagType, typeSeccomp, "--quiet"},
 		strings.NewReader("["+strings.Join(items, ",")+"]"))
-	if code != exitUsage || !strings.Contains(stderr, errTooManyStdin.Error()) {
+	if code != exitUsage || !strings.Contains(stderr, "stdin: "+errTooManyProfiles.Error()) {
 		t.Errorf("array: exit code = %d, stderr = %q, want %d and the bound",
 			code, stderr, exitUsage)
 	}
@@ -681,12 +1046,13 @@ func TestJSONOutputEscapesInvisibleRunes(t *testing.T) {
 }
 
 // TestEscapeInvisibleKeepsCleanOutput covers the output escapeInvisible
-// leaves alone: it is returned itself rather than copied, and bytes that do
-// not decode, such as half a rune, are kept as they are.
+// leaves alone, which it returns itself rather than a copy, and the bytes
+// that do not decode, such as half a rune, which it writes as the U+FFFD
+// encoding/json reads them as, one for each byte.
 func TestEscapeInvisibleKeepsCleanOutput(t *testing.T) {
 	t.Parallel()
 
-	clean := []byte("{\"path\": \"/etc/\u00e9t\u00e9\"}\n\xe2\x80")
+	clean := []byte("{\"path\": \"/etc/\u00e9t\u00e9\ufffd\"}\n")
 	if got := escapeInvisible(clean); &got[0] != &clean[0] || len(got) != len(clean) {
 		t.Errorf("escapeInvisible(%q) = %q, want the same slice", clean, got)
 	}
@@ -697,8 +1063,53 @@ func TestEscapeInvisibleKeepsCleanOutput(t *testing.T) {
 	}
 
 	mixed := []byte("\xe2\u202e\xe2\x80")
-	if got, want := string(escapeInvisible(mixed)), "\xe2\\u202e\xe2\x80"; got != want {
+	if got, want := string(escapeInvisible(mixed)), `\ufffd\u202e\ufffd\ufffd`; got != want {
 		t.Errorf("escapeInvisible(%q) = %q, want %q", mixed, got, want)
+	}
+}
+
+// TestValidateWritesWhatDoesNotDecodeAlikeAsDecoded covers a profile that
+// readers decode differently, which the default checks only warn about: a
+// byte that is not valid UTF-8, such as 0x9b, the 8-bit CSI, which a
+// terminal may read as the start of a control sequence, a \u escape of
+// half a surrogate pair, which Python keeps and serde_json refuses, and a
+// required member left out. encoding/json reads the first two as U+FFFD
+// and the last as zero, which is what validate judged, so it writes the
+// profile as it decoded, as merge writes its result, rather than as it
+// read it.
+func TestValidateWritesWhatDoesNotDecodeAlikeAsDecoded(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name, profileType, profile, warning, want string
+	}{
+		{
+			"a byte that is not valid UTF-8", typeSeccomp,
+			`{"defaultAction":"SCMP_ACT_ERRNO","listenerMetadata":"a` + "\x9b" + `b"}`,
+			"invalid UTF-8",
+			"{\n  \"defaultAction\": \"SCMP_ACT_ERRNO\",\n  \"listenerMetadata\": \"a\ufffdb\"\n}\n",
+		},
+		{
+			"a lone surrogate escape", typeSeccomp,
+			`{"defaultAction":"SCMP_ACT_ERRNO","listenerMetadata":"a\ud800b"}`,
+			"lone surrogate escape",
+			"{\n  \"defaultAction\": \"SCMP_ACT_ERRNO\",\n  \"listenerMetadata\": \"a\ufffdb\"\n}\n",
+		},
+		{
+			"a required member left out", typeLandlock,
+			`{"handledAccessNet":["bind_tcp"],"netRules":[{"accessNet":["bind_tcp"]}]}`,
+			"missing field",
+			"{\n  \"handledAccessNet\": [\n    \"bind_tcp\"\n  ],\n  \"netRules\": [\n" +
+				"    {\n      \"port\": 0,\n      \"accessNet\": [\n        \"bind_tcp\"\n" +
+				"      ]\n    }\n  ]\n}\n",
+		},
+	} {
+		code, stdout, stderr := runCapture(t,
+			[]string{cmdValidate, flagType, test.profileType, writeTemp(t, test.profile)}, nil)
+		if code != 0 || stdout != test.want || !strings.Contains(stderr, test.warning) {
+			t.Errorf("%s: exit code = %d, stdout = %q, stderr = %q, want 0, %q and a warning",
+				test.name, code, stdout, stderr, test.want)
+		}
 	}
 }
 
@@ -898,7 +1309,7 @@ func TestHelpSpellsFlagsAndReportsWriteFailures(t *testing.T) {
 		{cmdHelp, cmdMerge}, {cmdMerge, flagHelp}, {cmdValidate, flagHelp}, {cmdDiff, flagHelp},
 	} {
 		code, stdout, _ := runCapture(t, args, nil)
-		if code != 0 || !strings.Contains(stdout, "\n  --type string") ||
+		if code != 0 || !strings.Contains(stdout, "\n  --type type") ||
 			strings.Contains(stdout, "\n  -type") {
 			t.Errorf("%v: exit code = %d, stdout = %q, want flags with two dashes",
 				args, code, stdout)
@@ -1101,5 +1512,79 @@ func TestFlagValuesAreEscaped(t *testing.T) {
 	_, _, stderr := runCapture(t, []string{cmdValidate, flagType, long, testdataSeccompA}, nil)
 	if !strings.Contains(stderr, `"`+long[:merge.MaxQuotedBytes]+`"...`) {
 		t.Errorf("a long --type: stderr = %q, want the value cut", stderr)
+	}
+}
+
+// TestSeccompOutputKeepsEmptyFlagList pins the one difference to
+// specs.LinuxSeccomp: a runtime sets SECCOMP_FILTER_FLAG_SPEC_ALLOW for a
+// profile without a flag list and nothing for an empty one, so an empty list
+// is written rather than left out.
+func TestSeccompOutputKeepsEmptyFlagList(t *testing.T) {
+	t.Parallel()
+
+	const (
+		absent  = `{"defaultAction":"SCMP_ACT_ERRNO"}`
+		empty   = `{"defaultAction":"SCMP_ACT_ERRNO","flags":[]}`
+		allowed = `{"defaultAction":"SCMP_ACT_ERRNO","flags":["SECCOMP_FILTER_FLAG_SPEC_ALLOW"]}`
+	)
+
+	for _, testCase := range []struct {
+		name     string
+		args     []string
+		wantList bool
+	}{
+		{
+			name:     "validate echoes an empty list",
+			args:     []string{cmdValidate, flagType, typeSeccomp, writeTemp(t, empty)},
+			wantList: true,
+		},
+		{
+			name:     "validate leaves an absent list out",
+			args:     []string{cmdValidate, flagType, typeSeccomp, writeTemp(t, absent)},
+			wantList: false,
+		},
+		{
+			name: "validate echoes an empty list among several profiles",
+			args: []string{
+				cmdValidate, flagType, typeSeccomp, writeTemp(t, absent), writeTemp(t, empty),
+			},
+			wantList: true,
+		},
+		{
+			name: "intersect turns the flag off",
+			args: []string{
+				cmdMerge, flagType, typeSeccomp, flagStrategy, strategyIntersect,
+				writeTemp(t, allowed), writeTemp(t, empty),
+			},
+			wantList: true,
+		},
+		{
+			name: "union leaves the flag to the runtime",
+			args: []string{
+				cmdMerge, flagType, typeSeccomp, flagStrategy, strategyUnion,
+				writeTemp(t, absent), writeTemp(t, empty),
+			},
+			wantList: false,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			code, stdout, stderr := runCapture(t, testCase.args, nil)
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0: %s", code, stderr)
+			}
+
+			// Validate writes the profiles as it read them, merge as
+			// seccomp.Marshal writes the result, indented.
+			if got := strings.Contains(
+				strings.ReplaceAll(stdout, " ", ""),
+				`"flags":[]`,
+			); got != testCase.wantList {
+				t.Errorf(
+					"empty flag list written = %t, want %t:\n%s", got, testCase.wantList, stdout,
+				)
+			}
+		})
 	}
 }

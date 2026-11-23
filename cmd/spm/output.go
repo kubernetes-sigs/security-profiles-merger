@@ -124,6 +124,42 @@ func checkOutputPath(path string) error {
 	}
 }
 
+// errDirectoryAtOutput reports an --output path that names an existing
+// directory.
+var errDirectoryAtOutput = errors.New("is a directory, not a file")
+
+// checkOutputFlag checks the --output value before anything is read, so
+// that a path that cannot be written is a usage error the arguments show,
+// rather than a failure found once the work is done, which would exit as a
+// bad profile does: a path naming a directory (see checkOutputPath), an
+// existing directory, and where symlinks are refused (see refuseSymlinks),
+// a symlink, such as /dev/stdout, /dev/stderr, and on Linux /dev/fd/N,
+// which a process substitution such as >(cmd) passes. The checks run again
+// when the output is written, since the path may have changed by then. A
+// path that cannot be looked at, or does not exist yet, is left to that
+// write.
+func checkOutputFlag(path string) error {
+	if path == "" || path == stdinArg {
+		return nil
+	}
+
+	err := checkOutputPath(path)
+	if err != nil {
+		return err
+	}
+
+	info, statErr := os.Lstat(path)
+
+	switch {
+	case statErr == nil && info.Mode()&fs.ModeSymlink != 0 && refuseSymlinks:
+		return errSymlinkRefused
+	case statErr == nil && info.IsDir():
+		return errDirectoryAtOutput
+	default:
+		return nil
+	}
+}
+
 // parentDir returns the directory that holds the file path names, spelled
 // as the path spells it: the text up to and including the last separator,
 // or "." for a name without one. Unlike filepath.Dir it does not clean the
@@ -201,7 +237,7 @@ func writeOutputFile(path string, content []byte) error {
 // point, and what a mount point is then written through, so that a file put
 // at path in the meantime is neither asked about nor written.
 func writeRegularFile(path string, content []byte) error {
-	file, err := openRegular(path, 0)
+	file, err := openOutput(path, true, 0)
 	if err != nil {
 		return err
 	}
@@ -234,41 +270,51 @@ func writeRegularFile(path string, content []byte) error {
 // checked and is something else by the time it is opened.
 var errNotRegular = errors.New("is no longer a regular file")
 
-// openRegular opens for writing, with the given extra flags, an output file
-// that was found to be a regular file, and refuses it if it no longer is
-// one. It is opened without blocking and without following a symlink: a
-// FIFO put at path since it was checked would otherwise hold the open until
-// something reads from it, which a run that meant to replace a file must not
-// wait for, and a device would be written to.
+// errBecameRegular reports an output file that was a device or a FIFO when
+// it was checked and is a regular file by the time it is opened.
+var errBecameRegular = errors.New("is now a regular file, not the device or FIFO it was")
+
+// openOutput opens for writing, with the given extra flags and without
+// following a symlink, an output file that was found to be a regular file,
+// or with regular false, one that was found to be neither a regular file
+// nor a symlink, such as a device or a FIFO. It refuses a file that is no
+// longer what it was found to be.
 //
-// The type is only known once the file is open, so a device or a FIFO put
-// at path in the window between the check and the open is opened, though
-// never written to, before it is refused; Unix has no way to open a path
-// only if it is a regular file. Such a FIFO without a reader fails the open
-// with ENXIO, and so does a device without its hardware, neither of which
-// a regular file ever does, so that failure is reported as the file no
-// longer being a regular one rather than as "no such device or address".
-func openRegular(path string, flags int) (*os.File, error) {
+// A regular file is opened without blocking: a FIFO put at path since it
+// was checked would otherwise hold the open until something reads from it,
+// which a run that meant to replace a file must not wait for, and a device
+// would be written to. The type is only known once the file is open, so a
+// device or a FIFO put at path in the window between the check and the
+// open is opened, though never written to, before it is refused; Unix has
+// no way to open a path only if it is a regular file. Such a FIFO without
+// a reader fails the open with ENXIO, and so does a device without its
+// hardware, neither of which a regular file ever does, so that failure is
+// reported as the file no longer being a regular one rather than as "no
+// such device or address".
+//
+// A device or a FIFO is opened as a shell redirection opens it, so that a
+// FIFO waits for its reader. A regular file put at path since it was
+// checked is refused: it is opened without truncating it, so writing it in
+// place would leave whatever of its old content lies past the new.
+func openOutput(path string, regular bool, flags int) (*os.File, error) {
+	flags |= os.O_WRONLY | oNoFollow
+	if regular {
+		flags |= oNonBlock
+	}
+
 	// The path is the --output value, which is the caller's own choice;
 	// what needs guarding is what it names by now.
-	file, err := os.OpenFile( //nolint:gosec // the caller named this path
-		path, os.O_WRONLY|oNoFollow|oNonBlock|flags, 0,
-	)
+	file, err := os.OpenFile(path, flags, 0) //nolint:gosec // the caller named this path
 	if err != nil {
-		if isSymlinkRefusal(err) {
-			return nil, symlinkOpenError(path, err)
-		}
-
-		if isNoDevice(err) {
-			return nil, errNotRegular
-		}
-
-		return nil, bareFileError(err)
+		return nil, openOutputError(path, regular, err)
 	}
 
 	info, err := file.Stat()
-	if err == nil && !info.Mode().IsRegular() {
+	if err == nil && info.Mode().IsRegular() != regular {
 		err = errNotRegular
+		if !regular {
+			err = errBecameRegular
+		}
 	}
 
 	if err != nil {
@@ -280,42 +326,18 @@ func openRegular(path string, flags int) (*os.File, error) {
 	return file, nil
 }
 
-// errBecameRegular reports an output file that was a device or a FIFO when
-// it was checked and is a regular file by the time it is opened.
-var errBecameRegular = errors.New("is now a regular file, not the device or FIFO it was")
-
-// openSpecial opens for writing an output file that was found to be neither
-// a regular file nor a symlink, such as a device or a FIFO, as a shell
-// redirection opens it, so that a FIFO waits for its reader, but without
-// following a symlink. It refuses a regular file put at path since it was
-// checked: that is opened without truncating it, so writing it in place
-// would leave whatever of its old content lies past the new.
-func openSpecial(path string) (*os.File, error) {
-	// The path is the --output value, which is the caller's own choice;
-	// what needs guarding is that it is not followed through a symlink.
-	file, err := os.OpenFile( //nolint:gosec // the caller named this path
-		path, os.O_WRONLY|oNoFollow, 0,
-	)
-	if err != nil {
-		if isSymlinkRefusal(err) {
-			return nil, symlinkOpenError(path, err)
-		}
-
-		return nil, bareFileError(err)
+// openOutputError returns the failure of openOutput to open path: a
+// symlink refused as one (see symlinkOpenError), a regular file that is
+// one no longer, or the reason alone.
+func openOutputError(path string, regular bool, err error) error {
+	switch {
+	case isSymlinkRefusal(err):
+		return symlinkOpenError(path, err)
+	case regular && isNoDevice(err):
+		return errNotRegular
+	default:
+		return bareFileError(err)
 	}
-
-	info, err := file.Stat()
-	if err == nil && info.Mode().IsRegular() {
-		err = errBecameRegular
-	}
-
-	if err != nil {
-		_ = file.Close()
-
-		return nil, bareFileError(err)
-	}
-
-	return file, nil
 }
 
 // errSymlinkRefused reports an --output path that is a symbolic link, with
@@ -468,22 +490,16 @@ func fillTempFile(temp tempFile, content []byte) error {
 
 // writeInPlace writes content to a file that cannot be replaced, such as a
 // device, a FIFO or a mount point, without changing its mode. It is opened
-// without following a symlink, so that one put at path since it was checked
-// is refused too. A regular file, which is truncated, is opened as
-// openRegular opens it. A device or a FIFO the caller named is opened as
-// openSpecial opens it.
+// as openOutput opens it, without following a symlink, so that one put at
+// path since it was checked is refused too, and a regular file is
+// truncated.
 func writeInPlace(path string, content []byte, regular bool) error {
-	var (
-		file *os.File
-		err  error
-	)
-
+	flags := 0
 	if regular {
-		file, err = openRegular(path, os.O_TRUNC)
-	} else {
-		file, err = openSpecial(path)
+		flags = os.O_TRUNC
 	}
 
+	file, err := openOutput(path, regular, flags)
 	if err != nil {
 		return bareFileError(err)
 	}

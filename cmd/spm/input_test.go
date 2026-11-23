@@ -26,14 +26,17 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 )
 
 // stdinFailure reads stdin from reader and returns why it could not be
-// read, which readFromStdin returns as the one input stdin brings.
+// read, which readInputs returns without file arguments as the one input
+// stdin brings.
 func stdinFailure(t *testing.T, reader io.Reader) error {
 	t.Helper()
 
-	inputs, err := readFromStdin(reader)
+	inputs, err := readInputs(nil, reader)
 	if err != nil || len(inputs) != 1 || inputs[0].name != stdinName {
 		t.Fatalf("inputs = %q, error = %v, want stdin alone and no error",
 			inputNames(inputs), err)
@@ -47,15 +50,18 @@ func stdinFailure(t *testing.T, reader io.Reader) error {
 func TestReadFromStdinNothing(t *testing.T) {
 	t.Parallel()
 
-	for name, reader := range map[string]io.Reader{
-		"no reader":   nil,
-		"nothing":     strings.NewReader(""),
-		"whitespace":  strings.NewReader("   \n\t  "),
-		"empty array": strings.NewReader("[]"),
+	for name, test := range map[string]struct {
+		reader io.Reader
+		want   error
+	}{
+		"no reader":   {nil, errEmptyInput},
+		"nothing":     {strings.NewReader(""), errEmptyInput},
+		"whitespace":  {strings.NewReader("   \n\t  "), errEmptyInput},
+		"empty array": {strings.NewReader("[]"), errEmptyArray},
 	} {
-		err := stdinFailure(t, reader)
-		if !errors.Is(err, errEmptyInput) {
-			t.Errorf("%s: error = %v, want %v", name, err, errEmptyInput)
+		err := stdinFailure(t, test.reader)
+		if !errors.Is(err, test.want) {
+			t.Errorf("%s: error = %v, want %v", name, err, test.want)
 		}
 	}
 }
@@ -63,7 +69,7 @@ func TestReadFromStdinNothing(t *testing.T) {
 func TestReadFromStdinJSONArray(t *testing.T) {
 	t.Parallel()
 
-	result, err := readFromStdin(strings.NewReader(`[{"a":1},{"b":2}]`))
+	result, err := readInputs(nil, strings.NewReader(`[{"a":1},{"b":2}]`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -84,7 +90,7 @@ func TestReadFromStdinJSONArray(t *testing.T) {
 func TestReadFromStdinSingleObject(t *testing.T) {
 	t.Parallel()
 
-	result, err := readFromStdin(strings.NewReader(`{"a":1}`))
+	result, err := readInputs(nil, strings.NewReader(`{"a":1}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -99,7 +105,8 @@ func TestReadFromStdinSingleObject(t *testing.T) {
 }
 
 // TestReadFromStdinTooManyProfiles covers the bound on a stdin array, which
-// is the one way a single argument can expand into arbitrarily many inputs.
+// with a file array is the one way a single argument can expand into
+// arbitrarily many inputs.
 func TestReadFromStdinTooManyProfiles(t *testing.T) {
 	t.Parallel()
 
@@ -119,9 +126,9 @@ func TestReadFromStdinTooManyProfiles(t *testing.T) {
 
 	builder.WriteByte(']')
 
-	_, err := readFromStdin(strings.NewReader(builder.String()))
-	if !errors.Is(err, errTooManyStdin) {
-		t.Fatalf("error = %v, want %v", err, errTooManyStdin)
+	_, err := readInputs(nil, strings.NewReader(builder.String()))
+	if !errors.Is(err, errTooManyProfiles) {
+		t.Fatalf("error = %v, want %v", err, errTooManyProfiles)
 	}
 
 	// The same array reaches the command as a usage error, not as a failed
@@ -148,7 +155,7 @@ func TestReadFromStdinArraySplitsAtItsOwnCommas(t *testing.T) {
 
 	const array = " [ {\"a\":\"]\\\",[\\\\\"} ,\n1, \"x,y\" ,[ {}, [] ] ] "
 
-	inputs, err := readFromStdin(strings.NewReader(array))
+	inputs, err := readInputs(nil, strings.NewReader(array))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,6 +194,11 @@ func TestSplitArrayEdgeCases(t *testing.T) {
 		{name: "empty with space", array: " [ \t\r\n ] ", want: nil},
 		{name: "null", array: "[null]", want: []element{{"null", 1}}},
 		{
+			name:  "literals",
+			array: "[true,false ,null]",
+			want:  []element{{"true", 1}, {"false", 6}, {"null", 13}},
+		},
+		{
 			name:  "numbers",
 			array: "[0,-1.5e3 ,\t2E-2\n]",
 			want:  []element{{"0", 1}, {"-1.5e3", 3}, {"2E-2", 12}},
@@ -220,7 +232,7 @@ func TestSplitArrayEdgeCases(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			inputs, err := splitArray([]byte(test.array))
+			inputs, err := splitArray(stdinName, []byte(test.array))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -278,10 +290,10 @@ func TestReadFromStdinArrayErrorOrder(t *testing.T) {
 		}
 	}
 
-	_, err := readFromStdin(strings.NewReader(
-		"[" + strings.Join(slices.Repeat([]string{element}, maxInputFiles+1), ",") + "]"))
-	if !errors.Is(err, errTooManyStdin) {
-		t.Errorf("an array that parses: error = %v, want %v", err, errTooManyStdin)
+	_, err := readInputs(nil, strings.NewReader(
+		"["+strings.Join(slices.Repeat([]string{element}, maxInputFiles+1), ",")+"]"))
+	if !errors.Is(err, errTooManyProfiles) {
+		t.Errorf("an array that parses: error = %v, want %v", err, errTooManyProfiles)
 	}
 }
 
@@ -315,6 +327,209 @@ func TestReadInputsFromFiles(t *testing.T) {
 	// than a position in a list that may hold a thousand of them.
 	if got := inputNames(result); !slices.Equal(got, []string{file1, file2}) {
 		t.Errorf("names = %q, want %q", got, []string{file1, file2})
+	}
+}
+
+// TestReadInputsFromAFileArray covers a file holding a JSON array, which
+// is read as a stdin array is: each element is a profile, named by its
+// index after the path, and an array that does not parse or holds nothing
+// fails as the file.
+func TestReadInputsFromAFileArray(t *testing.T) {
+	t.Parallel()
+
+	array := writeTemp(t, ` [{"a":1}, {"b":2}]`)
+	single := writeTemp(t, `{"c":3}`)
+
+	inputs, err := readInputs([]string{single, array}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantData := []string{`{"c":3}`, `{"a":1}`, `{"b":2}`}
+	if got := inputData(inputs); !slices.Equal(got, wantData) {
+		t.Errorf("data = %q, want %q", got, wantData)
+	}
+
+	wantNames := []string{single, array + "[0]", array + "[1]"}
+	if got := inputNames(inputs); !slices.Equal(got, wantNames) {
+		t.Errorf("names = %q, want %q", got, wantNames)
+	}
+
+	for _, test := range []struct {
+		content string
+		want    string
+	}{
+		{"[]", errEmptyArray.Error()},
+		{"[{}", "line 1, column 4: unexpected end of JSON input"},
+	} {
+		file := writeTemp(t, test.content)
+
+		inputs, err = readInputs([]string{file}, nil)
+		if err != nil || len(inputs) != 1 || inputs[0].name != file || inputs[0].err == nil ||
+			!strings.Contains(inputs[0].err.Error(), test.want) {
+			t.Errorf("%q: inputs = %+v, error = %v, want the file failing with %q",
+				test.content, inputs, err, test.want)
+		}
+	}
+}
+
+// TestFileArrayElementsAreNamed covers the commands reading a file array:
+// each element is a profile, and a message about one names it by its
+// index after the path, as a message about an element of a stdin array
+// does.
+func TestFileArrayElementsAreNamed(t *testing.T) {
+	t.Parallel()
+
+	array := writeTemp(t, "["+seccompJSON(t, testSyscallRead)+`,{"defaultAction":1}]`)
+
+	code, stdout, stderr := runCapture(t, []string{cmdValidate, flagType, typeSeccomp, array}, nil)
+	if code != 1 || stdout != "" || !strings.HasPrefix(stderr, "error: "+array+"[1]: ") {
+		t.Errorf("exit code = %d, stdout = %q, stderr = %q, want 1 and the element named",
+			code, stdout, stderr)
+	}
+}
+
+// TestArrayLimits covers the bounds on an array, from a file or stdin:
+// it may hold up to the bound on all inputs together, as the same profiles
+// given as files may, and each element up to the bound on one profile.
+func TestArrayLimits(t *testing.T) {
+	t.Parallel()
+
+	// Two elements of 6 MiB each are within the bound on a profile, and the
+	// array they make is past it.
+	element := `{"defaultAction":"SCMP_ACT_ERRNO",` + `"x":"` +
+		strings.Repeat("a", 6<<20) + `"}`
+	pair := "[" + element + "," + element + "]"
+
+	inputs, err := readInputs([]string{writeTemp(t, pair)}, nil)
+	if err != nil || len(inputs) != 2 {
+		t.Errorf("a file array of two 6 MiB profiles: %d inputs, %v", len(inputs), err)
+	}
+
+	inputs, err = readInputs(nil, strings.NewReader(pair))
+	if err != nil || len(inputs) != 2 {
+		t.Errorf("a stdin array of two 6 MiB profiles: %d inputs, %v", len(inputs), err)
+	}
+
+	// An element past the bound on one profile is refused by its name.
+	big := `{"x":"` + strings.Repeat("a", maxInputSize) + `"}`
+
+	file := writeTemp(t, "[{},"+big+"]")
+
+	_, err = readInputs([]string{file}, nil)
+	if want := file + "[1]: " + errElementTooLarge.Error(); err == nil || err.Error() != want ||
+		!isInputLimitError(err) {
+		t.Errorf("an element past the bound: error = %v, want %q, a limit", err, want)
+	}
+
+	// A single profile past the bound on one is refused once one byte past
+	// that bound is read, rather than read on to the bound on all of them,
+	// which only an array may take.
+	huge := strings.NewReader(`{"x":"` + strings.Repeat("a", maxInputSize+maxInputSize/2) + `"}`)
+	size := huge.Len()
+
+	_, err = readInputs(nil, huge)
+	if read := size - huge.Len(); !errors.Is(err, errStdinTooLarge) || read != maxInputSize+1 {
+		t.Errorf("one profile past the bound: error = %v after %d bytes, want %v after %d",
+			err, read, errStdinTooLarge, maxInputSize+1)
+	}
+}
+
+// TestSplitArrayCopiesNothing covers the elements of an array, which are
+// found in place: an element past the bound on one profile is refused
+// without a copy of it, which a decoder would hold before its size could
+// be checked, and elements within it are not copied either.
+//
+//nolint:paralleltest // it reads the allocation counters of the whole process
+func TestSplitArrayCopiesNothing(t *testing.T) {
+	const bound = 1 << 20
+
+	big := []byte(`[{"x":"` + strings.Repeat("a", maxInputSize+maxInputSize/5) + `"}]`)
+
+	var err error
+
+	allocated := testutil.AllocatedBytes(func() { _, err = splitArray("big.json", big) })
+
+	if want := "big.json[0]: " + errElementTooLarge.Error(); err == nil || err.Error() != want {
+		t.Errorf("error = %v, want %q", err, want)
+	}
+
+	if allocated > bound {
+		t.Errorf("refusing an element of %d bytes allocated %d bytes, want at most %d",
+			len(big), allocated, bound)
+	}
+
+	element := `{"x":"` + strings.Repeat("a", maxInputSize/2) + `"}`
+	pair := []byte("[" + element + "," + element + "]")
+
+	var inputs []profileInput
+
+	allocated = testutil.AllocatedBytes(func() { inputs, err = splitArray("pair.json", pair) })
+
+	if err != nil || len(inputs) != 2 || string(inputs[1].data) != element {
+		t.Errorf("a pair of profiles: %d inputs, %v, want the two elements", len(inputs), err)
+	}
+
+	if allocated > bound {
+		t.Errorf("splitting %d bytes allocated %d bytes, want at most %d",
+			len(pair), allocated, bound)
+	}
+}
+
+// spaceReader reads as an endless run of JSON space.
+type spaceReader struct{}
+
+func (spaceReader) Read(buf []byte) (int, error) {
+	for idx := range buf {
+		buf[idx] = ' '
+	}
+
+	return len(buf), nil
+}
+
+// TestArrayAlonePastTheTotalBoundIsNamed covers an array that is past the
+// bound on all inputs together on its own, from a file or stdin: the error
+// names it, as every error about one input does, while one past what the
+// inputs before it leave names none (see TestTotalInputBoundCountsEveryByteRead).
+func TestArrayAlonePastTheTotalBoundIsNamed(t *testing.T) {
+	t.Parallel()
+
+	past := func() io.Reader {
+		return io.MultiReader(strings.NewReader("["),
+			io.LimitReader(spaceReader{}, maxTotalInputSize))
+	}
+
+	path := filepath.Join(t.TempDir(), "big.json")
+
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = io.Copy(file, past())
+	closeErr := file.Close()
+
+	if err != nil || closeErr != nil {
+		t.Fatal(err, closeErr)
+	}
+
+	for _, test := range []struct {
+		args  []string
+		stdin io.Reader
+		name  string
+	}{
+		{[]string{path}, nil, path},
+		{nil, past(), stdinName},
+	} {
+		code, _, stderr := runCapture(t,
+			append([]string{cmdValidate, flagType, typeSeccomp}, test.args...), test.stdin)
+
+		want := "error: " + test.name + ": " + errAloneTooLarge.Error() + "\n" +
+			usageHintOf(cmdValidate)
+		if code != exitUsage || stderr != want {
+			t.Errorf("%s: exit code = %d, stderr = %q, want %d and %q",
+				test.name, code, stderr, exitUsage, want)
+		}
 	}
 }
 
@@ -435,9 +650,10 @@ func TestUnreadableInputsFailOnTheirOwn(t *testing.T) {
 // TestStdinThatCannotBeReadIsNotCounted covers stdin that cannot be read,
 // which held no number of profiles anyone knows: diff reports its failure
 // rather than a count that takes it for one profile, whether or not a file
-// stands beside it. Beside two files, "-" makes three profiles at least,
-// which diff refuses after the inputs, as it refuses three files after
-// reporting the one that cannot be read.
+// stands beside it. Beside an array of two, "-" makes three profiles at
+// least, which diff refuses after the inputs, as it refuses a file that
+// cannot be read beside the array after reporting it. Three file arguments
+// are refused before anything is read.
 func TestStdinThatCannotBeReadIsNotCounted(t *testing.T) {
 	t.Parallel()
 
@@ -456,19 +672,29 @@ func TestStdinThatCannotBeReadIsNotCounted(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing.json")
 	_, statErr := os.Stat(missing)
 
+	pair := writeTemp(
+		t,
+		"["+seccompJSON(t, testSyscallRead)+","+seccompJSON(t, testSyscallRead)+"]",
+	)
+
 	for _, test := range []struct {
 		args []string
 		want string
 	}{
 		{
-			args: []string{stdinArg, file, file},
+			args: []string{stdinArg, pair},
 			want: "error: stdin: no input provided\n" +
-				"error: got 3 profiles from stdin and the files: " + errDiffRequiresTwo.Error() + "\n",
+				"error: got 3 profiles from the file arguments: " + errDiffRequiresTwo.Error() + "\n",
+		},
+		{
+			args: []string{missing, pair},
+			want: "error: " + missing + ": " + bareFileError(statErr).Error() + "\n" +
+				"error: got 3 profiles from the file arguments: " + errDiffRequiresTwo.Error() + "\n",
 		},
 		{
 			args: []string{file, missing, file},
-			want: "error: " + missing + ": " + bareFileError(statErr).Error() + "\n" +
-				"error: got 3 files: " + errDiffRequiresTwo.Error() + "\n",
+			want: "error: got 3 file arguments: " + errDiffRequiresTwo.Error() + "\n" +
+				usageHintOf(cmdDiff),
 		},
 	} {
 		code, _, stderr := runCapture(t,
@@ -514,7 +740,7 @@ func TestInputPastTheLimitsBesideABadOne(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing.json")
 	bad := writeTemp(t, `{"defaultAction":1}`)
 	large := writeTemp(t, string(make([]byte, maxInputSize+1)))
-	want := "error: " + large + ": " + errFileTooLarge.Error() + "\n"
+	want := "error: " + large + ": " + errFileTooLarge.Error() + "\n" + usageHintOf(cmdValidate)
 
 	for _, args := range [][]string{{missing, large}, {large, missing}, {bad, large}} {
 		code, _, stderr := runCapture(t,
@@ -582,7 +808,7 @@ func TestReadInputsDuplicateStdin(t *testing.T) {
 
 	stdin := strings.NewReader(`{"a":1}`)
 
-	_, err := readInputs([]string{"-", "-"}, stdin)
+	err := checkPaths([]string{"-", "-"}, stdin)
 	if !errors.Is(err, errDuplicateStdin) {
 		t.Errorf("error = %v, want %v", err, errDuplicateStdin)
 	}
@@ -603,10 +829,13 @@ func TestErrorSentinels(t *testing.T) {
 		{errEmptyFile, "file is empty"},
 		{errDuplicateStdin, `stdin ("-") can only be specified once`},
 		{errTooManyFiles, "too many input files (max 1000)"},
-		{errTooManyStdin, "stdin: too many profiles (max 1000)"},
+		{errTooManyProfiles, "too many profiles (max 1000)"},
+		{errElementTooLarge, "profile exceeds 10485760 byte limit"},
+		{errEmptyArray, "empty JSON array, no profile"},
 		{errStdinTooLarge, "stdin: input exceeds 10485760 byte limit"},
 		{errFileTooLarge, "file exceeds 10485760 byte limit"},
 		{errInputTooLarge, "inputs exceed 67108864 bytes in total"},
+		{errAloneTooLarge, "input exceeds 67108864 bytes, the limit on all inputs together"},
 	} {
 		if got := testCase.err.Error(); got != testCase.want {
 			t.Errorf("message = %q, want %q", got, testCase.want)
@@ -687,7 +916,10 @@ func TestTotalInputBoundCountsEveryByteRead(t *testing.T) {
 
 	code, _, stderr := runCapture(t, append([]string{cmdValidate, flagType, typeSeccomp},
 		slices.Repeat([]string{space}, 7)...), nil)
-	if want := "error: " + errInputTooLarge.Error() + "\n"; code != exitUsage || stderr != want {
+	if want := "error: " + errInputTooLarge.Error() + "\n" + usageHintOf(
+		cmdValidate,
+	); code != exitUsage ||
+		stderr != want {
 		t.Errorf("exit code = %d, stderr = %q, want %d and %q", code, stderr, exitUsage, want)
 	}
 
