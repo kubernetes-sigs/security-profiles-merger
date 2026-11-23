@@ -187,31 +187,24 @@ func TestValidateSeccompStrictDuplicate(t *testing.T) {
 	}
 }
 
-func TestValidateAppArmorStrict(t *testing.T) {
+// TestValidateStrict covers a valid profile of each type, which --strict
+// accepts.
+func TestValidateStrict(t *testing.T) {
 	t.Parallel()
 
-	file := writeTemp(t, apparmorJSON(t, "NET_ADMIN"))
+	for profileType, profile := range map[string]string{
+		typeSeccomp:  seccompJSON(t, testSyscallRead),
+		typeAppArmor: apparmorJSON(t, "NET_ADMIN"),
+		typeLandlock: landlockJSON(t, "read_file"),
+	} {
+		file := writeTemp(t, profile)
 
-	code, _, _ := runCapture(t, []string{
-		cmdValidate, flagType, typeAppArmor, flagStrict, file,
-	}, nil)
-
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-}
-
-func TestValidateLandlockStrict(t *testing.T) {
-	t.Parallel()
-
-	file := writeTemp(t, landlockJSON(t, "read_file"))
-
-	code, _, _ := runCapture(t, []string{
-		cmdValidate, flagType, typeLandlock, flagStrict, file,
-	}, nil)
-
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
+		code, _, stderr := runCapture(t, []string{
+			cmdValidate, flagType, profileType, flagStrict, file,
+		}, nil)
+		if code != 0 {
+			t.Errorf("%s: exit code = %d, want 0: %s", profileType, code, stderr)
+		}
 	}
 }
 
@@ -276,20 +269,6 @@ func TestValidateMultipleProfilesHumanFormat(t *testing.T) {
 
 	if !strings.Contains(stdout, "---") {
 		t.Errorf("expected --- separator between profiles, got: %s", stdout)
-	}
-}
-
-func TestValidateSeccompStrict(t *testing.T) {
-	t.Parallel()
-
-	file := writeTemp(t, seccompJSON(t, testSyscallRead))
-
-	code, _, _ := runCapture(t, []string{
-		cmdValidate, flagType, typeSeccomp, flagStrict, file,
-	}, nil)
-
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
 	}
 }
 
@@ -1171,6 +1150,103 @@ func TestValidateBaselineAndABI(t *testing.T) {
 				append([]string{cmdValidate, "--quiet"}, test.args...), nil)
 			if code != test.wantCode || !strings.Contains(stderr, test.want) ||
 				test.want == "" && stderr != "" {
+				t.Errorf("exit code = %d, stderr = %q, want %d and %q",
+					code, stderr, test.wantCode, test.want)
+			}
+		})
+	}
+}
+
+// TestABIForMergeAndDiff covers --abi on merge and diff, where it means
+// what it means for validate: the checks of the --validate modes refuse
+// every right the kernel of that version does not know, the default ones a
+// merge runs included, and a profile type without such versions refuses
+// the flag. A diff checks nothing without --validate, so it refuses --abi
+// alone, as validate refuses --arch alone.
+func TestABIForMergeAndDiff(t *testing.T) {
+	t.Parallel()
+
+	scoped := writeTemp(t, `{"scoped":["signal"]}`)
+	plain := writeTemp(t, `{"handledAccessFs":["read_file"]}`)
+
+	const needsV6 = `scoped[0]: "signal": access right needs a newer Landlock ABI (needs v6, have v5)`
+
+	merge := []string{cmdMerge, flagStrategy, strategyUnion, "--no-detect-note"}
+	diff := []string{cmdDiff, "--no-detect-note"}
+
+	for _, test := range []struct {
+		name     string
+		args     []string
+		wantCode int
+		want     string
+	}{
+		{
+			name:     "merge checks the inputs under the default mode",
+			args:     append(slices.Clone(merge), "--abi", "5", plain, scoped),
+			wantCode: 1,
+			want:     "error: " + scoped + ": " + needsV6 + "\n",
+		},
+		{
+			name:     "merge for the kernel that knows the right",
+			args:     append(slices.Clone(merge), "--abi", "6", plain, scoped),
+			wantCode: 0,
+		},
+		{
+			name:     "merge with a mode per input",
+			args:     append(slices.Clone(merge), "--abi", "5", "--validate", "strict,default", plain, scoped),
+			wantCode: 1,
+			want:     "error: " + scoped + ": " + needsV6 + "\n",
+		},
+		{
+			name:     "merge of another profile type",
+			args:     append(slices.Clone(merge), "--abi", "6", testdataSeccompA),
+			wantCode: exitUsage,
+			want:     "error: " + errABINotApplicable.Error() + "\n",
+		},
+		{
+			name:     "merge with an --abi that names no version",
+			args:     append(slices.Clone(merge), "--abi", "0", scoped),
+			wantCode: exitUsage,
+			want: `error: invalid Landlock ABI version "0" (use a whole number from 1 on)` + "\n" +
+				usageHintOf(cmdMerge),
+		},
+		{
+			name:     "diff checks the profiles with --validate",
+			args:     append(slices.Clone(diff), "--abi", "5", "--validate", "default", plain, scoped),
+			wantCode: exitUsage,
+			want:     "error: " + scoped + ": " + needsV6 + "\n",
+		},
+		{
+			name:     "diff for the kernel that knows the right",
+			args:     append(slices.Clone(diff), "--abi", "6", "--validate", "default", scoped, scoped),
+			wantCode: 0,
+		},
+		{
+			name:     "diff without --validate",
+			args:     append(slices.Clone(diff), "--abi", "5", plain, scoped),
+			wantCode: exitUsage,
+			want:     "error: --abi only applies with --validate\n" + usageHintOf(cmdDiff),
+		},
+		{
+			name:     "diff without --validate and with a bad version",
+			args:     append(slices.Clone(diff), "--abi", "x", plain, scoped),
+			wantCode: exitUsage,
+			want: "error: invalid Landlock ABI version \"x\" (use a whole number from 1 on)\n" +
+				usageHintOf(cmdDiff),
+		},
+		{
+			name: "diff of another profile type",
+			args: append(slices.Clone(diff), "--abi", "6", "--validate", "default",
+				testdataSeccompA, testdataSeccompA),
+			wantCode: exitUsage,
+			want:     "error: " + errABINotApplicable.Error() + "\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			code, _, stderr := runCapture(t, test.args, nil)
+			if code != test.wantCode || stderr != test.want {
 				t.Errorf("exit code = %d, stderr = %q, want %d and %q",
 					code, stderr, test.wantCode, test.want)
 			}

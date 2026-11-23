@@ -581,7 +581,7 @@ func TestLiteralIsMappedOnce(t *testing.T) {
 
 	side := buildFsSide(perms, newMatcherCache())
 	literal := buildFsSide(
-		map[string]fsPermission{"/café/crème": {read: false, write: true}}, nil,
+		map[string]fsPermission{"/café/crème": {read: false, write: true}}, newMatcherCache(),
 	).literals[0]
 
 	var granted fsPermission

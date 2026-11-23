@@ -465,9 +465,8 @@ func mergeCapabilities(left, right *CapabilityRules, mergeStrategy strategy) *Ca
 }
 
 // intersectStrategy implements intersection (AND) semantics. matchers is
-// the call's cache of pattern analyses, nil to read the shared cache only.
-// exceeded, where it is not nil, is set when matching two lists would
-// exceed the pair or work budget, which Intersect reports.
+// the call's cache of pattern analyses. exceeded is set when matching two
+// lists would exceed the pair or work budget, which Intersect reports.
 type intersectStrategy struct {
 	matchers *matcherCache
 	exceeded *bool
@@ -475,7 +474,7 @@ type intersectStrategy struct {
 
 // budgetErr reports ErrBudgetExceeded once a list ran past the budget.
 func (op intersectStrategy) budgetErr() error {
-	if op.exceeded != nil && *op.exceeded {
+	if *op.exceeded {
 		return fmt.Errorf("matching paths against patterns: %w", ErrBudgetExceeded)
 	}
 
@@ -486,12 +485,12 @@ func (op intersectStrategy) budgetErr() error {
 // budget cut the matching short. Once one has, the merge fails, so the lists
 // after it are not matched.
 func (op intersectStrategy) intersect(left, right map[string]fsPermission) map[string]fsPermission {
-	if op.exceeded != nil && *op.exceeded {
+	if *op.exceeded {
 		return nil
 	}
 
 	merged, exceeded := intersectPerms(left, right, op.matchers)
-	if exceeded && op.exceeded != nil {
+	if exceeded {
 		*op.exceeded = true
 	}
 

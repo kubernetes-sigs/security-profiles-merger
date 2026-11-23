@@ -1530,16 +1530,26 @@ func assertDiffNamesPaths(t *testing.T, formatted string, pathRules *landlock.Pa
 	// runtime's log and an operator's terminal are not places to let a
 	// profile choose the bytes.
 	for _, rule := range slices.Concat(pathRules.Added, pathRules.Removed) {
-		if !strings.Contains(formatted, merge.SafeText(rule.Path)) {
+		if !strings.Contains(formatted, asWritten(rule.Path)) {
 			t.Errorf("String = %q, missing the path %q", formatted, rule.Path)
 		}
 	}
 
 	for _, change := range pathRules.Changed {
-		if !strings.Contains(formatted, merge.SafeText(change.Path)) {
+		if !strings.Contains(formatted, asWritten(change.Path)) {
 			t.Errorf("String = %q, missing the changed path %q", formatted, change.Path)
 		}
 	}
+}
+
+// asWritten returns a path as a formatter writes it (see
+// merge.Builder.WriteText), for a diff that was not cut short.
+func asWritten(path string) string {
+	var out merge.Builder
+
+	out.WriteText(path)
+
+	return out.String()
 }
 
 // assertRulesDiffSwapped compares the two directions rule by rule, not by

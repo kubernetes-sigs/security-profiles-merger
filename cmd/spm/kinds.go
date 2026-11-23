@@ -19,7 +19,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -129,17 +129,10 @@ type kindOps[T any, D any] struct {
 	// validateBaseline is the check of a baseline at config load (see
 	// modeBaseline).
 	validateBaseline func(*T) error
-	// inputCheck is the check the merge functions run on each input on its
-	// own, or nil where no exported function runs exactly that check, so
-	// that the input is merged alone instead: apparmor folds an entry
-	// repeated within one list, which its Validate refuses, and a seccomp
-	// merge checks an input against the node's architecture, which
-	// seccomp.Validate does not, refusing one of another byte order.
-	inputCheck func(*T) error
-	format     func(*T) string
-	diff       func(*T, *T) (*D, error)
-	formatDiff func(*D) string
-	equal      func(*D) bool
+	format           func(*T) string
+	diff             func(*T, *T) (*D, error)
+	formatDiff       func(*D) string
+	equal            func(*D) bool
 	// forArch returns the functions as the node the options name runs
 	// them, rather than the one this program runs on, and is nil for a
 	// profile type that has no architectures. Validate has no such
@@ -180,17 +173,24 @@ func (ops kindOps[T, D]) hasABI() bool { return ops.forABI != nil }
 // validators that check no version.
 func (ops kindOps[T, D]) atNode(inv *invocation) kindOps[T, D] {
 	ops = ops.atArch(inv)
-	if ops.forABI == nil || inv.abi == 0 {
+	if !ops.checksABI(inv) {
 		return ops
 	}
 
 	return ops.forABI(landlock.Options{ABI: inv.abi})
 }
 
+// checksABI reports whether the validators check the ABI version --abi
+// names (see atNode). The merge functions check none, so a merge runs the
+// validator of the default mode itself then.
+func (ops kindOps[T, D]) checksABI(inv *invocation) bool {
+	return ops.forABI != nil && inv.abi != 0
+}
+
 // checkAlone decodes the input at idx as a profile of this kind and checks
 // it as the command would (see inputChecks), recording what it finds in the
 // report. A merge in the default mode runs the check its functions run on
-// one input (see mergeInputCheck).
+// one input (see mergeInputCheck), unless it checks an ABI version.
 func (ops kindOps[T, D]) checkAlone(inv *invocation, idx int) {
 	ops = ops.atNode(inv)
 	checks, report := inv.checks, inv.report
@@ -212,9 +212,8 @@ func (ops kindOps[T, D]) checkAlone(inv *invocation, idx int) {
 	}
 
 	check := ops.checker(mode)
-	if checks.strategy != "" && mode == modeDefault {
-		mergeFn, _ := ops.mergeFn(checks.strategy)
-		check = ops.mergeInputCheck(mergeFn)
+	if checks.strategy != "" && mode == modeDefault && !ops.checksABI(inv) {
+		check = mergeInputCheck(ops.mergeFn(checks.strategy))
 	}
 
 	err = check(profile)
@@ -235,7 +234,7 @@ func checkEachAlone(inv *invocation) {
 			continue
 		}
 
-		types, _ := detectMembers(inv.inputs[idx].data)
+		types := detectMembers(inv.inputs[idx].members)
 		if len(types) != 1 {
 			continue
 		}
@@ -278,7 +277,6 @@ func seccompOps(opts seccomp.Options) kindOps[specs.LinuxSeccomp, seccomp.Profil
 		validateStrict:   opts.ValidateStrict,
 		validateArtifact: opts.ValidateArtifact,
 		validateBaseline: opts.ValidateBaseline,
-		inputCheck:       nil,
 		format:           seccomp.FormatProfile,
 		diff:             opts.Diff,
 		formatDiff:       (*seccomp.ProfileDiff).String,
@@ -300,7 +298,6 @@ func landlockOps(kernel *landlock.Options) kindOps[landlock.Profile, landlock.Pr
 		validateStrict:   landlock.ValidateStrict,
 		validateArtifact: landlock.ValidateArtifact,
 		validateBaseline: landlock.ValidateBaseline,
-		inputCheck:       landlock.Validate,
 		format:           (*landlock.Profile).String,
 		diff:             landlock.Diff,
 		formatDiff:       (*landlock.ProfileDiff).String,
@@ -321,51 +318,39 @@ func landlockOps(kernel *landlock.Options) kindOps[landlock.Profile, landlock.Pr
 	return ops
 }
 
-// mergeFn returns the merge function of the strategy, and whether the
-// strategy is known. An unknown one gets union only so that mergeFn never
-// returns nil: checkAlone cannot reach that case, since the flags are
-// checked to name a known strategy before any input is read.
-func (ops kindOps[T, D]) mergeFn(strategy string) (func(...*T) (*T, error), bool) {
-	switch strategy {
-	case strategyIntersect:
-		return ops.intersect, true
-	case strategyUnion:
-		return ops.union, true
-	default:
-		return ops.union, false
+// mergeFn returns the merge function of the strategy, which the flags were
+// checked to name before any input was read (see mergeOptions.checkFlags).
+func (ops kindOps[T, D]) mergeFn(strategy string) func(...*T) (*T, error) {
+	if strategy == strategyIntersect {
+		return ops.intersect
 	}
+
+	return ops.union
 }
 
 // mergeCommand checks every input under its own mode and merges them.
 func (ops kindOps[T, D]) mergeCommand(
 	inv *invocation, strategy string, modes []validateMode,
 ) int {
-	ops = ops.atArch(inv)
-
-	mergeFn, known := ops.mergeFn(strategy)
-	if !known {
-		// runMerge checks the strategy before reading any input.
-		_, _ = fmt.Fprintf(inv.stderr, "error: unknown strategy %s\n", merge.QuoteBounded(strategy))
-
-		return exitUsage
-	}
+	ops = ops.atNode(inv)
 
 	checks := make([]func(*T) error, len(modes))
 	strict := make([]bool, len(modes))
 
 	for idx, mode := range modes {
 		// modeDefault is what the merge functions run on their own inputs,
-		// so it is left to them. The merge names an input by position,
-		// which is not something a caller can act on, so reportMergeFailure
-		// maps that name onto the input afterwards instead.
-		if mode != modeDefault {
+		// so it is left to them, unless it checks an ABI version, which they
+		// do not. The merge names an input by position, which is not
+		// something a caller can act on, so reportMergeFailure maps that
+		// name onto the input afterwards instead.
+		if mode != modeDefault || ops.checksABI(inv) {
 			checks[idx] = ops.checker(mode)
 		}
 
 		strict[idx] = mode.strictDecode()
 	}
 
-	return ops.mergeProfiles(inv, mergeFn, checks, strict)
+	return ops.mergeProfiles(inv, ops.mergeFn(strategy), checks, strict)
 }
 
 // checker returns the validation function for a mode.
@@ -384,39 +369,86 @@ func (ops kindOps[T, D]) checker(mode validateMode) func(*T) error {
 	return ops.validate
 }
 
-// knownType reports whether a profile type of the given name exists.
-func knownType(name string) bool {
-	return slices.Contains([]string{typeSeccomp, typeAppArmor, typeLandlock}, name)
+// apparmorOps returns the functions of the apparmor package.
+func apparmorOps() kindOps[apparmor.Profile, apparmor.ProfileDiff] {
+	return kindOps[apparmor.Profile, apparmor.ProfileDiff]{
+		intersect:        apparmor.Intersect,
+		union:            apparmor.Union,
+		validate:         apparmor.Validate,
+		validateStrict:   apparmor.ValidateStrict,
+		validateArtifact: apparmor.ValidateArtifact,
+		validateBaseline: apparmor.ValidateBaseline,
+		format:           (*apparmor.Profile).String,
+		diff:             apparmor.Diff,
+		formatDiff:       (*apparmor.ProfileDiff).String,
+		equal:            func(diff *apparmor.ProfileDiff) bool { return diff.Equal },
+		forArch:          nil,
+		forABI:           nil,
+	}
 }
 
-// useKind sets the profile kind the run uses to the one registered under
-// the given type name, and reports false for a name none is registered
-// under.
+// profileType is one profile type the commands take.
+type profileType struct {
+	// name is what --type and the messages call it.
+	name string
+	// target is the Go type its documents decode into, whose members
+	// reveal the type of a document (see detectMembers).
+	target reflect.Type
+	// kind returns its functions as the commands run them.
+	kind func() profileKind
+}
+
+// profileTypes lists every profile type, in the order the help, the
+// messages and type detection name them, which is all a new type needs
+// adding to.
+var profileTypes = []profileType{
+	{
+		name:   typeSeccomp,
+		target: reflect.TypeFor[specs.LinuxSeccomp](),
+		kind:   func() profileKind { return seccompOps(seccomp.ForHost()) },
+	},
+	{
+		name:   typeAppArmor,
+		target: reflect.TypeFor[apparmor.Profile](),
+		kind:   func() profileKind { return apparmorOps() },
+	},
+	{
+		name:   typeLandlock,
+		target: reflect.TypeFor[landlock.Profile](),
+		kind:   func() profileKind { return landlockOps(nil) },
+	},
+}
+
+// typeIndex returns the position in profileTypes of the profile type of the
+// given name, or -1 for a name none has.
+func typeIndex(name string) int {
+	return slices.IndexFunc(profileTypes, func(each profileType) bool { return each.name == name })
+}
+
+// knownType reports whether a profile type of the given name exists.
+func knownType(name string) bool {
+	return typeIndex(name) >= 0
+}
+
+// typeNames returns the names of the profile types, in profileTypes order.
+func typeNames() []string {
+	names := make([]string, len(profileTypes))
+	for idx, each := range profileTypes {
+		names[idx] = each.name
+	}
+
+	return names
+}
+
+// useKind sets the profile kind the run uses to the one of the given type
+// name, and reports false for a name no profile type has.
 func (inv *invocation) useKind(name string) bool {
-	switch name {
-	case typeSeccomp:
-		inv.kind = seccompOps(seccomp.ForHost())
-	case typeAppArmor:
-		inv.kind = kindOps[apparmor.Profile, apparmor.ProfileDiff]{
-			intersect:        apparmor.Intersect,
-			union:            apparmor.Union,
-			validate:         apparmor.Validate,
-			validateStrict:   apparmor.ValidateStrict,
-			validateArtifact: apparmor.ValidateArtifact,
-			validateBaseline: apparmor.ValidateBaseline,
-			inputCheck:       nil,
-			format:           (*apparmor.Profile).String,
-			diff:             apparmor.Diff,
-			formatDiff:       (*apparmor.ProfileDiff).String,
-			equal:            func(diff *apparmor.ProfileDiff) bool { return diff.Equal },
-			forArch:          nil,
-			forABI:           nil,
-		}
-	case typeLandlock:
-		inv.kind = landlockOps(nil)
-	default:
+	idx := typeIndex(name)
+	if idx < 0 {
 		return false
 	}
+
+	inv.kind = profileTypes[idx].kind()
 
 	return true
 }
@@ -604,10 +636,10 @@ func checkTypeMatchesInputs(profileType string, inputs []profileInput, report *i
 			continue
 		}
 
-		detected, members := detectMembers(input.data)
+		detected := detectMembers(input.members)
 
 		switch {
-		case slices.Contains(detected, profileType) || members == 0:
+		case slices.Contains(detected, profileType) || len(input.members) == 0:
 			continue
 		case len(detected) > 0:
 			report.fail(idx, &detectionError{text: fmt.Sprintf(
@@ -622,19 +654,14 @@ func checkTypeMatchesInputs(profileType string, inputs []profileInput, report *i
 	}
 }
 
-// unknownType reports an unknown profile type and returns the usage exit
-// code.
-func unknownType(stderr io.Writer, name string) int {
-	_, _ = fmt.Fprintf(stderr, "error: %v\n", unknownTypeError(name))
-
-	return exitUsage
-}
-
 // unknownTypeError says that no profile type has the given name.
 func unknownTypeError(name string) error {
+	names := typeNames()
+	last := len(names) - 1
+
 	return &detectionError{text: fmt.Sprintf(
-		"unknown type %s (use %s, %s, or %s)",
-		merge.QuoteBounded(name), typeSeccomp, typeAppArmor, typeLandlock,
+		"unknown type %s (use %s, or %s)",
+		merge.QuoteBounded(name), strings.Join(names[:last], ", "), names[last],
 	)}
 }
 
@@ -651,7 +678,7 @@ type typeConflict struct {
 }
 
 // listTypes writes the names of profile types as a list a message can hold:
-// "seccomp and apparmor", or "seccomp, landlock and apparmor".
+// "seccomp and apparmor", or "seccomp, apparmor and landlock".
 func listTypes(types []string) string {
 	last := len(types) - 1
 	if last < 1 {
@@ -688,7 +715,7 @@ func detectProfileType(inputs []profileInput, report *inputReport) (string, []ty
 			continue
 		}
 
-		current, _ := detectMembers(input.data)
+		current := detectMembers(input.members)
 
 		switch {
 		case len(current) > 1:
@@ -713,12 +740,15 @@ func detectProfileType(inputs []profileInput, report *inputReport) (string, []ty
 
 // parseObject decodes one input as a JSON object, the shape all profile
 // types share, so that malformed input is reported as a parse error rather
-// than as a type that cannot be detected.
+// than as a type that cannot be detected, and records the names of its
+// members on the input, which type detection reads.
 func parseObject(input *profileInput) error {
 	var fields map[string]json.RawMessage
 
 	err := json.Unmarshal(input.data, &fields)
 	if err == nil {
+		input.members = slices.Collect(maps.Keys(fields))
+
 		// null decodes into a map as a nil map, and is no more a profile
 		// than any other value that is not an object.
 		return strictjson.RequireObject(input.data)
@@ -736,48 +766,28 @@ func parseObject(input *profileInput) error {
 	return decodeError(input, err)
 }
 
-// detectTypes lists the profile types in the order they are reported, each
-// with the Go type its documents decode into.
-var detectTypes = []struct {
-	profileType string
-	target      reflect.Type
-}{
-	{typeSeccomp, reflect.TypeFor[specs.LinuxSeccomp]()},
-	{typeLandlock, reflect.TypeFor[landlock.Profile]()},
-	{typeAppArmor, reflect.TypeFor[apparmor.Profile]()},
-}
-
-// detectMembers returns every profile type whose members the document
-// carries, in detectTypes order, and how many top-level members the
-// document holds. More than one means the document is
-// ambiguous: returning only the first would silently drop the members of the
-// others, so the caller reports it instead.
+// detectMembers returns every profile type whose members a document with
+// the given top-level members (see parseObject) carries, in profileTypes
+// order. More than one means the document is ambiguous: returning only the
+// first would silently drop the members of the others, so the caller
+// reports it instead.
 //
 // Every top-level member is matched against every type the way the decoder
 // matches it, ignoring case: "Syscalls" fills the seccomp field, so a
 // document holding it is a seccomp profile whatever else it is. The types
 // share no member names, so a member reveals at most one of them.
-func detectMembers(raw []byte) ([]string, int) {
-	var fields map[string]json.RawMessage
-
-	err := json.Unmarshal(raw, &fields)
-	if err != nil {
-		return nil, 0
-	}
-
+func detectMembers(members []string) []string {
 	var found []string
 
-	for _, candidate := range detectTypes {
-		for key := range fields {
-			if strictjson.HasField(candidate.target, key) {
-				found = append(found, candidate.profileType)
-
-				break
-			}
+	for _, candidate := range profileTypes {
+		if slices.ContainsFunc(members, func(member string) bool {
+			return strictjson.HasField(candidate.target, member)
+		}) {
+			found = append(found, candidate.name)
 		}
 	}
 
-	return found, len(fields)
+	return found
 }
 
 // article returns the indefinite article for a profile type name.

@@ -55,7 +55,7 @@ func UnmarshalStrict(data []byte, profile *Profile) error {
 		return ErrNilProfile
 	}
 
-	return strictjson.Unmarshal(data, profile, nil)
+	return strictjson.Unmarshal(data, profile)
 }
 
 // DecodeArtifact decodes an artifact with UnmarshalStrict and checks it

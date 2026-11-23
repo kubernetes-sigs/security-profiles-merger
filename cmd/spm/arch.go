@@ -21,11 +21,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
+	"sigs.k8s.io/security-profiles-merger/landlock"
 	"sigs.k8s.io/security-profiles-merger/seccomp"
 )
 
@@ -113,4 +115,62 @@ func knownArch(arch specs.Arch) bool {
 	})
 
 	return !errors.Is(err, seccomp.ErrUnknownArch)
+}
+
+// flagNameABI is the name of the flag that names a Landlock ABI version,
+// without its dashes.
+const flagNameABI = "abi"
+
+var errBadABI = errors.New("invalid Landlock ABI version")
+
+// bindABIFlag declares --abi on the set. what says what the version is for
+// and which checks refuse the rights it does not know, which is all the
+// help of the commands taking it differs in.
+func bindABIFlag(flags *flag.FlagSet, target *string, what string) {
+	flags.StringVar(target, flagNameABI, "", "Landlock ABI version "+what)
+}
+
+// parseABIFlag parses the --abi value of a command whose flags are parsed,
+// reporting a value that names no version as a usage error.
+func parseABIFlag(
+	flags *flag.FlagSet, value string, stderr io.Writer,
+) (landlock.ABIVersion, int) {
+	abi, err := parseABI(value, flagNamed(flags, flagNameABI))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+
+		return 0, exitUsage
+	}
+
+	return abi, 0
+}
+
+// parseABI returns the Landlock ABI version an --abi value names, or 0
+// when the flag is not named, which leaves the version unchecked. A version
+// is a whole number from 1 on, written in decimal digits alone, without a
+// sign; one newer than the library knows reads as the newest it knows, as
+// landlock.Options reads it.
+func parseABI(value string, named bool) (landlock.ABIVersion, error) {
+	if !named {
+		return 0, nil
+	}
+
+	version, err := strconv.Atoi(value)
+
+	switch {
+	case err == nil && unsignedDigits(value) && version >= int(landlock.ABIV1):
+	case errors.Is(err, strconv.ErrRange) && unsignedDigits(value):
+		return 0, fmt.Errorf("%w %s (too large)", errBadABI, merge.QuoteBounded(value))
+	default:
+		return 0, fmt.Errorf("%w %s (use a whole number from %d on)",
+			errBadABI, merge.QuoteBounded(value), landlock.ABIV1)
+	}
+
+	return landlock.ABIVersion(version), nil
+}
+
+// unsignedDigits reports whether a value starts with a decimal digit, as a
+// version without a sign does.
+func unsignedDigits(value string) bool {
+	return value != "" && value[0] >= '0' && value[0] <= '9'
 }

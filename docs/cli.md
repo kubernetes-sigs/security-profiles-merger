@@ -43,7 +43,8 @@ Usage errors, which exit `2`:
   read counts as one profile at least, so only too many are refused then;
 - `--arch` for a profile type that has no architectures, or for `validate`
   without `--artifact`, `--strict` or `--baseline`, whose checks it does not
-  change; `--abi` for another profile type than Landlock;
+  change; `--abi` for another profile type than Landlock, or for `diff`
+  without `--validate`;
 - a flag or a `--` after the file arguments;
 - no file arguments while stdin is a terminal, or outside Windows another
   character device but the null device, such as `/dev/zero`;
@@ -66,6 +67,18 @@ Usage errors, which exit `2`:
   two types, or of another type than `--type` names, or members none of
   which the type knows, such as a profile wrapped in an object of another
   format, is a bad profile instead.
+
+A usage error the arguments alone show, such as an unknown flag, a missing
+`--strategy` or a flag after the file arguments, is reported on one line,
+followed by where to find the help rather than by the help itself:
+
+```
+error: flag provided but not defined: -o
+Run 'spm merge --help' for usage.
+```
+
+An unknown command, and an argument after the one `spm help` takes, are
+followed by the overview of the commands, after a blank line.
 
 The split is between "you invoked it wrong", which no profile can cause, and
 "the profile is wrong", which is the answer the command was asked for. An
@@ -238,6 +251,19 @@ takes and picks the `seccomp.Options` the merge and the checks run with:
 `seccomp.ForArch` of the name otherwise. It is a usage error for an
 AppArmor or Landlock merge.
 
+`--abi` names the Landlock ABI version of the kernel that loads the result,
+as for [`validate --abi`](#validate-profiles): the checks of every
+`--validate` mode run as `landlock.Options` runs them for that version and
+refuse each right of an input the kernel does not know. Under `default`
+that is a check the merge does not run on its own, so with `--abi` every
+input left to the merge is checked with `landlock.Options.Validate` first.
+It is a usage error for a seccomp or AppArmor merge.
+
+```sh
+spm merge --type landlock --strategy intersect --validate default,artifact \
+  --abi 4 baseline.json artifact.json
+```
+
 Profiles can also be read from stdin, as a single profile or a JSON array of
 profiles, and `-` reads stdin alongside file arguments. A document that
 starts with `[` is read as an array, and one that does not parse is reported
@@ -368,7 +394,8 @@ profiles, as `landlock_create_ruleset` reports it, and runs the validators
 of `landlock.Options` for that version in every mode: each right the
 kernel does not know is refused, since the kernel would refuse the
 ruleset. A version newer than the library knows reads as the newest it
-knows. It is a usage error for a seccomp or AppArmor profile.
+knows. It is a usage error for a seccomp or AppArmor profile. `merge` and
+`diff` take it as well, for the checks their `--validate` modes run.
 
 `--arch` names the native seccomp architecture of the node that loads the
 profiles, as `merge --arch` does. It matters to `--artifact` and `--strict`
@@ -553,6 +580,12 @@ spm diff --type seccomp --arch SCMP_ARCH_X86_64 left.json right.json
 `--arch` applies to seccomp profiles only; naming it for an AppArmor or
 Landlock diff is a usage error rather than a silently ignored flag. It picks
 the `seccomp.Options` whose `Diff` the command runs.
+
+`--abi` names the Landlock ABI version of the kernel that loads the
+profiles, as for [`validate --abi`](#validate-profiles): the `--validate`
+checks then refuse every right that kernel does not know. The comparison
+itself does not depend on it, so `--abi` without `--validate` is a usage
+error, and so is `--abi` for a seccomp or AppArmor diff.
 
 ## Version
 

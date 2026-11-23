@@ -17,15 +17,10 @@ limitations under the License.
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"slices"
-	"strconv"
-
-	"sigs.k8s.io/security-profiles-merger/internal/merge"
-	"sigs.k8s.io/security-profiles-merger/landlock"
 )
 
 const validateUsage = `Usage: spm validate [options] [files...]
@@ -84,9 +79,6 @@ type validateOptions struct {
 	artifact bool
 	baseline bool
 	quiet    bool
-	abi      string
-	// abiVersion is the version abi names once it is checked, or 0.
-	abiVersion landlock.ABIVersion
 }
 
 // bindValidateFlags declares the validate flags on the set and returns the
@@ -94,10 +86,12 @@ type validateOptions struct {
 func bindValidateFlags(flags *flag.FlagSet) *validateOptions {
 	opts := new(validateOptions)
 
-	opts.bind(
-		flags, "the validated profiles", "stdout, not with --quiet",
-		"of the node that loads the profiles, for --artifact, --strict or --baseline",
-	)
+	opts.bind(flags, commonHelp{
+		result:        "the validated profiles",
+		outputDefault: "stdout, not with --quiet",
+		archFor:       "of the node that loads the profiles, for --artifact, --strict or --baseline",
+		abiFor:        "of the kernel that loads the profiles, such as 6; refuses the rights it does not know",
+	})
 	flags.BoolVar(
 		&opts.strict, "strict", false,
 		"validate as a profile a person wrote: what --artifact rejects, and what "+
@@ -113,11 +107,6 @@ func bindValidateFlags(flags *flag.FlagSet) *validateOptions {
 		&opts.baseline, "baseline", false,
 		"validate as the baseline a runtime merges artifacts into, as the runtime "+
 			"checks it at config load",
-	)
-	flags.StringVar(
-		&opts.abi, "abi", "",
-		"Landlock ABI version of the kernel that loads the profiles, such as 6; "+
-			"refuses the rights it does not know",
 	)
 	flags.BoolVar(
 		&opts.quiet, "quiet", false,
@@ -147,14 +136,12 @@ func (opts *validateOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) i
 	return validateValidateFlags(opts, validateFlagsNamed{
 		format: flagNamed(flags, "format"),
 		arch:   flagNamed(flags, flagNameArch),
-		abi:    flagNamed(flags, flagNameABI),
 	}, stderr)
 }
 
 // validateInputs validates the profiles that were read, and writes them
 // back.
 func validateInputs(opts *validateOptions, inv *invocation) int {
-	inv.abi = opts.abiVersion
 	inv.checks = &inputChecks{
 		modes: slices.Repeat([]validateMode{opts.mode()}, len(inv.inputs)), strategy: "",
 	}
@@ -193,48 +180,11 @@ func (opts *validateOptions) mode() validateMode {
 	}
 }
 
-// flagNameABI is the name of the validate flag that names a Landlock ABI
-// version.
-const flagNameABI = "abi"
-
-var errBadABI = errors.New("invalid Landlock ABI version")
-
-// parseABI returns the Landlock ABI version an --abi value names, or 0
-// when the flag is not named, which leaves the version unchecked. A version
-// is a whole number from 1 on, written in decimal digits alone, without a
-// sign; one newer than the library knows reads as the newest it knows, as
-// landlock.Options reads it.
-func parseABI(value string, named bool) (landlock.ABIVersion, error) {
-	if !named {
-		return 0, nil
-	}
-
-	version, err := strconv.Atoi(value)
-
-	switch {
-	case err == nil && unsignedDigits(value) && version >= int(landlock.ABIV1):
-	case errors.Is(err, strconv.ErrRange) && unsignedDigits(value):
-		return 0, fmt.Errorf("%w %s (too large)", errBadABI, merge.QuoteBounded(value))
-	default:
-		return 0, fmt.Errorf("%w %s (use a whole number from %d on)",
-			errBadABI, merge.QuoteBounded(value), landlock.ABIV1)
-	}
-
-	return landlock.ABIVersion(version), nil
-}
-
-// unsignedDigits reports whether a value starts with a decimal digit, as a
-// version without a sign does.
-func unsignedDigits(value string) bool {
-	return value != "" && value[0] >= '0' && value[0] <= '9'
-}
-
 // validateFlagsNamed reports which validate flags were named, which a
 // default value cannot tell apart from the flag being left out.
 type validateFlagsNamed struct {
 	format bool
 	arch   bool
-	abi    bool
 }
 
 func validateValidateFlags(
@@ -246,15 +196,6 @@ func validateValidateFlags(
 
 	if code := checkModeFlags(opts, named.arch, stderr); code != 0 {
 		return code
-	}
-
-	var err error
-
-	opts.abiVersion, err = parseABI(opts.abi, named.abi)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
-
-		return exitUsage
 	}
 
 	if opts.quiet && opts.output != "" {
@@ -333,7 +274,7 @@ func (ops kindOps[T, D]) validateCommand(inv *invocation, mode validateMode) int
 
 	report.flush(inv.stderr)
 
-	return writeValidated(inv, profiles, formatAll(profiles, ops.format))
+	return writeValidated(inv, profiles, ops.format)
 }
 
 // asArray reports whether validate writes the profiles of the inputs as an
@@ -347,20 +288,24 @@ func asArray(inputs []profileInput) bool {
 
 // writeValidated writes the validated profiles, as one object or as an
 // array (see asArray). The human format has no array: it writes the
-// profiles one after the other, separated by "---" lines.
-func writeValidated[T any](inv *invocation, profiles []*T, humanStrs []string) int {
+// profiles one after the other, as formatFn writes each, separated by "---"
+// lines.
+func writeValidated[T any](inv *invocation, profiles []*T, formatFn func(*T) string) int {
 	if !asArray(inv.inputs) {
-		return inv.write(profiles[0], humanStrs[0])
+		return inv.write(profiles[0], func() string { return formatFn(profiles[0]) })
 	}
 
 	switch inv.format {
 	case formatHuman:
-		for idx, str := range humanStrs {
+		humanStrs := make([]string, len(profiles))
+
+		for idx, profile := range profiles {
+			humanStrs[idx] = formatFn(profile)
 			if idx > 0 {
 				_, _ = fmt.Fprintln(&inv.out, "---")
 			}
 
-			_, _ = fmt.Fprintln(&inv.out, str)
+			_, _ = fmt.Fprintln(&inv.out, humanStrs[idx])
 		}
 
 		warnTruncated(inv.stderr, humanStrs...)
@@ -374,15 +319,6 @@ func writeValidated[T any](inv *invocation, profiles []*T, humanStrs []string) i
 	}
 
 	return 0
-}
-
-func formatAll[T any](profiles []*T, formatFn func(*T) string) []string {
-	result := make([]string, len(profiles))
-	for idx, p := range profiles {
-		result[idx] = formatFn(p)
-	}
-
-	return result
 }
 
 // checkInputs runs check on every profile that decoded, in input order,

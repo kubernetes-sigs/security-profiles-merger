@@ -64,11 +64,12 @@ The codebase is organized in layers:
 - `internal/merge/` holds what the packages share beyond `spm`. The generic
   merge primitives: `Fold` folds any profile type pairwise,
   `IntersectSlice`, `UnionSlice` and `DeduplicateSlice` work with any
-  comparable element type, and `DiffSlice` with ordered element types only,
-  since it sorts its results, as `SortedKeyDiff` sorts the keys two maps do
-  not share and those they do; `NilIfEmpty` spells an empty list as nil;
-  `NewSliceDiff` builds an `spm.SliceDiff`, nil for equal lists, and
-  `WriteSliceDiff` formats one for string-like types, skipping a nil one.
+  comparable element type, and `NewSliceDiff`, which builds an
+  `spm.SliceDiff`, nil for equal lists, with ordered element types only,
+  since it sorts its results, as `SortedKeyDiff` sorts the keys two maps
+  do not share and those they do; `NilIfEmpty` spells an empty list as
+  nil; `WriteSliceDiff` formats an `spm.SliceDiff` for string-like types,
+  skipping a nil one.
   `ClonePtr` copies an optional value. All three profile packages merge
   through `Fold`, which returns a single profile as it is and stops at the
   first error a merge returns: apparmor and landlock fold copies they own,
@@ -79,7 +80,7 @@ The codebase is organized in layers:
   bounds on what an error reports (`Collector`, whose `Report` and
   `Reportf` build a failure only while the report has room, `BoundedError`,
   `QuoteBounded`), the limit sentinels (`LimitError`) and the quoting of
-  profile values for output (`SafeText`, `SafeName`).
+  profile values for output (`Builder.WriteText`, `SafeName`).
 - `internal/report/` holds the error type a `Collector` returns for several
   failures. It imports nothing of the module, so that `spm.Problems` can
   take apart exactly that type and `errors.Join` results, and no other

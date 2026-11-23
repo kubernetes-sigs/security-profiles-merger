@@ -540,11 +540,11 @@ func regroupSyscalls(syscalls []specs.LinuxSyscall) []specs.LinuxSyscall {
 			continue
 		}
 
-		key := groupKey(entry)
+		args := sortedArgs(entry.Args)
+		key := resultKey(entry.Action, entry.ErrnoRet, args)
 
 		current, ok := groups[key]
 		if !ok {
-			args := sortedArgs(entry.Args)
 			current = &group{
 				entry: specs.LinuxSyscall{
 					Names:    nil,
@@ -585,8 +585,4 @@ func regroupSyscalls(syscalls []specs.LinuxSyscall) []specs.LinuxSyscall {
 	}
 
 	return result
-}
-
-func groupKey(entry *specs.LinuxSyscall) string {
-	return resultKey(entry.Action, entry.ErrnoRet, sortedArgs(entry.Args))
 }

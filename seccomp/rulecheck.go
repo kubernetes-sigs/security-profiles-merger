@@ -44,20 +44,6 @@ type syscallRuleState struct {
 	mixedAt int
 }
 
-// syscallRuleCheck returns validateSyscallRules for a node with the given
-// native architecture, which decides whether the multiplexer copies of the
-// rules are checked.
-func syscallRuleCheck(native specs.Arch) profileCheck {
-	return func(profile *specs.LinuxSeccomp) error {
-		var errs merge.Collector
-
-		errs.Add(validateSyscallRules(profile, native))
-		errs.Add(validateLostRules(profile, native))
-
-		return errs.Err()
-	}
-}
-
 // validateLostRules reports a profile whose filter, loaded as written,
 // holds rules libseccomp loses on a covered architecture (see
 // ErrLostRules), which a runtime loading the profile itself would lose.
@@ -106,28 +92,32 @@ func validateLostRules(profile *specs.LinuxSeccomp, native specs.Arch) error {
 // to the profile default are skipped, an entry with several conditions on
 // one argument index adds one rule per condition, and conditions libseccomp
 // drops do not count. Each syscall is reported once, at the first
-// conflicting entry.
-func validateSyscallRules(profile *specs.LinuxSeccomp, native specs.Arch) error {
+// conflicting entry. The native architecture decides whether the
+// multiplexer copies of the rules are checked, and counts holds the rules
+// of each syscall (see clauseCounts).
+//
+// The profile must be within MaxArtifactRules: past that bound, expanding
+// the entries is the very work the bound exists to prevent. validateWith
+// runs this only after validateProfileSize, which checks that bound, has
+// passed.
+func validateSyscallRules(
+	profile *specs.LinuxSeccomp, native specs.Arch, counts map[string]uint64,
+) error {
 	def := defaultClause(profile)
 
 	checker := &ruleChecker{
-		counts:   clauseCounts(profile.Syscalls, def),
+		counts:   counts,
 		truncate: loadsWideValue(profile),
 		states:   make(map[string]*syscallRuleState),
 		reported: make(map[string]struct{}),
 		errs:     merge.Collector{},
 	}
 
-	// Past the profile-wide bound, expanding the entries is the very work
-	// that bound exists to prevent. validateWith runs this only after
-	// validateProfileSize has passed, which checks that bound first.
-	if sumCounts(checker.counts) <= MaxArtifactRules {
-		forEachClause(profile.Syscalls, def, checker.skip, checker.record)
-		checker.checkShapes()
+	forEachClause(profile.Syscalls, def, checker.skip, checker.record)
+	checker.checkShapes()
 
-		if coversAny(profile.Architectures, multiplexingArchitectures, native) {
-			checker.checkMultiplexed(profile.Syscalls, def)
-		}
+	if coversAny(profile.Architectures, multiplexingArchitectures, native) {
+		checker.checkMultiplexed(profile.Syscalls, def)
 	}
 
 	return checker.errs.Err()
@@ -143,14 +133,12 @@ type ruleChecker struct {
 }
 
 // validateRuleCount reports every syscall over the rule bound
-// (MaxArtifactRulesPerSyscall), in name order, counting rules the way
-// runtimes add them without expanding the entries. Only the names it
-// reports are sorted: a profile may name as many syscalls as it has bytes
-// for, while the ones it can put over the bound are limited by the rules it
-// loads.
-func validateRuleCount(profile *specs.LinuxSeccomp) error {
-	counts := clauseCounts(profile.Syscalls, defaultClause(profile))
-
+// (MaxArtifactRulesPerSyscall), in name order, given the rules of each
+// syscall (see clauseCounts), counted the way runtimes add them without
+// expanding the entries. Only the names it reports are sorted: a profile
+// may name as many syscalls as it has bytes for, while the ones it can put
+// over the bound are limited by the rules it loads.
+func validateRuleCount(counts map[string]uint64) error {
 	var over []string
 
 	for name, count := range counts {

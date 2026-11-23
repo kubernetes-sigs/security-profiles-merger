@@ -116,6 +116,9 @@ type profileInput struct {
 	// inArray reports an element of a stdin array, which validate writes
 	// back as an array however many elements it holds.
 	inArray bool
+	// members names the top-level members of data once it parsed as an
+	// object (see parseObject).
+	members []string
 	// err says why the input could not be read, and is nil for one that
 	// was. Such an input fails on its own, as one that does not parse does
 	// (see newInputReport), and its data is nil.
@@ -125,13 +128,17 @@ type profileInput struct {
 // newInput returns the input of a document read whole, from a file or
 // stdin.
 func newInput(name string, data []byte) profileInput {
-	return profileInput{name: name, data: data, source: nil, offset: 0, inArray: false, err: nil}
+	return profileInput{
+		name: name, data: data, source: nil, offset: 0, inArray: false, members: nil, err: nil,
+	}
 }
 
 // failedInput returns the input of a file or of stdin that could not be
 // read, and why.
 func failedInput(name string, err error) profileInput {
-	return profileInput{name: name, data: nil, source: nil, offset: 0, inArray: false, err: err}
+	return profileInput{
+		name: name, data: nil, source: nil, offset: 0, inArray: false, members: nil, err: err,
+	}
 }
 
 // unread reports whether the input could not be read.
@@ -673,6 +680,7 @@ func splitArray(data []byte) ([]profileInput, error) {
 			source:  data,
 			offset:  start,
 			inArray: true,
+			members: nil,
 			err:     nil,
 		})
 	}

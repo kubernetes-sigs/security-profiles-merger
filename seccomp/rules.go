@@ -260,19 +260,6 @@ func oversizedNames(counts map[string]uint64, total uint64) map[string]bool {
 	return summarized
 }
 
-// sumCounts returns the total of counts, which for the result of
-// clauseCounts is what totalClauses returns, without walking the entries a
-// second time.
-func sumCounts(counts map[string]uint64) uint64 {
-	var total uint64
-
-	for _, count := range counts {
-		total += count
-	}
-
-	return total
-}
-
 // clauseCounts returns how many clauses each syscall name loads, counted as
 // totalClauses counts them, whose total they add up to.
 func clauseCounts(syscalls []specs.LinuxSyscall, def *clause) map[string]uint64 {

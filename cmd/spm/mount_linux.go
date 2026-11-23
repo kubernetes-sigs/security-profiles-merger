@@ -22,30 +22,19 @@ import (
 	"strconv"
 )
 
-// isMountedFile reports whether the file at path is a mount point, which is
-// the case when it sits on another mount than the directory holding it. The
-// kernel names the mount of an open file in /proc/self/fdinfo. Where that
-// cannot be read, the answer is no, and the file is replaced like any other,
-// which a mount point then refuses.
-//
-// The file is opened as the write that follows opens it (see openRegular),
-// so asking needs no access the write does not, and a FIFO put at path does
-// not hold the question up.
-func isMountedFile(path string) bool {
-	return mountedFileWith(path, mountID)
+// isMountedFile reports whether file, opened from path (see openRegular),
+// is a mount point, which is the case when it sits on another mount than
+// the directory holding path. The kernel names the mount of an open file in
+// /proc/self/fdinfo. Where that cannot be read, the answer is no, and the
+// file is replaced like any other, which a mount point then refuses.
+func isMountedFile(file *os.File, path string) bool {
+	return mountedFileWith(file, path, mountID)
 }
 
 // mountedFileWith is isMountedFile with the function that reads the mount of
 // an open file, which a test replaces: mounting a file over another takes
 // privileges a test does not have.
-func mountedFileWith(path string, mountOf func(*os.File) (int, bool)) bool {
-	file, err := openRegular(path, 0)
-	if err != nil {
-		return false
-	}
-
-	defer func() { _ = file.Close() }()
-
+func mountedFileWith(file *os.File, path string, mountOf func(*os.File) (int, bool)) bool {
 	// The directory is the one the kernel resolved path through, which
 	// filepath.Dir would get wrong for "link/../file" (see parentDir).
 	dir, err := os.Open(parentDir(path))

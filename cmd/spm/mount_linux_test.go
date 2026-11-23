@@ -58,20 +58,11 @@ func TestIsMountedFileOfAnOrdinaryFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if isMountedFile(target) {
+	file := openOutput(t, target)
+
+	if isMountedFile(file, target) {
 		t.Error("a file created in its directory is taken for a mount point")
 	}
-
-	if isMountedFile(filepath.Join(t.TempDir(), "missing")) {
-		t.Error("a file that does not exist is taken for a mount point")
-	}
-
-	file, err := os.Open(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	t.Cleanup(func() { _ = file.Close() })
 
 	if _, ok := mountID(file); !ok {
 		t.Skip("/proc/self/fdinfo names no mount here")
@@ -103,15 +94,17 @@ func TestMountedFileComparesTheMounts(t *testing.T) {
 		}
 	}
 
-	if !mountedFileWith(target, mountsOf(2, true)) {
+	file := openOutput(t, target)
+
+	if !mountedFileWith(file, target, mountsOf(2, true)) {
 		t.Error("a file on another mount than its directory is not taken for a mount point")
 	}
 
-	if mountedFileWith(target, mountsOf(1, true)) {
+	if mountedFileWith(file, target, mountsOf(1, true)) {
 		t.Error("a file on the mount of its directory is taken for a mount point")
 	}
 
-	if mountedFileWith(target, mountsOf(2, false)) {
+	if mountedFileWith(file, target, mountsOf(2, false)) {
 		t.Error("a file whose mount cannot be read is taken for a mount point")
 	}
 }

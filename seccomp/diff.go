@@ -154,22 +154,22 @@ func diffProfiles(native specs.Arch, left, right *specs.LinuxSeccomp) (*ProfileD
 	}
 
 	diff := &ProfileDiff{
-		Equal:            true,
-		DefaultAction:    nil,
-		DefaultErrnoRet:  nil,
-		Architectures:    nil,
-		Flags:            nil,
-		ListenerPath:     nil,
-		ListenerMetadata: nil,
-		Syscalls:         nil,
+		Equal:            false,
+		DefaultAction:    diffDefaultAction(left, right),
+		DefaultErrnoRet:  diffDefaultErrnoRet(left, right),
+		Architectures:    diffArchitectures(native, left, right),
+		Flags:            merge.NewSliceDiff(loadedFlags(left.Flags), loadedFlags(right.Flags)),
+		ListenerPath:     diffText(left.ListenerPath, right.ListenerPath),
+		ListenerMetadata: diffText(left.ListenerMetadata, right.ListenerMetadata),
+		Syscalls: diffSyscallLists(
+			left.Syscalls, right.Syscalls, defaultClause(left), defaultClause(right),
+		),
 	}
+	// Every field but Equal is a pointer, set only where its section
+	// differs, so the profiles are equal where none is set.
+	var unchanged ProfileDiff
 
-	diffDefaultAction(diff, left, right)
-	diffDefaultErrnoRet(diff, left, right)
-	diffArchitectures(diff, native, left, right)
-	diffFlags(diff, left, right)
-	diffListener(diff, left, right)
-	diffSyscallEntries(diff, left, right)
+	diff.Equal = *diff == unchanged
 
 	return diff, nil
 }
@@ -375,35 +375,30 @@ func changedSyscall(
 	}, true
 }
 
-func diffDefaultAction(
-	diff *ProfileDiff, left, right *specs.LinuxSeccomp,
-) {
+func diffDefaultAction(left, right *specs.LinuxSeccomp) *ValueDiff[specs.LinuxSeccompAction] {
 	leftAction := defaultClause(left).action
 	rightAction := defaultClause(right).action
 
-	if leftAction != rightAction {
-		diff.Equal = false
-		diff.DefaultAction = &ValueDiff[specs.LinuxSeccompAction]{
-			Left:  leftAction,
-			Right: rightAction,
-		}
+	if leftAction == rightAction {
+		return nil
 	}
+
+	return &ValueDiff[specs.LinuxSeccompAction]{Left: leftAction, Right: rightAction}
 }
 
 // diffDefaultErrnoRet compares the default errno values as a runtime loads
 // them (see errnoMask), and reports them as reportedErrno spells them.
-func diffDefaultErrnoRet(
-	diff *ProfileDiff, left, right *specs.LinuxSeccomp,
-) {
+func diffDefaultErrnoRet(left, right *specs.LinuxSeccomp) *ValueDiff[*uint] {
 	leftRet := outputErrno(left.DefaultAction, left.DefaultErrnoRet)
 	rightRet := outputErrno(right.DefaultAction, right.DefaultErrnoRet)
 
-	if compareUintPtr(leftRet, rightRet) != 0 {
-		diff.Equal = false
-		diff.DefaultErrnoRet = &ValueDiff[*uint]{
-			Left:  reportedErrno(left.DefaultAction, left.DefaultErrnoRet),
-			Right: reportedErrno(right.DefaultAction, right.DefaultErrnoRet),
-		}
+	if compareUintPtr(leftRet, rightRet) == 0 {
+		return nil
+	}
+
+	return &ValueDiff[*uint]{
+		Left:  reportedErrno(left.DefaultAction, left.DefaultErrnoRet),
+		Right: reportedErrno(right.DefaultAction, right.DefaultErrnoRet),
 	}
 }
 
@@ -424,16 +419,11 @@ func reportedErrno(action specs.LinuxSeccompAction, ret *uint) *uint {
 // diffArchitectures compares the architecture lists with the given native
 // architecture implied on both sides, as runtimes always cover it: a
 // profile that lists it and one that does not are the same to the runtime.
-func diffArchitectures(
-	diff *ProfileDiff, native specs.Arch, left, right *specs.LinuxSeccomp,
-) {
-	diff.Architectures = merge.NewSliceDiff(
+func diffArchitectures(native specs.Arch, left, right *specs.LinuxSeccomp) *SliceDiff[specs.Arch] {
+	return merge.NewSliceDiff(
 		withoutNative(native, left.Architectures),
 		withoutNative(native, right.Architectures),
 	)
-	if diff.Architectures != nil {
-		diff.Equal = false
-	}
 }
 
 func withoutNative(native specs.Arch, archs []specs.Arch) []specs.Arch {
@@ -446,45 +436,13 @@ func withoutNative(native specs.Arch, archs []specs.Arch) []specs.Arch {
 	})
 }
 
-func diffFlags(
-	diff *ProfileDiff, left, right *specs.LinuxSeccomp,
-) {
-	diff.Flags = merge.NewSliceDiff(loadedFlags(left.Flags), loadedFlags(right.Flags))
-	if diff.Flags != nil {
-		diff.Equal = false
-	}
-}
-
-func diffListener(
-	diff *ProfileDiff, left, right *specs.LinuxSeccomp,
-) {
-	if left.ListenerPath != right.ListenerPath {
-		diff.Equal = false
-		diff.ListenerPath = &ValueDiff[string]{
-			Left:  left.ListenerPath,
-			Right: right.ListenerPath,
-		}
+// diffText compares a listener field, returning nil where both sides agree.
+func diffText(left, right string) *ValueDiff[string] {
+	if left == right {
+		return nil
 	}
 
-	if left.ListenerMetadata != right.ListenerMetadata {
-		diff.Equal = false
-		diff.ListenerMetadata = &ValueDiff[string]{
-			Left:  left.ListenerMetadata,
-			Right: right.ListenerMetadata,
-		}
-	}
-}
-
-func diffSyscallEntries(
-	diff *ProfileDiff, left, right *specs.LinuxSeccomp,
-) {
-	syscallsDiff := diffSyscallLists(
-		left.Syscalls, right.Syscalls, defaultClause(left), defaultClause(right),
-	)
-	if syscallsDiff != nil {
-		diff.Equal = false
-		diff.Syscalls = syscallsDiff
-	}
+	return &ValueDiff[string]{Left: left, Right: right}
 }
 
 // buildSyscallMap turns the rules collectRules read from syscall entries

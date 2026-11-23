@@ -296,7 +296,7 @@ func TestPathsThroughSymlinkedDirectories(t *testing.T) {
 	assertEntries(t, root, "deep", "dl")
 	assertEntries(t, filepath.Join(root, "deep", "a"), "b", "in.json", "out.json")
 
-	if isMountedFile(through("out.json")) {
+	if isMountedFile(openOutput(t, through("out.json")), through("out.json")) {
 		t.Error("the output file is taken for a mount point")
 	}
 }
@@ -403,4 +403,19 @@ func TestParentDir(t *testing.T) {
 			t.Errorf("parentDir(%q) = %q, want %q", test.path, got, test.want)
 		}
 	}
+}
+
+// openOutput opens the regular file at path as an output file is opened
+// before it is asked whether it is a mount point (see writeRegularFile).
+func openOutput(t *testing.T, path string) *os.File {
+	t.Helper()
+
+	file, err := openRegular(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = file.Close() })
+
+	return file
 }

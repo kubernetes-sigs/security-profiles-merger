@@ -207,17 +207,82 @@ func TestVersionRejectsArguments(t *testing.T) {
 	}{
 		{[]string{cmdVersion, testBogus}, "unexpected argument: bogus"},
 		{[]string{"-v", testBogus}, "unexpected argument: bogus"},
-		{[]string{cmdVersion, "--bogus"}, "flag provided but not defined"},
+		{[]string{cmdVersion, "--bogus"}, "flag provided but not defined: --bogus"},
 	} {
 		code, stdout, stderr := runCapture(t, test.args, nil)
-		if code != exitUsage || stdout != "" {
-			t.Errorf("%v: code = %d, stdout = %q, want %d and no output",
-				test.args, code, stdout, exitUsage)
-		}
 
-		if !strings.Contains(stderr, test.want) || !strings.Contains(stderr, "Usage: spm version") {
-			t.Errorf("%v: stderr = %q, want %q and the usage", test.args, stderr, test.want)
+		want := "error: " + test.want + "\n" + usageHintOf(cmdVersion)
+		if code != exitUsage || stdout != "" || stderr != want {
+			t.Errorf("%v: code = %d, stdout = %q, stderr = %q, want %d, no output and %q",
+				test.args, code, stdout, stderr, exitUsage, want)
 		}
+	}
+}
+
+// usageHintOf returns the line that follows a usage error of the command,
+// pointing at its help (see usageHint).
+func usageHintOf(command string) string {
+	return "Run 'spm " + command + " --help' for usage.\n"
+}
+
+// TestUsageErrorsPointAtTheHelp covers every kind of usage error the
+// arguments alone show: each is one line, followed by the hint at the help
+// rather than by the help itself, which would bury it.
+func TestUsageErrorsPointAtTheHelp(t *testing.T) {
+	t.Parallel()
+
+	file := writeTemp(t, seccompJSON(t, testSyscallRead))
+
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{cmdMerge, "-o", "x", file}, "flag provided but not defined: -o"},
+		{[]string{cmdMerge, file}, "--strategy is required"},
+		{
+			[]string{cmdMerge, flagStrategy, testBogus, file},
+			`unknown strategy "bogus" (use intersect or union)`,
+		},
+		{[]string{cmdDiff, flagFormat, testBogus, file, file}, `unknown format "bogus" (use json or human)`},
+		{
+			[]string{cmdValidate, flagType, testBogus, file},
+			`unknown type "bogus" (use seccomp, apparmor, or landlock)`,
+		},
+		{[]string{cmdValidate, "--abi", "0", file}, `invalid Landlock ABI version "0" (use a whole number from 1 on)`},
+		{[]string{cmdValidate, file, flagStrict}, "--strict is not a file (flags must precede file arguments)"},
+	} {
+		command := test.args[0]
+
+		code, stdout, stderr := runCapture(t, test.args, nil)
+
+		want := "error: " + test.want + "\n" + usageHintOf(command)
+		if code != exitUsage || stdout != "" || stderr != want {
+			t.Errorf("%v: code = %d, stdout = %q, stderr = %q, want %d, no output and %q",
+				test.args, code, stdout, stderr, exitUsage, want)
+		}
+	}
+}
+
+// TestJSONOutputFormatsNoText covers the human text of a result, which only
+// --format human writes, so that the JSON format never computes it.
+func TestJSONOutputFormatsNoText(t *testing.T) {
+	t.Parallel()
+
+	computed := func() string {
+		t.Error("the human text was computed for the JSON format")
+
+		return ""
+	}
+
+	if code := testInvocation(nil).write(new(int), computed); code != 0 {
+		t.Errorf("write: exit code = %d, want 0", code)
+	}
+
+	inv := testInvocation(rawInputs("{}", "{}"))
+	if code := writeValidated(inv, []*int{new(int), new(int)}, func(*int) string {
+		return computed()
+	}); code != 0 {
+		t.Errorf("writeValidated: exit code = %d, want 0", code)
 	}
 }
 
@@ -234,9 +299,10 @@ func TestSubcommandFlagErrorGoesToStderr(t *testing.T) {
 		t.Errorf("stdout = %q, want empty", stdout)
 	}
 
-	if !strings.Contains(stderr, "flag provided but not defined") ||
-		!strings.Contains(stderr, "Usage: spm diff") {
-		t.Errorf("stderr = %q, want the parse error and the usage", stderr)
+	if want := "error: flag provided but not defined: --bogus\n" + usageHintOf(
+		cmdDiff,
+	); stderr != want {
+		t.Errorf("stderr = %q, want %q", stderr, want)
 	}
 }
 
@@ -409,7 +475,8 @@ func TestSeparatorAfterFileArguments(t *testing.T) {
 	} {
 		code, stdout, stderr := runCapture(t, args, nil)
 
-		want := "error: -- must come before the file arguments, not among them\n"
+		want := "error: -- must come before the file arguments, not among them\n" +
+			usageHintOf(args[0])
 		if code != exitUsage || stdout != "" || stderr != want {
 			t.Errorf("%v: exit code = %d, stdout = %q, stderr = %q, want %d and %q",
 				args, code, stdout, stderr, exitUsage, want)
@@ -443,7 +510,7 @@ func TestNonInteractiveStdin(t *testing.T) {
 	}
 }
 
-func TestInteractiveStdinPrintsUsage(t *testing.T) {
+func TestInteractiveStdinIsRefused(t *testing.T) {
 	t.Parallel()
 
 	if runtime.GOOS == "windows" {
@@ -468,9 +535,10 @@ func TestInteractiveStdinPrintsUsage(t *testing.T) {
 		t.Fatalf("exit code = %d, stdout = %q, want %d and no output", code, stdout, exitUsage)
 	}
 
-	if !strings.Contains(stderr, "stdin is a terminal or another character device\n") ||
-		!strings.Contains(stderr, "Usage: spm merge") {
-		t.Errorf("stderr = %q, want the hint and the usage", stderr)
+	want := "error: no input files given and stdin is a terminal or another character device\n" +
+		usageHintOf(cmdMerge)
+	if stderr != want {
+		t.Errorf("stderr = %q, want %q", stderr, want)
 	}
 }
 

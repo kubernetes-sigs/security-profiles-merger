@@ -1,1 +1,2 @@
 error: unknown validation mode "strict\u3164" (use default, strict, or artifact)
+Run 'spm merge --help' for usage.
