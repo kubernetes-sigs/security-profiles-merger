@@ -207,10 +207,11 @@ func hostileUnionInputs(count int) (*Profile, *Profile) {
 	return left, right
 }
 
-// TestMoveConflictsScaleLinearly pins the cost of the move conflict check
-// on inputs whose directories all answer differently, counting the
-// comparisons it performs rather than timing them. The destinations grow
-// with the rules, so comparing them with every source grows with the square
+// TestMoveConflictsScaleLinearly bounds the cost of the move conflict check
+// on inputs whose directories all answer differently, without timing it:
+// conflicts compares every destination with every bucket of sources, so the
+// test bounds the sizes of the sets it walks. The destinations grow with
+// the rules, so comparing them with every source would grow with the square
 // of the rules, while the buckets keep the comparisons at most 64 per
 // destination.
 func TestMoveConflictsScaleLinearly(t *testing.T) {
@@ -227,10 +228,10 @@ func TestMoveConflictsScaleLinearly(t *testing.T) {
 		resultMasks := pathRuleMasks(result.PathRules)
 		paths := inputRulePaths([]*Profile{left, right})
 		full := moveSides(left, resultMasks, paths, referLevels[len(referLevels)-1:])[0]
-		_, withComparisons := full.withRoot.settle()
-		_, withoutComparisons := full.withoutRoot.settle()
+		comparisons := len(full.withRoot.destinations)*len(full.withRoot.sources) +
+			len(full.withoutRoot.destinations)*len(full.withoutRoot.sources)
 
-		return len(full.withRoot.destinations), withComparisons + withoutComparisons
+		return len(full.withRoot.destinations), comparisons
 	}
 
 	smallDestinations, smallComparisons := measure(small)

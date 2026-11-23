@@ -54,7 +54,7 @@ func BenchmarkAnalyzePattern(b *testing.B) {
 			b.ReportAllocs()
 
 			for range b.N {
-				_ = analyzePattern(pattern, true)
+				_ = compiledPattern(pattern)
 			}
 		})
 	}

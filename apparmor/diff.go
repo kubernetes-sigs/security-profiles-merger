@@ -271,41 +271,31 @@ func ruleKey(path string) pathKey {
 // implement fmt.Stringer; Diff returns a non-nil diff whenever its error is
 // nil, and String panics when called through a nil pointer.
 func (d ProfileDiff) String() string {
-	diff := &d
-
-	if diff.Equal {
+	if d.Equal {
 		return "Diff{equal}"
 	}
 
-	var out merge.Builder
+	return merge.Framed("Diff{", func(out *merge.Builder, parts *merge.Joiner) {
+		if d.Executable != nil {
+			merge.WriteSliceDiff(out, parts, "exec", d.Executable.AllowedExecutables)
+			merge.WriteSliceDiff(out, parts, "lib", d.Executable.AllowedLibraries)
+		}
 
-	out.WriteString("Diff{")
+		if d.Filesystem != nil {
+			merge.WriteSliceDiff(out, parts, "r", d.Filesystem.ReadOnlyPaths)
+			merge.WriteSliceDiff(out, parts, "w", d.Filesystem.WriteOnlyPaths)
+			merge.WriteSliceDiff(out, parts, "rw", d.Filesystem.ReadWritePaths)
+		}
 
-	parts := merge.NewJoiner(&out, " ")
+		if d.Network != nil {
+			parts.Next()
+			writeNetworkDiff(out, d.Network)
+		}
 
-	if diff.Executable != nil {
-		merge.WriteSliceDiff(&out, &parts, "exec", diff.Executable.AllowedExecutables)
-		merge.WriteSliceDiff(&out, &parts, "lib", diff.Executable.AllowedLibraries)
-	}
-
-	if diff.Filesystem != nil {
-		merge.WriteSliceDiff(&out, &parts, "r", diff.Filesystem.ReadOnlyPaths)
-		merge.WriteSliceDiff(&out, &parts, "w", diff.Filesystem.WriteOnlyPaths)
-		merge.WriteSliceDiff(&out, &parts, "rw", diff.Filesystem.ReadWritePaths)
-	}
-
-	if diff.Network != nil {
-		parts.Next()
-		writeNetworkDiff(&out, diff.Network)
-	}
-
-	if diff.Capabilities != nil {
-		merge.WriteSliceDiff(&out, &parts, "caps", diff.Capabilities.AllowedCapabilities)
-	}
-
-	out.WriteString("}")
-
-	return out.String()
+		if d.Capabilities != nil {
+			merge.WriteSliceDiff(out, parts, "caps", d.Capabilities.AllowedCapabilities)
+		}
+	})
 }
 
 func writeNetworkDiff(out *merge.Builder, networkDiff *NetworkDiff) {

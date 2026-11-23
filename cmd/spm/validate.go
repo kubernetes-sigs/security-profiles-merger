@@ -133,10 +133,33 @@ func runValidate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 // checkFlags checks the validate flags (see commandOptions).
 func (opts *validateOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) int {
-	return validateValidateFlags(opts, validateFlagsNamed{
-		format: flagNamed(flags, "format"),
-		arch:   flagNamed(flags, flagNameArch),
-	}, stderr)
+	if code := opts.check(stderr); code != 0 {
+		return code
+	}
+
+	if code := checkModeFlags(opts, flagNamed(flags, flagNameArch), stderr); code != 0 {
+		return code
+	}
+
+	if opts.quiet && opts.output != "" {
+		_, _ = fmt.Fprintln(
+			stderr, "error: --quiet cannot be combined with --output",
+		)
+
+		return exitUsage
+	}
+
+	// --format shapes the profile --quiet suppresses, so naming both says
+	// two things that cannot both be meant, as --output does.
+	if opts.quiet && flagNamed(flags, "format") {
+		_, _ = fmt.Fprintln(
+			stderr, "error: --quiet cannot be combined with --format",
+		)
+
+		return exitUsage
+	}
+
+	return 0
 }
 
 // validateInputs validates the profiles that were read, and writes them
@@ -178,45 +201,6 @@ func (opts *validateOptions) mode() validateMode {
 	default:
 		return modeDefault
 	}
-}
-
-// validateFlagsNamed reports which validate flags were named, which a
-// default value cannot tell apart from the flag being left out.
-type validateFlagsNamed struct {
-	format bool
-	arch   bool
-}
-
-func validateValidateFlags(
-	opts *validateOptions, named validateFlagsNamed, stderr io.Writer,
-) int {
-	if code := opts.check(stderr); code != 0 {
-		return code
-	}
-
-	if code := checkModeFlags(opts, named.arch, stderr); code != 0 {
-		return code
-	}
-
-	if opts.quiet && opts.output != "" {
-		_, _ = fmt.Fprintln(
-			stderr, "error: --quiet cannot be combined with --output",
-		)
-
-		return exitUsage
-	}
-
-	// --format shapes the profile --quiet suppresses, so naming both says
-	// two things that cannot both be meant, as --output does.
-	if opts.quiet && named.format {
-		_, _ = fmt.Fprintln(
-			stderr, "error: --quiet cannot be combined with --format",
-		)
-
-		return exitUsage
-	}
-
-	return 0
 }
 
 // checkModeFlags checks the flags that choose the validation mode and what

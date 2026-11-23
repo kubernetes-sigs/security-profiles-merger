@@ -183,7 +183,8 @@ func (r *multiplexRules) add(next clause) {
 		multiplexed.args = slices.DeleteFunc(slices.Clone(next.args), firstArg)
 		multiplexed.errnoRet = merge.ClonePtr(next.errnoRet)
 
-		if key := clauseKey(multiplexed); !hasKey(r.seen, key) {
+		key := clauseKey(multiplexed)
+		if _, seen := r.seen[key]; !seen {
 			r.seen[key] = struct{}{}
 			r.multiplexed = append(r.multiplexed, multiplexed)
 		}
@@ -200,12 +201,6 @@ func (r *multiplexRules) add(next clause) {
 	}
 
 	r.conditional = true
-}
-
-func hasKey(set map[string]struct{}, key string) bool {
-	_, ok := set[key]
-
-	return ok
 }
 
 // refused reports whether libseccomp may refuse the multiplexed rules or

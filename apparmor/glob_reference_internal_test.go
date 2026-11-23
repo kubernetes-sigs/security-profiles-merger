@@ -294,7 +294,7 @@ func TestIntersectPathsMatchesReference(t *testing.T) {
 	for range 60000 {
 		left, right := refRandPaths(rnd), refRandPaths(rnd)
 
-		strategy := intersectStrategy{matchers: newMatcherCache(), exceeded: new(bool)}
+		strategy := intersectStrategy{matchers: newMatcherCache(), exceeded: false}
 
 		got := sortedClone(strategy.mergePaths(left, right))
 		want := sortedClone(refIntersectPaths(left, right))
@@ -322,7 +322,7 @@ func TestMergeFilesystemMatchesReference(t *testing.T) {
 			ReadWritePaths: refRandPaths(rnd),
 		}
 
-		strategy := intersectStrategy{matchers: newMatcherCache(), exceeded: new(bool)}
+		strategy := intersectStrategy{matchers: newMatcherCache(), exceeded: false}
 
 		got := strategy.mergeFilesystem(left, right)
 		want := refMergeFilesystem(left, right)

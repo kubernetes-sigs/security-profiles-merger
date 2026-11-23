@@ -141,11 +141,6 @@ func failedInput(name string, err error) profileInput {
 	}
 }
 
-// unread reports whether the input could not be read.
-func (input *profileInput) unread() bool {
-	return input.err != nil
-}
-
 // stdinUnread reports whether readInputs read stdin for paths and could
 // not, which leaves the number of profiles it held unknown, so the inputs
 // cannot be counted. Its input is the one at the position of "-", since
@@ -156,7 +151,7 @@ func stdinUnread(paths []string, inputs []profileInput) bool {
 		at = 0
 	}
 
-	return at >= 0 && at < len(inputs) && inputs[at].unread()
+	return at >= 0 && at < len(inputs) && inputs[at].err != nil
 }
 
 // position returns where the byte at offset of the input's data sits in the
@@ -209,8 +204,13 @@ func readInputs(paths []string, stdin io.Reader) ([]profileInput, error) {
 		)
 
 		if path == stdinArg {
-			// Every other argument is one more profile.
-			items, read, err = readStdinArgument(stdin, len(paths)-1, allowance)
+			items, read, err = readStdin(stdin, allowance)
+			// A stdin array brings up to maxInputFiles profiles of its
+			// own, and every other argument one more, so the bound is on
+			// the profiles rather than on the arguments.
+			if err == nil && len(items)+len(paths)-1 > maxInputFiles {
+				err = errTooManyInputs
+			}
 		} else {
 			var input profileInput
 
@@ -379,24 +379,6 @@ func readFileInput(path string, allowance int) (profileInput, int, error) {
 	}
 }
 
-// readStdinArgument reads the profiles of a "-" argument given beside others
-// that bring one profile each, within the allowance the inputs read before
-// it leave, and returns how many bytes it read. A stdin array brings up to
-// maxInputFiles profiles of its own, so the bound is on the profiles rather
-// than on the arguments.
-func readStdinArgument(stdin io.Reader, others, allowance int) ([]profileInput, int, error) {
-	items, read, err := readStdin(stdin, allowance)
-	if err != nil {
-		return nil, read, err
-	}
-
-	if len(items)+others > maxInputFiles {
-		return nil, read, errTooManyInputs
-	}
-
-	return items, read, nil
-}
-
 // readFileWithLimit reads a regular file of at most maxInputSize bytes. The
 // failure it returns carries the reason alone: the caller names the input
 // as the caller wrote it, and the decorations os adds would otherwise spell
@@ -433,28 +415,40 @@ func readFileWithLimit(path string, allowance int) ([]byte, int, error) {
 
 	defer func() { _ = file.Close() }()
 
-	data, err := io.ReadAll(io.LimitReader(file, int64(readLimit(allowance))+1))
-	if err != nil {
-		return nil, len(data), bareFileError(err)
-	}
+	data, err := readBounded(file, allowance, errFileTooLarge, errEmptyFile)
 
-	err = pastLimit(len(data), allowance, errFileTooLarge)
-	if err != nil {
+	// A pipe that gave nothing at all had no writer by the time it was
+	// read, or one that wrote nothing.
+	switch {
+	case pipe && len(data) == 0 && errors.Is(err, errEmptyFile):
+		return nil, 0, errNoWriter
+	case err != nil:
 		return nil, len(data), err
 	}
 
-	// An empty file is reported as such, as empty stdin is, rather than
-	// left to the decoder, which would call it a truncated document. A pipe
-	// that gave nothing at all had no writer by the time it was read, or
-	// one that wrote nothing.
-	switch {
-	case pipe && len(data) == 0:
-		return nil, 0, errNoWriter
-	case len(bytes.Trim(data, strictjson.Space)) == 0:
-		return nil, len(data), errEmptyFile
+	return data, len(data), nil
+}
+
+// readBounded reads an input within the allowance the inputs read before it
+// leave, no more than readLimit allows, and returns the bytes it read, which
+// the caller charges to the allowance even when it fails. It fails with the
+// reason alone of a read that failed (see bareFileError), then with the
+// limit error of a read past the limit (see pastLimit), tooLarge naming the
+// bound on one input, and then with empty for an input of nothing but
+// space, which is reported as such rather than left to the decoder, which
+// would call it a truncated document.
+func readBounded(reader io.Reader, allowance int, tooLarge, empty error) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, int64(readLimit(allowance))+1))
+	if err != nil {
+		return data, bareFileError(err)
 	}
 
-	return data, len(data), nil
+	err = pastLimit(len(data), allowance, tooLarge)
+	if err == nil && len(bytes.Trim(data, strictjson.Space)) == 0 {
+		err = empty
+	}
+
+	return data, err
 }
 
 // openInput opens a file argument for readFileWithLimit and reports whether
@@ -538,18 +532,13 @@ func readStdin(reader io.Reader, allowance int) ([]profileInput, int, error) {
 		return unreadStdin(err), 0, nil
 	}
 
-	data, err := io.ReadAll(io.LimitReader(reader, int64(readLimit(allowance))+1))
-	if err != nil {
-		return unreadStdin(bareFileError(err)), len(data), nil
-	}
+	data, err := readBounded(reader, allowance, errStdinTooLarge, errEmptyInput)
 
-	err = pastLimit(len(data), allowance, errStdinTooLarge)
-	if err != nil {
+	switch {
+	case isInputLimitError(err):
 		return nil, len(data), err
-	}
-
-	if len(bytes.Trim(data, strictjson.Space)) == 0 {
-		return unreadStdin(errEmptyInput), len(data), nil
+	case err != nil:
+		return unreadStdin(err), len(data), nil
 	}
 
 	// Anything that does not open an array is a single document. That
@@ -581,30 +570,18 @@ func checkStdinFile(reader io.Reader) error {
 		return errNotRegularFile
 	}
 
-	mode, known := fileMode(file)
-
-	switch {
-	case !known:
-		// Stdin whose kind cannot be told is read, and fails there if it
-		// cannot be.
-		return nil
-	case mode.IsDir():
-		return errDirectoryInput
-	case mode&fs.ModeDevice != 0 && mode&fs.ModeCharDevice == 0:
-		return errNotRegularFile
-	default:
-		return nil
-	}
-}
-
-// fileMode returns the mode of an open file, and whether it could be told.
-func fileMode(file *os.File) (fs.FileMode, bool) {
+	// Stdin whose kind cannot be told is read, and fails there if it cannot
+	// be.
 	info, err := file.Stat()
-	if err != nil {
-		return 0, false
+	if err == nil && info.IsDir() {
+		return errDirectoryInput
 	}
 
-	return info.Mode(), true
+	if err == nil && info.Mode()&fs.ModeDevice != 0 && info.Mode()&fs.ModeCharDevice == 0 {
+		return errNotRegularFile
+	}
+
+	return nil
 }
 
 // unreadStdin returns the input of stdin that could not be read, and why.

@@ -739,7 +739,7 @@ func TestMatchGlobAgreesWithRegex(t *testing.T) {
 
 		// A relative pattern loads no rule, so it is not usable, and both
 		// implementations match nothing with it below.
-		matcher := matcherFor(pattern)
+		matcher := callMatcher(pattern)
 		if matcher.usable() != strings.HasPrefix(pattern, "/") {
 			t.Errorf("pattern %q: usable = %v", pattern, matcher.usable())
 
@@ -1161,7 +1161,7 @@ func FuzzMatchGlobAgreesWithPort(f *testing.F) {
 			return
 		}
 
-		matcher := matcherFor(pattern)
+		matcher := callMatcher(pattern)
 		if !matcher.usable() {
 			return
 		}
@@ -1192,5 +1192,5 @@ func FuzzMatchGlobAgreesWithPort(f *testing.F) {
 // matchedName returns a name as the merge hands it to a matcher: the literal
 // its analysis denotes, with escapes resolved and slashes collapsed.
 func matchedName(path string) string {
-	return matcherFor(path).literal
+	return callMatcher(path).literal
 }

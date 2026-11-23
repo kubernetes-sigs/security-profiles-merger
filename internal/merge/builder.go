@@ -135,6 +135,28 @@ func (b *Builder) fits(size int) bool {
 	return true
 }
 
+// Render returns the output write writes to a new Builder.
+func Render(write func(out *Builder)) string {
+	var out Builder
+
+	write(&out)
+
+	return out.String()
+}
+
+// Framed returns open, then the parts body writes separated by spaces, then
+// "}", as in "Diff{fs:+read_file net:-bind_tcp}".
+func Framed(open string, body func(out *Builder, parts *Joiner)) string {
+	return Render(func(out *Builder) {
+		out.WriteString(open)
+
+		parts := NewJoiner(out, " ")
+		body(out, &parts)
+
+		out.WriteString("}")
+	})
+}
+
 // Joiner writes a separator between the parts of a list written to a
 // Builder, for a list whose first part is not known in advance.
 type Joiner struct {
@@ -171,6 +193,33 @@ func WriteTexts[T ~string](out *Builder, values []T, sep string) {
 
 		out.WriteText(string(value))
 	}
+}
+
+// WriteParts writes count parts of a list, each after sign, stopping once
+// the output is full. write writes the part at idx after its sign.
+func WriteParts(out *Builder, parts *Joiner, count int, sign string, write func(idx int)) {
+	for idx := range count {
+		if out.Full() {
+			return
+		}
+
+		parts.Next()
+		out.WriteString(sign)
+		write(idx)
+	}
+}
+
+// WriteList writes values as WriteTexts does, separated by commas, after
+// prefix as a part of a list, as in "exec:/bin/a,/bin/b", and writes nothing
+// for an empty list.
+func WriteList[T ~string](out *Builder, parts *Joiner, prefix string, values []T) {
+	if len(values) == 0 {
+		return
+	}
+
+	parts.Next()
+	out.WriteString(prefix)
+	WriteTexts(out, values, ",")
 }
 
 // WriteSliceDiff writes a SliceDiff as a part of a diff, listing the

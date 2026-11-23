@@ -23,6 +23,7 @@ import (
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"sigs.k8s.io/security-profiles-merger/internal/merge"
 	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 )
 
@@ -248,21 +249,32 @@ func TestValidatorsDoNotBuildFailuresPastTheLimit(t *testing.T) {
 
 	small, large := failingProfile(count), failingProfile(10*count)
 
+	// collected runs check on a report of its own and returns that report.
+	collected := func(check profileCheck) func(*specs.LinuxSeccomp) error {
+		return func(profile *specs.LinuxSeccomp) error {
+			var errs merge.Collector
+
+			check(&errs, profile)
+
+			return errs.Err()
+		}
+	}
+
 	for _, testCase := range []struct {
 		name  string
-		check profileCheck
+		check func(*specs.LinuxSeccomp) error
 	}{
 		{name: "Validate", check: Validate},
-		{name: "validateWellFormed", check: validateWellFormed},
-		{name: "validateSyscallNameSpelling", check: validateSyscallNameSpelling},
-		{name: "validateNoNotify", check: validateNoNotify},
-		{name: "validateUnusedErrnoRet", check: validateUnusedErrnoRet},
-		{name: "validateUnusedValueTwo", check: validateUnusedValueTwo},
+		{name: "validateWellFormed", check: collected(validateWellFormed)},
+		{name: "validateSyscallNameSpelling", check: collected(validateSyscallNameSpelling)},
+		{name: "validateNoNotify", check: collected(validateNoNotify)},
+		{name: "validateUnusedErrnoRet", check: collected(validateUnusedErrnoRet)},
+		{name: "validateUnusedValueTwo", check: collected(validateUnusedValueTwo)},
 		{
 			name: "validateValueWidth",
-			check: func(profile *specs.LinuxSeccomp) error {
-				return validateValueWidth(profile, specs.ArchX86)
-			},
+			check: collected(func(errs *merge.Collector, profile *specs.LinuxSeccomp) {
+				validateValueWidth(errs, profile, specs.ArchX86)
+			}),
 		},
 	} {
 		err := testCase.check(large)
@@ -346,7 +358,7 @@ func TestValidateArtifactRefusesTooManyEntriesFirst(t *testing.T) {
 
 	small, large := empty(2*MaxArtifactEntries), empty(20*MaxArtifactEntries)
 
-	for name, validate := range map[string]profileCheck{
+	for name, validate := range map[string]func(*specs.LinuxSeccomp) error{
 		"ValidateArtifact": ValidateArtifact,
 		"ValidateStrict":   ValidateStrict,
 	} {

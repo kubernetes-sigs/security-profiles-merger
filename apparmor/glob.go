@@ -76,18 +76,14 @@ const (
 	// pattern's program over a name, and the regexp package simulates that
 	// program with one thread per instruction it can be at, so a comparison
 	// costs up to the length of the pattern times the length of the name,
-	// and a profile chooses both: fifteen patterns of 2040 stars against a
-	// thousand literals of four kilobytes, well inside every artifact limit
-	// and the pair bound, took over a minute and a half to intersect, some
-	// 85 milliseconds a comparison. The budget is that product summed over
-	// the pairs the prefix index lets through, which is at most the product
-	// of the bytes the two sides hold (see matchBudget and
-	// exceedsPairBudget), and it admits a profile of MaxArtifactPaths paths
-	// of typicalPathLen bytes against a node baseline of baselinePathBytes.
-	// At the budget the costliest comparisons take about a second and a half
-	// in total. That is the cost of one list: a merge weighs the executables,
-	// the libraries and the filesystem rules of two profiles separately, so
-	// it costs up to three times that.
+	// and a profile chooses both, so a few long patterns against many long
+	// literals cost far more than the pair bound suggests. The budget is
+	// that product summed over the pairs the prefix index lets through,
+	// which is at most the product of the bytes the two sides hold (see
+	// matchBudget and exceedsPairBudget), and it admits a profile of
+	// MaxArtifactPaths paths of typicalPathLen bytes against a node baseline
+	// of baselinePathBytes. It bounds one list: a merge weighs the
+	// executables, the libraries and the filesystem rules separately.
 	maxMergePathWork = MaxArtifactPaths * typicalPathLen * baselinePathBytes
 	// typicalPathLen is the path length the budgets assume a profile names.
 	typicalPathLen = 64
@@ -141,9 +137,6 @@ type globMatcher struct {
 	// prefix is literal up to and including its last "/", or "". It is
 	// the key the prefix index files a glob under.
 	prefix string
-	// starStar reports a usable pattern that is its literal prefix
-	// followed by "**", and nothing else.
-	starStar bool
 	// escapedNegation reports a class opened by an escaped "^", which the
 	// parser negates (see conversion.escapedNegation). The matcher models
 	// the negation, so it does not change what the pattern matches, only
@@ -162,8 +155,14 @@ type globMatcher struct {
 	// for a pattern the port cannot translate.
 	relative bool
 	// starStarForm reports a pattern that is its literal prefix followed
-	// by "**", which starStar reports once the pattern is compiled.
+	// by "**", and nothing else, compiled or not (see starStar).
 	starStarForm bool
+}
+
+// starStar reports a compiled pattern that is its literal prefix followed by
+// "**", and nothing else.
+func (matcher *globMatcher) starStar() bool {
+	return matcher.starStarForm && matcher.expr != nil
 }
 
 // verbatimOnly reports a pattern the matcher could model but did not
@@ -217,7 +216,7 @@ func (matcher *globMatcher) misleading() bool {
 // match a name with "//" that base does not, but no such name reaches
 // AppArmor. Both patterns are absolute, since a relative one is not usable.
 func (matcher *globMatcher) expandedBy(base *globMatcher) bool {
-	if !base.starStar || !matcher.usable() ||
+	if !base.starStar() || !matcher.usable() ||
 		!strings.HasPrefix(matcher.prefix, base.prefix) ||
 		strings.Contains(matcher.prefix, "//") {
 		return false
@@ -231,12 +230,11 @@ func literalMatcher(path string) *globMatcher {
 	name := filterSlashes(path)
 
 	return &globMatcher{
-		expr:     nil,
-		kind:     kindLiteral,
-		status:   globUsable,
-		literal:  name,
-		prefix:   name[:strings.LastIndexByte(name, '/')+1],
-		starStar: false,
+		expr:    nil,
+		kind:    kindLiteral,
+		status:  globUsable,
+		literal: name,
+		prefix:  name[:strings.LastIndexByte(name, '/')+1],
 
 		escapedNegation: false,
 		fragment:        "",
@@ -261,34 +259,33 @@ func (matcher *globMatcher) relativeLiteral() bool {
 	return matcher.kind == kindLiteral && matcher.relative
 }
 
-// analyzePattern runs a path through the parser port and compiles the
-// resulting regex, unless compile is false. Without compiling, a pattern the
-// matcher would model is left globUncompiled, and matches nothing until
-// compileMatcher compiles it. A path past the length limit is not
-// translated either, since it never compiles.
-func analyzePattern(pattern string, compile bool) *globMatcher {
-	return analyzeWithin(pattern, maxGlobPatternLen, compile)
+// analyzePattern runs a path through the parser port and translates the
+// resulting regex without compiling it: a pattern the matcher would model
+// is left globUncompiled, and matches nothing until compileMatcher compiles
+// it. A path past the length limit is not translated, since it never
+// compiles.
+func analyzePattern(pattern string) *globMatcher {
+	return analyzeWithin(pattern, maxGlobPatternLen)
 }
 
 // analyzeUnbounded analyzes a pattern as analyzePattern does, translating
 // it past maxGlobPatternLen and compiling nothing, for the identity of a
 // spelling QuotePath writes (see quotedKey). Its caller bounds the length.
 func analyzeUnbounded(pattern string) *globMatcher {
-	return analyzeWithin(pattern, len(pattern), false)
+	return analyzeWithin(pattern, len(pattern))
 }
 
 // analyzeWithin is analyzePattern with the length past which a pattern is
 // globTooComplex.
-func analyzeWithin(pattern string, maxLen int, compile bool) *globMatcher {
+func analyzeWithin(pattern string, maxLen int) *globMatcher {
 	conv := convertPattern(filterSlashes(decodeEscapes(pattern)))
 
 	matcher := &globMatcher{
-		expr:     nil,
-		kind:     conv.kind,
-		status:   globInvalid,
-		literal:  "",
-		prefix:   "",
-		starStar: false,
+		expr:    nil,
+		kind:    conv.kind,
+		status:  globInvalid,
+		literal: "",
+		prefix:  "",
 
 		escapedNegation: conv.escapedNegation,
 		fragment:        "",
@@ -319,10 +316,6 @@ func analyzeWithin(pattern string, maxLen int, compile bool) *globMatcher {
 	}
 
 	translateGlob(matcher, conv, relativePath(pattern))
-
-	if compile {
-		compileMatcher(matcher)
-	}
 
 	return matcher
 }
@@ -366,7 +359,6 @@ func compileMatcher(matcher *globMatcher) {
 
 	matcher.expr = expr
 	matcher.status = globUsable
-	matcher.starStar = matcher.starStarForm
 }
 
 // compileCost is what compiling the pattern costs a call's budget (see
@@ -394,7 +386,6 @@ func (matcher *globMatcher) uncompiled() *globMatcher {
 	stripped := *matcher
 	stripped.expr = nil
 	stripped.status = globUncompiled
-	stripped.starStar = false
 
 	return &stripped
 }
@@ -411,24 +402,12 @@ func (matcher *globMatcher) retainedBytes(pattern string) int {
 	return size
 }
 
-// programBytes estimates what compiling a pattern into a program holds. A
-// program is far larger than its pattern, and which part of the pattern it
-// grows with depends on the shape: literal text holds over a hundred bytes
-// per pattern byte in small programs and some sixty in large ones, little
-// of it in the translated expression; "?" translates into a class of every
-// byte but "/" and NUL, some thirty expression bytes per pattern byte, and
-// holds a few bytes per expression byte; and every star adds a loop, which
-// in a run of "*/" components costs over seven hundred bytes a star in a
-// program of a few hundred pattern bytes, the costliest shape measured, at
-// some 450 bytes per pattern byte. The estimate is a fixed eight kilobytes
-// per program, 160 bytes per pattern byte, twelve per expression byte and
-// 512 per star. Over literals, stars, "*/" and "a*/" runs, "?", classes,
-// alternations and escapes, from a few dozen bytes to MaxPathLen, it
-// exceeds what Go 1.24 to 1.27 retain by at least a third, as margin for
-// later releases, and by up to some six times for shapes one term
-// dominates (see TestRetainedBytesBoundsPrograms). Counting the pattern
-// alone let a cache bounded at a quarter megabyte of patterns hold tens of
-// megabytes.
+// programBytes estimates what compiling a pattern into a program holds: a
+// fixed cost per program plus terms for the pattern bytes, the expression
+// bytes and the stars, since a program is far larger than its pattern and
+// which of these it grows with depends on the shape. The estimate is meant
+// to exceed what any shape retains, with margin for later Go releases (see
+// TestRetainedBytesBoundsPrograms).
 func programBytes(pattern, fragment string) int {
 	const (
 		perProgram        = 8 << 10
@@ -439,26 +418,6 @@ func programBytes(pattern, fragment string) int {
 
 	return perProgram + perPatternByte*len(pattern) + perExpressionByte*len(fragment) +
 		perStar*strings.Count(pattern, "*")
-}
-
-// matcherFor returns the analysis of a path, caching it for paths with
-// pattern syntax. A path past the length limit is analyzed without being
-// compiled or cached: it matches nothing, and caching it would evict the
-// patterns worth keeping.
-func matcherFor(path string) *globMatcher {
-	if !strings.ContainsAny(path, patternSyntax) {
-		return literalMatcher(path)
-	}
-
-	if len(path) > maxGlobPatternLen {
-		return analyzePattern(path, false)
-	}
-
-	if cached := sharedMatcher(path); cached != nil {
-		return cached
-	}
-
-	return storeSharedMatcher(path, analyzePattern(path, true))
 }
 
 // sharedMatcher returns the analysis the shared cache holds for a pattern,
@@ -473,12 +432,10 @@ func sharedMatcher(path string) *globMatcher {
 // storeSharedMatcher adds an analysis to the shared cache and returns the one
 // the cache holds for the pattern, which is an earlier one when another call
 // stored it first. An analysis larger than the whole cache is returned
-// without being stored, so that it cannot empty the cache. No analysis is
-// that large today: a pattern stored here is at most maxGlobPatternLen
-// bytes, and the costliest shape of that length retains under a fifth of
-// maxGlobCacheBytes (see TestNoAnalysisOutgrowsTheSharedCache). The check
-// keeps a change to the estimate or the length limit from turning one
-// pattern into an eviction of every other.
+// without being stored, so that it cannot empty the cache. No pattern within
+// maxGlobPatternLen is that large (see TestNoAnalysisOutgrowsTheSharedCache);
+// the check keeps a change to the estimate or the length limit from turning
+// one pattern into an eviction of every other.
 func storeSharedMatcher(path string, analyzed *globMatcher) *globMatcher {
 	globCacheMu.Lock()
 	defer globCacheMu.Unlock()
@@ -522,9 +479,8 @@ func storeSharedMatcher(path string, analyzed *globMatcher) *globMatcher {
 // It keeps the analyses of literal paths too, which the shared cache does
 // not hold: analyzing one costs an allocation on every read otherwise, and a
 // merge reads each path many times. What it keeps of them is bounded by
-// literalBudget, past which a literal is analyzed anew on every read, as
-// matcherFor does, so that a profile of many long literals costs the call
-// no more memory than it did before.
+// literalBudget, past which a literal is analyzed anew on every read, so
+// that a profile of many long literals costs the call bounded memory.
 type matcherCache struct {
 	entries map[string]*globMatcher
 	// compileBudget is what the call may still spend compiling, in pattern
@@ -584,17 +540,19 @@ func keyAnalysis(path string) *globMatcher {
 		}
 	}
 
-	return analyzePattern(path, false)
+	return analyzePattern(path)
 }
 
-// matcher returns the analysis of a path as matcherFor does, reading it
-// from the call's own cache first and compiling only within the call's
-// budget. Paths past the length limit are analyzed anew, as matcherFor
-// analyzes them, since they are never compiled. A cache made by newKeyCache
-// returns keyAnalysis instead, which serves the identity of a path only.
+// matcher returns the analysis of a path, reading it from the call's own
+// cache first, then from the shared cache, and compiling a pattern only
+// within the call's budget, storing it in the shared cache. A path past the
+// length limit is analyzed anew by keyAnalysis on every read, since it is
+// never compiled, and caching it would evict the patterns worth keeping. A
+// cache made by newKeyCache returns keyAnalysis instead, which serves the
+// identity of a path only.
 func (cache *matcherCache) matcher(path string) *globMatcher {
 	if len(path) > maxGlobPatternLen {
-		return matcherFor(path)
+		return keyAnalysis(path)
 	}
 
 	if cached, ok := cache.entries[path]; ok {
@@ -622,7 +580,7 @@ func (cache *matcherCache) matcher(path string) *globMatcher {
 	fresh := analyzed == nil
 
 	if fresh {
-		analyzed = analyzePattern(path, false)
+		analyzed = analyzePattern(path)
 	}
 
 	analyzed = cache.admit(path, analyzed, fresh)
@@ -949,7 +907,7 @@ func (index *prefixIndex) candidates(
 
 // addStarStar files a "**" pattern under its prefix, if it is one.
 func (index *prefixIndex) addStarStar(pattern string, matcher *globMatcher) {
-	if matcher.starStar {
+	if matcher.starStar() {
 		index.add(matcher.prefix, pattern)
 	}
 }

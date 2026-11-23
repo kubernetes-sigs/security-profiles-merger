@@ -32,45 +32,33 @@ func (p *Profile) String() string {
 		return "Profile{<nil>}"
 	}
 
-	var out merge.Builder
+	return merge.Framed("Profile{", func(out *merge.Builder, parts *merge.Joiner) {
+		if p.Executable != nil && p.Executable.hasRules() {
+			parts.Next()
+			p.Executable.writeTo(out)
+		}
 
-	out.WriteString("Profile{")
+		if p.Filesystem != nil && p.Filesystem.hasRules() {
+			parts.Next()
+			p.Filesystem.writeTo(out)
+		}
 
-	parts := merge.NewJoiner(&out, " ")
+		if p.Network != nil && p.Network.hasRules() {
+			parts.Next()
+			p.Network.writeTo(out)
+		}
 
-	if p.Executable != nil && p.Executable.hasRules() {
-		parts.Next()
-		p.Executable.writeTo(&out)
-	}
-
-	if p.Filesystem != nil && p.Filesystem.hasRules() {
-		parts.Next()
-		p.Filesystem.writeTo(&out)
-	}
-
-	if p.Network != nil && p.Network.hasRules() {
-		parts.Next()
-		p.Network.writeTo(&out)
-	}
-
-	if p.Capabilities != nil {
-		parts.Next()
-		p.Capabilities.writeTo(&out)
-	}
-
-	out.WriteString("}")
-
-	return out.String()
+		if p.Capabilities != nil {
+			parts.Next()
+			p.Capabilities.writeTo(out)
+		}
+	})
 }
 
 // String returns a human-readable representation of the executable rules,
 // quoted and bounded as Profile.String is.
 func (e ExecutableRules) String() string {
-	var out merge.Builder
-
-	e.writeTo(&out)
-
-	return out.String()
+	return merge.Render(e.writeTo)
 }
 
 // hasRules reports whether the section renders as anything.
@@ -81,18 +69,14 @@ func (e ExecutableRules) hasRules() bool {
 func (e ExecutableRules) writeTo(out *merge.Builder) {
 	parts := merge.NewJoiner(out, " ")
 
-	writePathList(out, &parts, "exec:", e.AllowedExecutables)
-	writePathList(out, &parts, "lib:", e.AllowedLibraries)
+	merge.WriteList(out, &parts, "exec:", e.AllowedExecutables)
+	merge.WriteList(out, &parts, "lib:", e.AllowedLibraries)
 }
 
 // String returns a human-readable representation of the filesystem rules,
 // quoted and bounded as Profile.String is.
 func (f FilesystemRules) String() string {
-	var out merge.Builder
-
-	f.writeTo(&out)
-
-	return out.String()
+	return merge.Render(f.writeTo)
 }
 
 // hasRules reports whether the section renders as anything.
@@ -103,32 +87,18 @@ func (f FilesystemRules) hasRules() bool {
 func (f FilesystemRules) writeTo(out *merge.Builder) {
 	parts := merge.NewJoiner(out, " ")
 
-	writePathList(out, &parts, "r:", f.ReadOnlyPaths)
-	writePathList(out, &parts, "w:", f.WriteOnlyPaths)
-	writePathList(out, &parts, "rw:", f.ReadWritePaths)
-}
-
-// writePathList writes a list of paths after its prefix, as a part of its
-// section, unless it is empty.
-func writePathList(out *merge.Builder, parts *merge.Joiner, prefix string, paths []string) {
-	if len(paths) == 0 {
-		return
-	}
-
-	parts.Next()
-	out.WriteString(prefix)
-	merge.WriteTexts(out, paths, ",")
+	merge.WriteList(out, &parts, "r:", f.ReadOnlyPaths)
+	merge.WriteList(out, &parts, "w:", f.WriteOnlyPaths)
+	merge.WriteList(out, &parts, "rw:", f.ReadWritePaths)
 }
 
 // String returns a human-readable representation of the network rules.
 func (n NetworkRules) String() string {
-	var out merge.Builder
-
-	if n.hasRules() {
-		n.writeTo(&out)
+	if !n.hasRules() {
+		return ""
 	}
 
-	return out.String()
+	return merge.Render(n.writeTo)
 }
 
 // hasRules reports whether the section renders as anything: an empty one
@@ -177,11 +147,7 @@ const emptyCapabilities = "none"
 // capability spelled that way is quoted, which keeps a profile naming it
 // apart from one granting nothing.
 func (c CapabilityRules) String() string {
-	var out merge.Builder
-
-	c.writeTo(&out)
-
-	return out.String()
+	return merge.Render(c.writeTo)
 }
 
 func (c CapabilityRules) writeTo(out *merge.Builder) {

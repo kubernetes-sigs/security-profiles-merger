@@ -331,7 +331,7 @@ func TestTranslationAgreesWithApparmorParser(t *testing.T) {
 	}
 
 	for _, deviation := range parserDeviations {
-		matcher := matcherFor(deviation.pattern)
+		matcher := callMatcher(deviation.pattern)
 		if matcher.status != globInvalid {
 			t.Errorf("%q: port status = %d, want invalid (%s)",
 				deviation.pattern, matcher.status, deviation.reason)
@@ -408,7 +408,7 @@ func logParserVersion(t *testing.T, parser string) {
 func checkParserCase(t *testing.T, parser, features string, entry parserCase) {
 	t.Helper()
 
-	matcher := matcherFor(entry.pattern)
+	matcher := callMatcher(entry.pattern)
 
 	portValid := matcher.status == globUsable
 	if portValid != entry.valid {
@@ -1032,7 +1032,7 @@ func checkRandomPattern(
 ) randomOutcome {
 	t.Helper()
 
-	matcher := matcherFor(pattern)
+	matcher := callMatcher(pattern)
 	if matcher.status == globTooComplex {
 		return randomSkipped
 	}

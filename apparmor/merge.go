@@ -72,11 +72,8 @@ type InputError = spm.InputError
 // inputs, a single input included.
 func Intersect(profiles ...*Profile) (*Profile, error) {
 	matchers := newMatcherCache()
-	exceeded := false
 
-	return foldProfiles(
-		profiles, matchers, intersectStrategy{matchers: matchers, exceeded: &exceeded},
-	)
+	return foldProfiles(profiles, matchers, &intersectStrategy{matchers: matchers, exceeded: false})
 }
 
 // Union merges profiles so that the result permits an operation where any
@@ -163,7 +160,8 @@ func ValidateBaseline(baseline *Profile) error {
 // baseline QuotePath refuses and the capability names apparmor_parser does
 // not load, which a runtime could render into no merge result.
 func baselineRendering(baseline *Profile) error {
-	check := newValidator(newKeyCache())
+	// The checks here identify no path, so the validator needs no cache.
+	check := newValidator(nil)
 
 	for list, paths := range pathLists(baseline) {
 		for idx, path := range *paths {
@@ -469,12 +467,12 @@ func mergeCapabilities(left, right *CapabilityRules, mergeStrategy strategy) *Ca
 // lists would exceed the pair or work budget, which Intersect reports.
 type intersectStrategy struct {
 	matchers *matcherCache
-	exceeded *bool
+	exceeded bool
 }
 
 // budgetErr reports ErrBudgetExceeded once a list ran past the budget.
-func (op intersectStrategy) budgetErr() error {
-	if *op.exceeded {
+func (op *intersectStrategy) budgetErr() error {
+	if op.exceeded {
 		return fmt.Errorf("matching paths against patterns: %w", ErrBudgetExceeded)
 	}
 
@@ -484,15 +482,15 @@ func (op intersectStrategy) budgetErr() error {
 // intersect intersects the permissions of two lists, recording whether the
 // budget cut the matching short. Once one has, the merge fails, so the lists
 // after it are not matched.
-func (op intersectStrategy) intersect(left, right map[string]fsPermission) map[string]fsPermission {
-	if *op.exceeded {
+func (op *intersectStrategy) intersect(
+	left, right map[string]fsPermission,
+) map[string]fsPermission {
+	if op.exceeded {
 		return nil
 	}
 
 	merged, exceeded := intersectPerms(left, right, op.matchers)
-	if exceeded {
-		*op.exceeded = true
-	}
+	op.exceeded = exceeded
 
 	return merged
 }
@@ -508,7 +506,7 @@ func (op intersectStrategy) intersect(left, right map[string]fsPermission) map[s
 // since Validate refuses them (see dropUnusablePaths). A pattern past the
 // call's compile budget is kept, as a pairwise intersection keeps it where
 // both sides list it.
-func (op intersectStrategy) prepare(profile *Profile) {
+func (op *intersectStrategy) prepare(profile *Profile) {
 	populateEmpty(profile)
 
 	for _, paths := range pathLists(profile) {
@@ -523,7 +521,7 @@ func (op intersectStrategy) prepare(profile *Profile) {
 // where the input that lists it grants it more through its own patterns,
 // which the fold never matches against its own literals. A single input is
 // returned as it is.
-func (op intersectStrategy) mergeAll(profiles []*Profile) (*Profile, error) {
+func (op *intersectStrategy) mergeAll(profiles []*Profile) (*Profile, error) {
 	result, err := foldPairs(profiles, op)
 	if err != nil || len(profiles) < 2 {
 		return result, err
@@ -819,7 +817,7 @@ func populateEmpty(profile *Profile) {
 	}
 }
 
-func (intersectStrategy) mergeStrings(left, right []string) []string {
+func (*intersectStrategy) mergeStrings(left, right []string) []string {
 	return merge.IntersectSlice(left, right)
 }
 
@@ -827,12 +825,12 @@ func (intersectStrategy) mergeStrings(left, right []string) []string {
 // reading every path as granting one permission, so that the executable
 // lists and the filesystem rules are narrowed, budgeted and fallen back by
 // one implementation.
-func (op intersectStrategy) mergePaths(left, right []string) []string {
+func (op *intersectStrategy) mergePaths(left, right []string) []string {
 	return permittedPaths(op.intersect(readPerms(left), readPerms(right)))
 }
 
 // mergeBool never sees nil, since prepare populated every boolean.
-func (intersectStrategy) mergeBool(left, right *bool) *bool {
+func (*intersectStrategy) mergeBool(left, right *bool) *bool {
 	return mergeBoolPtr(left, right, func(lhs, rhs bool) bool { return lhs && rhs })
 }
 
@@ -852,7 +850,7 @@ func mergeBoolPtr(left, right *bool, combine func(lhs, rhs bool) bool) *bool {
 	return &val
 }
 
-func (op intersectStrategy) mergeFilesystem(left, right *FilesystemRules) *FilesystemRules {
+func (op *intersectStrategy) mergeFilesystem(left, right *FilesystemRules) *FilesystemRules {
 	return collapseFsPerms(op.intersect(expandFsPerms(left), expandFsPerms(right)))
 }
 
@@ -956,13 +954,7 @@ func addFsMatch(merged map[string]fsPermission, key string, perm fsPermission) {
 		return
 	}
 
-	if existing, ok := merged[key]; ok {
-		merged[key] = existing.union(perm)
-
-		return
-	}
-
-	merged[key] = perm
+	merged[key] = merged[key].union(perm)
 }
 
 // matchFsLiterals intersects every literal path with the globs of the other

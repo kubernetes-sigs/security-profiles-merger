@@ -373,16 +373,15 @@ func TestIntersectPastItsBudgetFailsForExecutables(t *testing.T) {
 		t.Fatalf("Intersect = %v, want ErrBudgetExceeded", err)
 	}
 
-	exceeded := false
-	strategy := intersectStrategy{matchers: newMatcherCache(), exceeded: &exceeded}
+	strategy := intersectStrategy{matchers: newMatcherCache(), exceeded: false}
 
 	got := strategy.mergePaths(
 		left.Executable.AllowedExecutables,
 		right.Executable.AllowedExecutables,
 	)
-	if !exceeded || !slices.Equal(got, []string{shared}) {
+	if !strategy.exceeded || !slices.Equal(got, []string{shared}) {
 		t.Errorf("mergePaths past the budget = %q, exceeded %t, want only %q",
-			got, exceeded, shared)
+			got, strategy.exceeded, shared)
 	}
 
 	// Once a list ran past the budget the merge fails, so the lists after

@@ -94,13 +94,8 @@ func bindDiffFlags(flags *flag.FlagSet) *diffOptions {
 // checkFlags checks the diff flags (see commandOptions).
 func (opts *diffOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) int {
 	validate := flagNamed(flags, "validate")
-	if validate {
-		_, err := parseValidateModes(opts.validate, 1)
-		if errors.Is(err, errUnknownValidateMode) {
-			_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
-
-			return exitUsage
-		}
+	if validate && checkValidateModes(opts.validate, stderr) != 0 {
+		return exitUsage
 	}
 
 	// The comparison itself does not depend on the ABI version, so --abi
@@ -147,12 +142,7 @@ func diffInputs(opts *diffOptions, inv *invocation) int {
 	// is checked under its mode first, which also bounds what a profile can
 	// make the comparison hold in memory (see the artifact limits).
 	if opts.validate != "" {
-		modes, err := parseValidateModes(opts.validate, len(inv.inputs))
-		if err != nil && !inv.stdinUnread {
-			inv.refusals = append(inv.refusals, err)
-		}
-
-		inv.checks = &inputChecks{modes: modes, strategy: ""}
+		inv.checks = &inputChecks{modes: inv.validateModes(opts.validate), strategy: ""}
 	}
 
 	// Exit code 1 means "different" for diff, so unparsable input is a

@@ -215,7 +215,7 @@ func TestMergeLookupsCountCleanedPaths(t *testing.T) {
 
 	for path, want := range map[string]uint64{"/a/b": 3, "//a//./b/": 3, "/": 1} {
 		got, _ := landlock.MergeLookups([]*landlock.Profile{
-			nil, fsProfile(fsRights{landlock.FSAccessReadFile}, landlock.PathRule{
+			fsProfile(fsRights{landlock.FSAccessReadFile}, landlock.PathRule{
 				Path: path, AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
 			}),
 		}, landlock.MaxMergeWork)

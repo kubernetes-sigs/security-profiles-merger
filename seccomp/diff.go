@@ -154,13 +154,15 @@ func diffProfiles(native specs.Arch, left, right *specs.LinuxSeccomp) (*ProfileD
 	}
 
 	diff := &ProfileDiff{
-		Equal:            false,
-		DefaultAction:    diffDefaultAction(left, right),
+		Equal: false,
+		DefaultAction: merge.NewValueDiff(
+			defaultClause(left).action, defaultClause(right).action,
+		),
 		DefaultErrnoRet:  diffDefaultErrnoRet(left, right),
 		Architectures:    diffArchitectures(native, left, right),
 		Flags:            merge.NewSliceDiff(loadedFlags(left.Flags), loadedFlags(right.Flags)),
-		ListenerPath:     diffText(left.ListenerPath, right.ListenerPath),
-		ListenerMetadata: diffText(left.ListenerMetadata, right.ListenerMetadata),
+		ListenerPath:     merge.NewValueDiff(left.ListenerPath, right.ListenerPath),
+		ListenerMetadata: merge.NewValueDiff(left.ListenerMetadata, right.ListenerMetadata),
 		Syscalls: diffSyscallLists(
 			left.Syscalls, right.Syscalls, defaultClause(left), defaultClause(right),
 		),
@@ -255,7 +257,8 @@ func loadedEntryKeys(
 	syscalls []specs.LinuxSyscall, def *clause, only map[string]bool,
 ) map[string][]string {
 	keys := make(map[string][]string)
-	seen := make(map[string]map[string]struct{})
+	// Keyed by syscall name and entry key.
+	seen := make(map[[2]string]struct{})
 
 	for idx := range syscalls {
 		entry := &syscalls[idx]
@@ -273,17 +276,11 @@ func loadedEntryKeys(
 				continue
 			}
 
-			byKey, ok := seen[name]
-			if !ok {
-				byKey = make(map[string]struct{})
-				seen[name] = byKey
-			}
-
-			if _, dup := byKey[key]; dup {
+			if _, dup := seen[[2]string{name, key}]; dup {
 				continue
 			}
 
-			byKey[key] = struct{}{}
+			seen[[2]string{name, key}] = struct{}{}
 			keys[name] = append(keys[name], key)
 		}
 	}
@@ -375,17 +372,6 @@ func changedSyscall(
 	}, true
 }
 
-func diffDefaultAction(left, right *specs.LinuxSeccomp) *ValueDiff[specs.LinuxSeccompAction] {
-	leftAction := defaultClause(left).action
-	rightAction := defaultClause(right).action
-
-	if leftAction == rightAction {
-		return nil
-	}
-
-	return &ValueDiff[specs.LinuxSeccompAction]{Left: leftAction, Right: rightAction}
-}
-
 // diffDefaultErrnoRet compares the default errno values as a runtime loads
 // them (see errnoMask), and reports them as reportedErrno spells them.
 func diffDefaultErrnoRet(left, right *specs.LinuxSeccomp) *ValueDiff[*uint] {
@@ -436,62 +422,29 @@ func withoutNative(native specs.Arch, archs []specs.Arch) []specs.Arch {
 	})
 }
 
-// diffText compares a listener field, returning nil where both sides agree.
-func diffText(left, right string) *ValueDiff[string] {
-	if left == right {
-		return nil
-	}
-
-	return &ValueDiff[string]{Left: left, Right: right}
-}
-
 // buildSyscallMap turns the rules collectRules read from syscall entries
 // into the per-name entries a runtime loads from them, in the normal form
-// the merge produces. def is the profile default.
+// the merge produces. def is the profile default. No name holds an entry
+// twice: collectRules drops exact duplicates and an unconditional rule hides
+// the conditional ones, and a summarized syscall lists its two clauses only
+// where they differ.
 func buildSyscallMap(
 	rules map[string]*syscallRules, def *clause,
 ) map[string][]SyscallEntry {
 	result := make(map[string][]SyscallEntry)
-	// Deduplication by key rather than by scanning what a name already
-	// holds, so that a syscall carrying many entries stays linear. Nothing
-	// reaches it today, since collectRules drops exact duplicates and an
-	// unconditional rule hides the conditional ones, but the diff must not
-	// list an entry twice if that ever changes.
-	seen := make(map[string]map[string]struct{})
 
 	for _, syscall := range syscallsOfRules(rules, def) {
 		for _, name := range syscall.Names {
-			entry := SyscallEntry{
+			result[name] = append(result[name], SyscallEntry{
 				Name:     name,
 				Action:   syscall.Action,
 				ErrnoRet: syscall.ErrnoRet,
 				Args:     syscall.Args,
-			}
-
-			byKey, ok := seen[name]
-			if !ok {
-				byKey = make(map[string]struct{})
-				seen[name] = byKey
-			}
-
-			key := syscallEntryKey(entry)
-			if _, dup := byKey[key]; dup {
-				continue
-			}
-
-			byKey[key] = struct{}{}
-
-			result[name] = append(result[name], entry)
+			})
 		}
 	}
 
 	return result
-}
-
-// syscallEntryKey formats the fields compareSyscallEntry compares, so that
-// entries compare equal exactly when their keys do.
-func syscallEntryKey(entry SyscallEntry) string {
-	return resultKey(entry.Action, entry.ErrnoRet, entry.Args)
 }
 
 func entriesToDetails(entries []SyscallEntry) []SyscallDetail {
@@ -557,29 +510,19 @@ func compareUintPtr(left, right *uint) int {
 // and a pointer to one both implement fmt.Stringer; through a nil pointer
 // it panics.
 func (d ProfileDiff) String() string {
-	diff := &d
-
-	if diff.Equal {
+	if d.Equal {
 		return "Diff{equal}"
 	}
 
-	var out merge.Builder
+	return merge.Framed("Diff{", func(out *merge.Builder, parts *merge.Joiner) {
+		writeScalarDiffs(out, parts, &d)
+		writeSliceDiffs(out, parts, &d)
+		writeListenerDiffs(out, parts, &d)
 
-	out.WriteString("Diff{")
-
-	parts := merge.NewJoiner(&out, " ")
-
-	writeScalarDiffs(&out, &parts, diff)
-	writeSliceDiffs(&out, &parts, diff)
-	writeListenerDiffs(&out, &parts, diff)
-
-	if diff.Syscalls != nil {
-		writeSyscallsDiff(&out, &parts, diff.Syscalls)
-	}
-
-	out.WriteString("}")
-
-	return out.String()
+		if d.Syscalls != nil {
+			writeSyscallsDiff(out, parts, d.Syscalls)
+		}
+	})
 }
 
 func writeScalarDiffs(out *merge.Builder, parts *merge.Joiner, diff *ProfileDiff) {
@@ -647,35 +590,21 @@ func writeSyscallsDiff(out *merge.Builder, parts *merge.Joiner, syscallsDiff *Sy
 	writeEntries(out, parts, "-", syscallsDiff.Removed)
 	writeEntries(out, parts, "+", syscallsDiff.Added)
 
-	for idx := range syscallsDiff.Changed {
-		if out.Full() {
-			return
-		}
-
+	merge.WriteParts(out, parts, len(syscallsDiff.Changed), "~", func(idx int) {
 		change := &syscallsDiff.Changed[idx]
 
-		parts.Next()
-		out.WriteString("~")
 		out.WriteText(change.Name)
 		out.WriteString(":")
 		writeDetails(out, change.Left)
 		out.WriteString("->")
 		writeDetails(out, change.Right)
-	}
+	})
 }
 
 // writeEntries writes each entry as its String method renders it, after
 // sign.
 func writeEntries(out *merge.Builder, parts *merge.Joiner, sign string, entries []SyscallEntry) {
-	for idx := range entries {
-		if out.Full() {
-			return
-		}
-
-		parts.Next()
-		out.WriteString(sign)
-		entries[idx].writeTo(out)
-	}
+	merge.WriteParts(out, parts, len(entries), sign, func(idx int) { entries[idx].writeTo(out) })
 }
 
 func writeDetails(out *merge.Builder, details []SyscallDetail) {

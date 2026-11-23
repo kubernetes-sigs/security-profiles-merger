@@ -430,6 +430,25 @@ func TestReportDuplicates(t *testing.T) {
 	}
 }
 
+func TestReportDuplicateValues(t *testing.T) {
+	t.Parallel()
+
+	values := []string{"A", "b", "a", "B\n"}
+
+	var report merge.Collector
+
+	merge.ReportDuplicateValues(&report, "list", values,
+		func(idx int) string { return strings.TrimSpace(strings.ToLower(values[idx])) }, errBuilt)
+
+	want := `list[2]: "a": built (also at list[0])` + "\n" +
+		`list[3]: "B\n": built (also at list[1])`
+
+	err := report.Err()
+	if !errors.Is(err, errBuilt) || err.Error() != want {
+		t.Errorf("report = %v, want %q", err, want)
+	}
+}
+
 // TestCheckInputsBoundsTheReport covers more failing profiles than a report
 // keeps: the first MaxJoinedErrors are kept, in order, and the rest counted.
 func TestCheckInputsBoundsTheReport(t *testing.T) {

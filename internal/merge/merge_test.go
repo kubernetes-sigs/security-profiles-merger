@@ -369,6 +369,19 @@ func TestNewSliceDiff(t *testing.T) {
 	}
 }
 
+func TestNewValueDiff(t *testing.T) {
+	t.Parallel()
+
+	if got := merge.NewValueDiff("a", "a"); got != nil {
+		t.Errorf("NewValueDiff of equal values = %+v, want nil", got)
+	}
+
+	got := merge.NewValueDiff("a", "")
+	if got == nil || got.Left != "a" || got.Right != "" {
+		t.Errorf("NewValueDiff(%q, %q) = %+v", "a", "", got)
+	}
+}
+
 // TestWriteSliceDiffOfNewSliceDiff checks that the results of NewSliceDiff
 // land on the right side of the formatted diff.
 func TestWriteSliceDiffOfNewSliceDiff(t *testing.T) {

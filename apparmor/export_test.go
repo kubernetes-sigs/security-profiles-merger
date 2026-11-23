@@ -23,7 +23,7 @@ import "fmt"
 // it silently drops. Validate leaves such patterns to ValidateStrict and
 // ValidateArtifact, which is what the fuzz targets check.
 func MatcherUsable(path string) bool {
-	return matcherFor(path).usable()
+	return newMatcherCache().matcher(path).usable()
 }
 
 // PathIdentity returns the rule a path spells, so that external tests can

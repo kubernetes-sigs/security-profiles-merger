@@ -59,11 +59,26 @@ func cacheState() (int, int) {
 	return len(globCacheEntries), globCacheBytes
 }
 
+// callMatcher returns the analysis of a path as a merge call reads it
+// first: from the shared cache, or analyzed, compiled and stored there.
+func callMatcher(path string) *globMatcher {
+	return newMatcherCache().matcher(path)
+}
+
+// compiledPattern returns the compiled analysis of a pattern without
+// reading or storing into the shared cache.
+func compiledPattern(pattern string) *globMatcher {
+	matcher := analyzePattern(pattern)
+	compileMatcher(matcher)
+
+	return matcher
+}
+
 func TestGlobRegexCacheEviction(t *testing.T) {
 	swapGlobCache(t)
 
 	for idx := range maxGlobCacheEntries + 1 {
-		matcherFor(fmt.Sprintf("/test/%d/*", idx))
+		callMatcher(fmt.Sprintf("/test/%d/*", idx))
 	}
 
 	if count, _ := cacheState(); count > maxGlobCacheEntries {
@@ -88,11 +103,11 @@ func TestGlobRegexCacheByteEviction(t *testing.T) {
 	// The bound weighs what an analysis retains, which for a compiled
 	// pattern is many times its length.
 	sample := pattern(0)
-	fits := maxGlobCacheBytes / analyzePattern(sample, true).retainedBytes(sample)
+	fits := maxGlobCacheBytes / compiledPattern(sample).retainedBytes(sample)
 	fewest := maxGlobCacheEntries
 
 	for idx := range 2 * fits {
-		matcherFor(pattern(idx))
+		callMatcher(pattern(idx))
 
 		count, bytes := cacheState()
 
@@ -123,18 +138,18 @@ func TestGlobRegexCacheByteEviction(t *testing.T) {
 func TestOversizePatternLeavesCacheAlone(t *testing.T) {
 	swapGlobCache(t)
 
-	matcherFor("/etc/*")
+	callMatcher("/etc/*")
 
 	filler := strings.Repeat("a", maxGlobCacheBytes/2)
 	for idx := range 4 {
-		matcher := matcherFor("/" + filler + strconv.Itoa(idx) + "/*")
+		matcher := callMatcher("/" + filler + strconv.Itoa(idx) + "/*")
 		if matcher.usable() || matcher.status != globTooComplex || matcher.kind != kindGlob {
 			t.Fatalf("oversize pattern analyzed as %+v, want an unusable glob", matcher)
 		}
 	}
 
 	count, bytes := cacheState()
-	if count != 1 || bytes != matcherFor("/etc/*").retainedBytes("/etc/*") {
+	if count != 1 || bytes != callMatcher("/etc/*").retainedBytes("/etc/*") {
 		t.Errorf("cache holds %d entries and %d bytes, want only /etc/*", count, bytes)
 	}
 }
@@ -166,9 +181,9 @@ func TestMatcherLiteralPrefix(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := matcherFor(test.pattern).prefix
+			got := callMatcher(test.pattern).prefix
 			if got != test.want {
-				t.Errorf("matcherFor(%q).prefix = %q, want %q",
+				t.Errorf("callMatcher(%q).prefix = %q, want %q",
 					test.pattern, got, test.want)
 			}
 		})
@@ -223,7 +238,7 @@ func TestClassMembers(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := matcherFor(test.pattern).matches(test.path); got != test.want {
+			if got := callMatcher(test.pattern).matches(test.path); got != test.want {
 				t.Errorf("%q matching %q = %v, want %v",
 					test.pattern, test.path, got, test.want)
 			}
@@ -284,14 +299,14 @@ func TestPatternStatus(t *testing.T) {
 		t.Run(test.pattern, func(t *testing.T) {
 			t.Parallel()
 
-			matcher := matcherFor(test.pattern)
+			matcher := callMatcher(test.pattern)
 			if matcher.kind != test.kind || matcher.status != test.status {
-				t.Errorf("matcherFor(%q) = kind %d status %d, want kind %d status %d",
+				t.Errorf("callMatcher(%q) = kind %d status %d, want kind %d status %d",
 					test.pattern, matcher.kind, matcher.status, test.kind, test.status)
 			}
 
 			if matcher.kind != kindLiteral && matcher.usable() != (test.status == globUsable) {
-				t.Errorf("matcherFor(%q).usable() = %v", test.pattern, matcher.usable())
+				t.Errorf("callMatcher(%q).usable() = %v", test.pattern, matcher.usable())
 			}
 
 			if want := test.kind != kindLiteral; IsGlobPattern(test.pattern) != want {
@@ -357,7 +372,7 @@ func TestStarComponentRule(t *testing.T) {
 		t.Run(test.pattern+" "+test.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := matcherFor(test.pattern).matches(test.name); got != test.want {
+			if got := callMatcher(test.pattern).matches(test.name); got != test.want {
 				t.Errorf("%q matching %q = %v, want %v", test.pattern, test.name, got, test.want)
 			}
 		})
@@ -380,7 +395,7 @@ func TestUnbalancedPatternsScanInLinearTime(t *testing.T) {
 		bound := testutil.StartWallClock(t, 2*time.Second)
 
 		IsGlobPattern(pattern)
-		analyzePattern(pattern, false)
+		analyzePattern(pattern)
 		dotComponentIn(pattern, newMatcherCache().matcher(pattern))
 
 		bound.Checkf("analyzing %d bytes of %q", size, char)
@@ -521,7 +536,7 @@ func TestExpandedByGuards(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := matcherFor(testCase.glob).expandedBy(matcherFor(testCase.base))
+			got := callMatcher(testCase.glob).expandedBy(callMatcher(testCase.base))
 			if got != testCase.want {
 				t.Errorf("%q expandedBy %q = %v, want %v (%s)",
 					testCase.glob, testCase.base, got, testCase.want, testCase.description)
@@ -684,7 +699,7 @@ func TestCallCompileBudgetIgnoresTheSharedCache(t *testing.T) {
 
 	const pattern = "/etc/{passwd,shadow}"
 
-	if !matcherFor(pattern).usable() {
+	if !callMatcher(pattern).usable() {
 		t.Fatal("the pattern does not compile on its own")
 	}
 
@@ -764,43 +779,6 @@ func TestMergesIgnoreTheSharedCache(t *testing.T) {
 		if !reflect.DeepEqual(cold, warm) {
 			t.Errorf("%s with a cold cache = %s, with a warm one = %s", name, cold, warm)
 		}
-	}
-}
-
-// TestLoadablePathsWithoutAPairedCopy covers a normalized copy that does not
-// pair with the profile, which normalizeProfile never returns: the checks
-// normalize the lists themselves and report what they report with the
-// paired copy, rather than index past the copy's lists.
-func TestLoadablePathsWithoutAPairedCopy(t *testing.T) {
-	t.Parallel()
-
-	profile := &Profile{
-		Executable: &ExecutableRules{
-			AllowedExecutables: []string{"/bin//./sh"}, AllowedLibraries: nil,
-		},
-		Filesystem: &FilesystemRules{
-			ReadOnlyPaths:  []string{"relative", "/etc//{a"},
-			ReadWritePaths: []string{"/srv/../x"},
-		},
-	}
-
-	report := func(normalized *Profile) string {
-		check := newValidator(newMatcherCache())
-		check.loadablePaths(profile, normalized)
-
-		err := check.report.Err()
-		if err == nil {
-			t.Fatal("loadablePaths reports nothing")
-		}
-
-		return err.Error()
-	}
-
-	want := report(normalizeProfile(profile))
-
-	empty := &Profile{Executable: nil, Filesystem: nil, Network: nil, Capabilities: nil}
-	if got := report(empty); got != want {
-		t.Errorf("without a paired copy loadablePaths reports %q, want %q", got, want)
 	}
 }
 
@@ -918,7 +896,7 @@ func TestRetainedBytesBoundsPrograms(t *testing.T) {
 
 			for idx := range count {
 				paths[idx] = fmt.Sprintf("/%d", idx) + shape(size)
-				matchers[idx] = analyzePattern(paths[idx], false)
+				matchers[idx] = analyzePattern(paths[idx])
 			}
 
 			var before, after runtime.MemStats
@@ -969,7 +947,7 @@ func TestNoAnalysisOutgrowsTheSharedCache(t *testing.T) {
 	} {
 		pattern := "/" + strings.Repeat(unit, (maxGlobPatternLen-1)/len(unit))
 
-		matcher := analyzePattern(pattern, true)
+		matcher := compiledPattern(pattern)
 		if !matcher.usable() {
 			t.Fatalf("%d bytes of %q do not compile", len(pattern), unit)
 		}
@@ -988,9 +966,9 @@ func TestNoAnalysisOutgrowsTheSharedCache(t *testing.T) {
 func TestOversizeAnalysisIsNotStored(t *testing.T) {
 	swapGlobCache(t)
 
-	matcherFor("/etc/*")
+	callMatcher("/etc/*")
 
-	huge := analyzePattern("/huge/*", false)
+	huge := analyzePattern("/huge/*")
 	huge.fragment = strings.Repeat("x", maxGlobCacheBytes)
 
 	if got := storeSharedMatcher("/huge/*", huge); got != huge {
@@ -1035,7 +1013,7 @@ func TestSyntacticChecksCompileNothing(t *testing.T) {
 	// What the shared cache holds, Validate reads rather than analyzing
 	// the pattern again, and it reads the analysis Diff reads, so the two
 	// take the same spellings for one rule.
-	shared := matcherFor(pattern)
+	shared := callMatcher(pattern)
 
 	keys := newKeyCache()
 	if keys.matcher(pattern) != shared {
@@ -1281,7 +1259,7 @@ func TestFailedCompileIsNotCharged(t *testing.T) {
 
 	const pattern = "/failed/*"
 
-	failed := analyzePattern(pattern, false)
+	failed := analyzePattern(pattern)
 	if failed.status != globUncompiled {
 		t.Fatal("the pattern is not one the matcher compiles")
 	}
@@ -1319,7 +1297,7 @@ func TestPathKeysDoNotCollideAcrossKinds(t *testing.T) {
 	// leaves an alternation without a comma, and that of the second is past
 	// the length limit: both are identified by their text.
 	for _, pattern := range []string{`/\001*`, "/" + strings.Repeat("?", 2000)} {
-		expression := analyzePattern(pattern, false).fragment
+		expression := analyzePattern(pattern).fragment
 		if expression == "" {
 			t.Fatalf("%q translates to no expression", pattern)
 		}
@@ -1352,5 +1330,42 @@ func TestPathKeysDoNotCollideAcrossKinds(t *testing.T) {
 		if !errors.Is(err, ErrRelativePath) {
 			t.Errorf("Union of %q and its expression = %v, want %v", pattern, err, ErrRelativePath)
 		}
+	}
+}
+
+// TestLoadablePathsWithoutAPairedCopy covers a normalized copy that does not
+// pair with the profile, which normalizeProfile never returns: the checks
+// normalize the lists themselves and report what they report with the
+// paired copy, rather than index past the copy's lists.
+func TestLoadablePathsWithoutAPairedCopy(t *testing.T) {
+	t.Parallel()
+
+	profile := &Profile{
+		Executable: &ExecutableRules{
+			AllowedExecutables: []string{"/bin//./sh"}, AllowedLibraries: nil,
+		},
+		Filesystem: &FilesystemRules{
+			ReadOnlyPaths:  []string{"relative", "/etc//{a"},
+			ReadWritePaths: []string{"/srv/../x"},
+		},
+	}
+
+	report := func(normalized *Profile) string {
+		check := newValidator(newMatcherCache())
+		check.loadablePaths(profile, normalized)
+
+		err := check.report.Err()
+		if err == nil {
+			t.Fatal("loadablePaths reports nothing")
+		}
+
+		return err.Error()
+	}
+
+	want := report(normalizeProfile(profile))
+
+	empty := &Profile{Executable: nil, Filesystem: nil, Network: nil, Capabilities: nil}
+	if got := report(empty); got != want {
+		t.Errorf("without a paired copy loadablePaths reports %q, want %q", got, want)
 	}
 }

@@ -75,10 +75,6 @@ func pickClause(
 	return right
 }
 
-func lessRestrictiveClause(left, right clause) clause {
-	return pickClause(left, right, lessRestrictive)
-}
-
 // syscallRules holds every clause of one profile for a single syscall name.
 // Past the collectRules budget it holds a summary of them instead, which
 // settleInputs turns into the one clause a collapse picks before any merge
@@ -488,8 +484,6 @@ const maxPruneClauses = 512
 
 // ruleMerger describes one merge direction over the clause model.
 type ruleMerger struct {
-	// pick chooses the action for a call that both sides constrain.
-	pick func(first, second specs.LinuxSeccompAction) specs.LinuxSeccompAction
 	// intersect selects intersection semantics: a fallback exists only when
 	// both sides have one, unconstrained regions are dropped, and a clause is
 	// emitted for the overlap of two conditional clauses to express "both
@@ -518,19 +512,21 @@ type ruleMerger struct {
 // intersectRulesFor and unionRulesFor return the merger of a node whose
 // native architecture is the given one.
 func intersectRulesFor(native specs.Arch) ruleMerger {
-	return ruleMerger{
-		pick: moreRestrictive, intersect: true, narrow: false, narrowCovered: false, native: native,
-	}
+	return ruleMerger{intersect: true, narrow: false, narrowCovered: false, native: native}
 }
 
 func unionRulesFor(native specs.Arch) ruleMerger {
-	return ruleMerger{
-		pick:          lessRestrictive,
-		intersect:     false,
-		narrow:        false,
-		narrowCovered: false,
-		native:        native,
+	return ruleMerger{intersect: false, narrow: false, narrowCovered: false, native: native}
+}
+
+// pick chooses the action for a call that both sides constrain: the more
+// restrictive one for intersection, the less restrictive one for union.
+func (m ruleMerger) pick(first, second specs.LinuxSeccompAction) specs.LinuxSeccompAction {
+	if m.intersect {
+		return moreRestrictive(first, second)
 	}
+
+	return lessRestrictive(first, second)
 }
 
 func (m ruleMerger) pickClause(left, right clause) clause {
@@ -773,13 +769,13 @@ func (m ruleMerger) mergeRules(
 ) (*clause, []clause) {
 	leftFallback := left.fallback(leftDef)
 	rightFallback := right.fallback(rightDef)
-	fallback := m.mergeFallback(leftFallback, rightFallback)
+	fallback := m.pickClause(*leftFallback, *rightFallback)
 
 	leftConds := left.conditionals()
 	rightConds := right.conditionals()
 
 	if m.exceedsClauseBudget(leftConds, rightConds) {
-		return m.collapseAll(fallback, leftConds, rightConds), nil
+		return m.collapseAll(&fallback, leftConds, rightConds), nil
 	}
 
 	var conditional []clause
@@ -808,7 +804,7 @@ func (m ruleMerger) mergeRules(
 		}
 	}
 
-	return fallback, conditional
+	return &fallback, conditional
 }
 
 // exceedsClauseBudget reports whether merging the two clause sets would take
@@ -926,7 +922,7 @@ func groupByArgs(clauses []clause) (map[string]clause, []string) {
 		key := sortedArgsKey(current.args)
 
 		if existing, ok := byArgs[key]; ok {
-			byArgs[key] = lessRestrictiveClause(existing, current)
+			byArgs[key] = pickClause(existing, current, lessRestrictive)
 
 			continue
 		}
@@ -1003,14 +999,6 @@ func clauseKeys(clauses []clause) []string {
 	}
 
 	return keys
-}
-
-// mergeFallback combines the fallback clauses of both sides, each the
-// unconditional clause of a syscall or the default of its profile.
-func (m ruleMerger) mergeFallback(left, right *clause) *clause {
-	picked := m.pickClause(*left, *right)
-
-	return &picked
 }
 
 // adjustClauses returns one clause per entry of clauses, with the action

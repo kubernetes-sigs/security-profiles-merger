@@ -325,22 +325,7 @@ var ErrRuleConflict = errors.New("libseccomp rejected a conflicting rule (EEXIST
 // classic BPF program libseccomp compiles for it, which is what the kernel
 // would run.
 func Compile(profile *specs.LinuxSeccomp, scratch string) ([]Instruction, error) {
-	var raw []byte
-
-	err := withFilter(profile, func(ctx C.scmp_filter_ctx) error {
-		var err error
-
-		raw, err = export(scratch, func(fd C.int) C.int {
-			return C.seccomp_export_bpf(ctx, fd)
-		})
-
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return decodeBPF(raw)
+	return compile(profile, scratch, false)
 }
 
 // CompileListedOnly is Compile for a filter of the listed architectures
@@ -351,9 +336,14 @@ func Compile(profile *specs.LinuxSeccomp, scratch string) ([]Instruction, error)
 // architecture, which libseccomp translates by name as it would from any
 // other.
 func CompileListedOnly(profile *specs.LinuxSeccomp, scratch string) ([]Instruction, error) {
+	return compile(profile, scratch, true)
+}
+
+// compile is Compile, or CompileListedOnly where listedOnly is set.
+func compile(profile *specs.LinuxSeccomp, scratch string, listedOnly bool) ([]Instruction, error) {
 	var raw []byte
 
-	err := withFilterFor(profile, true, func(ctx C.scmp_filter_ctx) error {
+	err := withFilterFor(profile, listedOnly, func(ctx C.scmp_filter_ctx) error {
 		var err error
 
 		raw, err = export(scratch, func(fd C.int) C.int {

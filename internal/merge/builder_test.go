@@ -240,3 +240,47 @@ func TestTruncated(t *testing.T) {
 		t.Errorf("Truncated(%q) = true for a value spelling the marker", value.String())
 	}
 }
+
+func TestFramedJoinsParts(t *testing.T) {
+	t.Parallel()
+
+	got := merge.Framed("List{", func(out *merge.Builder, parts *merge.Joiner) {
+		merge.WriteList(out, parts, "empty:", []string(nil))
+		merge.WriteList(out, parts, "a:", []string{"x", "y z"})
+		merge.WriteParts(out, parts, 2, "+", func(idx int) { out.WriteUint(uint64(idx)) })
+	})
+
+	want := `List{a:x,"y z" +0 +1}`
+	if got != want {
+		t.Errorf("Framed() = %q, want %q", got, want)
+	}
+
+	if got := merge.Framed("List{", func(*merge.Builder, *merge.Joiner) {}); got != "List{}" {
+		t.Errorf("Framed() without parts = %q, want %q", got, "List{}")
+	}
+}
+
+func TestWritePartsStopsAtTheBound(t *testing.T) {
+	t.Parallel()
+
+	written := 0
+
+	got := merge.Render(func(out *merge.Builder) {
+		parts := merge.NewJoiner(out, " ")
+
+		merge.WriteParts(out, &parts, merge.MaxFormattedBytes, "+", func(int) {
+			written++
+
+			out.WriteString("abc")
+		})
+	})
+
+	if !merge.Truncated(got) || len(got) > merge.MaxFormattedBytes {
+		t.Errorf("WriteParts() past the bound is %d bytes, ending %q",
+			len(got), got[len(got)-40:])
+	}
+
+	if written >= merge.MaxFormattedBytes {
+		t.Errorf("WriteParts() wrote all %d parts past the bound", written)
+	}
+}

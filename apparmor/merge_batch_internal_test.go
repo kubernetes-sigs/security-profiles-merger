@@ -185,7 +185,7 @@ func TestUnionFoldsBatchesWithPatterns(t *testing.T) {
 // foldingIntersect is intersectStrategy without the pass over the literals,
 // the merge Intersect returns where the pass runs past its budget.
 type foldingIntersect struct {
-	intersectStrategy
+	*intersectStrategy
 }
 
 func (op foldingIntersect) mergeAll(profiles []*Profile) (*Profile, error) {
@@ -253,7 +253,7 @@ func TestIntersectLiteralPassBudget(t *testing.T) {
 		matchers := newMatcherCache()
 
 		folded, err := foldProfiles(profiles, matchers, foldingIntersect{
-			intersectStrategy{matchers: matchers, exceeded: new(bool)},
+			&intersectStrategy{matchers: matchers, exceeded: false},
 		})
 		if err != nil {
 			t.Fatalf("fold: %v", err)
