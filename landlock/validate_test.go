@@ -450,24 +450,26 @@ func TestValidateRejectsPaths(t *testing.T) {
 			merges:     true,
 		},
 		{
+			// A path made of "." components is relative, not empty.
 			name:       "path resolving to dot",
 			profile:    readFileProfile([]landlock.PathRule{readRule("./")}),
 			validators: []validator{validateBase},
-			want:       []error{landlock.ErrEmptyPath},
+			want:       []error{landlock.ErrRelativePath},
+			notWant:    []error{landlock.ErrEmptyPath},
 			merges:     true,
 		},
 		{
 			name:       "dot",
 			profile:    readFileProfile([]landlock.PathRule{readRule(".")}),
 			validators: []validator{validateBase},
-			want:       []error{landlock.ErrEmptyPath},
+			want:       []error{landlock.ErrRelativePath},
 			merges:     true,
 		},
 		{
 			name:       "dots and slashes resolving to dot",
 			profile:    readFileProfile([]landlock.PathRule{readRule(".//./")}),
 			validators: []validator{validateBase},
-			want:       []error{landlock.ErrEmptyPath},
+			want:       []error{landlock.ErrRelativePath},
 			merges:     true,
 		},
 		{
@@ -477,16 +479,25 @@ func TestValidateRejectsPaths(t *testing.T) {
 			want:       []error{landlock.ErrNulInPath},
 		},
 		{
+			// The kernel resolves a relative path against the working
+			// directory of the process loading the ruleset, which the merge
+			// cannot see, so every level and the merges refuse it.
 			name:       "relative path",
 			profile:    fsProfile(read, readRule("relative/path")),
-			validators: []validator{validateStrict},
+			validators: everyLevel,
 			want:       []error{landlock.ErrRelativePath},
+			message:    `pathRules[0].path: "relative/path": relative path (must be absolute)`,
+			merges:     true,
 		},
 		{
-			name:       "relative path in an artifact",
-			profile:    fsProfile(read, readRule("etc")),
-			validators: []validator{validateArtifact},
-			want:       []error{landlock.ErrRelativePath},
+			// A relative path holding a ".." component is reported for the
+			// component alone, as documented on ErrRelativePath.
+			name:       "relative path with a parent component",
+			profile:    fsProfile(read, readRule("../x")),
+			validators: everyLevel,
+			want:       []error{landlock.ErrParentPath},
+			notWant:    []error{landlock.ErrRelativePath},
+			merges:     true,
 		},
 		{
 			// The length limit bounds the cost of every later check and of
@@ -526,7 +537,7 @@ func TestValidateRejectsPaths(t *testing.T) {
 			// slash.
 			name:       "relative path with a trailing slash",
 			profile:    fsProfile(read, readRule("srv/f/")),
-			validators: []validator{validateArtifact},
+			validators: everyLevel,
 			want:       []error{landlock.ErrRelativePath},
 			notWant:    []error{landlock.ErrTrailingSlash},
 		},
@@ -1305,10 +1316,9 @@ func TestValidateMessages(t *testing.T) {
 
 	want := strings.Join([]string{
 		`pathRules[0].path: "/a\x00b": path contains a NUL byte`,
-		`pathRules[1].path: "./": empty path (resolves to ".")`,
+		`pathRules[1].path: "./": relative path (must be absolute)`,
 		`pathRules[2].path: empty path`,
 		`netRules[1].port: 443: duplicate rule (also at netRules[0].port)`,
-		`pathRules[1].path: "./": relative path (must be absolute)`,
 		`pathRules[3].accessFs: rule grants no access right (path "/srv")`,
 		`netRules[1].accessNet: rule grants no access right (port 443)`,
 	}, "\n")
@@ -1347,10 +1357,6 @@ func TestValidateBaseline(t *testing.T) {
 		profile *landlock.Profile
 		want    error
 	}{
-		"relative path": {
-			fsProfile(read, landlock.PathRule{Path: "etc", AccessFS: read}),
-			landlock.ErrRelativePath,
-		},
 		"trailing slash": {
 			fsProfile(read, landlock.PathRule{Path: "/etc/", AccessFS: read}),
 			landlock.ErrTrailingSlash,
@@ -1377,12 +1383,6 @@ func TestValidateBaseline(t *testing.T) {
 			t.Errorf("%s: ValidateBaseline = %v, want %v", name, err, test.want)
 		}
 	}
-
-	// A relative rule grants nothing an absolute path sees, so the
-	// intersection drops the baseline's grant without an error.
-	relative := fsProfile(read, landlock.PathRule{Path: "etc", AccessFS: read})
-	assertMergeFormat(t, "Intersect", landlock.Intersect, "Profile{fs:read_file}",
-		relative, fsProfile(read, landlock.PathRule{Path: pathEtc, AccessFS: read}))
 }
 
 // TestOptionsValidateBaseline checks that Options adds the node's ABI

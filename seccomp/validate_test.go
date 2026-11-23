@@ -1885,3 +1885,76 @@ func TestValidateBaselineReportsWideValuesNextToAnArtifact(t *testing.T) {
 		t.Errorf("ValidateBaseline without x86 = %v, want nil", err)
 	}
 }
+
+// TestValidateBaselineAcceptsCoveredRules covers a baseline in safe shapes
+// holding a rule another rule with the same result covers: every merge of
+// two inputs drops the covered rule, which changes nothing a call gets, so
+// Diff and Intersect of the baseline alone drop it too, and ValidateBaseline
+// accepts the baseline. A covered rule with another result is outside the
+// safe shapes, where libseccomp's order may let it decide, and is still
+// refused.
+func TestValidateBaselineAcceptsCoveredRules(t *testing.T) {
+	t.Parallel()
+
+	node := seccomp.ForArch(specs.ArchX86_64)
+
+	for name, baseline := range map[string]*specs.LinuxSeccomp{
+		"an equality inside a range": profileOf(specs.ActErrno,
+			filtered("personality", specs.ActAllow, arg(0, specs.OpEqualTo, 8)),
+			filtered("personality", specs.ActAllow, arg(0, specs.OpLessThan, 16)),
+		),
+		"two conditions on one index of one entry": profileOf(specs.ActErrno,
+			filtered("read", specs.ActTrace,
+				arg(0, specs.OpGreaterThan, 1), arg(0, specs.OpGreaterThan, 5)),
+		),
+		"one filter spelled twice": profileOf(specs.ActErrno,
+			filtered("personality", specs.ActAllow, arg(0, specs.OpLessThan, 1)),
+			filtered("personality", specs.ActAllow, arg(0, specs.OpEqualTo, 0)),
+		),
+		"a mask inside a wider mask": profileOf(specs.ActErrno,
+			filtered("ioctl", specs.ActAllow, masked(2, 6, 4)),
+			filtered("ioctl", specs.ActAllow, masked(2, 2, 0)),
+		),
+	} {
+		baseline = on(baseline, specs.ArchX86_64)
+
+		err := node.ValidateBaseline(baseline)
+		if err != nil {
+			t.Errorf("%s: ValidateBaseline = %v, want nil", name, err)
+		}
+
+		// The claim of the Diff section: a merge with an input that
+		// constrains nothing compares equal to a baseline in safe shapes.
+		allowAll := on(profileOf(specs.ActAllow), specs.ArchX86_64)
+		killAll := on(profileOf(specs.ActKillProcess), specs.ArchX86_64)
+
+		for merge, result := range map[string]func() (*specs.LinuxSeccomp, error){
+			"Intersect": func() (*specs.LinuxSeccomp, error) { return node.Intersect(baseline, allowAll) },
+			"Union":     func() (*specs.LinuxSeccomp, error) { return node.Union(baseline, killAll) },
+			"Intersect alone": func() (*specs.LinuxSeccomp, error) {
+				return node.Intersect(baseline)
+			},
+		} {
+			merged, err := result()
+			if err != nil {
+				t.Fatalf("%s: %s: %v", name, merge, err)
+			}
+
+			diff, err := node.Diff(baseline, merged)
+			if err != nil || !diff.Equal {
+				t.Errorf("%s: Diff against %s = %v, %v, want equal", name, merge, diff, err)
+			}
+		}
+	}
+
+	covered := on(profileOf(specs.ActErrno,
+		filtered("personality", specs.ActTrap, arg(0, specs.OpEqualTo, 8)),
+		filtered("personality", specs.ActAllow, arg(0, specs.OpLessThan, 16)),
+	), specs.ArchX86_64)
+
+	err := node.ValidateBaseline(covered)
+	if !errors.Is(err, seccomp.ErrInexactBaseline) {
+		t.Errorf("ValidateBaseline of a covered rule with another result = %v, "+
+			"want ErrInexactBaseline", err)
+	}
+}

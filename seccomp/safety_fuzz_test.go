@@ -17,6 +17,7 @@ limitations under the License.
 package seccomp_test
 
 import (
+	"slices"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -230,6 +231,15 @@ func addSafetySeeds(f *testing.F) {
 	// one action and two errno values, for each merge.
 	f.Add([]byte("100120101010B12101000\x0010B000000"))
 	f.Add([]byte("1007101000110B711010011000B"))
+	// A mask with a value other than 0 on one side, read ALLOW where
+	// a0 & 6 == 4, and a range on the other, read ALLOW where a0 > 7. The
+	// left input repeats an unconditional clone ALLOW to fill its six
+	// entries, so that the right one gets the bytes after them.
+	f.Add([]byte{
+		0, 4, 0, 0, 8, 0, 1, 1, 1, 6, 1, 4, 6,
+		2, 8, 0, 0, 2, 8, 0, 0, 2, 8, 0, 0, 2, 8, 0, 0, 2, 8, 0, 0,
+		4, 0, 0, 8, 0, 1, 1, 1, 7, 1, 0, 5,
+	})
 }
 
 // safetyDirection describes one merge direction for checkMergeSafety.
@@ -492,4 +502,130 @@ func checkSafeAgainstEach(
 			}
 		}
 	})
+}
+
+// TestMergeSafetyOnHandPickedCalls checks the merges against inputs and
+// calls the fuzz targets do not reach: those decode two inputs filtering
+// arguments 0 and 1 and sample calls at each filter value and its
+// neighbours, so they miss a region only a mask and a range together
+// bound, such as "a0 & 6 == 4" and "a0 > 7", which hold together for 12
+// and 13 among the values below 16, masked comparisons with another value
+// than 0, the third argument, and three inputs. Each case lists calls of
+// three arguments that fall into such regions, and both orders of the
+// inputs must be safe against every input for each of them.
+func TestMergeSafetyOnHandPickedCalls(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name   string
+		inputs []*specs.LinuxSeccomp
+		calls  [][]uint64
+	}{
+		{
+			name: "a mask with a value next to a range on one argument",
+			inputs: []*specs.LinuxSeccomp{
+				profileOf(specs.ActErrno, filtered("read", specs.ActAllow, masked(0, 6, 4))),
+				profileOf(specs.ActErrno,
+					filtered("read", specs.ActAllow, arg(0, specs.OpGreaterThan, 7))),
+			},
+			calls: [][]uint64{
+				{4, 0, 0},
+				{5, 0, 0},
+				{6, 0, 0},
+				{8, 0, 0},
+				{12, 0, 0},
+				{13, 0, 0},
+				{14, 0, 0},
+				{20, 0, 0},
+				{28, 0, 0},
+			},
+		},
+		{
+			name: "masks with values of different results on the third argument",
+			inputs: []*specs.LinuxSeccomp{
+				profileOf(specs.ActErrno,
+					filtered("socket", specs.ActAllow, masked(2, 0xf0, 0x10)),
+					filtered("socket", specs.ActTrap, masked(2, 0x0f, 0x03)),
+				),
+				profileOf(specs.ActKillProcess,
+					filtered("socket", specs.ActLog, arg(2, specs.OpGreaterThan, 0x12)),
+				),
+			},
+			calls: [][]uint64{
+				{0, 0, 0x03},
+				{0, 0, 0x10},
+				{0, 0, 0x12},
+				{0, 0, 0x13},
+				{0, 0, 0x1f},
+				{0, 0, 0x23},
+				{1, 1, 0x13},
+				{0, 0, 0x30},
+			},
+		},
+		{
+			name: "three inputs filtering three arguments",
+			inputs: []*specs.LinuxSeccomp{
+				profileOf(specs.ActKillProcess,
+					filtered("writev", specs.ActAllow, masked(1, 3, 1))),
+				profileOf(specs.ActErrno,
+					filtered("writev", specs.ActAllow, arg(2, specs.OpLessThan, 4))),
+				profileOf(specs.ActAllow,
+					filtered("writev", specs.ActTrap, arg(0, specs.OpEqualTo, 2))),
+			},
+			calls: [][]uint64{
+				{1, 1, 3},
+				{2, 1, 3},
+				{1, 5, 3},
+				{1, 2, 3},
+				{1, 1, 4},
+				{2, 5, 4},
+				{1, 3, 0},
+				{0, 9, 2},
+			},
+		},
+	} {
+		reversed := slices.Clone(test.inputs)
+		slices.Reverse(reversed)
+
+		for _, direction := range []safetyDirection{intersectSafety(), unionSafety()} {
+			for _, inputs := range [][]*specs.LinuxSeccomp{test.inputs, reversed} {
+				result, err := direction.merge(inputs...)
+				if err != nil {
+					t.Fatalf("%s: %s: %v", test.name, direction.name, err)
+				}
+
+				checkCallsAgainstEach(t, test.name, direction, test.inputs, result, test.calls)
+			}
+		}
+	}
+}
+
+// checkCallsAgainstEach checks for each call of every syscall the inputs
+// name that a merge result is safe against every one of the inputs.
+func checkCallsAgainstEach(
+	t *testing.T, name string, direction safetyDirection, inputs []*specs.LinuxSeccomp,
+	result *specs.LinuxSeccomp, calls [][]uint64,
+) {
+	t.Helper()
+
+	cache := judges{}
+
+	for _, input := range inputs {
+		for _, entry := range input.Syscalls {
+			for _, syscall := range entry.Names {
+				for _, call := range calls {
+					got := cache.evalCall(t, result, syscall, call)
+
+					for idx, other := range inputs {
+						verdict := cache.judgeCall(other, syscall, call)
+						if !direction.safe(got, verdict) {
+							t.Errorf("%s: %s: %s%v yields %s, input %d may yield %v\n  result: %s",
+								name, direction.name, syscall, call, got, idx, verdict.possible,
+								seccomp.FormatProfile(result))
+						}
+					}
+				}
+			}
+		}
+	}
 }

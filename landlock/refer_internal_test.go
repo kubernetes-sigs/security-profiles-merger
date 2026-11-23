@@ -331,11 +331,11 @@ func TestFSBitsFitAMask(t *testing.T) {
 // at or beneath a grant of refer: a root and the paths it prefixes followed
 // by a "/", which sort together, but not a sibling whose name only starts
 // like the root's, such as "/a-b" or "/ab" for "/a", which sorts between
-// the two; "/" holds every absolute path and no relative one.
+// the two; "/" holds every path.
 func TestPathsBeneathFindsTheSortedRange(t *testing.T) {
 	t.Parallel()
 
-	paths := []string{"/a", "/a-b", "/a/b", "/a/c/d", "/ab", "/b", "rel", "rel/x"}
+	paths := []string{"/a", "/a-b", "/a/b", "/a/c/d", "/ab", "/b"}
 	slices.Sort(paths)
 
 	for _, test := range []struct {
@@ -344,7 +344,6 @@ func TestPathsBeneathFindsTheSortedRange(t *testing.T) {
 	}{
 		{[]string{"/a"}, []string{"/a", "/a/b", "/a/c/d"}},
 		{[]string{"/"}, []string{"/a", "/a-b", "/a/b", "/a/c/d", "/ab", "/b"}},
-		{[]string{"rel"}, []string{"rel", "rel/x"}},
 		{[]string{"/a/b", "/b"}, []string{"/a/b", "/b"}},
 		{[]string{"/a/c"}, []string{"/a/c/d"}},
 		{[]string{"/zz"}, nil},

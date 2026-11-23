@@ -139,18 +139,17 @@ if diff, err := seccomp.Diff(baseline, effective); err == nil && diff.Architectu
 The same calls exist in `apparmor` and `landlock`, which need the
 [extra steps](#extra-steps-after-intersect) below before step 4. Check a
 Landlock baseline with `landlock.Options{ABI: nodeABI}.ValidateBaseline`,
-not with `Validate`: it refuses a relative path, which covers no path in
-the merge, so `Intersect` would drop what the baseline grants there
-without an error, a trailing slash, a rule granting a right the baseline
-does not handle, and a right the node's kernel does not know, which would
-fail every merge result. It has no self-check: `Intersect` of one Landlock
-profile drops the rights a rule on an ancestor already grants, so a valid
-baseline granting `read_file` on `/` and `read_file` and `execute` on
-`/usr` diffs unequal against it without the merge taking anything away. It
-also drops a `refer` the baseline lists in `handledAccessFs` without a rule
-granting it, where a filesystem right ABI version 1 knows is handled beside
-it, since the kernel denies `refer` there anyway, so a baseline listing
-`read_file` and `refer` diffs unequal for that too.
+not with `Validate`: it refuses a trailing slash, a rule granting a right
+the baseline does not handle, and a right the node's kernel does not know,
+which would fail every merge result. It has no self-check: `Intersect`
+of one Landlock profile drops the rights a rule on an ancestor already
+grants, so a valid baseline granting `read_file` on `/` and `read_file`
+and `execute` on `/usr` diffs unequal against it without the merge taking
+anything away. It also drops a `refer` the baseline lists in
+`handledAccessFs` without a rule granting it, where a filesystem right ABI
+version 1 knows is handled beside it, since the kernel denies `refer`
+there anyway, so a baseline listing `read_file` and `refer` diffs unequal
+for that too.
 
 0. **Check the baseline once, at config load, with `ValidateBaseline`**
    (for Landlock see above): `Validate`, then

@@ -1214,8 +1214,8 @@ func TestValidateListOfTheWrongLengthUsesItsWeakestMode(t *testing.T) {
 func TestValidateBaselineAndABI(t *testing.T) {
 	t.Parallel()
 
-	relative := writeTemp(t, `{"handledAccessFs":["read_file"],`+
-		`"pathRules":[{"path":"usr","accessFs":["read_file"]}]}`)
+	trailing := writeTemp(t, `{"handledAccessFs":["read_file"],`+
+		`"pathRules":[{"path":"/usr/","accessFs":["read_file"]}]}`)
 	scoped := writeTemp(t, `{"scoped":["signal"]}`)
 	unhandled := writeTemp(t, `{"handledAccessFs":["read_file"],`+
 		`"pathRules":[{"path":"/usr","accessFs":["write_file"]}]}`)
@@ -1228,13 +1228,13 @@ func TestValidateBaselineAndABI(t *testing.T) {
 		want     string
 	}{
 		{
-			name:     "a relative Landlock path passes the default checks",
-			args:     []string{relative},
+			name:     "a Landlock path ending in a slash passes the default checks",
+			args:     []string{trailing},
 			wantCode: 0,
 		},
 		{
-			name:     "a relative Landlock path fails --baseline",
-			args:     []string{"--baseline", relative},
+			name:     "a Landlock path ending in a slash fails --baseline",
+			args:     []string{"--baseline", trailing},
 			wantCode: 1,
 			want:     "pathRules[0].path",
 		},

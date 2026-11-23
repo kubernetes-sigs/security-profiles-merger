@@ -65,18 +65,18 @@ type scanFrame struct {
 	object bool
 	// wantKey reports whether the next token in an object is a member name.
 	wantKey bool
-	// typ is the struct, map, slice or array type the value of the frame
-	// decodes into, behind any pointers; nil for any other type and where
-	// the scan follows no type, which leaves every value inside unchecked.
+	// typ is the struct or slice type the value of the frame decodes into,
+	// behind any pointers; nil for any other type and where the scan follows
+	// no type, which leaves every value inside unchecked.
 	typ reflect.Type
-	// named maps the JSON name of each field a member fills to whether the
-	// member is given a value other than null, for an object of a struct
-	// type with required fields where the scan looks for missing members;
-	// nil otherwise. It is keyed by the field rather than the folded member
-	// name, since two fields whose names fold alike are filled apart. field
-	// is the JSON name of the field the member whose value comes next
-	// fills, "" for none, and child the type of the value of the member or
-	// element that comes next.
+	// named holds, as true, the JSON name of each field a member gives a
+	// value other than null, for an object of a struct type with required
+	// fields where the scan looks for missing members; it is nil otherwise.
+	// It is keyed by the field rather than the folded member name, since
+	// two fields whose names fold alike are filled apart. field is the JSON
+	// name of the field the member whose value comes next fills, "" for
+	// none, and child the type of the value of the member or element that
+	// comes next.
 	named map[string]bool
 	field string
 	child reflect.Type
@@ -102,9 +102,8 @@ type documentScan struct {
 // fields, ignoring case, because a case-sensitive parser reads
 // "defaultAction" and "DefaultAction" as different members where
 // encoding/json fills one field from both. The keys of every other object,
-// one decoding into a map, as encoding/json keeps them, or one nothing
-// decodes into, are compared as written, since encoding/json folds case for
-// struct fields alone.
+// one nothing decodes into, are compared as written, since encoding/json
+// folds case for struct fields alone.
 // encoding/json decodes each occurrence into what the one before it filled,
 // so a later scalar or array replaces the earlier one while a later object
 // merges into it field by field, and other parsers keep the first or the last
@@ -283,62 +282,30 @@ func (state *scanState) member(frame *scanFrame, key string) {
 	frame.child = nil
 	frame.field = ""
 
-	switch {
-	case frame.typ == nil:
-	case frame.typ.Kind() == reflect.Map:
-		frame.child = frame.typ.Elem()
-	case frame.typ.Kind() == reflect.Struct:
-		// addKey folded the name already.
-		fields := fieldsOf(frame.typ)
-		// A set whose fields decoders resolve differently knows no member,
-		// so every member of it is reported as unknown (see jsonFields).
-		field, known, exact := fields.lookupFolded(key, frame.folded)
-
-		switch {
-		case !known:
-			state.scan.unknown.addLazily(path)
-		case !exact:
-			state.scan.misspelled.addWant(path, field.name)
-		}
-
-		frame.child = field.typ
-
-		if known {
-			frame.fills(field.name)
-		}
-	}
-}
-
-// fills records that the member whose value comes next fills the field of
-// the given JSON name, where the frame looks for missing members. The
-// field counts as named before its value is read: the decoder allocates a
-// struct embedded through a pointer for the member even where its value
-// is null (see reportMissing).
-func (frame *scanFrame) fills(name string) {
-	if frame.named == nil {
+	if frame.typ == nil || frame.typ.Kind() != reflect.Struct {
 		return
 	}
 
-	frame.field = name
+	// addKey folded the name already.
+	field, known, exact := fieldsOf(frame.typ).lookupFolded(key, frame.folded)
 
-	if _, seen := frame.named[name]; !seen {
-		frame.named[name] = false
+	switch {
+	case !known:
+		state.scan.unknown.addLazily(path)
+	case !exact:
+		state.scan.misspelled.addWant(path, field.name)
 	}
+
+	// field is "" for a member no field reads.
+	frame.child, frame.field = field.typ, field.name
 }
 
 // closed reports, where the scan looks for missing members, the required
-// members of an object of frame left out or null, and those of the elements
-// of a Go array that the array of frame does not give, which encoding/json
-// zeroes.
+// members of an object of frame left out or null.
 func (state *scanState) closed(frame *scanFrame) {
-	path := func() (string, bool) { return memberPath(state.stack) }
-
-	switch {
-	case frame.named != nil:
+	if frame.named != nil {
+		path := func() (string, bool) { return memberPath(state.stack) }
 		reportMissing(frame.typ, path, frame.named, &state.scan.missing)
-	case state.checkMissing && frame.typ != nil && frame.typ.Kind() == reflect.Array &&
-		frame.index < frame.typ.Len():
-		reportZeroElements(frame.typ, frame.index, path, &state.scan.missing)
 	}
 }
 
@@ -354,7 +321,7 @@ func (state *scanState) scalar(top *scanFrame, token json.Token) {
 	case !state.checkMissing:
 	case top == nil || top.named == nil:
 		// encoding/json leaves a value set to null where nothing else
-		// names it, as an element of a list or a value of a map, as it was.
+		// names it, as an element of a list, as it was.
 		reportZero(
 			child, func() (string, bool) { return memberPath(state.stack) }, &state.scan.missing,
 		)
@@ -377,7 +344,7 @@ func (state *scanState) newFrame(object bool, typ reflect.Type) *scanFrame {
 		typ = typ.Elem()
 	}
 
-	if typ == nil || !holdsMembers(typ.Kind()) {
+	if typ == nil || typ.Kind() != reflect.Struct && typ.Kind() != reflect.Slice {
 		return frame
 	}
 
@@ -389,13 +356,6 @@ func (state *scanState) newFrame(object bool, typ reflect.Type) *scanFrame {
 	}
 
 	return frame
-}
-
-// holdsMembers reports whether a value of the kind decodes members or
-// elements the scan follows: a struct, map, slice or array.
-func holdsMembers(kind reflect.Kind) bool {
-	return kind == reflect.Struct || kind == reflect.Map || kind == reflect.Slice ||
-		kind == reflect.Array
 }
 
 // valueType returns the type the value that comes next decodes into, or nil
@@ -410,8 +370,7 @@ func (frame *scanFrame) valueType(target reflect.Type) reflect.Type {
 		return nil
 	}
 
-	kind := frame.typ.Kind()
-	if kind == reflect.Slice || kind == reflect.Array {
+	if frame.typ.Kind() == reflect.Slice {
 		return frame.typ.Elem()
 	}
 
@@ -435,12 +394,11 @@ func (frame *scanFrame) expectsKey() bool {
 // the name repeats, which is when its path is collected. In an object
 // decoding into a struct, names repeat when they fold alike, as
 // encoding/json matches them to struct fields, so that "Name" and "name"
-// fill one field. Every other object, one decoding into a map, which keeps
-// each key as written, or one nothing decodes into, such as an object
-// inside a member no field reads, repeats a name only when it repeats it
-// exactly: encoding/json folds case for struct fields alone, and there
-// "Name" and "name" are two members, of which the member holding them is
-// reported as unknown.
+// fill one field. Every other object, one nothing decodes into, such as an
+// object inside a member no field reads, repeats a name only when it
+// repeats it exactly: encoding/json folds case for struct fields alone, and
+// there "Name" and "name" are two members, of which the member holding them
+// is reported as unknown.
 func (frame *scanFrame) addKey(key string) bool {
 	frame.member = key
 	frame.wantKey = false
@@ -605,14 +563,20 @@ func foldName(name string) string {
 
 	builder.Grow(len(name))
 
-	for _, char := range name {
-		if char < utf8.RuneSelf {
-			builder.WriteString(strings.ToUpper(string(char)))
+	for idx := 0; idx < len(name); idx++ {
+		char := name[idx]
 
-			continue
+		switch {
+		case 'a' <= char && char <= 'z':
+			builder.WriteByte(char - 'a' + 'A')
+		case char < utf8.RuneSelf:
+			builder.WriteByte(char)
+		default:
+			folded, size := utf8.DecodeRuneInString(name[idx:])
+			builder.WriteRune(foldRune(folded))
+
+			idx += size - 1
 		}
-
-		builder.WriteRune(foldRune(char))
 	}
 
 	return builder.String()

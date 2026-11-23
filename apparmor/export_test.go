@@ -32,7 +32,7 @@ func MatcherUsable(path string) bool {
 // one an input used. It reads the identity as validation and the merge
 // do: through a call's cache, on the normalized path.
 func PathIdentity(path string) string {
-	key := newMatcherCache().key(normalizePath(path))
+	key := newMatcherCache().key(filterRawSlashes(path))
 
 	return fmt.Sprintf("%d:%t:%s", key.kind, key.relative, key.text)
 }

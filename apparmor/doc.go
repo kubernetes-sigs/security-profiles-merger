@@ -38,8 +38,8 @@ limitations under the License.
 // one before it rejects:
 //
 //   - [Validate] reports what makes a profile ill-formed: empty, oversized
-//     or relative paths, AppArmor variables, and paths or capabilities
-//     listed twice, in any list.
+//     or relative paths, AppArmor variables, empty capability names, and
+//     paths or capabilities listed twice, in any list.
 //   - [ValidateArtifact] adds what a runtime checks on an artifact: the size
 //     limits, the patterns apparmor_parser rejects, and the paths and
 //     capability names a consumer rendering the profile would turn into

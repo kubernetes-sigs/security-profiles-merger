@@ -342,18 +342,6 @@ func compileMatcher(matcher *globMatcher) {
 	matcher.status = globUsable
 }
 
-// compileCost is what compiling the pattern costs a call's budget (see
-// maxCallCompileBytes): its length, for a pattern that is compiled or still
-// to be, and nothing for one that is not. The budget is charged only for a
-// compile that succeeds (see matcherCache.matcher).
-func (matcher *globMatcher) compileCost(pattern string) int {
-	if matcher.status != globUncompiled && matcher.expr == nil {
-		return 0
-	}
-
-	return len(pattern)
-}
-
 // uncompiled returns the analysis of the pattern as it is without its
 // compiled expression: a globUncompiled one, which matches nothing. A
 // call past its compile budget uses it in place of an analysis the shared
@@ -572,14 +560,17 @@ func (cache *matcherCache) matcher(path string) *globMatcher {
 // admit compiles a fresh analysis or takes a shared one as the call's budget
 // allows, charging the budget for each compile that succeeds, and returns the
 // analysis the call uses.
+//
+// What compiling costs the budget (see maxCallCompileBytes) is the length of
+// the path, for a pattern compiled already or a fresh one still to be, and
+// nothing for any other. The shared cache holds only analyses a compile was
+// attempted on, so one it holds without an expression failed to compile,
+// and would fail again. A failed compile is not charged, fresh or cached,
+// so that the budget left does not depend on what the shared cache holds.
 func (cache *matcherCache) admit(path string, analyzed *globMatcher, fresh bool) *globMatcher {
-	cost := analyzed.compileCost(path)
-	if !fresh && analyzed.expr == nil {
-		// The shared cache holds only analyses a compile was attempted on,
-		// so this one failed to compile, and would fail again. A failed
-		// compile is not charged, fresh or cached, so that the budget left
-		// does not depend on what the shared cache holds.
-		cost = 0
+	cost := 0
+	if analyzed.expr != nil || fresh && analyzed.status == globUncompiled {
+		cost = len(path)
 	}
 
 	switch {

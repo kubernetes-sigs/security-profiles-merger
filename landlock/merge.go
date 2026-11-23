@@ -286,22 +286,17 @@ func referGrants(profiles []*Profile, cleaned [][]string) referCount {
 
 	for idx, profile := range profiles {
 		own := make(map[string]struct{})
-
-		for ruleIdx, rule := range profile.PathRules {
-			if slices.Contains(rule.AccessFS, FSAccessRefer) {
-				own[cleaned[idx][ruleIdx]] = struct{}{}
-			}
-		}
+		addReferPaths(own, profile.PathRules, cleaned[idx])
 
 		for path := range own {
 			for range ancestors(path) {
 				walks++
 			}
+		}
 
-			if !beneathAny(path, own) {
-				grants[path]++
-				roots++
-			}
+		for _, root := range topmostPaths(own) {
+			grants[root]++
+			roots++
 		}
 
 		if len(own) > 0 {
@@ -764,8 +759,9 @@ func ancestorMask(ancestors iter.Seq[string], masks map[string]uint32) uint32 {
 }
 
 // ancestors yields the path itself followed by each of its parent
-// directories, ending at "/" for an absolute path. Paths are expected to be
-// cleaned, so they carry no trailing slash except for the root itself.
+// directories, ending at "/". Paths are expected to be cleaned and
+// absolute, as Validate leaves them, so they carry no trailing slash except
+// for the root itself.
 // Resolution is purely textual: the merge assumes no symlink or bind mount
 // crosses a rule boundary.
 //
@@ -787,27 +783,21 @@ func ancestors(path string) iter.Seq[string] {
 			}
 		}
 
-		// A relative path has no root ancestor, and "/" is already the
-		// path.
-		if len(path) > 1 && path[0] == '/' {
+		// "/" is already the path.
+		if path != rootPath {
 			yield(rootPath)
 		}
 	}
 }
 
-// parentPath returns the parent directory of a cleaned path, if it has one:
-// the root has none, and neither has a relative path of one component.
+// parentPath returns the parent directory of a cleaned absolute path, if
+// it has one: the root has none.
 func parentPath(path string) (string, bool) {
-	idx := strings.LastIndexByte(path, '/')
-
-	switch {
-	case idx < 0 || path == rootPath:
+	if path == rootPath {
 		return "", false
-	case idx == 0:
-		return rootPath, true
-	default:
-		return path[:idx], true
 	}
+
+	return path[:max(strings.LastIndexByte(path, '/'), 1)], true
 }
 
 // strictAncestors yields the parent directories of the path, nearest first,
@@ -911,13 +901,12 @@ type LoweredPath struct {
 	// Path is the rule path of the result, cleaned as the merge cleans it.
 	Path string
 	// Ancestor is the strict ancestor of Path a runtime opens Path
-	// beneath. It is "/" when Path is absolute and the input's rule on "/"
-	// grants every right lowered onto Path, and otherwise the shallowest
-	// strict ancestor other than "/" on which a rule of an input grants a
-	// right the result carries at Path, which that input grants neither on
-	// "/" nor through its own rule on Path. "/" is no ancestor of a
-	// relative Path, so a rule on "/" counts for none of its grants. Every
-	// such grant then comes from a rule on Ancestor or between it and Path.
+	// beneath. It is "/" when the input's rule on "/" grants every right
+	// lowered onto Path, and otherwise the shallowest strict ancestor other
+	// than "/" on which a rule of an input grants a right the result
+	// carries at Path, which that input grants neither on "/" nor through
+	// its own rule on Path. Every such grant then comes from a rule on
+	// Ancestor or between it and Path.
 	Ancestor string
 	// Input is the index, numbered as Intersect numbers its inputs, of the
 	// first input whose rule on Ancestor grants a right that input lowered
@@ -1020,12 +1009,11 @@ func addLowered(
 // for the grants of the input lowered onto it (see LoweredPath), and
 // whether the input lowered any. A right the input's own rule on the path
 // grants is not lowered, and neither is one no rule of the input grants on
-// an ancestor: that right reached the result from another input. Where the
-// path is absolute, a right the input's rule on "/" grants needs no
-// ancestor of its own; the others need the shallowest ancestor other than
-// "/" granting one of them. "/" is no ancestor of a relative path, so there
-// every lowered right needs one. The strict ancestors of a path are all
-// ancestors of its deepest one, so the shallowest is also the shortest.
+// an ancestor: that right reached the result from another input. A right
+// the input's rule on "/" grants needs no ancestor of its own; the others
+// need the shallowest ancestor other than "/" granting one of them. The
+// strict ancestors of a path are all ancestors of its deepest one, so the
+// shallowest is also the shortest.
 func loweredFrom(path string, access uint32, inputMasks map[string]uint32) (string, bool) {
 	// A path without a strict ancestor can carry nothing lowered.
 	wanted := access &^ inputMasks[path] & ancestorMask(strictAncestors(path), inputMasks)
@@ -1033,11 +1021,7 @@ func loweredFrom(path string, access uint32, inputMasks map[string]uint32) (stri
 		return "", false
 	}
 
-	beyondRoot := wanted
-	if strings.HasPrefix(path, rootPath) {
-		beyondRoot &^= inputMasks[rootPath]
-	}
-
+	beyondRoot := wanted &^ inputMasks[rootPath]
 	if beyondRoot == 0 {
 		return rootPath, true
 	}

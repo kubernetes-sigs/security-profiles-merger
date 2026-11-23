@@ -29,14 +29,6 @@ import (
 	"sigs.k8s.io/security-profiles-merger/landlock"
 )
 
-func allFSRightsForFuzz() []landlock.FSAccessRight {
-	return knownRights(landlock.FSAccessRights())
-}
-
-func allNetRightsForFuzz() []landlock.NetAccessRight {
-	return knownRights(landlock.NetAccessRights())
-}
-
 func allScopeRightsForFuzz() []landlock.ScopeRight {
 	return knownRights(landlock.ScopeRights())
 }
@@ -100,16 +92,27 @@ func oracleCleanPath(path string) string {
 	return joined
 }
 
-// fuzzPath substitutes the fallback for paths Validate rejects: empty paths,
-// paths with NUL bytes or ".." components, paths longer than the length
-// limit, and paths that clean to ".". Other paths reach the merge as
-// generated, including repeated slashes, "." components, trailing slashes,
-// and relative paths.
+// fuzzPath substitutes the fallback for empty paths, paths with NUL bytes
+// or ".." components, paths longer than the length limit, and paths that
+// clean to ".". Other paths reach the validators and Diff as generated,
+// including repeated slashes, "." components, trailing slashes and
+// relative paths, which the merge fuzzers replace (see absoluteFuzzPath).
 func fuzzPath(path, fallback string) string {
 	if path == "" || len(path) > landlock.MaxPathLen ||
 		strings.ContainsRune(path, 0) ||
 		slices.Contains(strings.Split(path, "/"), "..") ||
 		oracleCleanPath(path) == "." {
+		return fallback
+	}
+
+	return path
+}
+
+// absoluteFuzzPath substitutes the fallback for a relative path, which
+// Validate, and so every merge, rejects, so that the merge fuzzers merge
+// what they generate rather than stopping at the validation error.
+func absoluteFuzzPath(path, fallback string) string {
+	if !strings.HasPrefix(path, "/") {
 		return fallback
 	}
 
@@ -167,7 +170,7 @@ func buildFuzzNetRules(
 }
 
 func pickFSRights(mask uint32) []landlock.FSAccessRight {
-	all := allFSRightsForFuzz()
+	all := allFSRights()
 
 	var rights []landlock.FSAccessRight
 
@@ -181,7 +184,7 @@ func pickFSRights(mask uint32) []landlock.FSAccessRight {
 }
 
 func pickNetRights(mask uint8) []landlock.NetAccessRight {
-	all := allNetRightsForFuzz()
+	all := allNetRights()
 
 	var rights []landlock.NetAccessRight
 
@@ -348,8 +351,25 @@ func addLandlockFuzzSeeds(f *testing.F) {
 		uint8(0x01), uint8(0x01),
 	)
 
-	// Uncleaned and relative paths: "//etc/" and "/etc/./" name the same
-	// rule, "etc" is unrelated to "/etc", and refer is handled.
+	// Uncleaned paths: "//etc/" and "/etc/./" name the same rule, which
+	// is the ancestor of "//etc/sub/." and "/etc//sub", and refer is
+	// handled.
+	f.Add(
+		uint32(0x1FFFF), uint8(0x00), uint8(0x00),
+		"//etc/", "//etc/sub/.",
+		uint32(0x1FFFF), uint32(0x01),
+		uint16(0), uint16(0),
+		uint8(0x00), uint8(0x00),
+		uint32(0x07), uint8(0x00), uint8(0x00),
+		"/etc/./", "/etc//sub",
+		uint32(0x05), uint32(0x07),
+		uint16(0), uint16(0),
+		uint8(0x00), uint8(0x00),
+	)
+
+	// Relative paths, which only Diff reads as they are (the validators
+	// refuse them and the merge fuzzers replace them): "etc" is unrelated
+	// to "/etc", and "./etc" and "etc//sub" clean to "etc" and "etc/sub".
 	f.Add(
 		uint32(0x1FFFF), uint8(0x00), uint8(0x00),
 		"//etc/", "./etc",
@@ -401,11 +421,13 @@ func fuzzMerge(
 	t.Helper()
 
 	left := fuzzLandlockProfile(
-		hfsL, hnetL, scopeL, p1L, p2L,
+		hfsL, hnetL, scopeL,
+		absoluteFuzzPath(p1L, "/default1"), absoluteFuzzPath(p2L, "/default2"),
 		am1L, am2L, port1L, port2L, nm1L, nm2L,
 	)
 	right := fuzzLandlockProfile(
-		hfsR, hnetR, scopeR, p1R, p2R,
+		hfsR, hnetR, scopeR,
+		absoluteFuzzPath(p1R, "/default1"), absoluteFuzzPath(p2R, "/default2"),
 		am1R, am2R, port1R, port2R, nm1R, nm2R,
 	)
 
@@ -460,7 +482,7 @@ func semanticallyEqual(left, right *landlock.Profile) bool {
 
 	for _, path := range probePaths(left, right) {
 		for _, access := range allFSRights() {
-			if fsPermits(left, path, access) != fsPermits(right, path, access) {
+			if evalPermits(left, path, access) != evalPermits(right, path, access) {
 				return false
 			}
 		}
@@ -505,10 +527,10 @@ func scopeRightSet(rights []landlock.ScopeRight) map[landlock.ScopeRight]struct{
 }
 
 // probePaths returns the cleaned rule paths of all profiles, a descendant of
-// each, the root, and a relative path, sorted and without duplicates. The
-// merge result is questioned at these paths.
+// each, and the root, sorted and without duplicates. The merge result is
+// questioned at these paths.
 func probePaths(profiles ...*landlock.Profile) []string {
-	probes := []string{"/", "probe"}
+	probes := []string{"/"}
 
 	for _, profile := range profiles {
 		for _, rule := range profile.PathRules {
@@ -556,8 +578,8 @@ func assertIntersectInvariants(
 }
 
 // assertResultShape checks what every merge result satisfies: it validates,
-// its rules are sorted, and it is loadable unless an input uses a relative
-// or non-UTF-8 path or the result restricts nothing.
+// its rules are sorted, and it is loadable unless an input uses a
+// non-UTF-8 path or the result restricts nothing.
 func assertResultShape(t *testing.T, result *landlock.Profile, inputs ...*landlock.Profile) {
 	t.Helper()
 
@@ -589,13 +611,13 @@ func assertResultShape(t *testing.T, result *landlock.Profile, inputs ...*landlo
 	}
 }
 
-// loadablePaths reports whether every path of the inputs is absolute and
-// valid UTF-8. ValidateStrict rejects any other path, which Validate lets
-// through to the merge and the merge keeps.
+// loadablePaths reports whether every path of the inputs is valid UTF-8.
+// ValidateStrict rejects any other path, which Validate lets through to the
+// merge and the merge keeps.
 func loadablePaths(inputs []*landlock.Profile) bool {
 	for _, input := range inputs {
 		for _, rule := range input.PathRules {
-			if !strings.HasPrefix(rule.Path, "/") || !utf8.ValidString(rule.Path) {
+			if !utf8.ValidString(rule.Path) {
 				return false
 			}
 		}
@@ -838,39 +860,6 @@ func assertUnionScopedCoversCommon(
 	}
 }
 
-// fsPermits reports whether a profile permits a filesystem right under a
-// cleaned path, following the kernel: a right is denied when the profile
-// handles it, and refer is also denied when the profile handles any
-// filesystem right. A denied right is permitted where a rule on the path or
-// one of its ancestors grants it; a rule can only grant a right the profile
-// lists as handled, since the kernel refuses any other grant.
-func fsPermits(profile *landlock.Profile, path string, right landlock.FSAccessRight) bool {
-	handled := fsRightSet(profile.HandledAccessFS)
-
-	_, listed := handled[right]
-	denied := listed || (right == landlock.FSAccessRefer && len(handled) > 0)
-
-	if !denied {
-		return true
-	}
-
-	if !listed {
-		return false
-	}
-
-	for _, rule := range profile.PathRules {
-		if !slices.Contains(rule.AccessFS, right) {
-			continue
-		}
-
-		if evalCovers(oracleCleanPath(rule.Path), path) {
-			return true
-		}
-	}
-
-	return false
-}
-
 // netPermits reports whether a profile permits a network right on a port:
 // either the right is unhandled, or a rule for the port grants it.
 func netPermits(profile *landlock.Profile, port uint16, right landlock.NetAccessRight) bool {
@@ -906,9 +895,9 @@ func assertFSExact(
 
 	for _, path := range probePaths(left, right, result) {
 		for _, access := range allFSRights() {
-			want := combine(fsPermits(left, path, access), fsPermits(right, path, access))
+			want := combine(evalPermits(left, path, access), evalPermits(right, path, access))
 
-			got := fsPermits(result, path, access)
+			got := evalPermits(result, path, access)
 			if got != want && !exempt(result, inputs, access, got) {
 				t.Errorf(
 					"%s permits %q at %q = %v, want %v\nleft=%s\nright=%s\nresult=%s",
@@ -971,7 +960,7 @@ func assertUnionInvariants(
 
 // assertUnionOutlastsDowngrade checks the union against each input after
 // Options.Downgrade to every ABI version: the downgraded union permits
-// every access at the absolute probe paths, and allows every move or link
+// every access at the probe paths, and allows every move or link
 // among them, inside the root mount and inside any other, that a
 // downgraded input permits. Downgrade drops rights from the union and the
 // inputs alike, which can leave an input handling no filesystem right, and
@@ -992,8 +981,9 @@ func assertUnionOutlastsDowngrade(t *testing.T, result, left, right *landlock.Pr
 
 		for _, probe := range probes {
 			for _, access := range allFSRights() {
-				if !strings.HasPrefix(probe, "/") || fsPermits(union, probe, access) ||
-					!fsPermits(inputs[0], probe, access) && !fsPermits(inputs[1], probe, access) {
+				if evalPermits(union, probe, access) ||
+					!evalPermits(inputs[0], probe, access) &&
+						!evalPermits(inputs[1], probe, access) {
 					continue
 				}
 
@@ -1012,7 +1002,7 @@ func assertUnionOutlastsDowngrade(t *testing.T, result, left, right *landlock.Pr
 }
 
 // assertDowngradedUnionMoves reports, as the first failure, a move or link
-// among the absolute probes that an input allows and the union denies,
+// among the probes that an input allows and the union denies,
 // and whether there was none.
 func assertDowngradedUnionMoves(
 	t *testing.T, abi landlock.ABIVersion, probes []string,
@@ -1022,8 +1012,7 @@ func assertDowngradedUnionMoves(
 
 	for _, file := range probes {
 		for _, dst := range probes {
-			if file == "/" || !strings.HasPrefix(file, "/") || !strings.HasPrefix(dst, "/") ||
-				dst == evalParent(file) || evalCovers(file, dst) {
+			if file == "/" || dst == evalParent(file) || evalCovers(file, dst) {
 				continue
 			}
 

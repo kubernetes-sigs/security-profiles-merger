@@ -567,3 +567,66 @@ func TestPairBudgetChargesEachStrategyItsOwnComparisons(t *testing.T) {
 		t.Errorf("Union kept /a/lib.so, which /a/** covers")
 	}
 }
+
+// TestLiteralPassChargesEveryInputItLooksAt covers the narrowing that starts
+// the literal pass of an intersection: it looks at every input for every
+// literal, so many inputs of many literals cost their product even where no
+// pattern is ever matched. Each look is charged, so the pass falls back
+// past the budget rather than run that long, and stays within it for the
+// sizes a merge of a few profiles has.
+func TestLiteralPassChargesEveryInputItLooksAt(t *testing.T) {
+	t.Parallel()
+
+	// inputs builds count inputs of literals read-only paths each, all
+	// distinct, with "/data/**" in the first, so that the pass runs and
+	// every literal is narrowed to nothing by an input that neither lists
+	// it nor holds a pattern.
+	inputs := func(count, literals int) []map[string]fsPermission {
+		perms := make([]map[string]fsPermission, count)
+
+		for idx := range perms {
+			paths := make([]string, 0, literals+1)
+			for literal := range literals {
+				paths = append(paths, fmt.Sprintf("/in%d/f%d", idx, literal))
+			}
+
+			if idx == 0 {
+				paths = append(paths, "/data/**")
+			}
+
+			perms[idx] = readPerms(paths)
+		}
+
+		return perms
+	}
+
+	matchers := newMatcherCache()
+
+	small := inputs(8, 64)
+	sides := make([]fsSide, len(small))
+
+	for idx, perms := range small {
+		sides[idx] = buildFsSide(perms, matchers)
+	}
+
+	budget := &matchBudget{limited: true}
+	perm, within := literalGrant(sides[1].literals[0], permReadWrite, small, sides, budget)
+
+	if !within || perm.any() {
+		t.Fatalf("literalGrant = %+v, %t, want nothing within the budget", perm, within)
+	}
+
+	if budget.pairs != pathCount(len(sides)) {
+		t.Errorf("one literal was charged %d comparisons, want %d", budget.pairs, len(sides))
+	}
+
+	if _, within := missingLiteralGrants(small, map[string]fsPermission{}, matchers); !within {
+		t.Error("the pass over 8 inputs of 64 literals exceeds the budget")
+	}
+
+	// 64 inputs of 512 literals look at 2^21 inputs, twice the budget.
+	_, within = missingLiteralGrants(inputs(64, 512), map[string]fsPermission{}, matchers)
+	if within {
+		t.Error("the pass over 64 inputs of 512 literals stays within the budget")
+	}
+}

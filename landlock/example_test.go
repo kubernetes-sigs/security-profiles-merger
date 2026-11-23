@@ -265,7 +265,7 @@ func ExampleValidateArtifact() {
 			landlock.FSAccessReadFile,
 		},
 		PathRules: []landlock.PathRule{{
-			Path: "etc",
+			Path: "/etc/",
 		}},
 	}
 
@@ -273,7 +273,7 @@ func ExampleValidateArtifact() {
 	fmt.Println(landlock.Validate(artifact))
 
 	err := landlock.ValidateArtifact(artifact)
-	fmt.Println(errors.Is(err, landlock.ErrRelativePath))
+	fmt.Println(errors.Is(err, landlock.ErrTrailingSlash))
 	fmt.Println(errors.Is(err, landlock.ErrEmptyRule))
 
 	// Output:

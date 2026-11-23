@@ -25,23 +25,29 @@ import (
 )
 
 // restrictivenessOrder is the lattice the whole merge is built on, from the
-// most restrictive action to the least. SCMP_ACT_KILL_THREAD is the same
-// action as SCMP_ACT_KILL and is covered separately.
-func restrictivenessOrder() []specs.LinuxSeccompAction {
-	return []specs.LinuxSeccompAction{
-		specs.ActKillProcess,
-		specs.ActKill,
-		specs.ActTrap,
-		specs.ActErrno,
-		specs.ActNotify,
-		specs.ActTrace,
-		specs.ActLog,
-		specs.ActAllow,
+// most restrictive tier of actions to the least. SCMP_ACT_KILL_THREAD is the
+// same action as SCMP_ACT_KILL, so the two share a tier. SCMP_ACT_NOTIFY
+// sits between SCMP_ACT_ERRNO and SCMP_ACT_TRACE, the one placement that is
+// a judgement call rather than a kernel fact: it blocks the call until a
+// supervisor decides, which is stricter than handing it to a tracer and
+// looser than failing it outright.
+func restrictivenessOrder() [][]specs.LinuxSeccompAction {
+	return [][]specs.LinuxSeccompAction{
+		{specs.ActKillProcess},
+		{specs.ActKill, specs.ActKillThread},
+		{specs.ActTrap},
+		{specs.ActErrno},
+		{specs.ActNotify},
+		{specs.ActTrace},
+		{specs.ActLog},
+		{specs.ActAllow},
 	}
 }
 
 // TestRestrictivenessOrder asserts every pair of the lattice in both
-// argument orders, which is what pins the order itself.
+// argument orders, which is what pins the order itself: across tiers both
+// functions return the action of the expected tier, and within one, the
+// same action twice included, both return their first argument.
 //
 // Nothing else in the suite does: the safety oracles of the fuzz targets
 // express "never permits more" through MoreRestrictive and LessRestrictive,
@@ -53,127 +59,32 @@ func TestRestrictivenessOrder(t *testing.T) {
 
 	order := restrictivenessOrder()
 
-	for idx, stricter := range order {
-		for _, looser := range order[idx+1:] {
-			if got := seccomp.MoreRestrictive(stricter, looser); got != stricter {
-				t.Errorf("MoreRestrictive(%q, %q) = %q, want %q", stricter, looser, got, stricter)
-			}
+	check := func(name string, merge func(a, b specs.LinuxSeccompAction) specs.LinuxSeccompAction,
+		first, second, want specs.LinuxSeccompAction,
+	) {
+		t.Helper()
 
-			if got := seccomp.MoreRestrictive(looser, stricter); got != stricter {
-				t.Errorf("MoreRestrictive(%q, %q) = %q, want %q", looser, stricter, got, stricter)
-			}
-
-			if got := seccomp.LessRestrictive(stricter, looser); got != looser {
-				t.Errorf("LessRestrictive(%q, %q) = %q, want %q", stricter, looser, got, looser)
-			}
-
-			if got := seccomp.LessRestrictive(looser, stricter); got != looser {
-				t.Errorf("LessRestrictive(%q, %q) = %q, want %q", looser, stricter, got, looser)
-			}
+		if got := merge(first, second); got != want {
+			t.Errorf("%s(%q, %q) = %q, want %q", name, first, second, got, want)
 		}
 	}
-}
 
-// TestNotifyBetweenErrnoAndTrace pins the one placement of the lattice that
-// is a judgement call rather than a kernel fact: SCMP_ACT_NOTIFY blocks the
-// call until a supervisor decides, which is stricter than handing it to a
-// tracer (SCMP_ACT_TRACE) and looser than failing it outright
-// (SCMP_ACT_ERRNO).
-func TestNotifyBetweenErrnoAndTrace(t *testing.T) {
-	t.Parallel()
-
-	if got := seccomp.MoreRestrictive(specs.ActNotify, specs.ActErrno); got != specs.ActErrno {
-		t.Errorf("errno must be stricter than notify, got %q", got)
-	}
-
-	if got := seccomp.MoreRestrictive(specs.ActNotify, specs.ActTrace); got != specs.ActNotify {
-		t.Errorf("notify must be stricter than trace, got %q", got)
-	}
-}
-
-func TestMoreRestrictive(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		a, b specs.LinuxSeccompAction
-		want specs.LinuxSeccompAction
-	}{
-		{"kill vs allow", specs.ActKillProcess, specs.ActAllow, specs.ActKillProcess},
-		{"allow vs kill", specs.ActAllow, specs.ActKillProcess, specs.ActKillProcess},
-		{"errno vs allow", specs.ActErrno, specs.ActAllow, specs.ActErrno},
-		{"trap vs errno", specs.ActTrap, specs.ActErrno, specs.ActTrap},
-		{"notify vs trace", specs.ActNotify, specs.ActTrace, specs.ActNotify},
-		{"log vs allow", specs.ActLog, specs.ActAllow, specs.ActLog},
-		{"same action", specs.ActErrno, specs.ActErrno, specs.ActErrno},
-		{
-			"kill process > kill thread",
-			specs.ActKillThread,
-			specs.ActKillProcess,
-			specs.ActKillProcess,
-		},
-	}
-
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-
-			got := seccomp.MoreRestrictive(testCase.a, testCase.b)
-			if got != testCase.want {
-				t.Errorf(
-					"MoreRestrictive(%q, %q) = %q, want %q",
-					testCase.a, testCase.b, got, testCase.want,
-				)
+	for idx, tier := range order {
+		for _, first := range tier {
+			for _, second := range tier {
+				check("MoreRestrictive", seccomp.MoreRestrictive, first, second, first)
+				check("LessRestrictive", seccomp.LessRestrictive, first, second, first)
 			}
-		})
-	}
-}
 
-func TestLessRestrictive(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		a, b specs.LinuxSeccompAction
-		want specs.LinuxSeccompAction
-	}{
-		{"kill vs allow", specs.ActKillProcess, specs.ActAllow, specs.ActAllow},
-		{"errno vs allow", specs.ActErrno, specs.ActAllow, specs.ActAllow},
-		{"trap vs errno", specs.ActTrap, specs.ActErrno, specs.ActErrno},
-		{"same action", specs.ActAllow, specs.ActAllow, specs.ActAllow},
-	}
-
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-
-			got := seccomp.LessRestrictive(testCase.a, testCase.b)
-			if got != testCase.want {
-				t.Errorf(
-					"LessRestrictive(%q, %q) = %q, want %q",
-					testCase.a, testCase.b, got, testCase.want,
-				)
+			for _, looserTier := range order[idx+1:] {
+				for _, looser := range looserTier {
+					check("MoreRestrictive", seccomp.MoreRestrictive, first, looser, first)
+					check("MoreRestrictive", seccomp.MoreRestrictive, looser, first, first)
+					check("LessRestrictive", seccomp.LessRestrictive, first, looser, looser)
+					check("LessRestrictive", seccomp.LessRestrictive, looser, first, looser)
+				}
 			}
-		})
-	}
-}
-
-func TestActKillAndActKillThreadEquivalent(t *testing.T) {
-	t.Parallel()
-
-	got := seccomp.MoreRestrictive(specs.ActKill, specs.ActKillThread)
-	if got != specs.ActKill {
-		t.Errorf("MoreRestrictive(ActKill, ActKillThread) = %q, want %q", got, specs.ActKill)
-	}
-
-	got = seccomp.MoreRestrictive(specs.ActKillThread, specs.ActKill)
-	if got != specs.ActKillThread {
-		t.Errorf("MoreRestrictive(ActKillThread, ActKill) = %q, want %q", got, specs.ActKillThread)
-	}
-
-	got = seccomp.LessRestrictive(specs.ActKill, specs.ActKillThread)
-	if got != specs.ActKill {
-		t.Errorf("LessRestrictive(ActKill, ActKillThread) = %q, want %q", got, specs.ActKill)
+		}
 	}
 }
 

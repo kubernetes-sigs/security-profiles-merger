@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 
@@ -30,339 +29,6 @@ import (
 	"sigs.k8s.io/security-profiles-merger/internal/testutil"
 	"sigs.k8s.io/security-profiles-merger/spm"
 )
-
-// foldTwins holds two fields whose names differ only in case. encoding/json
-// matches a member spelled neither way to the first of them.
-type foldTwins struct {
-	Lower string `json:"name"`
-	Upper int    `json:"NAME"` //nolint:tagliatelle // a second spelling is the point
-}
-
-// foldPromoted promotes two fields whose names differ only in case, one
-// from each embedded struct.
-type foldPromoted struct {
-	foldFirst
-	foldSecond
-}
-
-type foldFirst struct {
-	Alpha string `json:"alpha"`
-}
-
-type foldSecond struct {
-	Alpha int `json:"ALPHA"` //nolint:tagliatelle // a second spelling is the point
-}
-
-// ambiguousPromoted promotes two untagged fields of one name at one depth,
-// which encoding/json drops both of.
-type ambiguousPromoted struct {
-	ambiguousFirst
-	ambiguousSecond
-
-	Other string `json:"other"`
-}
-
-type ambiguousFirst struct {
-	Value string
-}
-
-type ambiguousSecond struct {
-	Value int
-}
-
-// embeddedTwice embeds one struct twice at the same depth, so each of its
-// fields is promoted twice and dropped.
-type embeddedTwice struct {
-	twiceLeft
-	twiceRight
-}
-
-type twiceLeft struct{ twiceInner }
-
-type twiceRight struct{ twiceInner }
-
-type twiceInner struct {
-	Deep string `json:"deep"`
-}
-
-// taggedWins promotes an untagged and a tagged field of one name at one
-// depth: the tagged one wins.
-type taggedWins struct {
-	untaggedName
-	taggedName
-}
-
-type untaggedName struct {
-	Name string
-}
-
-type taggedName struct {
-	Other int `json:"Name"` //nolint:tagliatelle // the name of the untagged field is the point
-}
-
-// invalidTag carries a json tag that is no valid name. encoding/json of Go
-// 1.24 ignores the tag and reads the field by its Go name; the decoder of
-// Go 1.27 drops the field instead.
-type invalidTag struct {
-	Quoted string `json:"a'b"` //nolint:staticcheck // the invalid tag is the point
-}
-
-// EmbeddedLabel is an exported non-struct type, which encoding/json reads
-// as a field named after the type when it is embedded.
-type EmbeddedLabel string
-
-type labelled struct {
-	EmbeddedLabel
-}
-
-// TestFieldsResolveAsTheDecoder covers struct types no profile has, whose
-// fields encoding/json resolves by rules beyond "a field of the struct
-// itself wins": names that fold alike, names promoted ambiguously and
-// embedded non-struct types. The lookup must name the field the decoder
-// fills, and know exactly the members the decoder knows.
-func TestFieldsResolveAsTheDecoder(t *testing.T) {
-	t.Parallel()
-
-	for _, test := range []struct {
-		typ reflect.Type
-		// fills maps a member to the JSON name of the field it fills.
-		fills map[string]string
-	}{
-		{reflect.TypeFor[foldTwins](), map[string]string{"Name": "name", "NAME": "NAME", "name": "name"}},
-		{reflect.TypeFor[foldPromoted](), map[string]string{"Alpha": "alpha", "ALPHA": "ALPHA"}},
-		{reflect.TypeFor[ambiguousPromoted](), map[string]string{"Other": "other"}},
-		{reflect.TypeFor[embeddedTwice](), map[string]string{}},
-		{reflect.TypeFor[taggedWins](), map[string]string{"name": "Name"}},
-		{reflect.TypeFor[labelled](), map[string]string{"embeddedlabel": "EmbeddedLabel"}},
-	} {
-		checkKnownMembers(t, test.typ)
-
-		for member, want := range test.fills {
-			field, known, _ := fieldsOf(test.typ).lookupFolded(member, foldName(member))
-			if !known || field.name != want {
-				t.Errorf("%v: %q fills %q (known %v), want %q",
-					test.typ, member, field.name, known, want)
-			}
-		}
-	}
-
-	// A member the decoder drops as ambiguous is unknown.
-	unknown, _ := unknownFieldsStrictly[ambiguousPromoted]([]byte(`{"value":1,"other":"x"}`))
-	if !slices.Equal(unknown, []string{"value"}) {
-		t.Errorf("unknownFieldsStrictly = %v, want value", unknown)
-	}
-}
-
-// checkKnownMembers checks that HasField knows a fixed list of members of
-// typ exactly where the decoder does.
-func checkKnownMembers(t *testing.T, typ reflect.Type) {
-	t.Helper()
-
-	for _, member := range []string{
-		"name", "NAME", "Name", "alpha", "ALPHA", "Alpha", "value", "Value", "other",
-		"deep", "Deep", "Other", "EmbeddedLabel", "embeddedlabel",
-	} {
-		decoder := json.NewDecoder(strings.NewReader(`{"` + member + `":null}`))
-		decoder.DisallowUnknownFields()
-
-		wantKnown := decoder.Decode(reflect.New(typ).Interface()) == nil
-
-		if got := HasField(typ, member); got != wantKnown {
-			t.Errorf("%v: HasField(%q) = %v, the decoder knows it: %v", typ, member, got, wantKnown)
-		}
-	}
-}
-
-// TestFoldedTwinsResolveToTheFirst covers two fields whose names fold
-// alike: a member spelled neither way fills the first of them, every time,
-// whether the struct declares them or promotes them.
-func TestFoldedTwinsResolveToTheFirst(t *testing.T) {
-	t.Parallel()
-
-	var twins foldTwins
-
-	err := json.Unmarshal([]byte(`{"Name":"x"}`), &twins)
-	if err != nil || twins.Lower != "x" {
-		t.Fatalf("encoding/json no longer fills the first twin: %+v, %v", twins, err)
-	}
-
-	got, wants, _ := misspelledFieldsOf[foldTwins]([]byte(`{"Name":"x"}`))
-	if !slices.Equal(got, []string{"Name"}) || !slices.Equal(wants, []string{"name"}) {
-		t.Errorf("misspelledFieldsOf = %v (want %v), want Name (want name)", got, wants)
-	}
-
-	var promoted foldPromoted
-
-	err = json.Unmarshal([]byte(`{"Alpha":"x"}`), &promoted)
-	if err != nil || promoted.foldFirst.Alpha != "x" {
-		t.Fatalf("encoding/json no longer fills the first promoted twin: %+v, %v", promoted, err)
-	}
-
-	// Not in the order of a map.
-	for range 20 {
-		field, _, _ := jsonFields(reflect.TypeFor[foldPromoted]()).lookupFolded("Alpha", "ALPHA")
-		if field.name != "alpha" {
-			t.Fatalf("Alpha fills %q, want alpha", field.name)
-		}
-	}
-}
-
-// TestInvalidTagFailsClosed covers a field whose tag is no valid name. The
-// decoder of Go 1.24 reads it by its Go name and later ones may not, so the
-// lookup knows no member of such a type, and the check refuses a document
-// naming one whichever decoder runs.
-func TestInvalidTagFailsClosed(t *testing.T) {
-	t.Parallel()
-
-	for _, typ := range []reflect.Type{
-		reflect.TypeFor[invalidTag](), reflect.TypeFor[quotedTag](),
-	} {
-		for _, member := range []string{"Quoted", "quoted", "a'b", "a", `a"b`, "N"} {
-			if HasField(typ, member) {
-				t.Errorf("%v: HasField(%q) = true, want false", typ, member)
-			}
-		}
-	}
-
-	var tagged invalidTag
-
-	err := Unmarshal([]byte(`{"Quoted":"x"}`), &tagged)
-	if !errors.Is(err, spm.ErrUnknownField) {
-		t.Errorf("Unmarshal of a field with an invalid tag = %+v, %v, want ErrUnknownField",
-			tagged, err)
-	}
-
-	var quoted quotedTag
-
-	for _, doc := range []string{`{"a":"x"}`, `{"N":"x"}`} {
-		err = Unmarshal([]byte(doc), &quoted)
-		if !errors.Is(err, spm.ErrUnknownField) {
-			t.Errorf("Unmarshal(%s) of a field with a quoted tag = %+v, %v, want ErrUnknownField",
-				doc, quoted, err)
-		}
-	}
-}
-
-// TestInvalidTagVisibility covers which invalid tags mark a type: one on a
-// field Go hides as ambiguous, which encoding/json resolves by its own
-// rules, does, and one on an unexported field, which no decoder reads, does
-// not.
-func TestInvalidTagVisibility(t *testing.T) {
-	t.Parallel()
-
-	if !fieldsOf(reflect.TypeFor[hiddenInvalid]()).divergent {
-		t.Error("an invalid tag on an ambiguous promoted field does not mark the type")
-	}
-
-	// A struct literal with such a field trips go vet, so it is built.
-	unexportedInvalid := reflect.StructOf([]reflect.StructField{
-		{Name: "Visible", Type: reflect.TypeFor[string](), Tag: `json:"visible"`},
-		{
-			Name: "hidden", PkgPath: "sigs.k8s.io/security-profiles-merger/internal/strictjson",
-			Type: reflect.TypeFor[string](), Tag: `json:"a'b"`,
-		},
-	})
-
-	if fieldsOf(unexportedInvalid).divergent {
-		t.Error("an invalid tag on an unexported field marks the type")
-	}
-
-	if !HasField(unexportedInvalid, "visible") {
-		t.Error("the exported field of a type with an unexported invalid tag is unknown")
-	}
-}
-
-// hiddenInvalid promotes two fields named Value at one depth, which
-// reflect.VisibleFields leaves out as ambiguous, one with an invalid tag.
-type hiddenInvalid struct {
-	hiddenLeft
-	hiddenRight
-}
-
-type hiddenLeft struct {
-	Value string `json:"a'b"` //nolint:staticcheck // the invalid tag is the point
-}
-
-type hiddenRight struct {
-	Value string
-}
-
-// quotedTag carries a json tag holding a quote, which encoding/json of Go
-// 1.24 ignores, while the decoder built on encoding/json/v2 names the field
-// "a".
-type quotedTag struct {
-	N string `json:"a\"b"` //nolint:staticcheck // the invalid tag is the point
-}
-
-// depthTwins declares a field whose name folds like that of a field it
-// promotes. encoding/json of Go 1.24 fills the first in field order, the
-// promoted one, for a member spelled neither way; the decoder built on
-// encoding/json/v2 fills the shallower one.
-type depthTwins struct {
-	depthInner
-
-	Shared string `json:"Shared"` //nolint:tagliatelle // the second spelling is the point
-}
-
-type depthInner struct {
-	Shared string `json:"shared"`
-}
-
-// TestDepthTwinsFailClosed covers names that fold alike at different
-// depths, where the decoders disagree on the field a member fills: the
-// lookup knows no member of such a type, so the check refuses a document
-// naming one rather than name the wrong field. Twins at one depth, which
-// the decoders resolve alike, keep their lookup.
-func TestDepthTwinsFailClosed(t *testing.T) {
-	t.Parallel()
-
-	for _, member := range []string{"Shared", "shared", "SHARED"} {
-		if HasField(reflect.TypeFor[depthTwins](), member) {
-			t.Errorf("HasField(%q) = true, want false", member)
-		}
-
-		var twins depthTwins
-
-		err := Unmarshal([]byte(`{"`+member+`":"x"}`), &twins)
-		if !errors.Is(err, spm.ErrUnknownField) {
-			t.Errorf("Unmarshal of %q = %+v, %v, want ErrUnknownField", member, twins, err)
-		}
-	}
-
-	if !HasField(reflect.TypeFor[foldTwins](), "Name") ||
-		!HasField(reflect.TypeFor[foldPromoted](), "Alpha") {
-		t.Error("twins at one depth lost their lookup")
-	}
-}
-
-// shadowedRequired embeds a struct whose required field a field of its own
-// shadows: the decoder fills the shallower field, which is not required.
-type shadowedRequired struct {
-	requiredRule
-
-	Port string `json:"port"`
-}
-
-// TestMissingFieldsFollowTheDecodersFields covers the members the missing
-// check looks for, which must be the fields the decoder fills: a required
-// field shadowed by a shallower one is never filled, and never missing.
-func TestMissingFieldsFollowTheDecodersFields(t *testing.T) {
-	t.Parallel()
-
-	var decoded []shadowedRequired
-
-	raw := []byte(`[{"name":"a"}]`)
-
-	err := json.Unmarshal(raw, &decoded)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	got, omitted := missingFieldsOf(raw, &decoded)
-	if len(got) != 0 || omitted != 0 {
-		t.Errorf("missingFieldsOf = %v (%d omitted), want none", got, omitted)
-	}
-}
 
 // requiredNest nests itself to any depth around a list of rules with a
 // required member, so that the path of a rule is as long as a document
@@ -571,5 +237,59 @@ func TestUnknownMembersTheScanFinds(t *testing.T) {
 	err := Unmarshal(raw, new(specs.LinuxSeccomp))
 	if !errors.Is(err, spm.ErrUnknownField) || !strings.Contains(err.Error(), "syscalls[0].x") {
 		t.Errorf("Unmarshal = %v, want both unknown members", err)
+	}
+}
+
+// TestFoldName pins the folded form a member name is matched by: ASCII
+// letters upper-cased, other ASCII bytes kept, and every other rune folded
+// to the smallest rune of its case folding orbit, as encoding/json folds.
+func TestFoldName(t *testing.T) {
+	t.Parallel()
+
+	for name, want := range map[string]string{
+		"":              "",
+		"defaultAction": "DEFAULTACTION",
+		"a_z-A@Z[0`9{":  "A_Z-A@Z[0`9{",
+		"\u017fyscalls": "SYSCALLS",
+		"\u212a":        "K",
+		"\u0130":        "\u0130",
+		"\u00e9t\u00c9": "\u00c9T\u00c9",
+	} {
+		if got := foldName(name); got != want {
+			t.Errorf("foldName(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+// foldTwins holds two fields whose names differ only in case. encoding/json
+// matches a member spelled neither way to the first of them.
+type foldTwins struct {
+	Lower string `json:"name"`
+	Upper int    `json:"NAME"` //nolint:tagliatelle // a second spelling is the point
+}
+
+// TestFoldedTwinsResolveToTheFirst covers the rule jsonFields keeps for two
+// names that fold alike: a member spelled as neither fills the first in
+// field order, as encoding/json fills it, and a member spelled as one fills
+// that one. TestProfileTypesHaveFlatFields refuses such twins in the
+// profile types, so this pins the lookup rather than a shape a profile
+// document meets.
+func TestFoldedTwinsResolveToTheFirst(t *testing.T) {
+	t.Parallel()
+
+	var twins foldTwins
+
+	err := json.Unmarshal([]byte(`{"Name":"x"}`), &twins)
+	if err != nil || twins.Lower != "x" {
+		t.Fatalf("encoding/json no longer fills the first twin: %+v, %v", twins, err)
+	}
+
+	set := jsonFields(reflect.TypeFor[foldTwins]())
+
+	for member, want := range map[string]string{"Name": "name", "name": "name", "NAME": "NAME"} {
+		field, known, _ := set.lookup(member)
+		if !known || field.name != want {
+			t.Errorf("%s fills %q (known %v), want %q", member, field.name, known, want)
+		}
 	}
 }

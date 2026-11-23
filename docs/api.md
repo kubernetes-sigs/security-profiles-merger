@@ -148,9 +148,9 @@ from any of the three packages.
 | `ErrInexactBaseline` | `seccomp.ValidateBaseline`, `apparmor.ValidateBaseline` | A baseline whose intersection alone, or for seccomp its intersection with a profile allowing every call, differs from it: every merge with it takes away what the message names |
 | `ErrInvalidOptions` | Every method of `seccomp.Options` and `landlock.Options` that returns an error, without an `InputError` | Options that name no node to check for. A misconfigured node or caller, never a bad profile |
 | `ErrBudgetExceeded` | `apparmor.Intersect` and `apparmor.ValidateBaseline`; `landlock.Intersect` and `landlock.Union` | The merge ran past a bound on its own work, not wrapped in an `InputError`; see [Limits](integration.md#limits) |
-| `ErrEmptyPath` | `apparmor`, `landlock`: every validator and merge | A path is the empty string, or for `landlock` one that cleans to `.`, such as `.` or `./` |
+| `ErrEmptyPath` | `apparmor`, `landlock`: every validator and merge | A path is the empty string |
 | `ErrNulInPath` | `apparmor`: `ValidateArtifact` and `ValidateStrict`; `landlock`: every validator and merge | A path holds a NUL byte, or in `apparmor` an escape denoting one |
-| `ErrRelativePath` | `apparmor`: every validator and merge, and `QuotePath`; `landlock`: `ValidateBaseline`, `ValidateArtifact` and `ValidateStrict` | A path does not start with `/`, for `apparmor` as written, so an escape spelling the first `/` is relative too |
+| `ErrRelativePath` | `apparmor`: every validator and merge, and `QuotePath`; `landlock`: every validator and merge | A path does not start with `/`, for `apparmor` as written, so an escape spelling the first `/` is relative too; in `landlock` a NUL byte or a `..` component is reported instead |
 | `ErrPathTooLong` | `apparmor`, `landlock`: every validator and merge | A path is longer than `MaxPathLen`; [Path checks](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/spm#hdr-Path_checks) says which checks run before it |
 | `ErrDuplicateKey`, `ErrUnknownField`, `ErrMisspelledField`, `ErrInvalidUTF8`, `ErrUnexpectedData`, `ErrNotAnObject` | `UnmarshalStrict` of every package | See [Strict decoding](#strict-decoding) |
 | `ErrMissingField` | `seccomp.UnmarshalStrict` and `landlock.UnmarshalStrict` | See [Strict decoding](#strict-decoding) |
@@ -444,8 +444,8 @@ import "sigs.k8s.io/security-profiles-merger/landlock"
 |----------|-------------|
 | `Intersect` | Merge via intersection: handled and scoped sets unioned, rules intersected. For a runtime combining an artifact with its baseline. Fails with `ErrBudgetExceeded` past the [merge budget](#limits-2) |
 | `Union` | Merge via union: handled and scoped sets intersected, rules unioned. For combining recorded profiles. Has the budget of `Intersect`, plus the work of settling moves on the rule paths at or beneath each input's grants of `refer` |
-| `Validate` | Known rights and valid paths: no empty paths, paths over `MaxPathLen`, NUL bytes or `..` components. What the merge runs on each input; duplicates pass |
-| `ValidateBaseline` | `Validate` plus what a kernel could not load: relative paths, trailing `/` or `/.`, unhandled or empty grants, an empty ruleset, and paths that are not valid UTF-8. Used through `Options.ValidateBaseline` with the node's ABI version |
+| `Validate` | Known rights and valid paths: no empty or relative paths, paths over `MaxPathLen`, NUL bytes or `..` components. What the merge runs on each input; duplicates pass |
+| `ValidateBaseline` | `Validate` plus what a kernel could not load: trailing `/` or `/.`, unhandled or empty grants, an empty ruleset, and paths that are not valid UTF-8. Used through `Options.ValidateBaseline` with the node's ABI version |
 | `ValidateArtifact` | `ValidateBaseline` plus the [limit](#limits-2), checked first and on its own |
 | `ValidateStrict` | `ValidateArtifact` plus duplicate rules and rights, which no other validator reports |
 | `Options.Validate`, `Options.ValidateBaseline`, `Options.ValidateArtifact`, `Options.ValidateStrict`, `Options.DecodeArtifact` | The function of the same name plus the rights the ABI version `Options.ABI` names does not know, in one report. A version newer than `LatestABIVersion` is read as `LatestABIVersion`, and one below `ABIV1`, 0 included, is `ErrUnknownABIVersion` and `ErrInvalidOptions` |
@@ -480,7 +480,8 @@ seccomp.
 listed under [spm](#spm). A merge fails with `ErrNoProfiles` when given
 nothing, with `ErrBudgetExceeded` past its budget, and otherwise only on the
 rows that name it and on `ErrNilProfile`, `ErrEmptyPath`, `ErrNulInPath`,
-`ErrPathTooLong` and `ErrMoreProblems`, wrapped in an `InputError`.
+`ErrRelativePath`, `ErrPathTooLong` and `ErrMoreProblems`, wrapped in an
+`InputError`.
 
 | Sentinel | Raised by | Meaning |
 |----------|-----------|---------|
@@ -529,8 +530,8 @@ Each bullet names a section of the package documentation:
 - [ABI versions](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#hdr-ABI_versions): an `Intersect` result
   can require up to the highest version any input needs.
 - [Validation](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#hdr-Validation): a merge result passes
-  `ValidateStrict` when the inputs use absolute paths that are valid UTF-8,
-  it handles or scopes a right, and it holds no more than
-  `MaxArtifactRules` rules.
+  `ValidateStrict` when the inputs use paths that are valid UTF-8, it
+  handles or scopes a right, and it holds no more than `MaxArtifactRules`
+  rules.
 - [Diff](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/landlock#Diff): compares cleaned rules as written, so
   `Diff(p, Intersect(p, p))` can be unequal.

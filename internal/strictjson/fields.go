@@ -20,7 +20,6 @@ import (
 	"cmp"
 	"fmt"
 	"reflect"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -178,10 +177,9 @@ func HasField(target reflect.Type, name string) bool {
 const unreadableDocument = "(document)"
 
 // elementType returns the type a value of typ holds its members in: the
-// type itself, or the element type of a pointer, slice, array or map.
+// type itself, or the element type of a pointer or slice.
 func elementType(typ reflect.Type) reflect.Type {
-	for typ.Kind() == reflect.Pointer || typ.Kind() == reflect.Slice ||
-		typ.Kind() == reflect.Array || typ.Kind() == reflect.Map {
+	for typ.Kind() == reflect.Pointer || typ.Kind() == reflect.Slice {
 		typ = typ.Elem()
 	}
 
@@ -229,19 +227,15 @@ func plainFieldName(name string) bool {
 	return true
 }
 
-// fieldSet maps the JSON names of a struct's fields to their types, once by
-// exact name and once folded the way encoding/json folds a name for the
-// fallback match. That folding is not strings.ToLower: "\u0130" lowers to
-// "i" but folds to itself, so a lowered lookup takes a member the decoder
-// drops for a known one.
-//
-// A set marked divergent knows no member at all, so that a check reading a
-// document against it reports every member and refuses the document: see
-// jsonFields.
+// fieldSet holds the JSON-visible fields of a struct type: in field order,
+// by exact name, and by name folded the way encoding/json folds a name for
+// the fallback match. That folding is not strings.ToLower: "\u0130" lowers
+// to "i" but folds to itself, so a lowered lookup takes a member the
+// decoder drops for a known one.
 type fieldSet struct {
-	exact     map[string]reflect.Type
-	folded    map[string]jsonField
-	divergent bool
+	fields []jsonField
+	exact  map[string]jsonField
+	folded map[string]jsonField
 }
 
 // jsonField is a field of a struct as a member name matches it.
@@ -250,33 +244,22 @@ type jsonField struct {
 	name string
 	// typ is the type of the field.
 	typ reflect.Type
+	// required reports whether a document has to hold the member (see
+	// isRequired).
+	required bool
 }
 
 // lookup returns the field a member fills, whether one does, and whether
 // the member names it exactly rather than only ignoring case.
 func (set fieldSet) lookup(key string) (jsonField, bool, bool) {
-	if set.divergent {
-		return jsonField{}, false, false
-	}
-
-	if fieldType, ok := set.exact[key]; ok {
-		return jsonField{name: key, typ: fieldType}, true, true
-	}
-
-	field, ok := set.folded[foldName(key)]
-
-	return field, ok, false
+	return set.lookupFolded(key, foldName(key))
 }
 
 // lookupFolded is lookup for a member whose folded name (see foldName) the
 // caller holds already, which it does not fold again.
 func (set fieldSet) lookupFolded(key, folded string) (jsonField, bool, bool) {
-	if set.divergent {
-		return jsonField{}, false, false
-	}
-
-	if fieldType, ok := set.exact[key]; ok {
-		return jsonField{name: key, typ: fieldType}, true, true
+	if field, ok := set.exact[key]; ok {
+		return field, true, true
 	}
 
 	field, ok := set.folded[folded]
@@ -304,329 +287,45 @@ func fieldsOf(typ reflect.Type) fieldSet {
 	return set
 }
 
-// jsonFields collects the JSON-visible fields of a struct type, including
-// those promoted from embedded structs, as encoding/json resolves them (see
-// visibleFields). Where two names fold alike, the folded lookup takes the
-// field encoding/json takes, the first in field order.
+// jsonFields collects the fields encoding/json decodes the members of an
+// object into for a struct type: every exported field not tagged "-", by
+// the name its json tag gives it or by its Go name. Where two names fold
+// alike, the folded lookup takes the field encoding/json takes, the first
+// in field order.
 //
-// Those are the rules of the encoding/json of Go 1.24. The decoder of later
-// releases built on encoding/json/v2 resolves two shapes differently: two
-// fields whose names fold alike at different depths, where it fills the
-// shallower one rather than the first in field order, and a json tag that
-// is no valid name, which it may read as a name of its own. No profile type
-// has either shape. A type that has one is marked divergent, so that the
-// check knows none of its members and refuses every document holding one,
-// whichever decoder runs, rather than name the wrong field or skip the
-// checks of a field it cannot find.
+// That is all of encoding/json's field resolution the profile types need.
+// None of them embeds a struct, carries a json tag that is no valid name or
+// gives two fields one name, the shapes encoding/json resolves by further
+// rules, and its releases built on encoding/json/v2 resolve some of them
+// differently. TestProfileTypesHaveFlatFields keeps it that way.
 func jsonFields(typ reflect.Type) fieldSet {
-	fields := visibleFields(typ)
 	set := fieldSet{
-		exact:     make(map[string]reflect.Type, len(fields)),
-		folded:    make(map[string]jsonField, len(fields)),
-		divergent: hasInvalidTag(typ),
+		fields: make([]jsonField, 0, typ.NumField()),
+		exact:  make(map[string]jsonField, typ.NumField()),
+		folded: make(map[string]jsonField, typ.NumField()),
 	}
-	depths := make(map[string]int, len(fields))
 
-	for idx := range fields {
-		field := &fields[idx]
-		set.exact[field.name] = field.field.Type
+	for idx := range typ.NumField() {
+		field := typ.Field(idx)
 
-		folded := foldName(field.name)
-		if depth, taken := depths[folded]; taken {
-			set.divergent = set.divergent || depth != len(field.index)
-
+		tag := field.Tag.Get("json")
+		if !field.IsExported() || tag == "-" {
 			continue
 		}
 
-		depths[folded] = len(field.index)
-		set.folded[folded] = jsonField{name: field.name, typ: field.field.Type}
+		name, _, _ := strings.Cut(tag, ",")
+		member := jsonField{
+			name: cmp.Or(name, field.Name), typ: field.Type, required: isRequired(typ, &field),
+		}
+
+		set.fields = append(set.fields, member)
+		set.exact[member.name] = member
+
+		folded := foldName(member.name)
+		if _, taken := set.folded[folded]; !taken {
+			set.folded[folded] = member
+		}
 	}
 
 	return set
-}
-
-// hasInvalidTag reports whether a field encoding/json looks at, of the
-// struct type or of a struct it embeds without a tag name, carries a json
-// tag whose name is not empty but no valid name. It follows the visibility
-// rules of tagName and walks the embedded structs as ownFields does, so a
-// field Go hides as ambiguous counts, while an unexported field, which no
-// decoder reads, does not.
-func hasInvalidTag(typ reflect.Type) bool {
-	seen := map[reflect.Type]bool{}
-	pending := []reflect.Type{typ}
-
-	for len(pending) > 0 {
-		current := pending[0]
-		pending = pending[1:]
-
-		if seen[current] {
-			continue
-		}
-
-		seen[current] = true
-
-		for idx := range current.NumField() {
-			field := current.Field(idx)
-
-			embedded, invalid := tagShape(&field)
-			if invalid {
-				return true
-			}
-
-			if embedded != nil {
-				pending = append(pending, embedded)
-			}
-		}
-	}
-
-	return false
-}
-
-// tagShape returns the struct a field embeds without a tag name, whose
-// fields encoding/json promotes, or nil, and whether the field is one
-// encoding/json looks at and carries a json tag that is no valid name.
-func tagShape(field *reflect.StructField) (reflect.Type, bool) {
-	name, visible := tagName(field)
-	if !visible {
-		return nil, false
-	}
-
-	tagged, _, _ := strings.Cut(field.Tag.Get("json"), ",")
-	if tagged != "" && name == "" {
-		return nil, true
-	}
-
-	fieldType := field.Type
-	if fieldType.Name() == "" && fieldType.Kind() == reflect.Pointer {
-		fieldType = fieldType.Elem()
-	}
-
-	if name == "" && field.Anonymous && fieldType.Kind() == reflect.Struct {
-		return fieldType, false
-	}
-
-	return nil, false
-}
-
-// visibleField is a field of a struct type that encoding/json decodes a
-// member into.
-type visibleField struct {
-	// name is the JSON name of the field.
-	name string
-	// tagged reports whether the name comes from the field's json tag.
-	tagged bool
-	// index is the field's index sequence, as for
-	// reflect.Value.FieldByIndex.
-	index []int
-	// field is the field itself and owner the struct type declaring it.
-	field reflect.StructField
-	owner reflect.Type
-	// gate is the index sequence of the innermost struct embedded through
-	// a pointer that holds the field, at any depth, or nil for none.
-	gate []int
-}
-
-// embeddedStruct is a struct type visibleFields looks into, as embedded at
-// the index sequence of index.
-type embeddedStruct struct {
-	typ   reflect.Type
-	index []int
-	// gate is as for visibleField, for the fields of the struct.
-	gate []int
-}
-
-// visibleFields returns the fields encoding/json decodes the members of an
-// object into for a struct type, in field order, resolved by the rules of
-// its typeFields: embedded structs are walked breadth first, each type once;
-// a json tag that is not a valid name counts as none; of the fields sharing
-// a name the shallowest wins, a tagged one over an untagged one at the same
-// depth, and two at the same depth that neither rule separates are both
-// dropped. Fields promoted from two embeddings of one type at the same depth
-// are dropped the same way.
-func visibleFields(typ reflect.Type) []visibleField {
-	var (
-		fields  []visibleField
-		current []embeddedStruct
-		count   map[reflect.Type]int
-	)
-
-	next := []embeddedStruct{{typ: typ}}
-	nextCount := map[reflect.Type]int{}
-	visited := map[reflect.Type]bool{}
-
-	for len(next) > 0 {
-		current, next = next, current[:0]
-		count, nextCount = nextCount, map[reflect.Type]int{}
-
-		for _, outer := range current {
-			if visited[outer.typ] {
-				continue
-			}
-
-			visited[outer.typ] = true
-
-			found, embedded := ownFields(outer)
-
-			for _, inner := range embedded {
-				nextCount[inner.typ]++
-				if nextCount[inner.typ] == 1 {
-					next = append(next, inner)
-				}
-			}
-
-			for idx := range found {
-				fields = append(fields, found[idx])
-
-				// A type embedded twice at one depth promotes each of its
-				// fields twice, which the dominance rule drops.
-				if count[outer.typ] > 1 {
-					fields = append(fields, found[idx])
-				}
-			}
-		}
-	}
-
-	return dominantFields(fields)
-}
-
-// ownFields returns the fields a struct embedded as outer declares, and the
-// structs it embeds without a tag name, whose fields it promotes.
-func ownFields(outer embeddedStruct) ([]visibleField, []embeddedStruct) {
-	var (
-		fields   []visibleField
-		embedded []embeddedStruct
-	)
-
-	for idx := range outer.typ.NumField() {
-		field := outer.typ.Field(idx)
-
-		name, visible := tagName(&field)
-		if !visible {
-			continue
-		}
-
-		index := append(slices.Clone(outer.index), idx)
-
-		fieldType := field.Type
-		if fieldType.Name() == "" && fieldType.Kind() == reflect.Pointer {
-			fieldType = fieldType.Elem()
-		}
-
-		if name == "" && field.Anonymous && fieldType.Kind() == reflect.Struct {
-			gate := outer.gate
-			if field.Type.Kind() == reflect.Pointer {
-				gate = index
-			}
-
-			embedded = append(embedded, embeddedStruct{typ: fieldType, index: index, gate: gate})
-
-			continue
-		}
-
-		fields = append(fields, visibleField{
-			name: cmp.Or(name, field.Name), tagged: name != "", index: index,
-			field: field, owner: outer.typ, gate: outer.gate,
-		})
-	}
-
-	return fields, embedded
-}
-
-// tagName returns the name the json tag of a struct field gives it, "" for
-// none or one that is not valid, and whether encoding/json looks at the
-// field at all: not where the tag is "-", and of an unexported field only
-// where it embeds a struct, whose exported fields are promoted.
-func tagName(field *reflect.StructField) (string, bool) {
-	if field.Anonymous {
-		embedded := field.Type
-		if embedded.Kind() == reflect.Pointer {
-			embedded = embedded.Elem()
-		}
-
-		if !field.IsExported() && embedded.Kind() != reflect.Struct {
-			return "", false
-		}
-	} else if !field.IsExported() {
-		return "", false
-	}
-
-	tag := field.Tag.Get("json")
-	if tag == "-" {
-		return "", false
-	}
-
-	name, _, _ := strings.Cut(tag, ",")
-	if !validTagName(name) {
-		return "", true
-	}
-
-	return name, true
-}
-
-// validTagName reports whether encoding/json takes a json tag name as the
-// name of a field: a non-empty name of letters, digits and punctuation
-// other than a backslash and quotes.
-func validTagName(name string) bool {
-	if name == "" {
-		return false
-	}
-
-	for _, char := range name {
-		if !strings.ContainsRune("!#$%&()*+-./:;<=>?@[]^_{|}~ ", char) &&
-			!unicode.IsLetter(char) && !unicode.IsDigit(char) {
-			return false
-		}
-	}
-
-	return true
-}
-
-// dominantFields keeps, of the fields sharing a name, the one encoding/json
-// decodes into: the shallowest, a tagged one before an untagged one at the
-// same depth, and none where two remain tied. It returns them in field
-// order.
-func dominantFields(fields []visibleField) []visibleField {
-	slices.SortFunc(fields, func(left, right visibleField) int {
-		return cmp.Or(
-			strings.Compare(left.name, right.name),
-			cmp.Compare(len(left.index), len(right.index)),
-			compareTagged(left.tagged, right.tagged),
-			slices.Compare(left.index, right.index),
-		)
-	})
-
-	kept := fields[:0]
-
-	for start := 0; start < len(fields); {
-		end := start + 1
-		for end < len(fields) && fields[end].name == fields[start].name {
-			end++
-		}
-
-		first := fields[start]
-		if end-start == 1 || len(fields[start+1].index) != len(first.index) ||
-			fields[start+1].tagged != first.tagged {
-			kept = append(kept, first)
-		}
-
-		start = end
-	}
-
-	slices.SortFunc(kept, func(left, right visibleField) int {
-		return slices.Compare(left.index, right.index)
-	})
-
-	return kept
-}
-
-// compareTagged orders a tagged field before an untagged one.
-func compareTagged(left, right bool) int {
-	switch {
-	case left == right:
-		return 0
-	case left:
-		return -1
-	default:
-		return 1
-	}
 }

@@ -226,7 +226,7 @@ func refMergeFilesystem(left, right *FilesystemRules) *FilesystemRules {
 }
 
 func refRecord(merged map[string]fsPermission, key string, perm fsPermission) {
-	if !perm.read && !perm.write {
+	if !perm.any() {
 		return
 	}
 

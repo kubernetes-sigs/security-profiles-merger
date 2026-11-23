@@ -37,7 +37,7 @@ var (
 	ErrDuplicateRule = errors.New("duplicate rule")
 
 	// ErrEmptyPath is returned by Validate and every function that runs it
-	// when a path rule is empty or cleans to ".", such as "./".
+	// when a path rule is empty.
 	ErrEmptyPath = spm.ErrEmptyPath
 
 	// ErrNulInPath is returned by Validate and every function that runs it
@@ -54,7 +54,7 @@ var (
 	ErrTooManyRules = merge.LimitError("too many rules")
 
 	// ErrParentPath is returned by Validate and every function that runs it
-	// when a path rule holds a ".." component.
+	// when a path rule holds a ".." component, relative or not.
 	ErrParentPath = errors.New(`path contains a ".." component`)
 
 	// ErrUnhandledRight is returned by ValidateBaseline, ValidateArtifact
@@ -66,8 +66,10 @@ var (
 	// appears more than once in a handled set, a rule or the scoped set.
 	ErrDuplicateRight = errors.New("duplicate access right")
 
-	// ErrRelativePath is returned by ValidateBaseline, ValidateArtifact and
-	// ValidateStrict when a path rule is not absolute.
+	// ErrRelativePath is returned by Validate and every function that runs
+	// it when a path rule does not start with "/", "./" included. A path
+	// holding a NUL byte or a ".." component reports that instead, so
+	// "../x" matches ErrParentPath alone.
 	ErrRelativePath = spm.ErrRelativePath
 
 	// ErrTrailingSlash is returned by ValidateBaseline, ValidateArtifact and
@@ -159,8 +161,11 @@ func portRef(idx int) fieldRef { return fieldRef{rules: netRulesName, rule: idx,
 
 // Validate checks what the merge needs, and is what Intersect and Union run
 // on every input: known access rights (ErrUnknownRight) and paths that are
-// not empty (ErrEmptyPath), longer than MaxPathLen (ErrPathTooLong), or
-// holding a NUL byte (ErrNulInPath) or a ".." component (ErrParentPath).
+// not empty (ErrEmptyPath), longer than MaxPathLen (ErrPathTooLong),
+// holding a NUL byte (ErrNulInPath) or a ".." component (ErrParentPath), or
+// relative (ErrRelativePath). The merge compares paths as text, while the
+// kernel resolves a relative path against the working directory of the
+// process loading the ruleset, which no merge can see.
 // Duplicate rules and rights pass. Failures are collected into one bounded
 // report. See the Validation and Rule paths sections.
 func Validate(profile *Profile) error {
@@ -318,7 +323,7 @@ const (
 	pathTooLong
 	pathNUL
 	pathParent
-	pathDot
+	pathRelative
 )
 
 // err returns the error reporting the problem for the path.
@@ -332,8 +337,8 @@ func (p pathProblem) err(path string) error {
 		return fmt.Errorf("%s: %w", merge.QuoteBounded(path), ErrNulInPath)
 	case pathParent:
 		return fmt.Errorf("%s: %w", merge.QuoteBounded(path), ErrParentPath)
-	case pathDot:
-		return fmt.Errorf("%s: %w (resolves to %q)", merge.QuoteBounded(path), ErrEmptyPath, ".")
+	case pathRelative:
+		return fmt.Errorf("%s: %w", merge.QuoteBounded(path), ErrRelativePath)
 	case pathValid:
 	}
 
@@ -341,11 +346,12 @@ func (p pathProblem) err(path string) error {
 }
 
 // validatePath rejects empty paths, paths longer than MaxPathLen, paths
-// with NUL bytes, paths with ".." components, and paths that clean to ".".
-// It returns the cleaned path, or the problem it found.
+// with NUL bytes, paths with ".." components, and relative paths, and
+// reports the first of these it finds in that order. It returns the
+// cleaned path, which starts with "/", or the problem it found.
 //
-// The length is checked first, so a path no kernel could take is rejected
-// without scanning or cleaning it.
+// The length is checked right after emptiness, so a path no kernel could
+// take is rejected without scanning or cleaning it.
 func validatePath(path string) (string, pathProblem) {
 	switch {
 	case path == "":
@@ -356,14 +362,11 @@ func validatePath(path string) (string, pathProblem) {
 		return "", pathNUL
 	case hasParentComponent(path):
 		return "", pathParent
+	case path[0] != '/':
+		return "", pathRelative
 	}
 
-	cleaned := cleanPath(path)
-	if cleaned == "." {
-		return "", pathDot
-	}
-
-	return cleaned, pathValid
+	return cleanPath(path), pathValid
 }
 
 // hasParentComponent reports whether a slash-separated path has a ".."
@@ -485,16 +488,16 @@ func ValidateArtifact(profile *Profile) error {
 }
 
 // ValidateBaseline validates the profile a runtime trusts: every check of
-// Validate, and what a kernel could not load: a relative path
-// (ErrRelativePath), a path ending in "/" or "/." without naming the root
-// (ErrTrailingSlash), a path that is not valid UTF-8 (ErrInvalidUTF8Path),
-// a rule granting a right its profile does not handle (ErrUnhandledRight)
-// or none (ErrEmptyRule), and a profile that handles and scopes nothing
-// (ErrEmptyRuleset). It applies no MaxArtifactRules and checks no ABI
-// version; a runtime calls Options.ValidateBaseline at config load. Nor can
-// it see that the kernel also rejects a rule on a path that is not a
-// directory granting a right that applies to directories only (see
-// PathRule), which depends on the file system.
+// Validate, and what a kernel could not load: a path ending in "/" or "/."
+// without naming the root (ErrTrailingSlash), a path that is not valid
+// UTF-8 (ErrInvalidUTF8Path), a rule granting a right its profile does not
+// handle (ErrUnhandledRight) or none (ErrEmptyRule), and a profile that
+// handles and scopes nothing (ErrEmptyRuleset). It applies no
+// MaxArtifactRules and checks no ABI version; a runtime calls
+// Options.ValidateBaseline at config load. Nor can it see that the kernel
+// also rejects a rule on a path that is not a directory granting a right
+// that applies to directories only (see PathRule), which depends on the
+// file system.
 //
 // Unlike the seccomp and apparmor ValidateBaseline, it does not compare the
 // baseline with Intersect of the baseline alone, which changes how rules
@@ -767,7 +770,7 @@ func abiErrors[T ~string](
 }
 
 // validateLoadable reports what a kernel would refuse: a ruleset handling
-// nothing, relative paths, rules granting no right, and rules granting
+// nothing, paths ending in a slash, rules granting no right, and rules granting
 // rights outside the handled access sets.
 func validateLoadable(report *merge.Collector, profile *Profile) {
 	if len(profile.HandledAccessFS) == 0 &&
@@ -808,10 +811,10 @@ func validateLoadable(report *merge.Collector, profile *Profile) {
 }
 
 // validateLoadablePath reports a rule path the kernel would refuse or that
-// would come out of the merge as another path: a relative path, one ending
-// in a slash, and one JSON cannot carry. An empty path and one longer than
-// MaxPathLen are left to Validate, which reports them without scanning
-// them (see ErrPathTooLong).
+// would come out of the merge as another path: one ending in a slash, and
+// one JSON cannot carry. An empty path and one longer than MaxPathLen are
+// left to Validate, which reports them without scanning them (see
+// ErrPathTooLong).
 func validateLoadablePath(report *merge.Collector, idx int, path string) {
 	if path == "" || len(path) > MaxPathLen {
 		return
@@ -821,7 +824,6 @@ func validateLoadablePath(report *merge.Collector, idx int, path string) {
 		failed   bool
 		sentinel error
 	}{
-		{!strings.HasPrefix(path, "/"), ErrRelativePath},
 		{hasTrailingSlash(path), ErrTrailingSlash},
 		{!utf8.ValidString(path), ErrInvalidUTF8Path},
 	} {
@@ -838,11 +840,10 @@ func validateLoadablePath(report *merge.Collector, idx int, path string) {
 	}
 }
 
-// hasTrailingSlash reports whether an absolute path names its last
-// component as a directory, by ending in "/" or "/.", without being the
-// root, which is a directory anyway. A relative path is reported as
-// relative, and a path Validate rejects for what it holds as Validate
-// reports it, rather than as either ending in a slash.
+// hasTrailingSlash reports whether a path names its last component as a
+// directory, by ending in "/" or "/.", without being the root, which is a
+// directory anyway. A path Validate rejects is reported as Validate reports
+// it, rather than as ending in a slash.
 func hasTrailingSlash(path string) bool {
 	if !strings.HasSuffix(path, "/") && !strings.HasSuffix(path, "/.") {
 		return false
@@ -850,7 +851,7 @@ func hasTrailingSlash(path string) bool {
 
 	cleaned, problem := validatePath(path)
 
-	return problem == pathValid && strings.HasPrefix(path, "/") && cleaned != rootPath
+	return problem == pathValid && cleaned != rootPath
 }
 
 func validateHandled[T ~string](

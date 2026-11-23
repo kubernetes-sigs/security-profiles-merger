@@ -393,6 +393,22 @@ func FuzzAppArmorIntersectPermitsThree(f *testing.F) {
 		uint64(0b10)<<(fsSelectorBits*15), uint32(0), uint32(0), uint8(0),
 		uint64(0b10)<<(fsSelectorBits*15), uint32(0), uint32(0), uint8(0))
 
+	// The escaped literal `/etc/\x61pp.conf`, under `/etc/\x61*` and
+	// "/etc/*.conf", all read-only and so executable for the composed two.
+	f.Add(uint64(0), uint32(0), composed(3, 1), uint8(0),
+		uint64(0), uint32(0), composed(4, 1), uint8(0),
+		uint64(0b01)<<(fsSelectorBits*3), uint32(0), uint32(0), uint8(0))
+	// The file named by an escaped star, under "/etc/*" and the escaped
+	// star before a star, which writes it.
+	f.Add(uint64(0), uint32(0), composed(5, 3), uint8(0),
+		uint64(0b11)<<(fsSelectorBits*1), uint32(1<<1), uint32(0), uint8(0),
+		uint64(0), uint32(0), composed(6, 2), uint8(0))
+	// Nested alternations holding "**" three ways, around a literal they
+	// all cover.
+	f.Add(uint64(0b11)<<(fsSelectorBits*13), uint32(1<<13), composed(0, 3), uint8(0),
+		uint64(0), uint32(0), composed(1, 3), uint8(0),
+		uint64(0b11)<<(fsSelectorBits*2), uint32(0), composed(2, 3), uint8(0))
+
 	for _, triple := range evalGroupingTriples {
 		f.Add(triple[0][0], uint32(triple[0][1]), uint32(0b1011), uint8(netRawBit|netTCPBit),
 			triple[1][0], uint32(triple[1][1]), uint32(0b1011), uint8(netRawBit|netTCPBit),
@@ -482,7 +498,8 @@ func assertPathsIntersectThree(t *testing.T, access operation, inputs []*Profile
 	}
 }
 
-// listedLiterals returns the literal paths of the list an operation reads.
+// listedLiterals returns the files the literal paths of the list an
+// operation reads name, their escapes resolved.
 func listedLiterals(profile *Profile, access operation) []string {
 	var paths []string
 
@@ -493,5 +510,10 @@ func listedLiterals(profile *Profile, access operation) []string {
 			profile.Filesystem.WriteOnlyPaths, profile.Filesystem.ReadWritePaths)
 	}
 
-	return slices.DeleteFunc(slices.Clone(paths), IsGlobPattern)
+	literals := slices.DeleteFunc(slices.Clone(paths), IsGlobPattern)
+	for idx, path := range literals {
+		literals[idx] = evalLiteralName(path)
+	}
+
+	return literals
 }

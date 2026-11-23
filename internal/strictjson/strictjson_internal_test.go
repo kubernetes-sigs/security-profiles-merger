@@ -149,14 +149,6 @@ func TestDuplicateKeysFoldOnlyForStructs(t *testing.T) {
 			t.Errorf("Unmarshal(%s) = %v, want %v naming %s", test.raw, err, test.want, test.path)
 		}
 	}
-
-	// A map keeps every key as written, so keys differing in case are two.
-	var values map[string]int
-
-	err := Unmarshal([]byte(`{"k":1,"K":2}`), &values)
-	if err != nil || len(values) != 2 {
-		t.Errorf("Unmarshal into a map = %v, %v, want both keys", values, err)
-	}
 }
 
 // TestBracketedPathsAreQuotedOnce covers the message naming a member whose
@@ -198,67 +190,15 @@ func TestBracketedPathsAreQuotedOnce(t *testing.T) {
 	}
 
 	// The paths a document holds, end to end.
-	err := Unmarshal([]byte(`{"a.b":1,"c, d":2}`), new(walkEmbedded))
+	err := Unmarshal([]byte(`{"a.b":1,"c, d":2}`), new(walkInner))
 	if want := `unknown fields ["a.b"], "c, d"`; err == nil || err.Error() != want {
 		t.Errorf("Unmarshal = %v, want %s", err, want)
 	}
 }
 
-// walkEmbedded and walkTarget exercise the parts of the unknown-field walker
-// the profile types do not use: promoted fields and map values.
-type walkEmbedded struct {
+// walkInner is a struct of one field, whose members are known or not.
+type walkInner struct {
 	Inner string `json:"inner"`
-}
-
-type walkTarget struct {
-	walkEmbedded
-
-	Values map[string]walkEmbedded    `json:"values"`
-	Nested map[string][]walkEmbedded  `json:"nested"`
-	Raw    map[string]json.RawMessage `json:"raw"`
-}
-
-// walkShadowing embeds a struct whose field shares a JSON name with one of
-// its own; encoding/json decodes into the shallower field.
-type walkShadowing struct {
-	walkShadowed
-
-	Values string `json:"values"`
-}
-
-type walkShadowed struct {
-	Values map[string]walkEmbedded `json:"values"`
-}
-
-func TestUnknownFieldsWalksPromotedAndMapFields(t *testing.T) {
-	t.Parallel()
-
-	raw := `{"inner":"x","values":{"b":{"inner":"y","bogus":1},"a":{"inner":"z"}},` +
-		`"nested":{"n":[{"inner":"w","typo":2}]},"raw":{"k":{"anything":true}},"extra":3}`
-
-	got, _ := unknownFields([]byte(raw), reflect.TypeFor[walkTarget]())
-
-	want := []string{"values.b.bogus", "nested.n[0].typo", "extra"}
-	if !slices.Equal(got, want) {
-		t.Errorf("unknownFields = %v, want %v", got, want)
-	}
-}
-
-// TestDuplicateKeysOfAMapAreExact covers an object decoding into a map:
-// encoding/json keeps each of its keys as written, so keys that differ only
-// in case are distinct, while the members of a struct inside still fold.
-func TestDuplicateKeysOfAMapAreExact(t *testing.T) {
-	t.Parallel()
-
-	raw := `{"values":{"a":{"inner":"x"},"A":{"inner":"y","INNER":"z"},"a":{}},` +
-		`"VALUES":{}}`
-
-	scan := scanDocument([]byte(raw), reflect.TypeFor[walkTarget](), false)
-
-	want := []string{"values.A.INNER", "values.a", "VALUES"}
-	if !slices.Equal(scan.duplicates.paths, want) {
-		t.Errorf("duplicates = %q, want %q", scan.duplicates.paths, want)
-	}
 }
 
 // TestDuplicateKeysBoundsPathWork covers a document nesting deeply under
@@ -533,20 +473,6 @@ func FuzzUnknownFields(f *testing.F) {
 	})
 }
 
-func TestUnknownFieldsPrefersShallowerField(t *testing.T) {
-	t.Parallel()
-
-	// "values" is the string field of walkShadowing, not the map promoted
-	// from walkShadowed, so nothing inside it is inspected.
-	got, _ := unknownFields(
-		[]byte(`{"values":{"k":{"bogus":1}}}`),
-		reflect.TypeFor[walkShadowing](),
-	)
-	if len(got) != 0 {
-		t.Errorf("unknownFields = %v, want none", got)
-	}
-}
-
 // walkTags holds the fields encoding/json reads by their Go name or not at
 // all, which no profile type has.
 type walkTags struct {
@@ -627,10 +553,9 @@ func TestHasField(t *testing.T) {
 }
 
 // requiredTarget has a field whose zero value is a value of its own, as the
-// port of a network rule is, directly and through an embedded struct.
+// port of a network rule is.
 type requiredTarget struct {
 	Rules    []requiredRule   `json:"rules"`
-	Embedded []requiredOuter  `json:"embedded"`
 	Pointers []*requiredRule  `json:"pointers"`
 	One      *requiredRule    `json:"one"`
 	Plain    []unrequiredRule `json:"plain"`
@@ -639,12 +564,6 @@ type requiredTarget struct {
 type requiredRule struct {
 	Port uint16 `json:"port" strict:"required"`
 	Name string `json:"name"`
-}
-
-type requiredOuter struct {
-	requiredRule
-
-	Extra string `json:"extra"`
 }
 
 type unrequiredRule struct {
@@ -673,8 +592,6 @@ func TestMissingFieldsOf(t *testing.T) {
 		// A nil pointer is no object that could miss a member.
 		{`{"pointers":[null],"one":null}`, nil},
 		{`{"pointers":[{}],"one":{}}`, []string{"pointers[0].port", "one.port"}},
-		// A member of an embedded struct sits in the object embedding it.
-		{`{"embedded":[{"port":1},{"extra":"x"}]}`, []string{"embedded[1].port"}},
 	} {
 		var decoded requiredTarget
 
@@ -695,10 +612,6 @@ func TestMissingFieldsOf(t *testing.T) {
 
 	if got, omitted := missingFieldsOf([]byte(`[{}]`), &plain); got != nil || omitted != 0 {
 		t.Errorf("a type without required fields: missingFieldsOf = %v (%d omitted)", got, omitted)
-	}
-
-	if !requiresFields(reflect.TypeFor[requiredOuter]()) {
-		t.Error("a required field of an embedded struct is not seen")
 	}
 }
 
@@ -921,46 +834,6 @@ func TestDecodeIntoAFilledTarget(t *testing.T) {
 	}
 }
 
-// requiredMaps holds required fields in the values of maps, which no profile
-// type has but the walk supports, keyed by a string and by a named string
-// type the decoder fills from the member name as well.
-type requiredMaps struct {
-	Named map[string]requiredRule   `json:"named"`
-	Keyed map[ruleName]requiredRule `json:"keyed"`
-}
-
-type ruleName string
-
-// TestMissingFieldsOfInMaps covers a required member of a map value: it is
-// reported with the member name as the path segment, in document order, as
-// every finding of a read of the document's tokens is.
-func TestMissingFieldsOfInMaps(t *testing.T) {
-	t.Parallel()
-
-	for _, test := range []struct {
-		raw  string
-		want []string
-	}{
-		{`{"named":{"a":{"port":0}}}`, nil},
-		{`{"named":{"b":{"port":1},"a":{}}}`, []string{"named.a.port"}},
-		{`{"named":{"c":null,"a":{"name":"x"}}}`, []string{"named.c.port", "named.a.port"}},
-		{`{"keyed":{"x":{}},"named":{}}`, []string{"keyed.x.port"}},
-	} {
-		var decoded requiredMaps
-
-		err := json.Unmarshal([]byte(test.raw), &decoded)
-		if err != nil {
-			t.Fatalf("%s: %v", test.raw, err)
-		}
-
-		got, omitted := missingFieldsOf([]byte(test.raw), &decoded)
-		if !slices.Equal(got, test.want) || omitted != 0 {
-			t.Errorf("%s: missingFieldsOf = %v (%d omitted), want %v",
-				test.raw, got, omitted, test.want)
-		}
-	}
-}
-
 // checkMissingCases decodes each document into a T as encoding/json does
 // and compares the missing members the scan reports with the want of it.
 func checkMissingCases[T any](t *testing.T, cases []struct {
@@ -1014,125 +887,6 @@ func TestMissingFieldsOfFoldedTwins(t *testing.T) {
 	err := Unmarshal([]byte(`{"a":"x"}`), &decoded)
 	if !errors.Is(err, spm.ErrMissingField) || err.Error() != `missing field "A"` {
 		t.Errorf("Unmarshal = %v, want missing field \"A\"", err)
-	}
-}
-
-// PointerInner is embedded through a pointer, which encoding/json allocates
-// once a document names any member of it, null or not. It is exported, as
-// the decoder cannot allocate a pointer to an unexported struct.
-type PointerInner struct {
-	P string `json:"p" strict:"required"`
-	Q string `json:"q"`
-}
-
-type pointerEmbedding struct {
-	*PointerInner
-
-	R string `json:"r"`
-}
-
-// PointerMiddle embeds PointerInner through a pointer of its own.
-type PointerMiddle struct {
-	*PointerInner
-
-	M string `json:"m" strict:"required"`
-}
-
-type pointerNesting struct {
-	*PointerMiddle
-
-	R string `json:"r"`
-}
-
-// TestMissingFieldsOfPointerEmbedding covers a required field of a struct
-// embedded through a pointer: it is missing wherever the decoder allocates
-// the struct, which a member of it does, at any depth, and not where the
-// pointer stays nil.
-func TestMissingFieldsOfPointerEmbedding(t *testing.T) {
-	t.Parallel()
-
-	checkMissingCases[pointerEmbedding](t, []struct {
-		raw  string
-		want []string
-	}{
-		{`{}`, nil},
-		{`{"r":"x"}`, nil},
-		{`{"q":"x"}`, []string{"p"}},
-		{`{"q":null}`, []string{"p"}},
-		{`{"Q":"x"}`, []string{"p"}},
-		{`{"p":null}`, []string{"p"}},
-		{`{"p":"x"}`, nil},
-	})
-
-	checkMissingCases[pointerNesting](t, []struct {
-		raw  string
-		want []string
-	}{
-		{`{"r":"x"}`, nil},
-		// A member of the middle struct leaves the inner pointer nil.
-		{`{"m":"x"}`, nil},
-		{`{"m":null}`, []string{"m"}},
-		{`{"q":"x"}`, []string{"p", "m"}},
-		{`{"q":"x","m":"y"}`, []string{"p"}},
-	})
-}
-
-type requiredArrays struct {
-	Pair     [2]requiredRule            `json:"pair"`
-	Nested   [][2]requiredRule          `json:"nested"`
-	Pointers [2]*requiredRule           `json:"pointers"`
-	Wide     [40]requiredRule           `json:"wide"`
-	Plain    [2]unrequiredRule          `json:"plain"`
-	Mapped   map[string][1]requiredRule `json:"mapped"`
-}
-
-// TestMissingFieldsOfArrays covers a required field of the elements of a
-// Go array: encoding/json zeroes the elements a document does not give,
-// and leaves an array it gives null or leaves out zero.
-func TestMissingFieldsOfArrays(t *testing.T) {
-	t.Parallel()
-
-	full := strings.Repeat(`{"port":1},`, 40)
-	full = `"wide":[` + full[:len(full)-1] + `]`
-
-	checkMissingCases[requiredArrays](t, []struct {
-		raw  string
-		want []string
-	}{
-		{`{"pair":[{"port":1},{"port":2}],` + full + `}`, nil},
-		// encoding/json drops elements past the length of the array.
-		{`{"pair":[{"port":1},{"port":2},{}],` + full + `}`, nil},
-		{`{"pair":[{"port":1}],` + full + `}`, []string{"pair[1].port"}},
-		{`{"pair":[{"port":1},null],` + full + `}`, []string{"pair[1].port"}},
-		{`{"pair":[{},{"port":1}],` + full + `}`, []string{"pair[0].port"}},
-		{`{"pair":[],` + full + `}`, []string{"pair[0].port", "pair[1].port"}},
-		{`{"pair":null,` + full + `}`, []string{"pair[0].port", "pair[1].port"}},
-		{
-			`{` + full + `,"pair":[{"port":1},{"port":2}],"nested":[[{"port":1}],null]}`,
-			[]string{"nested[0][1].port", "nested[1][0].port", "nested[1][1].port"},
-		},
-		{
-			`{"pair":[{"port":1},{"port":2}],` + full + `,"mapped":{"k":[]}}`,
-			[]string{"mapped.k[0].port"},
-		},
-		// Nil pointers and fields without a required one hold nothing to
-		// miss.
-		{`{"pair":[{"port":1},{"port":2}],` + full + `,"pointers":[],"plain":[]}`, nil},
-	})
-
-	// A member left out is reported, bounded as any other report.
-	var decoded requiredArrays
-
-	got, omitted := missingFieldsOf([]byte(`{}`), &decoded)
-	if len(got) != maxReportedPaths || got[0] != "pair[0].port" ||
-		got[2] != "wide[0].port" || omitted != 42-maxReportedPaths {
-		t.Errorf("missingFieldsOf({}) = %v (%d omitted), want the first %d of 42",
-			got, omitted, maxReportedPaths)
-	}
-
-	err := Unmarshal([]byte(`{"pair":[{"port":1}],`+full+`}`), &decoded)
-	if !errors.Is(err, spm.ErrMissingField) || err.Error() != `missing field "pair[1].port"` {
-		t.Errorf("Unmarshal = %v, want missing field \"pair[1].port\"", err)
 	}
 }
 
@@ -1244,7 +998,7 @@ func TestPathAt(t *testing.T) {
 		value string
 	}{
 		{`{"rules":[{"port":1},{"port":"x"}]}`, "rules[1].port", `"x"`},
-		{`{"embedded":[{"port":70000}]}`, "embedded[0].port", "70000"},
+		{`{"pointers":[{"port":70000}]}`, "pointers[0].port", "70000"},
 		{`{"rules":[{"port":1}], "one": {"name": {}}}`, "one.name", "{}"},
 		{"{\"rules\" :\n  [ {\"name\":\n [1]}]}", "rules[0].name", "[1]"},
 		{`{"one":{"port":-1}}`, "one.port", "-1"},

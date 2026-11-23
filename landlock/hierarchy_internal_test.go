@@ -24,16 +24,16 @@ import (
 
 // TestAncestorsMatchRelation checks the enumeration the merge uses
 // against the hierarchy relation it stands for: for every pair of cleaned
-// paths, the enumeration lists an ancestor exactly when the relation holds.
-// The merge enumerates rather than testing every rule, because testing would
-// make a profile with many rules quadratic to merge.
+// absolute paths, as Validate leaves them, the enumeration lists an
+// ancestor exactly when the relation holds. The merge enumerates rather
+// than testing every rule, because testing would make a profile with many
+// rules quadratic to merge.
 func TestAncestorsMatchRelation(t *testing.T) {
 	t.Parallel()
 
 	paths := []string{
 		"/", "/a", "/a/b", "/a/b/c", "/ab", "/ab/c", "/a/bc",
-		"/var/log", "/var/log/app", "/var", "relative", "relative/deep",
-		"/a/b/", "/a/./b", "/a/../b", "",
+		"/var/log", "/var/log/app", "/var", "/a/b/", "/a/./b", "/a/../b",
 	}
 
 	for _, raw := range paths {
@@ -41,8 +41,8 @@ func TestAncestorsMatchRelation(t *testing.T) {
 		yielded := slices.Collect(ancestors(cleaned))
 
 		// The parents are the same enumeration without the path itself.
-		if parents := slices.Collect(strictAncestors(cleaned)); len(yielded) > 0 &&
-			!slices.Equal(parents, yielded[1:]) {
+		parents := slices.Collect(strictAncestors(cleaned))
+		if !slices.Equal(parents, yielded[1:]) {
 			t.Errorf("strictAncestors(%q) = %v, want %v", cleaned, parents, yielded[1:])
 		}
 
@@ -63,19 +63,15 @@ func TestAncestorsMatchRelation(t *testing.T) {
 }
 
 // isAncestorOrSelf reports whether ancestor is path itself or one of its
-// parent directories. Paths are expected to be cleaned. This states the
-// hierarchy relation ancestors enumerates; the merge uses the enumeration,
-// and TestAncestorsMatchRelation keeps the two in agreement.
+// parent directories. Paths are expected to be cleaned and absolute. This
+// states the hierarchy relation ancestors enumerates; the merge uses the
+// enumeration, and TestAncestorsMatchRelation keeps the two in agreement.
 func isAncestorOrSelf(ancestor, path string) bool {
 	if ancestor == path {
 		return true
 	}
 
-	if ancestor == "/" {
-		return strings.HasPrefix(path, "/")
-	}
-
-	return strings.HasPrefix(path, ancestor+"/")
+	return ancestor == "/" || strings.HasPrefix(path, ancestor+"/")
 }
 
 // TestCleanPathTable pins the canonical form of a rule path against written

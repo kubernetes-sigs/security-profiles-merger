@@ -42,11 +42,7 @@ const Space = " \t\r\n"
 // anything but whitespace behind the document (spm.ErrUnexpectedData). A
 // document that is not a JSON object is refused too (spm.ErrNotAnObject):
 // encoding/json decodes null into a struct as nothing at all, which would
-// make it an empty profile. A required member
-// is also missing in the elements of a Go array a document gives fewer
-// elements for, or none, and in a struct embedded through a pointer once
-// the document names any member of it, since the decoder fills both with
-// zero values.
+// make it an empty profile.
 //
 // Every message is bounded (see merge.BoundedText), since the decoder quotes
 // back literals whose length the document chooses.
@@ -298,9 +294,7 @@ func findings[T any](data []byte, decoded *T, hint Hint, withUTF8 bool) iter.Seq
 // every such member by its path; where it found none, the decoder's own
 // finding is reported rather than dropped. That finding is a member name
 // rather than a path, so it is written as the path of a member by that
-// name, which brackets and quotes a name that is no plain path segment. A
-// member of a type whose fields decoders resolve differently is among the
-// members the scan found (see jsonFields).
+// name, which brackets and quotes a name that is no plain path segment.
 func (scan *documentScan) unknownErr(hint Hint) error {
 	switch {
 	case len(scan.unknown.paths) > 0 || scan.unknown.omitted > 0:

@@ -479,8 +479,8 @@ const maxPairwiseClauses = 4096
 const maxSyscallClauses = 512
 
 // maxPruneClauses bounds the clause count for which pruneDominated runs.
-// Pruning compares every clause against every other one and only removes
-// clauses that can never decide a call, so skipping it past this bound
+// Pruning may compare every clause against every other one and only
+// removes clauses that can never decide a call, so skipping it past this bound
 // leaves the result less minimal but unchanged in what it permits.
 const maxPruneClauses = 512
 
@@ -1144,12 +1144,26 @@ func (m ruleMerger) collapseClauses(clauses []clause, fallback *clause) []clause
 // It compares every clause against every other one, so past maxPruneClauses
 // it is skipped. Pruning only removes clauses that never decide a call, so
 // skipping it leaves the result less minimal but unchanged in what it
-// permits.
+// permits. Clauses of one result and one condition each, the shape a
+// recorded profile's rules mostly take, are pruned by pruneUniform, which
+// keeps the same ones comparing fewer pairs.
 func pruneDominated(clauses []keyedClause) []keyedClause {
 	if len(clauses) > maxPruneClauses {
 		return clauses
 	}
 
+	if !slices.ContainsFunc(clauses, func(current keyedClause) bool {
+		return len(current.clause.args) != 1 || !current.clause.sameResult(clauses[0].clause)
+	}) {
+		return pruneUniform(clauses)
+	}
+
+	return prunePairwise(clauses)
+}
+
+// prunePairwise is pruneDominated comparing every clause against every
+// other one.
+func prunePairwise(clauses []keyedClause) []keyedClause {
 	dead := make([]bool, len(clauses))
 
 	for idx, current := range clauses {
@@ -1177,6 +1191,104 @@ func pruneDominated(clauses []keyedClause) []keyedClause {
 	}
 
 	return kept
+}
+
+// pruneUniform is pruneDominated for clauses of one result with one
+// condition each, and keeps the clauses it keeps. With one result a clause
+// is dead where another covers it and it does not cover that one, and
+// every clause has the rank of the first, so of live twins the one with the
+// smallest key stays. Clauses on different argument indices never cover
+// each other (see argsCover), and of two single equalities on one index
+// neither covers the other, since canonical arguments would make them
+// exact duplicates, which no caller passes. So only pairs on one index of
+// which one is no equality are compared, which for distinct equalities
+// next to a few ranges is linear rather than quadratic.
+func pruneUniform(clauses []keyedClause) []keyedClause {
+	dead, twinPairs := uniformCovers(clauses)
+
+	// A twin goes for a dead twin, and for a live one of a smaller key.
+	goes := make([]bool, len(clauses))
+
+	for _, pair := range twinPairs {
+		first, second := clauses[pair[0]], clauses[pair[1]]
+		goes[pair[0]] = goes[pair[0]] || dead[pair[1]] || second.key < first.key
+		goes[pair[1]] = goes[pair[1]] || dead[pair[0]] || first.key < second.key
+	}
+
+	kept := make([]keyedClause, 0, len(clauses))
+
+	for idx, current := range clauses {
+		if !dead[idx] && !goes[idx] {
+			kept = append(kept, current)
+		}
+	}
+
+	return kept
+}
+
+// uniformCovers compares the pairs of clauses pruneUniform compares and
+// returns which clauses another strictly covers, and the pairs of clauses
+// that cover each other, by index into clauses.
+func uniformCovers(clauses []keyedClause) ([]bool, [][2]int) {
+	dead := make([]bool, len(clauses))
+
+	var twinPairs [][2]int
+
+	compare := func(first, second int) {
+		left, right := clauses[first].clause.args, clauses[second].clause.args
+		leftCovers, rightCovers := argsCover(left, right), argsCover(right, left)
+
+		switch {
+		case leftCovers && rightCovers:
+			twinPairs = append(twinPairs, [2]int{first, second})
+		case leftCovers:
+			dead[second] = true
+		case rightCovers:
+			dead[first] = true
+		}
+	}
+
+	for _, group := range groupByIndex(clauses) {
+		for offset, first := range group.others {
+			for _, second := range group.others[offset+1:] {
+				compare(first, second)
+			}
+
+			for _, second := range group.equalities {
+				compare(first, second)
+			}
+		}
+	}
+
+	return dead, twinPairs
+}
+
+// indexGroup holds the indices, into a list of clauses of one condition
+// each, of the clauses on one argument index, by whether they test it for
+// equality.
+type indexGroup struct{ equalities, others []int }
+
+// groupByIndex groups clauses of one condition each by argument index.
+func groupByIndex(clauses []keyedClause) map[uint]*indexGroup {
+	byIndex := make(map[uint]*indexGroup)
+
+	for idx, current := range clauses {
+		index := current.clause.args[0].Index
+
+		group, ok := byIndex[index]
+		if !ok {
+			group = &indexGroup{}
+			byIndex[index] = group
+		}
+
+		if singleEquality(current.clause) {
+			group.equalities = append(group.equalities, idx)
+		} else {
+			group.others = append(group.others, idx)
+		}
+	}
+
+	return byIndex
 }
 
 // twinGoes reports whether the clause at idx goes for a twin (see twins):
@@ -1387,15 +1499,59 @@ func (m ruleMerger) finishRules(
 
 // settledSyscalls returns the entries of one profile the way a
 // merge in direction m reads them (see settleInputs), in the form a merge
-// result takes: one name per entry, conditional clauses sorted. def is the
+// result takes: one name per entry, conditional clauses sorted, and none
+// another one with the same result covers (see pruneCovered). def is the
 // profile default; entries equal to it are elided.
 func settledSyscalls(
 	m ruleMerger, syscalls []specs.LinuxSyscall, def *clause,
 ) []specs.LinuxSyscall {
 	rules := collectRules(syscalls, def)
 	m.settleInputs(rules, def)
+	pruneCovered(rules)
 
 	return syscallsOfRules(rules, def)
+}
+
+// pruneCovered drops, from every syscall whose conditional clauses form a
+// safe shape, each clause another clause with the same result covers, of
+// two that cover each other all but one, as pruneDominated drops them from
+// a merge result. libseccomp evaluates a safe shape as the working model
+// does, so this changes nothing a call gets, and a profile read on its own
+// then takes the form a merge with an input that constrains nothing gives
+// it. Outside the safe shapes libseccomp's order may let a covered clause
+// decide, so those syscalls are left as they are.
+//
+// Pruning compares clauses in pairs (see pruneUniform), so a syscall is
+// skipped where no clause can cover another (see mayCover), as for the
+// distinct equalities a recorded profile is mostly made of, and past
+// maxPruneClauses (see pruneDominated). A syscall skipped past that bound
+// keeps its covered clauses, which Diff can then report as a change against
+// a profile without them, and never hides one.
+func pruneCovered(rules map[string]*syscallRules) {
+	for _, current := range rules {
+		if !mayCover(current.conditional) || !safeShape(current.conditional) {
+			continue
+		}
+
+		keyed := make([]keyedClause, len(current.conditional))
+		for idx, next := range current.conditional {
+			keyed[idx] = keyedClause{key: sortedArgsKey(next.args), clause: next}
+		}
+
+		keyed = pruneDominated(keyed)
+		current.conditional = sortKeyedClauses(make([]clause, 0, len(keyed)), keyed)
+	}
+}
+
+// mayCover reports whether, of clauses free of exact duplicates, one may
+// cover another, which takes two clauses and one that is no single
+// equality: a single equality covers only a filter that tests the same
+// argument for the same value, and canonical arguments make two such
+// clauses exact duplicates.
+func mayCover(clauses []clause) bool {
+	return len(clauses) > 1 && slices.ContainsFunc(clauses, func(current clause) bool {
+		return !singleEquality(current)
+	})
 }
 
 // syscallsOfRules emits the rules collectRules read, by syscall name, as
