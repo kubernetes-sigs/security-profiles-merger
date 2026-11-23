@@ -1,4 +1,3 @@
-auto-detected profile type: seccomp
 error: testdata/seccomp_truncated.json: line 2, column 19: unexpected end of JSON input
 error: testdata/seccomp_type_error.json: line 4, column 35: syscalls[0].action: want a string, got number
 error: testdata/invalid_action.json: defaultAction: "SCMP_ACT_BOGUS": unknown seccomp action

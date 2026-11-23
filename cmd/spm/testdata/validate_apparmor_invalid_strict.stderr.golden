@@ -1,7 +1,7 @@
 error: testdata/apparmor_invalid.json: executable.allowedExecutables[1]: "bin/sh": relative path (must be absolute)
 error: testdata/apparmor_invalid.json: filesystem.readOnlyPaths[2]: "@{HOME}/notes": AppArmor variables are not supported
 error: testdata/apparmor_invalid.json: filesystem.writeOnlyPaths[0]: "/etc": duplicate path across filesystem categories (also at filesystem.readOnlyPaths[0])
-error: testdata/apparmor_invalid.json: executable.allowedExecutables[2]: "/usr/bin/bash": duplicate executable path (also at executable.allowedExecutables[0])
+error: testdata/apparmor_invalid.json: executable.allowedExecutables[2]: "/usr/bin/bash": duplicate path within list (also at executable.allowedExecutables[0])
 error: testdata/apparmor_invalid.json: capability.allowedCapabilities[1]: empty capability
 error: testdata/apparmor_invalid.json: capability.allowedCapabilities[2]: "chown": duplicate capability (also at capability.allowedCapabilities[0])
 error: testdata/apparmor_invalid.json: capability.allowedCapabilities[3]: "NET BIND": invalid capability name, so an unknown capability

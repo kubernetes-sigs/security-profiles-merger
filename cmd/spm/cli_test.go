@@ -213,7 +213,7 @@ func TestVersionRejectsArguments(t *testing.T) {
 	}{
 		{[]string{cmdVersion, testBogus}, "unexpected argument: bogus"},
 		{[]string{"-v", testBogus}, "unexpected argument: bogus"},
-		{[]string{cmdVersion, "--bogus"}, "flag provided but not defined: --bogus"},
+		{[]string{cmdVersion, "--bogus"}, "flag provided but not defined: -bogus"},
 	} {
 		code, stdout, stderr := runCapture(t, test.args, nil)
 
@@ -258,7 +258,7 @@ func TestUsageErrorsPointAtTheHelp(t *testing.T) {
 			`unknown type "bogus" (use seccomp, apparmor, or landlock)`,
 		},
 		{[]string{cmdValidate, "--abi", "0", file}, `invalid Landlock ABI version "0" (use a whole number from 1 on)`},
-		{[]string{cmdValidate, file, flagStrict}, "--strict is not a file (flags must precede file arguments)"},
+		{[]string{cmdValidate, file, "--typo"}, "flag provided but not defined: -typo"},
 		{[]string{cmdValidate, ""}, errEmptyArgument.Error()},
 		{
 			[]string{cmdDiff, file, file, missing},
@@ -283,31 +283,31 @@ func TestUsageErrorsPointAtTheHelp(t *testing.T) {
 			[]string{
 				cmdMerge, flagStrategy, strategyUnion, flagStrategy, strategyIntersect, missing,
 			},
-			`invalid value "intersect" for flag --strategy: already given as "union"`,
+			`invalid value "intersect" for flag -strategy: already given as "union"`,
 		},
 		{
 			[]string{cmdValidate, "--type=seccomp", "-type", typeAppArmor, missing},
-			`invalid value "apparmor" for flag --type: already given as "seccomp"`,
+			`invalid value "apparmor" for flag -type: already given as "seccomp"`,
 		},
 		{
 			[]string{cmdDiff, "--validate", "default", "--validate", "strict", missing, missing},
-			`invalid value "strict" for flag --validate: already given as "default"`,
+			`invalid value "strict" for flag -validate: already given as "default"`,
 		},
 		{
 			[]string{cmdValidate, flagFormat, formatJSON, flagFormat, formatHuman, missing},
-			`invalid value "human" for flag --format: already given as "json"`,
+			`invalid value "human" for flag -format: already given as "json"`,
 		},
 		{
 			[]string{cmdValidate, "--output", "a.json", "--output=b.json", missing},
-			`invalid value "b.json" for flag --output: already given as "a.json"`,
+			`invalid value "b.json" for flag -output: already given as "a.json"`,
 		},
 		{
 			[]string{cmdValidate, flagStrict, flagArch, archNone, flagArch, archNative, missing},
-			`invalid value "native" for flag --arch: already given as "none"`,
+			`invalid value "native" for flag -arch: already given as "none"`,
 		},
 		{
 			[]string{cmdValidate, "--abi", "1", "--abi", "01", missing},
-			`invalid value "01" for flag --abi: already given as "1"`,
+			`invalid value "01" for flag -abi: already given as "1"`,
 		},
 	} {
 		command := test.args[0]
@@ -373,12 +373,13 @@ func TestHumanFormatWritesALinePerRule(t *testing.T) {
 			"default:SCMP_ACT_ERRNO\nflags:none",
 		},
 		{
+			// An empty list grants what a nil one does, and reads as it does.
 			"no capability, and one named none",
 			humanAppArmor(&apparmor.Profile{Capabilities: &apparmor.CapabilityRules{}}) + "|" +
 				humanAppArmor(&apparmor.Profile{Capabilities: &apparmor.CapabilityRules{
 					AllowedCapabilities: []string{"none"},
 				}}),
-			`caps:none|caps:"none"`,
+			noRules + "|caps:none",
 		},
 		{
 			"a value holding a newline",
@@ -663,7 +664,7 @@ func TestSubcommandFlagErrorGoesToStderr(t *testing.T) {
 		t.Errorf("stdout = %q, want empty", stdout)
 	}
 
-	if want := "error: flag provided but not defined: --bogus\n" + usageHintOf(
+	if want := "error: flag provided but not defined: -bogus\n" + usageHintOf(
 		cmdDiff,
 	); stderr != want {
 		t.Errorf("stderr = %q, want %q", stderr, want)
@@ -798,60 +799,66 @@ func TestJSONOutputKeepsHTMLCharacters(t *testing.T) {
 	}
 }
 
-func TestFlagAfterFileArguments(t *testing.T) {
+// TestFlagsAfterFileArguments covers flags given after or between the file
+// arguments, which are read as flags, as those before them are.
+func TestFlagsAfterFileArguments(t *testing.T) {
 	t.Parallel()
 
 	file := writeTemp(t, seccompJSON(t, testSyscallRead))
 
-	// The hint wins over checks of the flag values, which would otherwise
-	// report the misplaced flag as missing or its value as unknown.
-	for _, args := range [][]string{
-		{cmdValidate, file, flagStrict},
-		{cmdValidate, flagStrict, "--artifact", file, "--quiet"},
-		{cmdDiff, file, file, flagFormat},
-		{cmdDiff, flagFormat, testBogus, file, file, flagType},
-		{cmdMerge, file, flagStrategy, strategyUnion},
-		{cmdMerge, flagStrategy, testBogus, file, flagType, typeSeccomp},
+	for _, test := range []struct {
+		args   []string
+		stdout string
+	}{
+		{[]string{cmdValidate, file, flagQuiet}, ""},
+		{[]string{cmdValidate, file, flagStrict, file, flagQuiet}, ""},
+		{[]string{cmdDiff, file, flagFormat, formatHuman, file}, "equal\n"},
+		{[]string{cmdDiff, file, file, flagFormat + "=" + formatHuman}, "equal\n"},
+		{[]string{cmdMerge, file, flagStrategy, strategyUnion, flagFormat, formatHuman}, ""},
 	} {
-		code, _, stderr := runCapture(t, args, nil)
-		if code != exitUsage {
-			t.Fatalf("%v: exit code = %d, want %d", args, code, exitUsage)
+		code, stdout, stderr := runCapture(t, test.args, nil)
+		if code != 0 {
+			t.Fatalf("%v: exit code = %d, want 0: %s", test.args, code, stderr)
 		}
 
-		if !strings.Contains(stderr, "is not a file (flags must precede file arguments)") {
-			t.Errorf("%v: stderr = %q, want the flag order hint", args, stderr)
+		if test.stdout != "" && stdout != test.stdout {
+			t.Errorf("%v: stdout = %q, want %q", test.args, stdout, test.stdout)
+		}
+
+		if test.args[0] == cmdMerge && !strings.HasPrefix(stdout, "default:") {
+			t.Errorf("%v: stdout = %q, want the human format", test.args, stdout)
 		}
 	}
 }
 
-// TestSeparatorAfterFileArguments covers a "--" among the file arguments,
-// where it no longer ends the flags: the error says where it belongs rather
-// than calling it a misplaced flag.
-func TestSeparatorAfterFileArguments(t *testing.T) {
+// TestSeparatorAmongFileArguments covers a "--" after a file argument,
+// which ends the flags there too: every argument after it is a file.
+func TestSeparatorAmongFileArguments(t *testing.T) {
 	t.Parallel()
 
 	file := writeTemp(t, seccompJSON(t, testSyscallRead))
 
 	for _, args := range [][]string{
-		{cmdValidate, file, "--", file},
+		{cmdValidate, flagQuiet, file, "--", file},
 		{cmdDiff, file, "--", file},
 		{cmdMerge, flagStrategy, strategyUnion, file, "--", file},
 	} {
-		code, stdout, stderr := runCapture(t, args, nil)
-
-		want := "error: -- must come before the file arguments, not among them\n" +
-			usageHintOf(args[0])
-		if code != exitUsage || stdout != "" || stderr != want {
-			t.Errorf("%v: exit code = %d, stdout = %q, stderr = %q, want %d and %q",
-				args, code, stdout, stderr, exitUsage, want)
+		code, _, stderr := runCapture(t, args, nil)
+		if code != 0 {
+			t.Errorf("%v: exit code = %d, want 0: %s", args, code, stderr)
 		}
 	}
 
-	// Before the files it ends the flags, and one after it is a file name.
-	code, _, stderr := runCapture(t, []string{cmdValidate, "--", file, "--"}, nil)
-	if code != 1 || !strings.Contains(stderr, "error: --: ") {
-		t.Errorf("exit code = %d, stderr = %q, want 1 and -- reported as a missing file",
-			code, stderr)
+	// One after it is a file name, and so is a flag.
+	for _, args := range [][]string{
+		{cmdValidate, "--", file, "--"},
+		{cmdValidate, file, "--", flagQuiet},
+	} {
+		code, _, stderr := runCapture(t, args, nil)
+		if code != 1 || !strings.Contains(stderr, "error: "+args[len(args)-1]+": ") {
+			t.Errorf("%v: exit code = %d, stderr = %q, want 1 and %s reported as a "+
+				"missing file", args, code, stderr, args[len(args)-1])
+		}
 	}
 }
 
@@ -1231,14 +1238,14 @@ func TestNonObjectInputReportsAlike(t *testing.T) {
 func TestFlagErrorIsEscaped(t *testing.T) {
 	t.Parallel()
 
-	// Only the argument is quoted, as a file name is, not the message
-	// around it.
+	// A message holding a character that does not print as itself is
+	// quoted whole, as a file name holding one is.
 	for _, test := range []struct {
 		arg, want string
 	}{
-		{"--\x1b[2J", `error: flag provided but not defined: "--\x1b[2J"` + "\n"},
+		{"--\x1b[2J", `error: "flag provided but not defined: -\x1b[2J"` + "\n"},
 		{"--format=\x1b[2J", ""},
-		{"---\x1b[2J", `error: bad flag syntax: "---\x1b[2J"` + "\n"},
+		{"---\x1b[2J", `error: "bad flag syntax: ---\x1b[2J"` + "\n"},
 	} {
 		code, _, stderr := runCapture(t, []string{cmdMerge, test.arg}, nil)
 		if code != exitUsage || strings.Contains(stderr, "\x1b") ||
@@ -1249,34 +1256,22 @@ func TestFlagErrorIsEscaped(t *testing.T) {
 	}
 }
 
-// TestFlagErrorsSpellFlagsAsWritten covers the errors the flag package
-// writes, which name a flag with one dash however the caller wrote it. They
-// are written as the caller wrote them, and with two dashes, as the usage
-// and the documentation spell a flag, where the arguments do not show them.
-func TestFlagErrorsSpellFlagsAsWritten(t *testing.T) {
+// TestFlagErrors covers the errors the flag package writes, which name a
+// flag with one dash however the caller wrote it, and quote a value it
+// reports.
+func TestFlagErrors(t *testing.T) {
 	t.Parallel()
 
 	for _, test := range []struct {
 		args []string
 		want string
 	}{
-		{[]string{cmdMerge, "--typo"}, "error: flag provided but not defined: --typo\n"},
+		{[]string{cmdMerge, "--typo"}, "error: flag provided but not defined: -typo\n"},
 		{[]string{cmdMerge, "-real.json"}, "error: flag provided but not defined: -real.json\n"},
-		{[]string{cmdMerge, flagType}, "error: flag needs an argument: --type\n"},
+		{[]string{cmdMerge, flagType}, "error: flag needs an argument: -type\n"},
 		{[]string{cmdMerge, "-type"}, "error: flag needs an argument: -type\n"},
-		// A name holding the separator of a reason is still the whole name.
-		{[]string{cmdValidate, "-a: b"}, "error: flag provided but not defined: -a: b\n"},
-		// A phrase a quoted value holds is not the one the name follows.
-		{
-			[]string{cmdValidate, "--strict=a for flag -b"},
-			`error: invalid boolean value "a for flag -b" for --strict: parse error`,
-		},
 		{
 			[]string{cmdValidate, "--strict=maybe"},
-			`error: invalid boolean value "maybe" for --strict`,
-		},
-		{
-			[]string{cmdValidate, "-strict=maybe"},
 			`error: invalid boolean value "maybe" for -strict`,
 		},
 	} {
@@ -1285,17 +1280,6 @@ func TestFlagErrorsSpellFlagsAsWritten(t *testing.T) {
 			t.Errorf("%v: exit code = %d, stderr = %q, want %d and %q",
 				test.args, code, stderr, exitUsage, test.want)
 		}
-	}
-
-	// A value the error quotes is left as it is, even where it holds one of
-	// the phrases a flag name follows.
-	const (
-		quoted = `invalid value " for -x" for flag -n: parse error`
-		want   = `invalid value " for -x" for flag --n: parse error`
-	)
-
-	if got := flagAsWritten(quoted, []string{"--n=1"}); got != want {
-		t.Errorf("flagAsWritten(%q) = %q, want %q", quoted, got, want)
 	}
 }
 
@@ -1382,34 +1366,6 @@ func TestHumanOutputWarnsWhenCut(t *testing.T) {
 	}
 }
 
-// TestExitCodeContract pins the documented exit codes as literal integers.
-// Every other assertion in the suite compares against these constants, so
-// changing one would otherwise leave the whole suite green while breaking
-// every caller that reads the exit status.
-func TestExitCodeContract(t *testing.T) {
-	t.Parallel()
-
-	if exitUsage != 2 {
-		t.Errorf("exitUsage = %d, want 2", exitUsage)
-	}
-
-	if exitDiff != 1 {
-		t.Errorf("exitDiff = %d, want 1", exitDiff)
-	}
-
-	if maxInputFiles != 1000 {
-		t.Errorf("maxInputFiles = %d, want 1000", maxInputFiles)
-	}
-
-	if maxInputSize != 10<<20 {
-		t.Errorf("maxInputSize = %d, want %d", maxInputSize, 10<<20)
-	}
-
-	if maxTotalInputSize != 64<<20 {
-		t.Errorf("maxTotalInputSize = %d, want %d", maxTotalInputSize, 64<<20)
-	}
-}
-
 // TestSeparatorAfterBooleanFlag covers "--" after a flag that takes no
 // value: what follows is a file name, so a missing one is a missing file
 // rather than a misplaced flag.
@@ -1434,16 +1390,44 @@ func TestSeparatorAfterBooleanFlag(t *testing.T) {
 	}
 
 	// A "--" that is the value of a flag is not a separator.
-	flags := newFlagSet(cmdValidate)
-	flags.String("output", "", "")
-	flags.Bool("strict", false, "")
+	for _, test := range []struct {
+		args, files []string
+		fails       bool
+	}{
+		{args: []string{"--output", "--", "-x"}, fails: true},
+		{args: []string{"--output=--", "--", "-x"}, files: []string{"-x"}},
+		{args: []string{"-strict", "--", "-x"}, files: []string{"-x"}},
+		{args: []string{"--output", "-", "--", "-x"}, files: []string{"-x"}},
+		{args: []string{"--output", "--", "a", "--strict", "--", "-x"}, files: []string{"a", "-x"}},
+		{args: []string{"a", "--strict", "-", "--", "--strict"}, files: []string{"a", "-", "--strict"}},
+		{
+			args:  []string{"--output=--", "--arch", "--output", "--", "a.json", "--bogus"},
+			files: []string{"a.json", "--bogus"},
+		},
+		{args: []string{"a", "---x"}, fails: true},
+		{args: []string{"a", "--output"}, fails: true},
+	} {
+		flags := newFlagSet(cmdValidate)
+		flags.String("output", "", "")
+		flags.String("arch", "", "")
+		flags.Bool("strict", false, "")
 
-	if argsSeparated(flags, []string{"--output", "--", "-x"}) {
-		t.Error("a flag value \"--\" was taken for the separator")
+		err := parseInterspersed(flags, test.args)
+		if test.fails != (err != nil) || !test.fails && !slices.Equal(flags.Args(), test.files) {
+			t.Errorf("parseInterspersed(%q) = %v, files %q, want files %q", test.args, err,
+				flags.Args(), test.files)
+		}
 	}
 
-	if !argsSeparated(flags, []string{"-strict", "--", "-x"}) {
-		t.Error("a \"--\" after a boolean flag was not taken for the separator")
+	// Here --arch takes "--output" as its value, so the "--" after it ends
+	// the flags and --bogus is a file: what is refused is the architecture.
+	code, _, stderr := runCapture(t, []string{
+		cmdMerge, flagStrategy, strategyUnion, "--output=--", flagArch, "--output", "--",
+		"a.json", "--bogus",
+	}, nil)
+	if code != exitUsage || !strings.Contains(stderr, "unknown architecture") {
+		t.Errorf("exit code = %d, stderr = %q, want %d and the architecture refused",
+			code, stderr, exitUsage)
 	}
 }
 

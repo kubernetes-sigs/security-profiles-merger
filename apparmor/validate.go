@@ -28,13 +28,17 @@ import (
 )
 
 var (
-	// ErrDuplicatePath is returned by every validator and merge when a path
-	// is in two filesystem categories, however each is spelled.
-	ErrDuplicatePath = errors.New("duplicate path across filesystem categories")
+	// ErrDuplicatePathAcrossCategories is returned by every validator and
+	// merge when a path is in two filesystem categories, however each is
+	// spelled.
+	ErrDuplicatePathAcrossCategories = errors.New(
+		"duplicate path across filesystem categories",
+	)
 
-	// ErrDuplicatePathInCategory is returned by the validators when a path
-	// appears twice within one filesystem category, which a merge folds.
-	ErrDuplicatePathInCategory = errors.New("duplicate path within category")
+	// ErrDuplicatePathInList is returned by the validators when a path
+	// appears twice within one list, a filesystem category,
+	// AllowedExecutables or AllowedLibraries, which a merge folds.
+	ErrDuplicatePathInList = errors.New("duplicate path within list")
 
 	// ErrDuplicateCapability is returned by the validators when a name is
 	// listed twice, ignoring ASCII case, which a merge folds.
@@ -51,12 +55,6 @@ var (
 	// ErrEmptyCapability is returned by every validator and merge when a
 	// capability name is empty.
 	ErrEmptyCapability = errors.New("empty capability")
-
-	// ErrDuplicateExecutablePath is returned by the validators when a path
-	// appears twice in AllowedExecutables or in AllowedLibraries, which a
-	// merge folds, as ErrDuplicatePathInCategory is for a filesystem
-	// category.
-	ErrDuplicateExecutablePath = errors.New("duplicate executable path")
 
 	// ErrGlobTooComplex is returned by ValidateArtifact, ValidateStrict and
 	// ValidateBaseline when a pattern is past the matcher's limits and so
@@ -75,10 +73,10 @@ var (
 	// before it.
 	ErrPathTooLong = spm.ErrPathTooLong
 
-	// ErrDotComponent is returned by ValidateArtifact, ValidateStrict and
-	// ValidateBaseline when a path has a "." or ".." component, which
-	// matches nothing.
-	ErrDotComponent = errors.New(`path contains a "." or ".." component`)
+	// ErrDotComponent is spm.ErrDotComponent, returned by ValidateArtifact,
+	// ValidateStrict and ValidateBaseline when a path has a "." or ".."
+	// component, which matches nothing.
+	ErrDotComponent = spm.ErrDotComponent
 
 	// ErrUnsupportedVariable is returned by every validator and merge when a
 	// path references an AppArmor variable such as @{HOME} (see the Paths
@@ -196,12 +194,12 @@ func isKnownCapability(name string) bool {
 // Validate checks that a profile is well-formed, as the Validation and
 // Paths the validators reject sections describe: it reports a nil profile
 // (ErrNilProfile), paths that are too long, empty, relative or reference a
-// variable, a path listed in two filesystem categories or twice within one
-// (ErrDuplicatePath, ErrDuplicatePathInCategory), a path listed twice in
-// AllowedExecutables or in AllowedLibraries (ErrDuplicateExecutablePath),
-// and empty or repeated capability names. Paths are compared as the merge
-// matches them, so "/etc//passwd", "/etc/passwd" and `/etc/\passwd` are one
-// path. Failures are collected into one bounded report.
+// variable, a path listed in two filesystem categories
+// (ErrDuplicatePathAcrossCategories) or twice within one list
+// (ErrDuplicatePathInList), and empty or repeated capability names. Paths
+// are compared as the merge matches them, so "/etc//passwd", "/etc/passwd"
+// and `/etc/\passwd` are one path. Failures are collected into one bounded
+// report.
 func Validate(profile *Profile) error {
 	if profile == nil {
 		return ErrNilProfile
@@ -358,11 +356,11 @@ func (check *validator) duplicatePaths(profile, normalized *Profile, listDuplica
 
 	check.listDuplicates(
 		allowedExecutablesPath, profile.Executable.AllowedExecutables,
-		normalized.Executable.AllowedExecutables, ErrDuplicateExecutablePath,
+		normalized.Executable.AllowedExecutables, ErrDuplicatePathInList,
 	)
 	check.listDuplicates(
 		allowedLibrariesPath, profile.Executable.AllowedLibraries,
-		normalized.Executable.AllowedLibraries, ErrDuplicateExecutablePath,
+		normalized.Executable.AllowedLibraries, ErrDuplicatePathInList,
 	)
 }
 
@@ -1123,7 +1121,7 @@ func (check *validator) filesystemDuplicates(
 					return fmt.Errorf(
 						"%s[%d]: %s: %w (also at %s[%d])",
 						category.name, idx, merge.QuoteBounded(category.raw[idx]),
-						ErrDuplicatePath, earlier.category, earlier.idx,
+						ErrDuplicatePathAcrossCategories, earlier.category, earlier.idx,
 					)
 				})
 			}
@@ -1138,7 +1136,7 @@ func (check *validator) filesystemDuplicates(
 
 	for _, category := range categories {
 		check.listDuplicates(
-			category.name, category.raw, category.normalized, ErrDuplicatePathInCategory,
+			category.name, category.raw, category.normalized, ErrDuplicatePathInList,
 		)
 	}
 }

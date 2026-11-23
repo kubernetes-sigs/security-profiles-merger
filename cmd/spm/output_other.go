@@ -18,6 +18,8 @@ limitations under the License.
 
 package main
 
+import "os"
+
 // oNoFollow is zero where the platform has no O_NOFOLLOW; --output then
 // behaves as it always has there.
 const oNoFollow = 0
@@ -46,6 +48,19 @@ func syncDir(_ string) error {
 // isMountPoint is always false where a rename failure does not say that
 // its target is a mount point.
 func isMountPoint(_ error) bool {
+	return false
+}
+
+// fileOwnedBy is always false where the owner of a file is not told by a
+// user ID, so that no file is written in place for want of a replacement.
+func fileOwnedBy(_ *os.File, _ int) bool {
+	return false
+}
+
+// isReadOnlyFS is always false where a failure to create a file is not
+// told apart for a read-only file system; a directory that takes no new
+// file is still recognized by fs.ErrPermission.
+func isReadOnlyFS(_ error) bool {
 	return false
 }
 

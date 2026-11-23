@@ -117,6 +117,13 @@ var (
 	// ErrRelativePath is returned by apparmor and landlock when a path does
 	// not start with "/".
 	ErrRelativePath = errors.New("relative path (must be absolute)")
+	// ErrDotComponent is matched when a path has a component the package
+	// does not resolve: by apparmor's ValidateArtifact, ValidateStrict and
+	// ValidateBaseline for a "." or ".." component, which matches nothing,
+	// and by every landlock validator and merge for a ".." component, which
+	// the kernel resolves against the file system, reported as such
+	// (landlock cleans "." components away).
+	ErrDotComponent = errors.New(`path contains a "." or ".." component`)
 	// ErrPathTooLong is returned by apparmor and landlock when a path is
 	// longer than [MaxPathLen] bytes. See the Path checks section for the
 	// checks that run before it.
@@ -253,7 +260,7 @@ func isReport(err error) bool {
 }
 
 // InputError names the one input profile an error is about. Intersect and
-// Union of every package, and landlock.LoweredRulePaths, return one for each
+// Union of every package, and landlock.IntersectLowered, return one for each
 // input that is nil or fails validation, and a merge also for an error its
 // package documents as brought by one input, such as
 // seccomp.ErrConflictingListener; Diff returns one for the first nil
@@ -269,9 +276,7 @@ func isReport(err error) bool {
 type InputError struct {
 	// Index is the zero-based position of the profile among the inputs:
 	// for a merge 0 is the first profile, where a runtime passes its
-	// baseline; for Diff 0 is left and 1 is right; for
-	// landlock.LoweredRulePaths, inputs[i] is i, and the result is reported
-	// without an InputError.
+	// baseline; for Diff 0 is left and 1 is right.
 	Index int
 	// Err is what was wrong with the profile: ErrNilProfile, the error of
 	// the package's Validate, which may report several failures, or another

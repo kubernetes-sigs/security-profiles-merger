@@ -50,9 +50,9 @@ const (
 	// one drops the rule it was meant to carry.
 	modeArtifact
 	// modeBaseline runs the checks a runtime runs on its baseline at
-	// config load, for validate --baseline alone: merge --validate and diff
-	// --validate take no such mode, since neither checks a baseline as the
-	// runtime loads it.
+	// config load, for validate alone: merge --validate and diff --validate
+	// take no such mode, since neither checks a baseline as the runtime
+	// loads it.
 	modeBaseline
 )
 
@@ -61,10 +61,12 @@ const (
 	modeNameDefault  = "default"
 	modeNameStrict   = "strict"
 	modeNameArtifact = "artifact"
+	modeNameBaseline = "baseline"
 )
 
-// modeByName returns the mode a --validate value names.
-func modeByName(name string) (validateMode, bool) {
+// modeByName returns the mode a --validate value names, baseline only
+// where withBaseline is set.
+func modeByName(name string, withBaseline bool) (validateMode, bool) {
 	switch name {
 	case modeNameDefault:
 		return modeDefault, true
@@ -72,6 +74,8 @@ func modeByName(name string) (validateMode, bool) {
 		return modeStrict, true
 	case modeNameArtifact:
 		return modeArtifact, true
+	case modeNameBaseline:
+		return modeBaseline, withBaseline
 	default:
 		return modeDefault, false
 	}
@@ -86,11 +90,26 @@ func (mode validateMode) strictDecode() bool {
 	return mode == modeStrict || mode == modeArtifact
 }
 
-// strength orders the modes by what they accept: each accepts only what
-// the weaker ones accept, as the library's validators do, default the most
-// and strict the least.
-func (mode validateMode) strength() int {
-	return slices.Index([]validateMode{modeDefault, modeArtifact, modeStrict}, mode)
+// weakestMode returns the mode whose checks every listed mode includes:
+// default, artifact and strict each accept only what the weaker ones
+// accept, as the library's validators do, and baseline includes only
+// default, so default is what a list mixing baseline with another mode
+// shares.
+func weakestMode(modes []validateMode) validateMode {
+	order := []validateMode{modeDefault, modeArtifact, modeStrict}
+	weakest := modes[0]
+
+	for _, mode := range modes[1:] {
+		switch {
+		case mode == weakest:
+		case mode == modeBaseline || weakest == modeBaseline:
+			weakest = modeDefault
+		case slices.Index(order, mode) < slices.Index(order, weakest):
+			weakest = mode
+		}
+	}
+
+	return weakest
 }
 
 // modeCount is the number of validation modes, which index
@@ -105,7 +124,7 @@ const modeCount = int(modeBaseline) + 1
 type profileKind interface {
 	mergeCommand(inv *invocation, strategy string, modes []validateMode) int
 	diffCommand(inv *invocation) int
-	validateCommand(inv *invocation, mode validateMode) int
+	validateCommand(inv *invocation) int
 	// checkAlone checks the input at idx on its own, as a profile of this
 	// kind (see checkEachAlone).
 	checkAlone(inv *invocation, idx int)
@@ -413,7 +432,8 @@ func (inv *invocation) useKind(name string) *profileType {
 // It returns 0 once the kind is set. When no input parses, the run stops (see
 // invocation.stop) with parseExit. A detected type is noted on stderr
 // unless noDetectNote is set, so that a command in a pipeline can stay
-// silent about what it inferred.
+// silent about what it inferred, once the inputs decode (see
+// invocation.noteDetected).
 //
 // The type is checked against the inputs as well, whether named or
 // detected, rather than taken on faith: only the members of that type are
@@ -468,21 +488,22 @@ func resolveKind(inv *invocation, profileType string, parseExit int, noDetectNot
 	checkTypeMatchesInputs(profileType, inputs, report)
 
 	if !named && !noDetectNote {
-		inv.noteDetected(profileType)
+		inv.detected = profileType
 	}
 
 	return 0
 }
 
-// noteDetected notes the detected profile type on stderr. A run that a
-// usage error stops says nothing about the type it would have used: the
-// error is the answer, and every usage error that comes up once the inputs
-// are read is known by now. Neither does a run with an input that could
-// not be read, which fails whatever the type: the note is about the
-// inputs, and they were not all read.
-func (inv *invocation) noteDetected(profileType string) {
-	if len(inv.refusals) == 0 && !anyUnread(inv.inputs) {
-		_, _ = fmt.Fprintf(inv.stderr, "auto-detected profile type: %s\n", profileType)
+// noteDetected notes the detected profile type on stderr, if there is one
+// to note, once every input has decoded as a profile of that type: the note
+// says what the inputs were taken for, and one that does not decode as
+// that type, or could not be read at all, says otherwise. A run that a
+// usage error stops says nothing about the type either: the error is the
+// answer, and every usage error that comes up once the inputs are read is
+// known by now.
+func (inv *invocation) noteDetected() {
+	if inv.detected != "" && len(inv.refusals) == 0 && !inv.report.anyFailed() {
+		_, _ = fmt.Fprintf(inv.stderr, "auto-detected profile type: %s\n", inv.detected)
 	}
 }
 

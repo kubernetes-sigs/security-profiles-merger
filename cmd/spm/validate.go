@@ -33,8 +33,9 @@ Validate one or more security profiles.
 Reads from stdin when no files are provided: a single profile, or a JSON
 array of profiles, which a file may hold as well.
 A file argument of - reads stdin beside the files.
-Flags must precede file arguments, and -- ends them; a flag that takes a
-value may be given twice only with the same value both times.
+Flags may come before or after the file arguments, and -- ends them; a
+flag that takes a value may be given twice only with the same value both
+times.
 Exit status: 0 when every profile is valid, 1 when one is invalid, of
 another type, or cannot be read, or the output cannot be written, 2 on a
 usage error; 1 when a usage error comes up after a profile was found
@@ -48,31 +49,34 @@ as an array.
 lines. --quiet writes no profile and notes no auto-detected profile type,
 and --no-detect-note drops that note while still writing the profiles.
 Errors and warnings always go to stderr.
---quiet cannot be combined with --output or --format, and --artifact,
---strict and --baseline cannot be combined with each other.
+--quiet cannot be combined with --output or --format.
 
---artifact is for a profile a runtime did not author, such as one pulled
+--validate names the checks to run: one mode for all profiles, or one mode
+per profile, separated by commas, as for merge and diff. --artifact,
+--strict and --baseline are short for --validate artifact, strict and
+baseline, and cannot be combined with each other or with --validate.
+artifact is for a profile a runtime did not author, such as one pulled
 with a workload: it adds the limits and checks of the library's
-ValidateArtifact. --strict is for a profile a person wrote: it adds to
-those what is likely a mistake, such as a duplicate entry. Both decode
-strictly, refusing unknown and misspelled fields, missing required members
-and invalid UTF-8, which the default checks only warn about. --baseline is
-for the baseline a runtime merges every artifact into, checked as the
-runtime checks it at config load, with the library's ValidateBaseline: for
-seccomp and AppArmor it refuses a baseline the merge does not read
-exactly, and for Landlock what the merge would read otherwise than meant,
-such as a rule granting a right the baseline does not handle.
+ValidateArtifact. strict is for a profile a person wrote: it adds to those
+what is likely a mistake, such as a duplicate entry. Both decode strictly,
+refusing unknown and misspelled fields, missing required members and
+invalid UTF-8, which the default checks only warn about. baseline is for
+the baseline a runtime merges every artifact into, checked as the runtime
+checks it at config load, with the library's ValidateBaseline: for seccomp
+and AppArmor it refuses a baseline the merge does not read exactly, and
+for Landlock what the merge would read otherwise than meant, such as a
+rule granting a right the baseline does not handle.
 
 --arch names the native seccomp architecture of the node that loads the
 profiles. A value above 32 bits is refused where that node covers a 32-bit
-architecture: by --artifact and --strict as such, and by --baseline as a
-baseline the merge does not read exactly. For --baseline it also decides
-how the merge settles the architectures and which byte order it refuses.
-It defaults to the architecture this program runs on, so the same profile
-can pass here and fail on another machine; pass a name such as
-SCMP_ARCH_X86_64 for the target node, or --arch none for a node of
+architecture: by the artifact and strict checks as such, and by the
+baseline check as a baseline the merge does not read exactly, which also
+depends on it for how the merge settles the architectures and which byte
+order it refuses. It defaults to the architecture this program runs on, so
+the same profile can pass here and fail on another machine; pass a name
+such as SCMP_ARCH_X86_64 for the target node, or --arch none for a node of
 unknown architecture. The default checks do not depend on it, so it needs
-one of those three flags.
+one of the other modes.
 
 --abi names the Landlock ABI version of the kernel that loads the profiles,
 as landlock_create_ruleset reports it, and refuses every right that kernel
@@ -85,10 +89,15 @@ Options:
 type validateOptions struct {
 	commonOptions
 
-	strict   bool
-	artifact bool
-	baseline bool
-	quiet    bool
+	// validate is the --validate value, default where it is left out, and
+	// validateGiven whether the flag was given, which its value cannot say:
+	// left out, a boolean mode flag may name the mode instead.
+	validate      string
+	validateGiven bool
+	strict        bool
+	artifact      bool
+	baseline      bool
+	quiet         bool
 }
 
 // bindValidateFlags declares the validate flags on the set and returns the
@@ -99,24 +108,27 @@ func bindValidateFlags(flags *flag.FlagSet) *validateOptions {
 	opts.bind(flags, commonHelp{
 		result:        "the validated profiles",
 		outputDefault: "stdout, not with --quiet",
-		archFor:       "of the node that loads the profiles, for --artifact, --strict or --baseline",
+		archFor:       "of the node that loads the profiles, for the strict, artifact and baseline checks",
 		abiFor:        "of the kernel that loads the profiles, such as 6; refuses the rights it does not know",
 	})
+	stringFlag(
+		flags, &opts.validate, "validate", modeNameDefault,
+		"`checks` to run: default, strict, artifact or baseline; or one mode per "+
+			"profile, comma separated",
+	)
 	flags.BoolVar(
 		&opts.strict, "strict", false,
-		"validate as a profile a person wrote: what --artifact rejects, and what "+
-			"is likely a mistake, such as a duplicate entry",
+		"same as --validate strict: the checks for a profile a person wrote",
 	)
 	flags.BoolVar(
 		&opts.artifact, "artifact", false,
-		"validate as an artifact, the untrusted profile a container runtime pulls: "+
-			"the artifact limits and checks, and strict decoding, which rejects unknown "+
-			"and misspelled fields, missing required members and invalid UTF-8",
+		"same as --validate artifact: the checks for an artifact, the untrusted "+
+			"profile a container runtime pulls",
 	)
 	flags.BoolVar(
 		&opts.baseline, "baseline", false,
-		"validate as the baseline a runtime merges artifacts into, as the runtime "+
-			"checks it at config load",
+		"same as --validate baseline: the checks a runtime runs on its baseline "+
+			"at config load",
 	)
 	flags.BoolVar(
 		&opts.quiet, "quiet", false,
@@ -147,7 +159,7 @@ func (opts *validateOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) i
 		return code
 	}
 
-	if code := checkModeFlags(opts, flagNamed(flags, flagNameArch), stderr); code != 0 {
+	if code := checkModeFlags(opts, flags, stderr); code != 0 {
 		return code
 	}
 
@@ -175,9 +187,7 @@ func (opts *validateOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) i
 // validateInputs validates the profiles that were read, and writes them
 // back.
 func validateInputs(opts *validateOptions, inv *invocation) int {
-	inv.checks = &inputChecks{
-		modes: slices.Repeat([]validateMode{opts.mode()}, len(inv.inputs)),
-	}
+	inv.checks = &inputChecks{modes: inv.validateModes(opts.modes())}
 
 	// --quiet promises a silent stderr on success, so it implies
 	// --no-detect-note.
@@ -186,7 +196,7 @@ func validateInputs(opts *validateOptions, inv *invocation) int {
 		return code
 	}
 
-	code = inv.kind.validateCommand(inv, opts.mode())
+	code = inv.kind.validateCommand(inv)
 	if code != 0 {
 		return code
 	}
@@ -198,46 +208,66 @@ func validateInputs(opts *validateOptions, inv *invocation) int {
 	return flushOutput(opts.output, inv.out.Bytes(), inv.stdout, inv.stderr)
 }
 
-// mode maps the validate flags to a mode; the flags have already been
-// checked not to be set together.
-func (opts *validateOptions) mode() validateMode {
+// modes returns the --validate value the flags amount to: --validate as
+// given, or the mode the boolean flag that is set names, or default. The
+// flags have already been checked not to be set together.
+func (opts *validateOptions) modes() string {
 	switch {
+	case opts.validateGiven:
+		return opts.validate
 	case opts.artifact:
-		return modeArtifact
+		return modeNameArtifact
 	case opts.strict:
-		return modeStrict
+		return modeNameStrict
 	case opts.baseline:
-		return modeBaseline
+		return modeNameBaseline
 	default:
-		return modeDefault
+		return modeNameDefault
 	}
 }
 
 // checkModeFlags checks the flags that choose the validation mode and what
-// it depends on. archNamed reports whether --arch was named.
-func checkModeFlags(opts *validateOptions, archNamed bool, stderr io.Writer) int {
-	if opts.strict && opts.artifact {
-		_, _ = fmt.Fprintln(
-			stderr, "error: --strict cannot be combined with --artifact",
-		)
+// it depends on: --artifact, --strict and --baseline name one mode each, so
+// at most one of them may be set, and none beside --validate.
+func checkModeFlags(opts *validateOptions, flags *flag.FlagSet, stderr io.Writer) int {
+	var set []string
+
+	for _, each := range []struct {
+		name string
+		set  bool
+	}{
+		{modeNameStrict, opts.strict},
+		{modeNameArtifact, opts.artifact},
+		{modeNameBaseline, opts.baseline},
+	} {
+		if each.set {
+			set = append(set, "--"+each.name)
+		}
+	}
+
+	opts.validateGiven = flagNamed(flags, "validate")
+	if opts.validateGiven {
+		set = append(set, "--validate")
+	}
+
+	if len(set) > 1 {
+		_, _ = fmt.Fprintf(stderr, "error: %s cannot be combined with %s\n", set[0], set[1])
 
 		return exitUsage
 	}
 
-	if opts.baseline && (opts.strict || opts.artifact) {
-		_, _ = fmt.Fprintln(
-			stderr, "error: --baseline cannot be combined with --strict or --artifact",
-		)
-
-		return exitUsage
+	if code := checkValidateModes(opts.modes(), flags.NArg(), true, stderr); code != 0 {
+		return code
 	}
 
 	// The default checks do not depend on the architecture, so --arch
 	// without the checks that do would be a flag that quietly does nothing,
 	// as it would be for a profile type without architectures.
-	if archNamed && opts.mode() == modeDefault {
+	listed, _ := parseValidateModes(opts.modes(), true)
+	if flagNamed(flags, flagNameArch) &&
+		!slices.ContainsFunc(listed, func(mode validateMode) bool { return mode != modeDefault }) {
 		_, _ = fmt.Fprintln(
-			stderr, "error: --arch only applies with --strict, --artifact or --baseline",
+			stderr, "error: --arch only applies to the strict, artifact and baseline checks",
 		)
 
 		return exitUsage
@@ -246,20 +276,27 @@ func checkModeFlags(opts *validateOptions, archNamed bool, stderr io.Writer) int
 	return 0
 }
 
-// validateCommand decodes and checks under one mode every profile that the
+// validateCommand decodes and checks under its mode every profile that the
 // report holds no failure for, and writes them when none failed, the ones
 // the report holds included. A mode that decodes strictly makes the JSON
 // ambiguities unmarshalAll looks for, such as members the profile type does
 // not know, errors rather than warnings.
-func (ops kindOps[T, D]) validateCommand(inv *invocation, mode validateMode) int {
-	check := ops.validators[mode]
+func (ops kindOps[T, D]) validateCommand(inv *invocation) int {
+	modes := inv.checks.modes
+	strict := make([]bool, len(modes))
+
+	for idx, mode := range modes {
+		strict[idx] = mode.strictDecode()
+	}
 
 	inputs, report := inv.inputs, inv.report
-	profiles := unmarshalAll[T](
-		inputs, slices.Repeat([]bool{mode.strictDecode()}, len(inputs)), report,
-	)
+	profiles := unmarshalAll[T](inputs, strict, report)
 
-	checkInputs(profiles, report, func(_ int, profile *T) error { return check(profile) })
+	inv.noteDetected()
+
+	checkInputs(profiles, report, func(idx int, profile *T) error {
+		return ops.validators[modes[idx]](profile)
+	})
 
 	if inv.halted() {
 		return inv.stop(1)

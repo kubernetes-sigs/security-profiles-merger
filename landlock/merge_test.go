@@ -843,19 +843,19 @@ func TestMergeRejectsParentComponents(t *testing.T) {
 
 		for name, validate := range validators {
 			err := validate(base)
-			if !errors.Is(err, landlock.ErrParentPath) {
-				t.Errorf("%s(%q) = %v, want ErrParentPath", name, path, err)
+			if !errors.Is(err, landlock.ErrDotComponent) {
+				t.Errorf("%s(%q) = %v, want ErrDotComponent", name, path, err)
 			}
 		}
 
 		_, err := landlock.Intersect(artifact, base)
-		if !errors.Is(err, landlock.ErrParentPath) {
-			t.Errorf("Intersect(%q) = %v, want ErrParentPath", path, err)
+		if !errors.Is(err, landlock.ErrDotComponent) {
+			t.Errorf("Intersect(%q) = %v, want ErrDotComponent", path, err)
 		}
 
 		_, err = landlock.Union(base, artifact)
-		if !errors.Is(err, landlock.ErrParentPath) {
-			t.Errorf("Union(%q) = %v, want ErrParentPath", path, err)
+		if !errors.Is(err, landlock.ErrDotComponent) {
+			t.Errorf("Union(%q) = %v, want ErrDotComponent", path, err)
 		}
 	}
 

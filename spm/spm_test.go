@@ -73,6 +73,11 @@ func TestSentinelsAreShared(t *testing.T) {
 			shared: spm.ErrBudgetExceeded,
 		},
 		{
+			name:   "ErrDotComponent",
+			errs:   []error{apparmor.ErrDotComponent, landlock.ErrDotComponent},
+			shared: spm.ErrDotComponent,
+		},
+		{
 			name:   "ErrPathTooLong",
 			errs:   []error{apparmor.ErrPathTooLong, landlock.ErrPathTooLong},
 			shared: spm.ErrPathTooLong,
@@ -177,6 +182,15 @@ func TestSharedSentinelsMatchWrappedErrors(t *testing.T) {
 	_, nilSeccomp := seccomp.Intersect(nil)
 	_, nilAppArmor := apparmor.Intersect(nil)
 	_, nilLandlock := landlock.Union(nil)
+	dotAppArmor := apparmor.ValidateArtifact(&apparmor.Profile{
+		Filesystem: &apparmor.FilesystemRules{ReadOnlyPaths: []string{"/etc/./passwd"}},
+	})
+	dotLandlock := landlock.Validate(&landlock.Profile{
+		HandledAccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
+		PathRules: []landlock.PathRule{{
+			Path: "/srv/../etc", AccessFS: []landlock.FSAccessRight{landlock.FSAccessReadFile},
+		}},
+	})
 
 	for _, testCase := range []struct {
 		name string
@@ -189,6 +203,8 @@ func TestSharedSentinelsMatchWrappedErrors(t *testing.T) {
 		{name: "seccomp with a nil profile", got: nilSeccomp, want: spm.ErrNilProfile},
 		{name: "apparmor with a nil profile", got: nilAppArmor, want: spm.ErrNilProfile},
 		{name: "landlock with a nil profile", got: nilLandlock, want: spm.ErrNilProfile},
+		{name: "apparmor with a dot component", got: dotAppArmor, want: spm.ErrDotComponent},
+		{name: "landlock with a dot component", got: dotLandlock, want: spm.ErrDotComponent},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()

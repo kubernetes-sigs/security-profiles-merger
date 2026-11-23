@@ -894,17 +894,20 @@ func TestDuplicatesPastTheCompileBudget(t *testing.T) {
 		across.Filesystem.WriteOnlyPaths = []string{`/x/\x62*`}
 
 		err := Validate(across)
-		if !errors.Is(err, ErrDuplicatePath) {
-			t.Errorf("after %d patterns, Validate across categories = %v, want ErrDuplicatePath",
-				len(filler), err)
+		if !errors.Is(err, ErrDuplicatePathAcrossCategories) {
+			t.Errorf(
+				"after %d patterns, Validate across categories = %v, want ErrDuplicatePathAcrossCategories",
+				len(filler),
+				err,
+			)
 		}
 
 		within := budgetProfile(append(slices.Clone(filler), "/x/b*", `/x/\x62*`)...)
 
 		err = Validate(within)
-		if !errors.Is(err, ErrDuplicatePathInCategory) {
+		if !errors.Is(err, ErrDuplicatePathInList) {
 			t.Errorf("after %d patterns, Validate within a category = %v, "+
-				"want ErrDuplicatePathInCategory", len(filler), err)
+				"want ErrDuplicatePathInList", len(filler), err)
 		}
 	}
 }
@@ -1076,8 +1079,8 @@ func TestSyntacticChecksCompileNothing(t *testing.T) {
 	}
 
 	err := Validate(profile)
-	if !errors.Is(err, ErrDuplicatePath) {
-		t.Errorf("Validate = %v, want %v", err, ErrDuplicatePath)
+	if !errors.Is(err, ErrDuplicatePathAcrossCategories) {
+		t.Errorf("Validate = %v, want %v", err, ErrDuplicatePathAcrossCategories)
 	}
 
 	if count, _ := cacheState(); count != 0 {
@@ -1101,8 +1104,8 @@ func TestSyntacticChecksCompileNothing(t *testing.T) {
 	}
 
 	err = Validate(profile)
-	if !errors.Is(err, ErrDuplicatePath) {
-		t.Errorf("Validate with a warm cache = %v, want %v", err, ErrDuplicatePath)
+	if !errors.Is(err, ErrDuplicatePathAcrossCategories) {
+		t.Errorf("Validate with a warm cache = %v, want %v", err, ErrDuplicatePathAcrossCategories)
 	}
 
 	if count, _ := cacheState(); count != 1 {
@@ -1394,7 +1397,7 @@ func TestPathKeysDoNotCollideAcrossKinds(t *testing.T) {
 		across.Filesystem.WriteOnlyPaths = []string{expression}
 
 		err = Validate(across)
-		if errors.Is(err, ErrDuplicatePath) {
+		if errors.Is(err, ErrDuplicatePathAcrossCategories) {
 			t.Errorf("Validate = %v, want %q and its expression apart", err, pattern)
 		}
 

@@ -176,6 +176,18 @@ func writeArgs(out *merge.Builder, args []specs.LinuxSeccompArg) {
 	}
 }
 
+// FormatSyscall returns one syscall entry of a profile as FormatProfile
+// writes it, quoted and bounded as FormatProfile is: its names, the
+// arguments it applies to and its result, as in "read,write->SCMP_ACT_ALLOW".
+// A nil entry reads "<nil>".
+func FormatSyscall(syscall *specs.LinuxSyscall) string {
+	if syscall == nil {
+		return "<nil>"
+	}
+
+	return merge.Render(func(out *merge.Builder) { writeSyscall(out, syscall) })
+}
+
 func writeSyscall(out *merge.Builder, syscall *specs.LinuxSyscall) {
 	merge.WriteTexts(out, syscall.Names, ",")
 	writeResult(out, syscall.Args, syscall.Action, syscall.ErrnoRet)

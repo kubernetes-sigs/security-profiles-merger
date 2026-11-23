@@ -345,33 +345,22 @@ func readFileInput(path string, allowance int) ([]profileInput, int, error) {
 }
 
 // readFileWithLimit reads a regular file of at most maxInputSize bytes, or
-// an array of profiles within the allowance (see readBounded). The failure
+// an array of profiles within the allowance (see readBounded), and returns
+// how many bytes it read, which the allowance is charged with. The failure
 // it returns carries the reason alone: the caller names the input as the
-// caller wrote it, and the decorations os adds would otherwise spell the
-// path a second time, cleaned into one the caller never typed.
+// caller wrote it, rather than as os spells the path.
 //
-// It reads a regular file or a pipe, a symlink being followed to what it
-// names, so that a process substitution such as <(cmd), and /dev/stdin
-// where it leads to a pipe, still work. The file is opened without
-// blocking, where the platform has the flag (see oNonBlock), since opening
-// a FIFO for reading otherwise waits for a writer, which a FIFO planted in
-// an untrusted tree of profiles never gets. A FIFO is therefore read only
-// if a writer has it open already; one that opens it later finds no reader.
-// How a FIFO without a writer reads differs between the platforms. On
-// Linux the read returns end of file at once, without blocking or with,
-// and Go reads a FIFO with a writer through its poller, which waits for
-// what the writer has yet to write until it closes its end. Go reads no
-// FIFO through its poller on darwin, so setBlocking switches the pipe to
-// blocking reads there, and a blocking read of a FIFO without a writer
-// returns end of file at once. On FreeBSD the first reader clears the end
-// of file of a FIFO, so a FIFO without a writer may still wait for one
-// there, and possibly on the other BSDs. Anything else is refused once it
-// is open, before it is read: a directory, a socket, and a device, whose
-// read may never end, as /dev/zero's does, or wait without a writer to
-// close, as a terminal's does even without blocking. /dev/null is refused
-// with them, rather than read as an empty file.
-//
-// It returns how many bytes it read, which the allowance is charged with.
+// It reads a regular file or a pipe, a symlink followed, so that <(cmd) and
+// /dev/stdin on a pipe work, and refuses anything else once it is open,
+// before reading: a directory, a socket, and a device such as /dev/zero,
+// which never ends, a terminal, which waits, or /dev/null. The file is
+// opened without blocking where the platform can (see oNonBlock), since a
+// FIFO planted in an untrusted tree would otherwise hold the open forever,
+// so a FIFO is read only if a writer has it open already. How one without a
+// writer reads differs: end of file at once on Linux, and on darwin once
+// setBlocking has made its reads blocking, which Go's poller does not do
+// there; on FreeBSD, and possibly the other BSDs, the first reader clears
+// the end of file, so it may wait for a writer.
 func readFileWithLimit(path string, allowance int) ([]byte, int, error) {
 	file, pipe, err := openInput(path)
 	if err != nil {

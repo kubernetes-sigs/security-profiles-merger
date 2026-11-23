@@ -155,21 +155,21 @@ func TestValidateRejects(t *testing.T) {
 		{
 			"read-only and write-only", apparmor.Validate,
 			validationProfile([3][]string{{pathEtcConfig}, {pathEtcConfig}, nil}, [2][]string{}, nil),
-			[]error{apparmor.ErrDuplicatePath},
+			[]error{apparmor.ErrDuplicatePathAcrossCategories},
 			[]string{"filesystem.writeOnlyPaths[0]", "(also at filesystem.readOnlyPaths[0])"},
 			nil,
 		},
 		{
 			"read-only and read-write", apparmor.Validate,
 			validationProfile([3][]string{{pathEtcConfig}, nil, {pathEtcConfig}}, [2][]string{}, nil),
-			[]error{apparmor.ErrDuplicatePath},
+			[]error{apparmor.ErrDuplicatePathAcrossCategories},
 			[]string{"filesystem.readWritePaths[0]", "(also at filesystem.readOnlyPaths[0])"},
 			nil,
 		},
 		{
 			"write-only and read-write", apparmor.Validate,
 			validationProfile([3][]string{nil, {pathTmp}, {pathTmp}}, [2][]string{}, nil),
-			[]error{apparmor.ErrDuplicatePath},
+			[]error{apparmor.ErrDuplicatePathAcrossCategories},
 			[]string{"filesystem.readWritePaths[0]", "(also at filesystem.writeOnlyPaths[0])"},
 			nil,
 		},
@@ -180,7 +180,7 @@ func TestValidateRejects(t *testing.T) {
 			validationProfile(
 				[3][]string{{`///\x2fetc/config`}, nil, {pathEtcConfig}}, [2][]string{}, nil,
 			),
-			[]error{apparmor.ErrDuplicatePath},
+			[]error{apparmor.ErrDuplicatePathAcrossCategories},
 			[]string{"filesystem.readWritePaths[0]", "(also at filesystem.readOnlyPaths[0])"},
 			nil,
 		},
@@ -190,7 +190,7 @@ func TestValidateRejects(t *testing.T) {
 				[3][]string{{pathEtcConfig, pathTmp}, {pathEtcConfig}, {pathTmp}},
 				[2][]string{}, nil,
 			),
-			[]error{apparmor.ErrDuplicatePath},
+			[]error{apparmor.ErrDuplicatePathAcrossCategories},
 			[]string{
 				"filesystem.writeOnlyPaths[0]: " + strconv.Quote(pathEtcConfig),
 				"(also at filesystem.readOnlyPaths[0])",
@@ -226,23 +226,23 @@ func TestValidateRejects(t *testing.T) {
 			// One list naming a path twice is not a path in two lists.
 			"read-only twice", apparmor.Validate,
 			validationProfile([3][]string{{pathEtcConfig, pathEtcConfig}, nil, nil}, [2][]string{}, nil),
-			[]error{apparmor.ErrDuplicatePathInCategory},
+			[]error{apparmor.ErrDuplicatePathInList},
 			[]string{"filesystem.readOnlyPaths[1]"},
-			apparmor.ErrDuplicatePath,
+			apparmor.ErrDuplicatePathAcrossCategories,
 		},
 		{
 			"write-only twice", apparmor.Validate,
 			validationProfile([3][]string{nil, {pathTmp, pathTmp}, nil}, [2][]string{}, nil),
-			[]error{apparmor.ErrDuplicatePathInCategory},
+			[]error{apparmor.ErrDuplicatePathInList},
 			[]string{"filesystem.writeOnlyPaths[1]"},
-			apparmor.ErrDuplicatePath,
+			apparmor.ErrDuplicatePathAcrossCategories,
 		},
 		{
 			"read-write twice", apparmor.Validate,
 			validationProfile([3][]string{nil, nil, {pathVarLog, pathVarLog}}, [2][]string{}, nil),
-			[]error{apparmor.ErrDuplicatePathInCategory},
+			[]error{apparmor.ErrDuplicatePathInList},
 			[]string{"filesystem.readWritePaths[1]"},
-			apparmor.ErrDuplicatePath,
+			apparmor.ErrDuplicatePathAcrossCategories,
 		},
 		{
 			"empty capability", apparmor.Validate,
@@ -270,14 +270,14 @@ func TestValidateRejects(t *testing.T) {
 			// tier a filesystem path listed twice is, by Validate.
 			"executable twice", apparmor.Validate,
 			validationProfile([3][]string{}, [2][]string{{pathBinShell, pathBinSh, pathBinShell}, nil}, nil),
-			[]error{apparmor.ErrDuplicateExecutablePath},
+			[]error{apparmor.ErrDuplicatePathInList},
 			[]string{"executable.allowedExecutables[2]: " + strconv.Quote(pathBinShell)},
 			nil,
 		},
 		{
 			"library twice", apparmor.Validate,
 			validationProfile([3][]string{}, [2][]string{nil, {pathLibCStd, pathLibCStd}}, nil),
-			[]error{apparmor.ErrDuplicateExecutablePath},
+			[]error{apparmor.ErrDuplicatePathInList},
 			[]string{"executable.allowedLibraries[1]: " + strconv.Quote(pathLibCStd)},
 			nil,
 		},
@@ -286,7 +286,7 @@ func TestValidateRejects(t *testing.T) {
 			// category.
 			"executable spelled twice", apparmor.ValidateArtifact,
 			validationProfile([3][]string{}, [2][]string{{pathBinShell, "/bin//bash"}, nil}, nil),
-			[]error{apparmor.ErrDuplicateExecutablePath},
+			[]error{apparmor.ErrDuplicatePathInList},
 			[]string{`executable.allowedExecutables[1]: "/bin//bash"`},
 			nil,
 		},
@@ -295,7 +295,7 @@ func TestValidateRejects(t *testing.T) {
 			validationProfile(
 				[3][]string{}, [2][]string{{pathBinShell, pathBinShell}, {pathLibCStd, pathLibCStd}}, nil,
 			),
-			[]error{apparmor.ErrDuplicateExecutablePath},
+			[]error{apparmor.ErrDuplicatePathInList},
 			[]string{"executable.allowedExecutables[1]", "executable.allowedLibraries[1]"},
 			nil,
 		},
@@ -307,7 +307,7 @@ func TestValidateRejects(t *testing.T) {
 				[3][]string{{pathEtcConfig}, {pathEtcConfig}, nil},
 				[2][]string{{pathBinShell, pathBinShell}, nil}, nil,
 			),
-			[]error{apparmor.ErrDuplicatePath, apparmor.ErrDuplicateExecutablePath},
+			[]error{apparmor.ErrDuplicatePathAcrossCategories, apparmor.ErrDuplicatePathInList},
 			[]string{
 				"filesystem.writeOnlyPaths[0]", "(also at filesystem.readOnlyPaths[0])",
 				"executable.allowedExecutables[1]",
@@ -325,7 +325,7 @@ func TestValidateRejects(t *testing.T) {
 			),
 			[]error{apparmor.ErrPathTooLong},
 			[]string{"filesystem.readOnlyPaths[0]"},
-			apparmor.ErrDuplicateExecutablePath,
+			apparmor.ErrDuplicatePathInList,
 		},
 		{
 			"unknown capability", apparmor.ValidateStrict,
@@ -439,7 +439,7 @@ func TestValidateStrictGlobTooComplex(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	want := "Profile{r:/etc/passwd net:!raw,!tcp,!udp caps:none}"
+	want := "Profile{r:/etc/passwd net:!raw,!tcp,!udp}"
 	if got := result.String(); got != want {
 		t.Errorf("Intersect = %s, want %s", got, want)
 	}
@@ -932,8 +932,8 @@ func TestMergesFoldDuplicateExecutables(t *testing.T) {
 	)
 
 	err := apparmor.Validate(profile)
-	if !errors.Is(err, apparmor.ErrDuplicateExecutablePath) {
-		t.Fatalf("Validate = %v, want ErrDuplicateExecutablePath", err)
+	if !errors.Is(err, apparmor.ErrDuplicatePathInList) {
+		t.Fatalf("Validate = %v, want ErrDuplicatePathInList", err)
 	}
 
 	for name, mergeFn := range map[string]func(...*apparmor.Profile) (*apparmor.Profile, error){
@@ -978,7 +978,7 @@ func TestValidateMessages(t *testing.T) {
 	want := strings.Join([]string{
 		`filesystem.readWritePaths[1]: "/etc": duplicate path across filesystem categories ` +
 			`(also at filesystem.readOnlyPaths[1])`,
-		`filesystem.readOnlyPaths[1]: "/etc": duplicate path within category ` +
+		`filesystem.readOnlyPaths[1]: "/etc": duplicate path within list ` +
 			`(also at filesystem.readOnlyPaths[0])`,
 		`capability.allowedCapabilities[1]: "chown": duplicate capability ` +
 			`(also at capability.allowedCapabilities[0])`,

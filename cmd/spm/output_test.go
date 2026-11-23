@@ -160,3 +160,21 @@ func TestStdoutWriteFailureReadsAsAFileOne(t *testing.T) {
 		}
 	}
 }
+
+// TestWrittenInPlaceSaysTheContentIsGone covers the failure of a write in
+// place to a file that could not be replaced, which says so, since the old
+// content is gone, unlike after a failed replacement.
+func TestWrittenInPlaceSaysTheContentIsGone(t *testing.T) {
+	t.Parallel()
+
+	err := writtenInPlace(nil)
+	if err != nil {
+		t.Errorf("writtenInPlace(nil) = %v, want nil", err)
+	}
+
+	err = writtenInPlace(fs.ErrPermission)
+	if !errors.Is(err, fs.ErrPermission) ||
+		!strings.HasSuffix(err.Error(), " (written in place, the old content is gone)") {
+		t.Errorf("writtenInPlace = %v, want it to wrap the failure and say so", err)
+	}
+}

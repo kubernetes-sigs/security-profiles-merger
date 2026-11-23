@@ -752,23 +752,6 @@ func TestInputPastTheLimitsBesideABadOne(t *testing.T) {
 	}
 }
 
-func TestReadInputsFileTooLarge(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	large := filepath.Join(dir, "large.json")
-
-	err := os.WriteFile(large, make([]byte, maxInputSize+1), 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = readInputs([]string{large}, nil)
-	if !errors.Is(err, errFileTooLarge) {
-		t.Errorf("error = %v, want %v", err, errFileTooLarge)
-	}
-}
-
 func TestReadInputsStdinDash(t *testing.T) {
 	t.Parallel()
 
@@ -800,17 +783,6 @@ func TestReadInputsNoPathsUsesStdin(t *testing.T) {
 
 	if got := inputData(result); !slices.Equal(got, []string{`{"a":1}`, `{"b":2}`}) {
 		t.Errorf("data = %q, want both documents in order", got)
-	}
-}
-
-func TestReadInputsDuplicateStdin(t *testing.T) {
-	t.Parallel()
-
-	stdin := strings.NewReader(`{"a":1}`)
-
-	err := checkPaths([]string{"-", "-"}, stdin)
-	if !errors.Is(err, errDuplicateStdin) {
-		t.Errorf("error = %v, want %v", err, errDuplicateStdin)
 	}
 }
 

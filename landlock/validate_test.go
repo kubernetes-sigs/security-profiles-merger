@@ -495,7 +495,7 @@ func TestValidateRejectsPaths(t *testing.T) {
 			name:       "relative path with a parent component",
 			profile:    fsProfile(read, readRule("../x")),
 			validators: everyLevel,
-			want:       []error{landlock.ErrParentPath},
+			want:       []error{landlock.ErrDotComponent},
 			notWant:    []error{landlock.ErrRelativePath},
 			merges:     true,
 		},
@@ -547,7 +547,7 @@ func TestValidateRejectsPaths(t *testing.T) {
 			name:       "parent component with a trailing slash",
 			profile:    fsProfile(read, readRule("/a/../")),
 			validators: []validator{validateArtifact},
-			want:       []error{landlock.ErrParentPath},
+			want:       []error{landlock.ErrDotComponent},
 			notWant:    []error{landlock.ErrTrailingSlash},
 		},
 		{

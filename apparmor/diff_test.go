@@ -751,8 +751,8 @@ func TestPathIdentityIsSharedByDiffAndValidate(t *testing.T) {
 	}
 
 	err := apparmor.Validate(readOnly(tooComplex, escapedTooComplex))
-	if !errors.Is(err, apparmor.ErrDuplicatePathInCategory) {
-		t.Errorf("Validate = %v, want ErrDuplicatePathInCategory", err)
+	if !errors.Is(err, apparmor.ErrDuplicatePathInList) {
+		t.Errorf("Validate = %v, want ErrDuplicatePathInList", err)
 	}
 
 	got := mergeFs(t, apparmor.Union, readOnly(tooComplex), readOnly(escapedTooComplex))

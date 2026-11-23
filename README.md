@@ -166,10 +166,9 @@ incompatible Go API change within a major version
   budgets may change in a minor release, raised or lowered. `MaxPathLen`
   follows the kernel and does not change.
 - **Error text** may change in any release. Dispatch on the sentinels with
-  `errors.Is`, and on the typed errors, `InputError` and
-  `landlock.ResultError`, with `errors.As`, which only a major release
-  removes or renames; a release may add sentinels, and an error may match
-  additional ones.
+  `errors.Is`, and on the typed error `InputError` with `errors.As`, which
+  only a major release removes or renames; a release may add sentinels,
+  and an error may match additional ones.
 - **Diff JSON** keeps its field names and shape within a major release, and
   a minor release may add fields. `seccomp.FormatProfile` and the `String`
   methods are for people and may change in any release.
@@ -327,7 +326,9 @@ artifact, err := node.DecodeArtifact(artifactBytes)
 if err != nil {
     return err // a permanent rejection
 }
-llEffective, err := landlock.Intersect(baseline, artifact)
+// A rule of the result can carry the baseline's grant on an ancestor down
+// to a path the artifact chose, which IntersectLowered reports.
+llEffective, lowered, err := landlock.IntersectLowered(baseline, artifact)
 if err != nil {
     return err
 }
@@ -335,14 +336,8 @@ if err := node.Validate(llEffective); err != nil {
     return err
 }
 
-// A rule of the result can carry the baseline's grant on an ancestor down
-// to a path the artifact chose. Open each such path so that it cannot
-// leave the hierarchy of its ancestor, as docs/integration.md describes,
-// or refuse the profile.
-lowered, err := landlock.LoweredRulePaths(llEffective, baseline, artifact)
-if err != nil {
-    return err
-}
+// Open each lowered path so that it cannot leave the hierarchy of its
+// ancestor, as docs/integration.md describes, or refuse the profile.
 for _, each := range lowered {
     if err := openBeneath(each.Path, each.Ancestor); err != nil {
         return err
@@ -388,11 +383,12 @@ spm validate --artifact artifact.json
 spm diff baseline.json merged.json
 ```
 
-Flags precede file arguments, and without file arguments a command reads
-stdin. `spm help <command>` lists the options of a command, and
-[docs/cli.md](docs/cli.md) is the reference: exit codes, the validation
-modes and what each refuses, input limits, how inputs are named in messages,
-and what `--output` guards against.
+Flags may come before or after the file arguments, and without file
+arguments a command reads stdin. `spm help <command>` lists the options of
+a command, and [docs/cli.md](docs/cli.md) shows the common tasks and is the
+reference: exit codes, the validation modes and what each refuses, input
+limits, how inputs are named in messages, and what `--output` guards
+against.
 
 ## Contributing
 

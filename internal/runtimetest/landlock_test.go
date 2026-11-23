@@ -242,7 +242,7 @@ func restrict(layers []*landlock.Profile) error {
 }
 
 // restrictOne builds a ruleset from profile, opening each rule path as a
-// runtime that does not check LoweredRulePaths would, following symlinks,
+// runtime that does not check IntersectLowered would, following symlinks,
 // and enforces it on this thread.
 func restrictOne(profile *landlock.Profile) error {
 	if len(profile.HandledAccessNet) > 0 || len(profile.Scoped) > 0 {
@@ -544,7 +544,7 @@ func TestIntersectLoadsAsItsLayers(t *testing.T) {
 // symlink below the baseline's rule, the intersection carries the
 // baseline's access down to it, and a runtime that opens the rule path
 // following symlinks binds the rule to the symlink's target, which the
-// baseline never covered. LoweredRulePaths reports the path with the
+// baseline never covered. IntersectLowered reports the path with the
 // baseline's rule path as its ancestor, and opening it beneath that
 // ancestor without following symlinks, as the guide tells a runtime to,
 // fails.
@@ -576,15 +576,12 @@ func TestLoweredRulePathOnASymlink(t *testing.T) {
 	var lowered []landlock.LoweredPath
 
 	merged := applied(t, link, func(root string) []*landlock.Profile {
-		effective, err := landlock.Intersect(baseline(root), artifact(root))
+		effective, loweredHere, err := landlock.IntersectLowered(baseline(root), artifact(root))
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		lowered, err = landlock.LoweredRulePaths(effective, baseline(root), artifact(root))
-		if err != nil {
-			t.Fatal(err)
-		}
+		lowered = loweredHere
 
 		want := landlock.LoweredPath{
 			Path:     filepath.Join(root, "a", "link"),
@@ -593,7 +590,7 @@ func TestLoweredRulePathOnASymlink(t *testing.T) {
 			InRoot:   false,
 		}
 		if !slices.Contains(lowered, want) {
-			t.Errorf("LoweredRulePaths = %+v, want %+v", lowered, want)
+			t.Errorf("IntersectLowered = %+v, want %+v", lowered, want)
 		}
 
 		dir, err := syscall.Open(want.Ancestor, oPath|syscall.O_CLOEXEC, 0)
@@ -623,7 +620,7 @@ func TestLoweredRulePathOnASymlink(t *testing.T) {
 	}
 
 	if len(lowered) == 0 {
-		t.Error("LoweredRulePaths reported nothing")
+		t.Error("IntersectLowered reported nothing")
 	}
 }
 

@@ -1156,7 +1156,7 @@ func TestSingleIntersectDropsUnusableGlobs(t *testing.T) {
 		t.Errorf("Intersect(p) = %s, Intersect(p, p) = %s", single, double)
 	}
 
-	want := "Profile{exec:/bin/sh r:/etc/passwd rw:/tmp/** net:!raw,!tcp,!udp caps:none}"
+	want := "Profile{exec:/bin/sh r:/etc/passwd rw:/tmp/** net:!raw,!tcp,!udp}"
 	if got := single.String(); got != want {
 		t.Errorf("Intersect(p) = %s, want %s", got, want)
 	}
@@ -1298,8 +1298,8 @@ func TestValidateNormalizesPathsForDuplicateChecks(t *testing.T) {
 	})
 
 	err := apparmor.Validate(profile)
-	if !errors.Is(err, apparmor.ErrDuplicatePath) {
-		t.Errorf("Validate = %v, want ErrDuplicatePath", err)
+	if !errors.Is(err, apparmor.ErrDuplicatePathAcrossCategories) {
+		t.Errorf("Validate = %v, want ErrDuplicatePathAcrossCategories", err)
 	}
 }
 
@@ -1309,8 +1309,8 @@ func TestValidateStrictNormalizesExecutablePaths(t *testing.T) {
 	profile := execProfile("/bin/sh", "/bin//sh")
 
 	err := apparmor.ValidateStrict(profile)
-	if !errors.Is(err, apparmor.ErrDuplicateExecutablePath) {
-		t.Errorf("ValidateStrict = %v, want ErrDuplicateExecutablePath", err)
+	if !errors.Is(err, apparmor.ErrDuplicatePathInList) {
+		t.Errorf("ValidateStrict = %v, want ErrDuplicatePathInList", err)
 	}
 }
 

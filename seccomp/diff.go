@@ -162,6 +162,9 @@ func diffProfiles(native specs.Arch, left, right *specs.LinuxSeccomp) (*ProfileD
 			left.Syscalls, right.Syscalls, defaultClause(left), defaultClause(right),
 		),
 	}
+	if diff.Syscalls != nil {
+		reportWrittenErrnos(diff.Syscalls, left.Syscalls, right.Syscalls)
+	}
 	// Every field but Equal is a pointer, set only where its section
 	// differs, so the profiles are equal where none is set.
 	var unchanged ProfileDiff
@@ -399,6 +402,145 @@ func reportedErrno(action specs.LinuxSeccompAction, ret *uint) *uint {
 	}
 
 	return outputErrno(action, ret)
+}
+
+// wideErrno is an errno the entries of a syscall write wider than the bits
+// a runtime loads, for an action and the value it loads as. mixed reports
+// entries that write different values for them.
+type wideErrno struct {
+	action  specs.LinuxSeccompAction
+	loaded  uint
+	written uint
+	mixed   bool
+}
+
+// reportWrittenErrnos replaces each errno of a rule in the diff that the
+// entries of the profiles write wider than the bits a runtime loads with
+// the value they write, as reportedErrno does for the default: the rules
+// carry the loaded value, which for 99999 is 34463, a number the profile
+// never names. A rule does not say which entries it came from, so the value
+// is replaced only where every entry of the syscall with that action and
+// loaded value, in both profiles, writes the same one; where they differ,
+// as 99999 and 34463 do, the rule keeps the loaded value on both sides, so
+// that spelling alone never reads as a change. The arguments are left out
+// of the match, since Diff rewrites them into the form libseccomp
+// compares, which only shows the loaded value more often.
+func reportWrittenErrnos(diff *SyscallsDiff, left, right []specs.LinuxSyscall) {
+	wide := wideErrnos(slices.Concat(left, right))
+	if wide == nil {
+		return
+	}
+
+	writeErrnos(diff.Removed, wide)
+	writeErrnos(diff.Added, wide)
+
+	for idx := range diff.Changed {
+		writeDetailErrnos(diff.Changed[idx].Name, diff.Changed[idx].Left, wide)
+		writeDetailErrnos(diff.Changed[idx].Name, diff.Changed[idx].Right, wide)
+	}
+}
+
+// wideErrnos returns, per syscall name, the errno each action and loaded
+// value is written with in the entries, keeping only those all entries
+// write alike and wider than the bits a runtime loads, or nil for none.
+func wideErrnos(syscalls []specs.LinuxSyscall) map[string][]wideErrno {
+	if !slices.ContainsFunc(syscalls, func(entry specs.LinuxSyscall) bool {
+		return errnoSignificant(entry.Action) && entry.ErrnoRet != nil &&
+			*entry.ErrnoRet > errnoMask
+	}) {
+		return nil
+	}
+
+	written := make(map[string][]wideErrno)
+
+	for idx := range syscalls {
+		entry := &syscalls[idx]
+		if !errnoSignificant(entry.Action) {
+			continue
+		}
+
+		value := defaultErrno
+		if entry.ErrnoRet != nil {
+			value = *entry.ErrnoRet
+		}
+
+		loaded := *runtimeErrno(entry.Action, entry.ErrnoRet)
+
+		for _, name := range entry.Names {
+			written[name] = addWrittenErrno(written[name], entry.Action, loaded, value)
+		}
+	}
+
+	for name, errnos := range written {
+		written[name] = slices.DeleteFunc(errnos, func(each wideErrno) bool {
+			return each.mixed || each.written <= errnoMask
+		})
+	}
+
+	return written
+}
+
+// addWrittenErrno records in errnos that an entry with the action writes
+// value, which loads as loaded, and returns errnos: as a new record, or by
+// marking the record of an equivalent action and loaded value mixed where
+// it holds another value.
+func addWrittenErrno(
+	errnos []wideErrno, action specs.LinuxSeccompAction, loaded, value uint,
+) []wideErrno {
+	found := findWideErrno(errnos, action, loaded)
+	if found == nil {
+		return append(errnos, wideErrno{action: action, loaded: loaded, written: value})
+	}
+
+	if found.written != value {
+		found.mixed = true
+	}
+
+	return errnos
+}
+
+// findWideErrno returns the errno of errnos recorded for an action
+// equivalent to the given one and the loaded value, or nil.
+func findWideErrno(
+	errnos []wideErrno, action specs.LinuxSeccompAction, loaded uint,
+) *wideErrno {
+	for idx := range errnos {
+		if errnos[idx].loaded == loaded && actionsEquivalent(errnos[idx].action, action) {
+			return &errnos[idx]
+		}
+	}
+
+	return nil
+}
+
+// writeErrnos replaces the errno of each entry the wide errnos of its
+// profile name (see reportWrittenErrnos).
+func writeErrnos(entries []SyscallEntry, wide map[string][]wideErrno) {
+	for idx := range entries {
+		writeDetailErrno(&entries[idx].SyscallDetail, wide[entries[idx].Name])
+	}
+}
+
+// writeDetailErrnos replaces the errno of each rule of the named syscall
+// the wide errnos of its profile name (see reportWrittenErrnos).
+func writeDetailErrnos(name string, details []SyscallDetail, wide map[string][]wideErrno) {
+	for idx := range details {
+		writeDetailErrno(&details[idx], wide[name])
+	}
+}
+
+// writeDetailErrno replaces the errno of a rule with the one errnos record
+// for its action and loaded value, if any.
+func writeDetailErrno(detail *SyscallDetail, errnos []wideErrno) {
+	if len(errnos) == 0 || !errnoSignificant(detail.Action) {
+		return
+	}
+
+	found := findWideErrno(errnos, detail.Action, *runtimeErrno(detail.Action, detail.ErrnoRet))
+	if found != nil {
+		written := found.written
+		detail.ErrnoRet = &written
+	}
 }
 
 // diffArchitectures compares the architecture lists with the given native
