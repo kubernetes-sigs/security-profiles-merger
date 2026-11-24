@@ -54,10 +54,10 @@ var (
 	errNoWriter       = errors.New("empty pipe (it had no writer, or nothing was written)")
 )
 
-// The inputs past the limits (see inputLimitError). One that a single
-// input is past names it, as every error about an input does: stdin here,
-// and a file or an element of an array by its name where the input is
-// read (see readFileInput and splitArray).
+// The limits on the inputs (see inputLimitError). One that a single input
+// is past is reported for that input (see inputLimitError.of), as every
+// error about an input names it; the others are on all inputs together:
+// the file arguments, the profiles they bring, and the bytes read.
 var (
 	errTooManyFiles    = newInputLimitError("too many input files (max %d)", maxInputFiles)
 	errTooManyProfiles = newInputLimitError("too many profiles (max %d)", maxInputFiles)
@@ -65,12 +65,12 @@ var (
 		"too many profiles (max %d, counting each element of an array and each other input)",
 		maxInputFiles,
 	)
-	errStdinTooLarge   = newInputLimitError(stdinName+": input exceeds %d byte limit", maxInputSize)
-	errFileTooLarge    = newInputLimitError("file exceeds %d byte limit", maxInputSize)
-	errElementTooLarge = newInputLimitError("profile exceeds %d byte limit", maxInputSize)
+	// errProfileTooLarge is a single profile past the bound on one: a file
+	// or stdin that holds no array, or an element of an array.
+	errProfileTooLarge = newInputLimitError("profile exceeds %d byte limit", maxInputSize)
 	errInputTooLarge   = newInputLimitError("inputs exceed %d bytes in total", maxTotalInputSize)
 	// errAloneTooLarge is an array past the bound on all inputs together
-	// on its own, with no input read before it, which is named.
+	// on its own, with no input read before it.
 	errAloneTooLarge = newInputLimitError(
 		"input exceeds %d bytes, the limit on all inputs together", maxTotalInputSize,
 	)
@@ -84,14 +84,38 @@ var (
 // nothing about it is known to be wrong, and reading on would hold more in
 // memory than the limits allow.
 type inputLimitError struct {
-	text string
+	// input names the input past the limit, and is empty for a limit on
+	// all inputs together, which no input is past on its own, and for the
+	// limit itself, which errors.Is matches whatever input it names.
+	input string
+	// limit says which limit it is past.
+	limit string
 }
 
 func newInputLimitError(format string, bound int) *inputLimitError {
-	return &inputLimitError{text: fmt.Sprintf(format, bound)}
+	return &inputLimitError{limit: fmt.Sprintf(format, bound)}
 }
 
-func (e *inputLimitError) Error() string { return e.text }
+func (e *inputLimitError) Error() string {
+	if e.input == "" {
+		return e.limit
+	}
+
+	return merge.SafeName(e.input) + ": " + e.limit
+}
+
+// Is reports whether target is the limit the error is past (see
+// inputLimitError.input).
+func (e *inputLimitError) Is(target error) bool {
+	limit, ok := target.(*inputLimitError)
+
+	return ok && limit.input == "" && limit.limit == e.limit
+}
+
+// of returns the error of the named input past the limit.
+func (e *inputLimitError) of(input string) *inputLimitError {
+	return &inputLimitError{input: input, limit: e.limit}
+}
 
 // isInputLimitError reports whether err is an input past the limits.
 func isInputLimitError(err error) bool {
@@ -121,9 +145,14 @@ type profileInput struct {
 	// source is the document data was read from, which for an element of
 	// an array is the array, and offset is where data starts in it. A line
 	// and column are counted in source, so that they point into what the
-	// caller holds; a nil source is data itself.
-	source []byte
-	offset int
+	// caller holds; a nil source is data itself. lines counts the line
+	// breaks in source before offset, and lineStart is where the line that
+	// holds offset starts, so that a position in data is found without
+	// reading source before it (see position).
+	source    []byte
+	offset    int
+	lines     int
+	lineStart int
 	// inArray reports an element of an array, which validate writes back
 	// as an array however many elements it holds.
 	inArray bool
@@ -158,18 +187,27 @@ func anyUnread(inputs []profileInput) bool {
 
 // position returns where the byte at offset of the input's data sits in the
 // document it was read from, as "line L, column C", counting both from one
-// and the column in bytes.
+// and the column in bytes. It reads source only from where data starts:
+// the lines before were counted once, as the array was split (see
+// splitArray). Counting them again for each element would read the array
+// up to every element that fails, which for an array whose elements all
+// fail is quadratic in its size.
 func (input *profileInput) position(offset int64) string {
 	source := input.source
 	if source == nil {
 		source = input.data
 	}
 
-	at := min(max(int(offset), 0)+input.offset, len(source))
-	line := bytes.Count(source[:at], []byte("\n")) + 1
-	column := at - (bytes.LastIndexByte(source[:at], '\n') + 1) + 1
+	target := min(max(int(offset), 0)+input.offset, len(source))
+	from := min(input.offset, target)
+	line := input.lines + bytes.Count(source[from:target], []byte("\n")) + 1
 
-	return fmt.Sprintf("line %d, column %d", line, column)
+	lineStart := input.lineStart
+	if last := bytes.LastIndexByte(source[from:target], '\n'); last >= 0 {
+		lineStart = from + last + 1
+	}
+
+	return fmt.Sprintf("line %d, column %d", line, target-lineStart+1)
 }
 
 // readInputs reads the profiles the file arguments name, or stdin without
@@ -331,10 +369,8 @@ func readFileInput(path string, allowance int) ([]profileInput, int, error) {
 	data, read, err := readFileWithLimit(path, allowance)
 
 	switch {
-	case errors.Is(err, errInputTooLarge):
-		return nil, read, err
 	case isInputLimitError(err):
-		return nil, read, fmt.Errorf("%s: %w", merge.SafeName(path), err)
+		return nil, read, err
 	case err != nil:
 		return []profileInput{failedInput(path, err)}, read, nil
 	}
@@ -346,9 +382,10 @@ func readFileInput(path string, allowance int) ([]profileInput, int, error) {
 
 // readFileWithLimit reads a regular file of at most maxInputSize bytes, or
 // an array of profiles within the allowance (see readBounded), and returns
-// how many bytes it read, which the allowance is charged with. The failure
-// it returns carries the reason alone: the caller names the input as the
-// caller wrote it, rather than as os spells the path.
+// how many bytes it read, which the allowance is charged with. A failure
+// to read it carries the reason alone: the caller names the input as the
+// caller wrote it, rather than as os spells the path. A limit it is past
+// names it so already.
 //
 // It reads a regular file or a pipe, a symlink followed, so that <(cmd) and
 // /dev/stdin on a pipe work, and refuses anything else once it is open,
@@ -369,7 +406,7 @@ func readFileWithLimit(path string, allowance int) ([]byte, int, error) {
 
 	defer func() { _ = file.Close() }()
 
-	data, err := readBounded(file, allowance, errFileTooLarge, errEmptyFile)
+	data, err := readBounded(file, path, allowance, errEmptyFile)
 
 	// A pipe that gave nothing at all had no writer by the time it was
 	// read, or one that wrote nothing.
@@ -393,12 +430,11 @@ func readFileWithLimit(path string, allowance int) ([]byte, int, error) {
 // and reads on past maxInputSize only for a document that opens an array.
 //
 // It fails with the reason alone of a read that failed (see bareFileError),
-// then with the limit error of a read past its bound, tooLarge naming the
-// bound on one profile and errInputTooLarge the one on all inputs, and then
-// with empty for an input of nothing but space, which is reported as such
-// rather than left to the decoder, which would call it a truncated
-// document.
-func readBounded(reader io.Reader, allowance int, tooLarge, empty error) ([]byte, error) {
+// then with the limit error of a read past its bound (see pastBound),
+// which names the input as name, and then with empty for an input of
+// nothing but space, which is reported as such rather than left to the
+// decoder, which would call it a truncated document.
+func readBounded(reader io.Reader, name string, allowance int, empty error) ([]byte, error) {
 	limit := min(maxInputSize, allowance)
 
 	data, err := io.ReadAll(io.LimitReader(reader, int64(limit)+1))
@@ -416,7 +452,7 @@ func readBounded(reader io.Reader, allowance int, tooLarge, empty error) ([]byte
 	case err != nil:
 		return data, bareFileError(err)
 	case len(data) > limit:
-		return data, pastBound(array, allowance, tooLarge)
+		return data, pastBound(name, array, allowance)
 	case len(bytes.Trim(data, strictjson.Space)) == 0:
 		return data, empty
 	default:
@@ -424,18 +460,19 @@ func readBounded(reader io.Reader, allowance int, tooLarge, empty error) ([]byte
 	}
 }
 
-// pastBound returns the limit error of a read past its bound: tooLarge
-// where that is the bound on one profile, and errInputTooLarge where it is
-// the allowance the inputs read before leave, which an array is read
-// within, and a single profile where that is below the bound on one. An
-// array past the whole bound, with no input read before it, is past it on
-// its own, and the caller names it (see errAloneTooLarge).
-func pastBound(array bool, allowance int, tooLarge error) error {
+// pastBound returns the limit error of a read of the named input past its
+// bound: errProfileTooLarge where that is the bound on one profile, and
+// errInputTooLarge where it is the allowance the inputs read before leave,
+// which an array is read within, and a single profile where that is below
+// the bound on one. That bound is on all inputs together, so it names no
+// input, unless an array is past it on its own, with no input read before
+// it (see errAloneTooLarge).
+func pastBound(name string, array bool, allowance int) error {
 	switch {
 	case !array && maxInputSize <= allowance:
-		return tooLarge
+		return errProfileTooLarge.of(name)
 	case allowance == maxTotalInputSize:
-		return errAloneTooLarge
+		return errAloneTooLarge.of(name)
 	default:
 		return errInputTooLarge
 	}
@@ -523,11 +560,9 @@ func readStdin(reader io.Reader, allowance int) ([]profileInput, int, error) {
 		return unread(stdinName, err), 0, nil
 	}
 
-	data, err := readBounded(reader, allowance, errStdinTooLarge, errEmptyInput)
+	data, err := readBounded(reader, stdinName, allowance, errEmptyInput)
 
 	switch {
-	case errors.Is(err, errAloneTooLarge):
-		return nil, len(data), fmt.Errorf("%s: %w", stdinName, err)
 	case isInputLimitError(err):
 		return nil, len(data), err
 	case err != nil:
@@ -625,15 +660,23 @@ func readArray(name string, data []byte) ([]profileInput, error) {
 // be checked. The count is checked before each element is looked at, so
 // that an array of more elements than the bound is refused without
 // walking them, and each element is bound as a profile given alone is.
+// The lines before each element are counted on the way, each line break
+// once, so that the position of an error in an element is found without
+// reading the array up to it (see profileInput.position).
 func splitArray(name string, data []byte) ([]profileInput, error) {
-	var result []profileInput
+	var (
+		result []profileInput
+		// lines counts the line breaks before counted, and lineStart is
+		// where the line that holds counted starts.
+		lines, lineStart, counted int
+	)
 
 	// Past the opening bracket, which only space can precede.
 	pos := skipSpace(data, bytes.IndexByte(data, '[')+1)
 
 	for pos < len(data) && data[pos] != ']' {
 		if len(result) == maxInputFiles {
-			return nil, fmt.Errorf("%s: %w", merge.SafeName(name), errTooManyProfiles)
+			return nil, errTooManyProfiles.of(name)
 		}
 
 		start := pos
@@ -641,15 +684,24 @@ func splitArray(name string, data []byte) ([]profileInput, error) {
 
 		elementName := name + "[" + strconv.Itoa(len(result)) + "]"
 		if pos-start > maxInputSize {
-			return nil, fmt.Errorf("%s: %w", merge.SafeName(elementName), errElementTooLarge)
+			return nil, errProfileTooLarge.of(elementName)
 		}
 
+		lines += bytes.Count(data[counted:start], []byte("\n"))
+		if last := bytes.LastIndexByte(data[counted:start], '\n'); last >= 0 {
+			lineStart = counted + last + 1
+		}
+
+		counted = start
+
 		result = append(result, profileInput{
-			name:    elementName,
-			data:    data[start:pos:pos],
-			source:  data,
-			offset:  start,
-			inArray: true,
+			name:      elementName,
+			data:      data[start:pos:pos],
+			source:    data,
+			offset:    start,
+			lines:     lines,
+			lineStart: lineStart,
+			inArray:   true,
 		})
 
 		// Past the comma, if one follows, to the next element or the

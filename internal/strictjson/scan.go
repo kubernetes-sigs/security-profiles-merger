@@ -44,7 +44,9 @@ import (
 // carries its whole ancestry, so keeping one per open frame, or building one
 // per value, costs memory quadratic in a document that nests deeply or puts
 // many values under a long name. A path is built from the stack only when a
-// finding is reported.
+// finding is reported. The stack holds frames by value, so that opening an
+// object or array allocates nothing once the stack is as deep as the
+// document has nested so far.
 type scanFrame struct {
 	// keys holds the names of the members seen so far in an object, folded
 	// where the object decodes into a struct (see addKey), mapped to
@@ -54,10 +56,8 @@ type scanFrame struct {
 	keys map[string]bool
 	// first is the name of the first member of an object, as keys holds it.
 	first string
-	// member is the name of the object member whose value comes next, and
-	// folded the same name folded, for an object decoding into a struct,
-	// or "" for any other.
-	member, folded string
+	// member is the name of the object member whose value comes next.
+	member string
 	// index is the index of the next array element, and for an object the
 	// count of its members so far.
 	index int
@@ -65,21 +65,72 @@ type scanFrame struct {
 	object bool
 	// wantKey reports whether the next token in an object is a member name.
 	wantKey bool
+	// tracked reports an object whose missing members the scan looks for
+	// (see named).
+	tracked bool
 	// typ is the struct or slice type the value of the frame decodes into,
 	// behind any pointers; nil for any other type and where the scan follows
 	// no type, which leaves every value inside unchecked.
 	typ reflect.Type
-	// named holds, as true, the JSON name of each field a member gives a
-	// value other than null, for an object of a struct type with required
-	// fields where the scan looks for missing members; it is nil otherwise.
-	// It is keyed by the field rather than the folded member name, since
-	// two fields whose names fold alike are filled apart. field is the JSON
-	// name of the field the member whose value comes next fills, "" for
-	// none, and child the type of the value of the member or element that
-	// comes next.
-	named map[string]bool
-	field string
+	// named holds the position (see jsonField) of each field a member
+	// gives a value other than null, for an object of a struct type with
+	// required fields where the scan looks for missing members. It is
+	// kept by field rather than by folded member name, since two fields
+	// whose names fold alike are filled apart. field is the position of
+	// the field the member whose value comes next fills, -1 for none, and
+	// child the type of the value of the member or element that comes
+	// next.
+	named fieldMask
+	field int
 	child reflect.Type
+}
+
+// fieldMask is a set of field positions: a bit per field, the first
+// fieldMaskBits in one word and the rest, for a struct of more fields than
+// that, in words made as they are needed. Those are held behind a pointer,
+// so that every frame, most of which hold no fieldMask at all, is smaller.
+type fieldMask struct {
+	low  uint64
+	high *[]uint64
+}
+
+// fieldMaskBits is how many fields one word of a fieldMask holds.
+const fieldMaskBits = 64
+
+// add puts the field at position idx in the set.
+func (mask *fieldMask) add(idx int) {
+	if idx < fieldMaskBits {
+		mask.low |= 1 << idx
+
+		return
+	}
+
+	if mask.high == nil {
+		mask.high = new([]uint64)
+	}
+
+	word := idx/fieldMaskBits - 1
+	for len(*mask.high) <= word {
+		*mask.high = append(*mask.high, 0)
+	}
+
+	(*mask.high)[word] |= 1 << (idx % fieldMaskBits)
+}
+
+// has reports whether the field at position idx is in the set. A nil mask
+// is the empty set.
+func (mask *fieldMask) has(idx int) bool {
+	switch {
+	case mask == nil:
+		return false
+	case idx < fieldMaskBits:
+		return mask.low&(1<<idx) != 0
+	}
+
+	word := idx/fieldMaskBits - 1
+
+	return mask.high != nil && word < len(*mask.high) &&
+		(*mask.high)[word]&(1<<(idx%fieldMaskBits)) != 0
 }
 
 // documentScan holds what scanDocument found, each in document order: the
@@ -137,7 +188,7 @@ func scanDocument(
 func PathAt(raw []byte, offset int64) (string, int64) {
 	path, start := "", int64(-1)
 
-	state := newScanState(nil, false, func(stack []*scanFrame, after, end int64) bool {
+	state := newScanState(nil, false, func(stack []scanFrame, after, end int64) bool {
 		if end < offset {
 			return true
 		}
@@ -165,7 +216,7 @@ func valueStart(raw []byte, offset int64) int64 {
 // scanState is scanDocument under way: the open objects and arrays, the
 // type the document decodes into, and what it found so far.
 type scanState struct {
-	stack  []*scanFrame
+	stack  []scanFrame
 	target reflect.Type
 	// checkMissing reports whether the scan looks for missing members.
 	checkMissing bool
@@ -173,8 +224,11 @@ type scanState struct {
 	// value, with the stack it sits in, its innermost frame at that value,
 	// where the token before it ended and where it ends; the scan stops
 	// when it returns false.
-	onValue func(stack []*scanFrame, after, end int64) bool
+	onValue func(stack []scanFrame, after, end int64) bool
 	scan    documentScan
+	// missing is the path of the member the scan looks at for missing
+	// members, kept so that its names are reused.
+	missing missingPath
 }
 
 // newScanState returns a scan of a document against target (see
@@ -182,7 +236,7 @@ type scanState struct {
 // it is not nil (see scanState).
 func newScanState(
 	target reflect.Type, checkMissing bool,
-	onValue func(stack []*scanFrame, after, end int64) bool,
+	onValue func(stack []scanFrame, after, end int64) bool,
 ) *scanState {
 	return &scanState{
 		target:       target,
@@ -232,9 +286,12 @@ func (state *scanState) valueStarted(after, end int64) bool {
 // next reads one token, which spans after to end, and reports whether the
 // scan goes on.
 func (state *scanState) next(token json.Token, after, end int64) bool {
+	// top points into the stack, so it is not used once a frame is pushed,
+	// which may move the stack. A frame popped stays where it is until the
+	// next one is pushed.
 	var top *scanFrame
 	if len(state.stack) > 0 {
-		top = state.stack[len(state.stack)-1]
+		top = &state.stack[len(state.stack)-1]
 	}
 
 	delim, isDelim := token.(json.Delim)
@@ -256,7 +313,16 @@ func (state *scanState) next(token json.Token, after, end int64) bool {
 			return false
 		}
 
-		state.stack = append(state.stack, state.newFrame(delim == '{', child))
+		// The stack doubles as it grows, where append grows a long slice
+		// by a quarter and allocates about five times its final size in
+		// all on the way to it.
+		if len(state.stack) == cap(state.stack) {
+			state.stack = slices.Grow(state.stack, max(len(state.stack), minStackFrames))
+		}
+
+		frame := state.newFrame(delim == '{', child)
+		frame.keys = state.reusedKeys()
+		state.stack = append(state.stack, frame)
 	default:
 		state.scalar(top, token)
 
@@ -275,19 +341,20 @@ func (state *scanState) next(token json.Token, after, end int64) bool {
 func (state *scanState) member(frame *scanFrame, key string) {
 	path := func() (string, bool) { return memberPath(state.stack) }
 
-	if frame.addKey(key) {
+	folded, repeated := frame.addKey(key)
+	if repeated {
 		state.scan.duplicates.addLazily(path)
 	}
 
 	frame.child = nil
-	frame.field = ""
+	frame.field = -1
 
 	if frame.typ == nil || frame.typ.Kind() != reflect.Struct {
 		return
 	}
 
 	// addKey folded the name already.
-	field, known, exact := fieldsOf(frame.typ).lookupFolded(key, frame.folded)
+	field, known, exact := fieldsOf(frame.typ).lookupFolded(key, folded)
 
 	switch {
 	case !known:
@@ -296,16 +363,18 @@ func (state *scanState) member(frame *scanFrame, key string) {
 		state.scan.misspelled.addWant(path, field.name)
 	}
 
-	// field is "" for a member no field reads.
-	frame.child, frame.field = field.typ, field.name
+	if known {
+		frame.child, frame.field = field.typ, field.index
+	}
 }
 
 // closed reports, where the scan looks for missing members, the required
 // members of an object of frame left out or null.
 func (state *scanState) closed(frame *scanFrame) {
-	if frame.named != nil {
-		path := func() (string, bool) { return memberPath(state.stack) }
-		reportMissing(frame.typ, path, frame.named, &state.scan.missing)
+	if frame.tracked {
+		reportMissing(
+			frame.typ, state.missing.at(state.stack), &frame.named, &state.scan.missing,
+		)
 	}
 }
 
@@ -319,16 +388,43 @@ func (state *scanState) scalar(top *scanFrame, token json.Token) {
 	case token != nil:
 		top.markNamed()
 	case !state.checkMissing:
-	case top == nil || top.named == nil:
+	case top == nil || !top.tracked:
 		// encoding/json leaves a value set to null where nothing else
 		// names it, as an element of a list, as it was.
-		reportZero(
-			child, func() (string, bool) { return memberPath(state.stack) }, &state.scan.missing,
-		)
+		reportZero(child, state.missing.at(state.stack), &state.scan.missing)
 	default:
 		// A member of an object read as null is missing where the object
 		// closes, as one left out is.
 	}
+}
+
+// minStackFrames is how many frames the stack of a scan holds at first,
+// as deep as a profile document nests.
+const minStackFrames = 8
+
+// maxReusedKeys is how many names the keys of a frame may have held for a
+// frame opened in its place to reuse them. Clearing a map costs time in
+// the space it grew to, so a large one is dropped rather than cleared for
+// every small object after it.
+const maxReusedKeys = 8
+
+// reusedKeys returns the keys of the frame last closed where the next one
+// opens, cleared, so that the objects of a document allocate a map per
+// level it nests rather than one each, or nil where there are none.
+func (state *scanState) reusedKeys() map[string]bool {
+	depth := len(state.stack)
+	if depth == cap(state.stack) {
+		return nil
+	}
+
+	keys := state.stack[:depth+1][depth].keys
+	if len(keys) > maxReusedKeys {
+		return nil
+	}
+
+	clear(keys)
+
+	return keys
 }
 
 func isClosing(delim json.Delim) bool {
@@ -337,8 +433,8 @@ func isClosing(delim json.Delim) bool {
 
 // newFrame opens an object or array whose value decodes into typ, or whose
 // type is not followed where typ is nil.
-func (state *scanState) newFrame(object bool, typ reflect.Type) *scanFrame {
-	frame := &scanFrame{object: object, wantKey: object}
+func (state *scanState) newFrame(object bool, typ reflect.Type) scanFrame {
+	frame := scanFrame{object: object, wantKey: object, field: -1}
 
 	for typ != nil && typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()
@@ -350,10 +446,8 @@ func (state *scanState) newFrame(object bool, typ reflect.Type) *scanFrame {
 
 	frame.typ = typ
 
-	if state.checkMissing && object && typ.Kind() == reflect.Struct &&
-		requiresFields(typ) {
-		frame.named = map[string]bool{}
-	}
+	frame.tracked = state.checkMissing && object && typ.Kind() == reflect.Struct &&
+		requiresFields(typ)
 
 	return frame
 }
@@ -379,8 +473,8 @@ func (frame *scanFrame) valueType(target reflect.Type) reflect.Type {
 
 // markNamed records that the member whose value starts next is given one.
 func (frame *scanFrame) markNamed() {
-	if frame != nil && frame.named != nil && frame.field != "" {
-		frame.named[frame.field] = true
+	if frame != nil && frame.tracked && frame.field >= 0 {
+		frame.named.add(frame.field)
 	}
 }
 
@@ -390,50 +484,51 @@ func (frame *scanFrame) expectsKey() bool {
 	return frame != nil && frame.wantKey
 }
 
-// addKey records a member name and reports whether this is the first time
-// the name repeats, which is when its path is collected. In an object
-// decoding into a struct, names repeat when they fold alike, as
-// encoding/json matches them to struct fields, so that "Name" and "name"
-// fill one field. Every other object, one nothing decodes into, such as an
-// object inside a member no field reads, repeats a name only when it
-// repeats it exactly: encoding/json folds case for struct fields alone, and
-// there "Name" and "name" are two members, of which the member holding them
-// is reported as unknown.
-func (frame *scanFrame) addKey(key string) bool {
+// addKey records a member name and returns it as the object compares it,
+// and whether this is the first time the name repeats, which is when its
+// path is collected. In an object decoding into a struct, names are folded
+// and repeat when they fold alike, as encoding/json matches them to struct
+// fields, so that "Name" and "name" fill one field. Every other object,
+// one nothing decodes into, such as an object inside a member no field
+// reads, repeats a name only when it repeats it exactly: encoding/json
+// folds case for struct fields alone, and there "Name" and "name" are two
+// members, of which the member holding them is reported as unknown.
+func (frame *scanFrame) addKey(key string) (string, bool) {
 	frame.member = key
 	frame.wantKey = false
-	frame.folded = ""
 	frame.index++
 
 	name := key
 	if frame.typ != nil && frame.typ.Kind() == reflect.Struct {
-		frame.folded = foldName(key)
-		name = frame.folded
+		name = foldName(key)
 	}
 
 	switch {
 	case frame.index == 1:
 		frame.first = name
 
-		return false
+		return name, false
 	case frame.keys == nil:
 		frame.keys = map[string]bool{frame.first: false}
+	case len(frame.keys) == 0:
+		// Keys reused from a frame closed before (see reusedKeys).
+		frame.keys[frame.first] = false
 	}
 
 	reported, seen := frame.keys[name]
 	if !seen {
 		frame.keys[name] = false
 
-		return false
+		return name, false
 	}
 
 	if reported {
-		return false
+		return name, false
 	}
 
 	frame.keys[name] = true
 
-	return true
+	return name, true
 }
 
 // startValue advances the frame past the value that starts next. A nil frame
@@ -466,10 +561,12 @@ const maxPathBytes = merge.MaxQuotedBytes + utf8.UTFMax
 // cut the path there. Every outer frame is at the value holding the next
 // one: an object at its current member, an array at the element before its
 // next index.
-func memberPath(stack []*scanFrame) (string, bool) {
+func memberPath(stack []scanFrame) (string, bool) {
 	path := ""
 
-	for idx, frame := range stack {
+	for idx := range stack {
+		frame := &stack[idx]
+
 		if len(path) > maxPathBytes {
 			return path, idx < len(stack)
 		}
@@ -526,34 +623,47 @@ func (c *pathCollector) add(path string) {
 	c.addLazily(func() (string, bool) { return path, false })
 }
 
+// full reports whether the collector keeps no more paths. A path it is
+// given then counts among the ones left out.
+func (c *pathCollector) full() bool {
+	return len(c.paths) >= maxReportedPaths
+}
+
+// keep adds a path built for a collector that is not full, unless it holds
+// the path already (see pathCollector), and reports whether it added it.
+func (c *pathCollector) keep(built string, cut bool) bool {
+	if !cut && slices.Contains(c.paths, built) {
+		return false
+	}
+
+	c.paths = append(c.paths, built)
+
+	return true
+}
+
 // addWant is addLazily for a misspelled member, with the spelling of the
 // field it stands for.
 func (c *pathCollector) addWant(path pathOf, want string) {
-	if len(c.paths) >= maxReportedPaths {
+	if c.full() {
 		c.omitted++
 
 		return
 	}
 
-	built, cut := path()
-	if cut || !slices.Contains(c.paths, built) {
-		c.paths = append(c.paths, built)
+	if c.keep(path()) {
 		c.wants = append(c.wants, want)
 	}
 }
 
 // addLazily is add for a path that is only worth building when it is kept.
 func (c *pathCollector) addLazily(path pathOf) {
-	if len(c.paths) >= maxReportedPaths {
+	if c.full() {
 		c.omitted++
 
 		return
 	}
 
-	built, cut := path()
-	if cut || !slices.Contains(c.paths, built) {
-		c.paths = append(c.paths, built)
-	}
+	c.keep(path())
 }
 
 // foldName returns the name in the case-folded form encoding/json uses to

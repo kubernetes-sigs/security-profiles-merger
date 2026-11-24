@@ -420,13 +420,18 @@ The module does not bound the size of the document itself. Cap what you
 read from the registry before decoding it. 1 MiB is plenty: the largest
 profile in this repository, the Moby default seccomp profile for amd64, is
 about 16 KiB, and the profiles KEP-6061 expects runtimes to accept are of
-that order. Strict decoding holds up to about 85 to 90 times the size of
-the document in heap at its peak, depending on its shape (a list of empty
-syscall entries comes close to that), and allocates about twice that in
-total, so at a 1 MiB cap each artifact can hold on the order of 90 MB before
-`ValidateArtifact` gets to refuse it on its counts. Size the number of
-artifacts decoded in parallel by that. The `spm` command reads up to 10 MiB
-per input, since its user picks the files.
+that order. Strict decoding holds up to about 75 times the size of the
+document in heap at its peak with the default `GOGC`, depending on its
+shape (a list of empty syscall entries comes close to that, nearly all of
+it the decoded profile, which `json.Unmarshal` holds as well), and
+allocates about 125 times the size of the document in total, so at a 1 MiB
+cap each artifact can hold on the order of 75 MB before `ValidateArtifact`
+gets to refuse it on its counts. Those ratios are for documents near the
+cap: a small one nested as deeply as encoding/json reads, 10,000 levels,
+costs more per byte, on the order of 10 MB in all, which stays far below
+what a document near the cap costs. Size the number of artifacts decoded
+in parallel by that. The `spm` command reads up to 10 MiB per input,
+since its user picks the files.
 
 ## Reading a validation error
 

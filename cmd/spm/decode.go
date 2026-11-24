@@ -163,7 +163,9 @@ func newInputReport(inputs []profileInput) *inputReport {
 		failed: make([]bool, len(inputs)),
 	}
 
-	for idx, input := range inputs {
+	for idx := range inputs {
+		input := &inputs[idx]
+
 		if input.err != nil {
 			report.fail(idx, input.err)
 		}

@@ -70,8 +70,10 @@ var errDiffRequiresTwo = errors.New("diff requires exactly 2 profiles")
 type diffOptions struct {
 	commonOptions
 
-	// validate is the --validate value, empty for no checks.
+	// validate is the --validate value, empty for no checks, and modes the
+	// modes it lists, which checkFlags parses, nil for none.
 	validate string
+	modes    []validateMode
 }
 
 // bindDiffFlags declares the diff flags on the set and returns the struct
@@ -108,8 +110,13 @@ func (opts *diffOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) int {
 	}
 
 	validate := flagNamed(flags, "validate")
-	if validate && checkValidateModes(opts.validate, flags.NArg(), false, stderr) != 0 {
-		return exitUsage
+	if validate {
+		modes, code := checkValidateModes(opts.validate, flags.NArg(), false, stderr)
+		if code != 0 {
+			return code
+		}
+
+		opts.modes = modes
 	}
 
 	// The comparison itself does not depend on the ABI version, so --abi
@@ -155,8 +162,8 @@ func diffInputs(opts *diffOptions, inv *invocation) int {
 	// else is checked, as the library's Diff checks nothing. With it, each
 	// is checked under its mode first, which also bounds what a profile can
 	// make the comparison hold in memory (see the artifact limits).
-	if opts.validate != "" {
-		inv.checks = &inputChecks{modes: inv.validateModes(opts.validate)}
+	if opts.modes != nil {
+		inv.checks = &inputChecks{modes: inv.validateModes(opts.modes)}
 	}
 
 	// Exit code 1 means "different" for diff, so unparsable input is a

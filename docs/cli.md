@@ -533,9 +533,9 @@ The inputs are bounded: a single profile, or an element of an array, of 10
 MiB, 64 MiB in total counting every byte read, the space between documents
 included (an array may take the 64 MiB on its own), 1000 file arguments,
 and 1000 profiles, counting each element of an array. An input past them is
-a usage error that names it (`error: big.json: file exceeds 10485760 byte
-limit`, `error: profiles.json[3]: profile exceeds 10485760 byte limit`); the
-bound on all inputs together names none unless an array is past it alone.
+a usage error that names it (`error: big.json: profile exceeds 10485760 byte
+limit`, or `profiles.json[3]` for an element of an array); the bound on all
+inputs together names none unless an array is past it alone.
 It ends the run there, so nothing is reported about the other inputs. An
 array that does not parse is a bad profile instead, since its syntax is
 checked before its elements are counted.

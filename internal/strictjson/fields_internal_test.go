@@ -20,6 +20,8 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -108,23 +110,152 @@ func TestMissingPathsAreBuiltLazily(t *testing.T) {
 				name, deepAllocs, deep, shallowAllocs)
 		}
 	}
+}
 
-	// A close with nothing missing asks for no path at all.
-	asked := false
+// TestReportMissingAllocatesNothing covers the close of an object with
+// nothing missing, which builds no path at all, and one past a full
+// report, which counts what it leaves out instead: neither costs an
+// allocation.
+//
+//nolint:paralleltest // AllocsPerRun refuses to run in a parallel test
+func TestReportMissingAllocatesNothing(t *testing.T) {
+	stack := []scanFrame{{object: true, member: "rules", field: -1}}
 
-	reportMissing(
-		reflect.TypeFor[requiredRule](),
-		func() (string, bool) {
-			asked = true
+	var path missingPath
 
-			return "x", false
+	var named fieldMask
+	named.add(0)
+	named.add(1)
+
+	full := pathCollector{paths: make([]string, maxReportedPaths), wants: nil, omitted: 0}
+	empty := pathCollector{paths: nil, wants: nil, omitted: 0}
+
+	reportMissing(reflect.TypeFor[requiredRule](), path.at(stack), nil, &full)
+
+	if full.omitted != 1 {
+		t.Errorf("a full report counted %d members left out, want 1", full.omitted)
+	}
+
+	if !testutil.UninstrumentedRun() {
+		return
+	}
+
+	for name, run := range map[string]func(){
+		"missing nothing": func() {
+			reportMissing(
+				reflect.TypeFor[requiredRule](), path.at(stack), &named,
+				&empty,
+			)
 		},
-		map[string]bool{"port": true, "name": true},
-		&pathCollector{paths: nil, wants: nil, omitted: 0},
-	)
+		"past a full report": func() {
+			reportMissing(reflect.TypeFor[requiredRule](), path.at(stack), nil, &full)
+		},
+	} {
+		if allocs := testing.AllocsPerRun(10, run); allocs != 0 {
+			t.Errorf("reportMissing of an object %s: %v allocations, want none", name, allocs)
+		}
+	}
+}
 
-	if asked {
-		t.Error("reportMissing built the path of an object missing nothing")
+// TestScanFramesAllocateOnce covers the cost of the objects of a document
+// that holds every required member, or misses them past a full report:
+// opening and closing one, and looking for the members it misses, costs no
+// allocation, so that a document of many small objects allocates in the
+// scan no more than one of a few. Each object here costs json.Decoder
+// nothing either, since its tokens are delimiters.
+//
+//nolint:paralleltest // AllocsPerRun refuses to run in a parallel test
+func TestScanFramesAllocateOnce(t *testing.T) {
+	if !testutil.UninstrumentedRun() {
+		t.Skip("coverage counters and the race detector allocate on their own")
+	}
+
+	const count = 1000
+
+	for name, element := range map[string]string{
+		"missing":       `{}`,
+		"nested arrays": `[[[]]]`,
+	} {
+		document := func(count int) []byte {
+			return nestedRules(1, strings.TrimSuffix(strings.Repeat(element+",", count), ","))
+		}
+
+		small, large := document(count), document(2*count)
+		scan := func(raw []byte) func() {
+			return func() { scanDocument(raw, reflect.TypeFor[requiredNest](), true) }
+		}
+
+		smallAllocs := testing.AllocsPerRun(5, scan(small))
+		largeAllocs := testing.AllocsPerRun(5, scan(large))
+
+		// The stack doubles as it grows, which only the deepest
+		// document pays for, and the report is full long before the end.
+		if largeAllocs > smallAllocs+count/100 {
+			t.Errorf("%s: %v allocations for %d objects, %v for %d, want about the same",
+				name, largeAllocs, 2*count, smallAllocs, count)
+		}
+	}
+}
+
+// TestFieldMaskPastOneWord covers a struct of more fields than one word of
+// a fieldMask holds: a member given a value at a position past the word is
+// told apart from one left out.
+func TestFieldMaskPastOneWord(t *testing.T) {
+	t.Parallel()
+
+	const count = 2*fieldMaskBits + 3
+
+	fields := make([]reflect.StructField, count)
+	for idx := range fields {
+		fields[idx] = reflect.StructField{
+			Name: "F" + strconv.Itoa(idx),
+			Type: reflect.TypeFor[int](),
+			Tag:  reflect.StructTag(`json:"f` + strconv.Itoa(idx) + `" strict:"required"`),
+		}
+	}
+
+	typ := reflect.StructOf(fields)
+
+	var members []string
+
+	for idx := range count {
+		if idx != 0 && idx != fieldMaskBits && idx != count-1 {
+			members = append(members, `"f`+strconv.Itoa(idx)+`":1`)
+		}
+	}
+
+	scan := scanDocument([]byte("{"+strings.Join(members, ",")+"}"), typ, true)
+
+	want := []string{"f0", "f" + strconv.Itoa(fieldMaskBits), "f" + strconv.Itoa(count-1)}
+	if !slices.Equal(scan.missing.paths, want) || scan.missing.omitted != 0 {
+		t.Errorf(
+			"missing = %v (%d omitted), want %v",
+			scan.missing.paths,
+			scan.missing.omitted,
+			want,
+		)
+	}
+}
+
+// TestFieldMaskWords covers a fieldMask holding a position past its first
+// word: it holds that position alone, and none past the words it made.
+func TestFieldMaskWords(t *testing.T) {
+	t.Parallel()
+
+	const held = 2*fieldMaskBits + 3
+
+	var mask fieldMask
+
+	mask.add(held)
+
+	for _, idx := range []int{0, fieldMaskBits, held - 1, held + 1, 4 * fieldMaskBits} {
+		if mask.has(idx) {
+			t.Errorf("mask %+v holding %d holds %d", mask, held, idx)
+		}
+	}
+
+	if !mask.has(held) {
+		t.Errorf("mask %+v does not hold %d", mask, held)
 	}
 }
 

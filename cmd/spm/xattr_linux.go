@@ -20,11 +20,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
-	"strconv"
 	"strings"
 	"syscall"
+	"unsafe"
 )
 
 // xattr is an extended attribute an output file passes on to the file that
@@ -46,14 +45,13 @@ const selinuxXattr = "security.selinux"
 // that cannot be read, as by a confined process, is an error, so that the
 // file is not replaced by one that silently carries another: it is written
 // in place instead where the caller owns it (see writeRegularFileWith).
-// The other attributes are best effort. Where /proc is not mounted the file
-// is not reached by its descriptor and keeps nothing.
+// The other attributes are best effort. The file is reached by its
+// descriptor, so that neither a name that leads elsewhere by now nor a
+// /proc that is not mounted can stand between it and its attributes.
 func readXattrs(file *os.File) ([]xattr, error) {
-	path := fdPath(file)
-
 	var attrs []xattr
 
-	label, err := getXattr(path, selinuxXattr)
+	label, err := getXattr(file, selinuxXattr)
 
 	switch {
 	case err == nil:
@@ -62,7 +60,7 @@ func readXattrs(file *os.File) ([]xattr, error) {
 		return nil, fmt.Errorf("reading the SELinux label: %w", err)
 	}
 
-	names, err := listXattrs(path)
+	names, err := listXattrs(file)
 	if err != nil {
 		return attrs, nil //nolint:nilerr // the other attributes are best effort
 	}
@@ -72,7 +70,7 @@ func readXattrs(file *os.File) ([]xattr, error) {
 			continue
 		}
 
-		value, err := getXattr(path, name)
+		value, err := getXattr(file, name)
 		if err == nil {
 			attrs = append(attrs, xattr{name: name, value: value})
 		}
@@ -93,10 +91,8 @@ func readXattrs(file *os.File) ([]xattr, error) {
 // attribute of another namespace that cannot be set, such as a trusted one,
 // which takes CAP_SYS_ADMIN, is left out.
 func writeXattrs(file *os.File, attrs []xattr) error {
-	path := fdPath(file)
-
 	for _, attr := range attrs {
-		current, err := getXattr(path, attr.name)
+		current, err := getXattr(file, attr.name)
 
 		switch {
 		case err == nil && bytes.Equal(current, attr.value):
@@ -105,7 +101,7 @@ func writeXattrs(file *os.File, attrs []xattr) error {
 			continue
 		}
 
-		err = syscall.Setxattr(path, attr.name, attr.value, 0)
+		err = setXattr(file, attr.name, attr.value)
 		if err != nil && attr.name == selinuxXattr {
 			return fmt.Errorf("keeping the SELinux label: %w", err)
 		}
@@ -114,33 +110,26 @@ func writeXattrs(file *os.File, attrs []xattr) error {
 	return nil
 }
 
-// fdPath returns the path that reaches an open file through its descriptor,
-// which the xattr calls of the syscall package, all of which follow a
-// symlink, need to reach the file itself rather than whatever its name
-// leads to by now.
-func fdPath(file *os.File) string {
-	return "/proc/self/fd/" + strconv.Itoa(int(file.Fd()))
-}
-
 // noXattr reports a failure to read an attribute that says the file has
-// none of that name, or none at all: ENODATA, a file system without
-// extended attributes, or a /proc that is not mounted.
+// none of that name, or none at all: ENODATA, or a file system without
+// extended attributes (ENOTSUP, and ENOSYS from some FUSE file systems).
 func noXattr(err error) bool {
-	return errors.Is(err, syscall.ENODATA) || errors.Is(err, errors.ErrUnsupported) ||
-		errors.Is(err, fs.ErrNotExist)
+	return errors.Is(err, syscall.ENODATA) || errors.Is(err, errors.ErrUnsupported)
 }
 
-// getXattr returns the value of the named attribute of the file at path.
-func getXattr(path, name string) ([]byte, error) {
+// getXattr returns the value of the named attribute of an open file.
+func getXattr(file *os.File, name string) ([]byte, error) {
 	return readSized(func(dest []byte) (int, error) {
-		return syscall.Getxattr(path, name, dest)
+		return onDescriptor(file, func(fd uintptr) (int, error) {
+			return fgetxattr(fd, name, dest)
+		})
 	})
 }
 
-// listXattrs returns the names of the attributes of the file at path.
-func listXattrs(path string) ([]string, error) {
+// listXattrs returns the names of the attributes of an open file.
+func listXattrs(file *os.File) ([]string, error) {
 	list, err := readSized(func(dest []byte) (int, error) {
-		return syscall.Listxattr(path, dest)
+		return onDescriptor(file, func(fd uintptr) (int, error) { return flistxattr(fd, dest) })
 	})
 	if err != nil {
 		return nil, err
@@ -157,23 +146,134 @@ func listXattrs(path string) ([]string, error) {
 	return names, nil
 }
 
+// setXattr sets the named attribute of an open file.
+func setXattr(file *os.File, name string, value []byte) error {
+	_, err := onDescriptor(file, func(fd uintptr) (int, error) {
+		return 0, fsetxattr(fd, name, value)
+	})
+
+	return err
+}
+
+// onDescriptor runs call on the descriptor of an open file, which stays
+// open while it runs. The syscall package has no xattr calls that take a
+// descriptor, only ones that take a path and follow a symlink.
+func onDescriptor(file *os.File, call func(fd uintptr) (int, error)) (int, error) {
+	conn, err := file.SyscallConn()
+	if err != nil {
+		return 0, fmt.Errorf("reaching the file: %w", err)
+	}
+
+	var (
+		result  int
+		callErr error
+	)
+
+	err = conn.Control(func(fd uintptr) { result, callErr = call(fd) })
+	if err != nil {
+		return 0, fmt.Errorf("reaching the file: %w", err)
+	}
+
+	return result, callErr
+}
+
+// The xattr calls below pass the kernel pointers to the name and the
+// buffer, converted in the call expression, as package syscall passes them
+// for the calls it has, and return the errno as it is, the reason alone,
+// which the callers word as they wrap it.
+
+// fgetxattr reads the named attribute of the file open as descriptor into
+// dest, and returns its size, which a call with an empty dest only
+// reports.
+func fgetxattr(descriptor uintptr, name string, dest []byte) (int, error) {
+	namePtr, err := syscall.BytePtrFromString(name)
+	if err != nil {
+		return 0, fmt.Errorf("attribute name: %w", err)
+	}
+
+	//nolint:gosec // see above
+	size, _, errno := syscall.Syscall6(
+		syscall.SYS_FGETXATTR,
+		descriptor,
+		uintptr(unsafe.Pointer(namePtr)),
+		uintptr(unsafe.Pointer(unsafe.SliceData(dest))),
+		uintptr(len(dest)),
+		0, 0,
+	)
+	if errno != 0 {
+		return 0, errno //nolint:wrapcheck // see above
+	}
+
+	return int(size), nil
+}
+
+// flistxattr reads the names of the attributes of the file open as
+// descriptor into dest, each ended by a NUL byte, and returns their size,
+// which a call with an empty dest only reports.
+func flistxattr(descriptor uintptr, dest []byte) (int, error) {
+	//nolint:gosec // see above
+	size, _, errno := syscall.Syscall(
+		syscall.SYS_FLISTXATTR,
+		descriptor,
+		uintptr(unsafe.Pointer(unsafe.SliceData(dest))),
+		uintptr(len(dest)),
+	)
+	if errno != 0 {
+		return 0, errno //nolint:wrapcheck // see above
+	}
+
+	return int(size), nil
+}
+
+// fsetxattr sets the named attribute of the file open as descriptor to
+// value, creating or replacing it.
+func fsetxattr(descriptor uintptr, name string, value []byte) error {
+	namePtr, err := syscall.BytePtrFromString(name)
+	if err != nil {
+		return fmt.Errorf("attribute name: %w", err)
+	}
+
+	//nolint:gosec // see above
+	_, _, errno := syscall.Syscall6(
+		syscall.SYS_FSETXATTR,
+		descriptor,
+		uintptr(unsafe.Pointer(namePtr)),
+		uintptr(unsafe.Pointer(unsafe.SliceData(value))),
+		uintptr(len(value)),
+		0, 0,
+	)
+	if errno != 0 {
+		return errno //nolint:wrapcheck // see above
+	}
+
+	return nil
+}
+
 // readSized calls read with a buffer of the size a call without one
-// reports, again as long as the value grows in between (ERANGE).
+// reports, again as long as the value grows in between (ERANGE). A value
+// of size 0 is returned at once: a call with an empty buffer only asks for
+// the size again, which may have grown in between without an ERANGE. A
+// size past the buffer, which the kernel never returns, is asked for again
+// as well rather than trusted.
 func readSized(read func(dest []byte) (int, error)) ([]byte, error) {
 	for {
 		size, err := read(nil)
-		if err != nil {
+
+		switch {
+		case err != nil:
 			return nil, err
+		case size == 0:
+			return []byte{}, nil
 		}
 
 		dest := make([]byte, size)
 
 		size, err = read(dest)
-		if errors.Is(err, syscall.ERANGE) {
-			continue
-		}
 
-		if err != nil {
+		switch {
+		case errors.Is(err, syscall.ERANGE), err == nil && size > len(dest):
+			continue
+		case err != nil:
 			return nil, err
 		}
 

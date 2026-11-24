@@ -150,38 +150,70 @@ func structHoldsZeroRequired(value reflect.Value) bool {
 // reportMissing collects the required members of an object of a struct
 // type at path that named holds no value for, and those of a struct member
 // it holds no value for, whose fields are all zero then (see reportZero).
-// named maps the JSON name of each field a member of the object fills to
-// whether that member is given a value other than null; nil stands for an
-// object naming nothing.
+// named holds the position of each field a member of the object gives a
+// value other than null; nil stands for an object naming nothing.
 //
 // A path is only built for a member the collector keeps, since an object
-// closes with nothing missing far more often than not.
+// closes with nothing missing far more often than not. Until then the path
+// is the names path holds, which reportMissing extends by a member and
+// takes back, so that a member no path is built for costs no allocation.
 func reportMissing(
-	typ reflect.Type, path pathOf, named map[string]bool, found *pathCollector,
+	typ reflect.Type, path *missingPath, named *fieldMask, found *pathCollector,
 ) {
-	for _, member := range fieldsOf(typ).fields {
-		if named[member.name] {
+	for idx, member := range fieldsOf(typ).fields {
+		if named.has(idx) {
 			continue
 		}
 
-		memberPath := func() (string, bool) {
-			outer, cut := path()
+		path.members = append(path.members, member.name)
 
-			return joinFieldPath(outer, member.name), cut
-		}
-		if member.required {
-			found.addLazily(memberPath)
+		switch {
+		case !member.required:
+		case found.full():
+			found.omitted++
+		default:
+			found.keep(path.build())
 		}
 
-		reportZero(member.typ, memberPath, found)
+		reportZero(member.typ, path, found)
+
+		path.members = path.members[:len(path.members)-1]
 	}
 }
 
 // reportZero collects the required members of a value of type typ the
 // decoder leaves zero at path: those of a struct. A pointer or slice stays
 // nil and holds nothing to miss.
-func reportZero(typ reflect.Type, path pathOf, found *pathCollector) {
+func reportZero(typ reflect.Type, path *missingPath, found *pathCollector) {
 	if typ != nil && typ.Kind() == reflect.Struct && requiresFields(typ) {
 		reportMissing(typ, path, nil, found)
 	}
+}
+
+// missingPath is the path of a member reportMissing looks at: that of the
+// value the innermost frame of stack is at (see memberPath), followed by
+// the names of members, each a member of a struct the one before it holds.
+// It is built only when a path is kept. A scan keeps one and reuses its
+// names, which grow no longer than the profile types nest structs.
+type missingPath struct {
+	stack   []scanFrame
+	members []string
+}
+
+// at returns path reset to the value the innermost frame of stack is at.
+func (path *missingPath) at(stack []scanFrame) *missingPath {
+	path.stack = stack
+	path.members = path.members[:0]
+
+	return path
+}
+
+// build returns the path, and whether memberPath cut it.
+func (path *missingPath) build() (string, bool) {
+	built, cut := memberPath(path.stack)
+	for _, member := range path.members {
+		built = joinFieldPath(built, member)
+	}
+
+	return built, cut
 }

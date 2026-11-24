@@ -165,9 +165,8 @@ var errABINotApplicable = fmt.Errorf("--abi only applies to %s profiles", typeLa
 var errArchNotApplicable = fmt.Errorf("--arch only applies to %s profiles", typeSeccomp)
 
 // checkAlone decodes the input at idx as a profile of this kind and checks
-// it as the command would (see inputChecks), recording what it finds in the
-// report. A merge in the default mode runs the check its functions run on
-// one input (see mergeInputCheck), unless it checks an ABI version.
+// it as the command would (see inputChecks and kindOps.inputCheck),
+// recording what it finds in the report.
 func (ops kindOps[T, D]) checkAlone(inv *invocation, idx int) {
 	checks, report := inv.checks, inv.report
 
@@ -187,10 +186,7 @@ func (ops kindOps[T, D]) checkAlone(inv *invocation, idx int) {
 		return
 	}
 
-	check := ops.validators[mode]
-	if checks.strategy != "" && mode == modeDefault && !ops.checksABI {
-		check = mergeInputCheck(ops.mergeFn(checks.strategy))
-	}
+	check, _ := ops.inputCheck(mode, checks.strategy)
 
 	err = check(profile)
 	if err != nil {
@@ -307,27 +303,46 @@ func (ops kindOps[T, D]) mergeFn(strategy string) func(...*T) (*T, error) {
 	return ops.union
 }
 
-// mergeCommand checks every input under its own mode and merges them.
+// inputCheck returns the check of an input under mode, for a merge of the
+// given strategy, "" for a command that merges nothing, and reports
+// whether it is the merge's own: the default mode of a merge is what its
+// functions run on their own inputs, which no exported validator runs
+// exactly (see mergeInputCheck), so it is left to them, unless it checks an
+// ABI version, which they do not. Every other input is checked by the
+// validator of its mode.
+func (ops kindOps[T, D]) inputCheck(mode validateMode, strategy string) (func(*T) error, bool) {
+	if strategy != "" && mode == modeDefault && !ops.checksABI {
+		return mergeInputCheck(ops.mergeFn(strategy)), true
+	}
+
+	return ops.validators[mode], false
+}
+
+// mergeCommand checks every input under its own mode and merges them. An
+// input the merge checks itself is left to it (see kindOps.inputCheck), and
+// checked alone only where the merge does not run (see checkLeftInputs).
+// The merge names an input by position, which is not something a caller
+// can act on, so reportMergeFailure maps that name onto the input
+// afterwards instead.
 func (ops kindOps[T, D]) mergeCommand(
 	inv *invocation, strategy string, modes []validateMode,
 ) int {
 	checks := make([]func(*T) error, len(modes))
+	alone := make([]func(*T) error, len(modes))
 	strict := make([]bool, len(modes))
 
 	for idx, mode := range modes {
-		// modeDefault is what the merge functions run on their own inputs,
-		// so it is left to them, unless it checks an ABI version, which they
-		// do not. The merge names an input by position, which is not
-		// something a caller can act on, so reportMergeFailure maps that
-		// name onto the input afterwards instead.
-		if mode != modeDefault || ops.checksABI {
-			checks[idx] = ops.validators[mode]
+		check, byMerge := ops.inputCheck(mode, strategy)
+		if byMerge {
+			alone[idx] = check
+		} else {
+			checks[idx] = check
 		}
 
 		strict[idx] = mode.strictDecode()
 	}
 
-	return ops.mergeProfiles(inv, ops.mergeFn(strategy), checks, strict)
+	return ops.mergeProfiles(inv, ops.mergeFn(strategy), checks, alone, strict)
 }
 
 // apparmorOps returns the functions of the apparmor package.
@@ -612,7 +627,9 @@ func (e *detectionError) Error() string { return e.text }
 // detectKind asks the caller to do. So is an empty object, which holds
 // nothing the type could fail to know.
 func checkTypeMatchesInputs(profileType string, inputs []profileInput, report *inputReport) {
-	for idx, input := range inputs {
+	for idx := range inputs {
+		input := &inputs[idx]
+
 		if report.failedAt(idx) {
 			continue
 		}
@@ -691,7 +708,9 @@ func detectProfileType(inputs []profileInput, report *inputReport) (string, []ty
 		revealed  []string
 	)
 
-	for idx, input := range inputs {
+	for idx := range inputs {
+		input := &inputs[idx]
+
 		if report != nil && report.failedAt(idx) {
 			continue
 		}
