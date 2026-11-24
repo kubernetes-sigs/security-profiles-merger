@@ -44,3 +44,15 @@ func MultiplexingArchitecture(arch specs.Arch) bool { return multiplexingArchite
 // NarrowArchitecture reports whether libseccomp compiles 32-bit comparisons
 // for the architecture.
 func NarrowArchitecture(arch specs.Arch) bool { return narrowArchitectures[arch] }
+
+// SyscallAliases exposes the pairs of syscall names libseccomp gives one
+// pseudo number, so that the libseccomp tests can check that no other pair
+// shares one.
+func SyscallAliases() [][2]string {
+	aliases := make([][2]string, 0, len(syscallAliases))
+	for _, alias := range syscallAliases {
+		aliases = append(aliases, alias)
+	}
+
+	return aliases
+}

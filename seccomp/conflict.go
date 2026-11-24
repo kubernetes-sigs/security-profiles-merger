@@ -23,14 +23,15 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
 
-// conflictTracker remembers the rules seen for one syscall name, each as
-// the key of its filter and the number of its result. Each condition is
-// numbered once per syscall (see filterKey), and each result once (see
-// resultOf), so comparing two rules compares a few small numbers. A syscall
-// whose rules are checked loads at most MaxArtifactRulesPerSyscall of them,
-// so comparing each with every rule before it costs some 32 thousand
-// comparisons per syscall and tracker, twice that with the tracker for a
-// 32-bit architecture, and up to some two million for a profile at
+// conflictTracker remembers the rules seen for one syscall, each as the key
+// of its filter and the number of its result. Each condition is numbered
+// once per syscall (see filterKey), and each result once (see resultOf), so
+// comparing two rules compares a few small numbers. A syscall whose rules
+// are checked loads at most MaxArtifactRulesPerSyscall of them, the two
+// names of an alias libseccomp reads as one syscall counting as one (see
+// syscallAlias), so comparing each with every rule before it costs some 32
+// thousand comparisons per syscall and tracker, twice that with the tracker
+// for a 32-bit architecture, and up to some two million for a profile at
 // MaxArtifactRules.
 type conflictTracker struct {
 	conditions map[condition]uint16

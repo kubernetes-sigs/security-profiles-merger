@@ -39,9 +39,11 @@ type syscallRuleState struct {
 	// conditional holds the conditional rules.
 	conditional []clause
 	// first is the first rule, and mixedAt the index of the first entry
-	// whose rule yields a different result, or -1.
-	first   clause
-	mixedAt int
+	// whose rule yields a different result, or -1, and mixedName the name
+	// that entry gives the syscall.
+	first     clause
+	mixedAt   int
+	mixedName string
 }
 
 // validateLostRules reports a profile whose filter, loaded as written,
@@ -58,11 +60,23 @@ type syscallRuleState struct {
 // the merges drop it: a runtime loading the profile keeps it under a number
 // libseccomp makes up, and it is such a rule that the block tests first.
 //
+// The names of an alias the native architecture lacks are read as one
+// syscall (see joinedAliases), as libseccomp compiles their rules into one
+// in every block that places them, where they compile to more comparisons
+// than the rules of either name alone. Where the native architecture is
+// not known, every alias is read so, which may only count more
+// comparisons.
+//
 // A merge can still produce the shape from inputs that pass, since it
 // drops rules equal to the default and collapses others to unconditional
 // ones; that is what the merges check their result for.
 func validateLostRules(profile *specs.LinuxSeccomp, native specs.Arch) error {
 	def := defaultClause(profile)
+
+	joined := joinedAliases(native)
+	if native == "" {
+		joined = syscallAliases
+	}
 
 	loaded := &specs.LinuxSeccomp{
 		DefaultAction:    profile.DefaultAction,
@@ -71,7 +85,9 @@ func validateLostRules(profile *specs.LinuxSeccomp, native specs.Arch) error {
 		Flags:            nil,
 		ListenerPath:     "",
 		ListenerMetadata: "",
-		Syscalls:         syscallsOfRules(collectRules(profile.Syscalls, def), def),
+		Syscalls: syscallsOfRules(
+			collectRules(joinAliases(profile.Syscalls, joined), def), def,
+		),
 	}
 
 	settler := newAbsentSettler(unionRulesFor(native), loaded)
@@ -93,8 +109,10 @@ func validateLostRules(profile *specs.LinuxSeccomp, native specs.Arch) error {
 // one argument index adds one rule per condition, and conditions libseccomp
 // drops do not count. Each syscall is reported once, at the first
 // conflicting entry. The native architecture decides whether the
-// multiplexer copies of the rules are checked, and counts holds the rules
-// of each syscall (see clauseCounts).
+// multiplexer copies of the rules are checked. aliases are those
+// libseccomp reads as one syscall in the filter (see collapsedAliases),
+// whose rules it refuses and evaluates as the rules of one syscall, and
+// counts holds the rules of each syscall name (see clauseCounts).
 //
 // The profile must be within MaxArtifactRules: past that bound, expanding
 // the entries is the very work the bound exists to prevent. validateWith
@@ -102,12 +120,13 @@ func validateLostRules(profile *specs.LinuxSeccomp, native specs.Arch) error {
 // passed.
 func validateSyscallRules(
 	errs *merge.Collector, profile *specs.LinuxSeccomp, native specs.Arch,
-	counts map[string]uint64,
+	aliases []syscallAlias, counts map[string]uint64,
 ) {
 	def := defaultClause(profile)
 
 	checker := &ruleChecker{
 		counts:   counts,
+		aliases:  aliasesByName(aliases),
 		truncate: loadsWideValue(profile),
 		states:   make(map[string]*syscallRuleState),
 		reported: make(map[string]struct{}),
@@ -122,22 +141,52 @@ func validateSyscallRules(
 	}
 }
 
-// ruleChecker carries the state of validateSyscallRules.
+// ruleChecker carries the state of validateSyscallRules. states and
+// reported are keyed by syscall (see key), counts by name.
 type ruleChecker struct {
 	counts   map[string]uint64
+	aliases  map[string]syscallAlias
 	truncate bool
 	states   map[string]*syscallRuleState
 	reported map[string]struct{}
 	errs     *merge.Collector
 }
 
+// key returns the syscall libseccomp reads a name as: the first name of
+// its alias where the filter reads both names of the alias as one, and the
+// name itself otherwise.
+func (c *ruleChecker) key(name string) string {
+	if alias, ok := c.aliases[name]; ok {
+		return alias[0]
+	}
+
+	return name
+}
+
+// total returns how many rules the syscall of a key loads, under every
+// name libseccomp reads as that syscall.
+func (c *ruleChecker) total(key string) uint64 {
+	if alias, ok := c.aliases[key]; ok {
+		return c.counts[alias[0]] + c.counts[alias[1]]
+	}
+
+	return c.counts[key]
+}
+
 // validateRuleCount reports every syscall over the rule bound
 // (MaxArtifactRulesPerSyscall), in name order, given the rules of each
-// syscall (see clauseCounts), counted the way runtimes add them without
-// expanding the entries. Only the names it reports are sorted: a profile
-// may name as many syscalls as it has bytes for, while the ones it can put
-// over the bound are limited by the rules it loads.
-func validateRuleCount(errs *merge.Collector, counts map[string]uint64) {
+// syscall name (see clauseCounts), counted the way runtimes add them
+// without expanding the entries, and counting the two names of each of the
+// aliases given as one syscall, which labels name (see aliasLabels). Only
+// the names it reports are sorted: a profile may name as many syscalls as
+// it has bytes for, while the ones it can put over the bound are limited by
+// the rules it loads.
+func validateRuleCount(
+	errs *merge.Collector, counts map[string]uint64, aliases []syscallAlias,
+	labels countLabels,
+) {
+	counts = joinAliasCounts(counts, aliases)
+
 	var over []string
 
 	for name, count := range counts {
@@ -152,15 +201,17 @@ func validateRuleCount(errs *merge.Collector, counts map[string]uint64) {
 		errs.Report(func() error {
 			return fmt.Errorf(
 				"syscalls: %s in %d rules: %w (max %d)",
-				merge.QuoteBounded(name), counts[name], ErrTooManyRulesPerSyscall,
+				labels.of(name), counts[name], ErrTooManyRulesPerSyscall,
 				MaxArtifactRulesPerSyscall,
 			)
 		})
 	}
 }
 
+// conflict reports the syscall of a name as conflicting at entry idx, by
+// the name the entry gives it.
 func (c *ruleChecker) conflict(idx int, name string) {
-	c.reported[name] = struct{}{}
+	c.reported[c.key(name)] = struct{}{}
 
 	c.errs.Report(func() error {
 		return fmt.Errorf(
@@ -169,14 +220,15 @@ func (c *ruleChecker) conflict(idx int, name string) {
 	})
 }
 
-// skip reports whether a syscall needs no further rules: it has been
-// reported already, or it is over the rule bound, which validateRuleCount
-// reports on its own. forEachClause consults it per name, so the rules of
-// an over-bound syscall are never expanded.
+// skip reports whether a syscall name needs no further rules: its syscall
+// has been reported already, or it is over the rule bound, which
+// validateRuleCount reports on its own. forEachClause consults it per name,
+// so the rules of an over-bound syscall are never expanded.
 func (c *ruleChecker) skip(name string) bool {
-	_, done := c.reported[name]
+	key := c.key(name)
+	_, done := c.reported[key]
 
-	return done || c.counts[name] > MaxArtifactRulesPerSyscall
+	return done || c.total(key) > MaxArtifactRulesPerSyscall
 }
 
 // record checks the rule an entry adds for a syscall against the rules
@@ -189,7 +241,9 @@ func (c *ruleChecker) record(idx int, name string, next clause) {
 		return
 	}
 
-	state, ok := c.states[name]
+	key := c.key(name)
+
+	state, ok := c.states[key]
 	if !ok {
 		state = &syscallRuleState{
 			trackers: [2]*conflictTracker{newConflictTracker(), nil},
@@ -201,18 +255,18 @@ func (c *ruleChecker) record(idx int, name string, next clause) {
 			state.trackers[1] = newConflictTracker()
 		}
 
-		c.states[name] = state
+		c.states[key] = state
 	}
 
 	if state.mixedAt < 0 && !state.first.sameResult(next) {
-		state.mixedAt = idx
+		state.mixedAt, state.mixedName = idx, name
 	}
 
 	if !next.unconditional() {
 		state.conditional = append(state.conditional, next)
 	}
 
-	conflict := state.track(next, c.counts[name])
+	conflict := state.track(next, c.total(key))
 	if conflict {
 		c.conflict(idx, name)
 	}
@@ -244,14 +298,14 @@ func (s *syscallRuleState) track(next clause, total uint64) bool {
 // when every rule shares its result, since record reports any other rule as
 // conflicting with it.
 func (c *ruleChecker) checkShapes() {
-	for _, name := range slices.Sorted(maps.Keys(c.states)) {
-		state := c.states[name]
-		if _, done := c.reported[name]; done || state.mixedAt < 0 {
+	for _, key := range slices.Sorted(maps.Keys(c.states)) {
+		state := c.states[key]
+		if _, done := c.reported[key]; done || state.mixedAt < 0 {
 			continue
 		}
 
 		if !safeShape(dedupeClauses(state.conditional)) {
-			c.conflict(state.mixedAt, name)
+			c.conflict(state.mixedAt, state.mixedName)
 		}
 	}
 }

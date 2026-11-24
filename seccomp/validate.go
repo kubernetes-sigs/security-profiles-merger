@@ -537,14 +537,24 @@ func validateWith(profile *specs.LinuxSeccomp, native specs.Arch, checks []profi
 		return err
 	}
 
+	// The names of an alias libseccomp reads as one syscall here count as
+	// one syscall for the per-syscall limits and the rule checks, and an
+	// entry naming both, as a merge result does, adds its rules to that
+	// syscall once (see dropAliasRepeats).
+	aliases := collapsedAliases(profile.Architectures, native)
+	counted := *profile
+	counted.Syscalls = dropAliasRepeats(profile.Syscalls, aliases)
+
 	// The profile loads at most MaxArtifactRules rules, so the counts hold
 	// at most that many names.
-	counts := clauseCounts(profile.Syscalls, defaultClause(profile))
+	counts := clauseCounts(counted.Syscalls, defaultClause(profile))
 
 	var errs merge.Collector
 
-	validateEntryCount(&errs, profile)
-	validateRuleCount(&errs, counts)
+	labels := aliasLabels(profile.Syscalls, aliases)
+
+	validateEntryCount(&errs, &counted, aliases, labels)
+	validateRuleCount(&errs, counts, aliases, labels)
 
 	err = Validate(profile)
 	errs.Add(err)
@@ -554,7 +564,7 @@ func validateWith(profile *specs.LinuxSeccomp, native specs.Arch, checks []profi
 	}
 
 	if err == nil {
-		validateSyscallRules(&errs, profile, native, counts)
+		validateSyscallRules(&errs, &counted, native, aliases, counts)
 		errs.Add(validateLostRules(profile, native))
 	}
 
@@ -751,7 +761,14 @@ func validateNoNotify(errs *merge.Collector, profile *specs.LinuxSeccomp) {
 	}
 }
 
-func validateEntryCount(errs *merge.Collector, profile *specs.LinuxSeccomp) {
+// validateEntryCount reports every syscall named in more entries than
+// MaxArtifactEntriesPerSyscall, in name order, counting the two names of
+// each of the aliases given as one syscall, which labels name (see
+// aliasLabels).
+func validateEntryCount(
+	errs *merge.Collector, profile *specs.LinuxSeccomp, aliases []syscallAlias,
+	labels countLabels,
+) {
 	counts := make(map[string]int)
 
 	for idx := range profile.Syscalls {
@@ -760,12 +777,14 @@ func validateEntryCount(errs *merge.Collector, profile *specs.LinuxSeccomp) {
 		}
 	}
 
+	counts = joinAliasCounts(counts, aliases)
+
 	for _, name := range slices.Sorted(maps.Keys(counts)) {
 		if counts[name] > MaxArtifactEntriesPerSyscall {
 			errs.Report(func() error {
 				return fmt.Errorf(
 					"syscalls: %s in %d entries: %w (max %d)",
-					merge.QuoteBounded(name), counts[name], ErrTooManyEntriesPerSyscall,
+					labels.of(name), counts[name], ErrTooManyEntriesPerSyscall,
 					MaxArtifactEntriesPerSyscall,
 				)
 			})

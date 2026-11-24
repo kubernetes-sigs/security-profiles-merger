@@ -244,3 +244,207 @@ func TestOnlyX86_64AndX32ShareAnAuditArch(t *testing.T) {
 		t.Fatal("no filter was built")
 	}
 }
+
+// TestOnlyKnownAliasesSharePseudoNumbers checks the alias table against the
+// linked libseccomp: on every architecture it resolves names for, two names
+// it resolves to one made-up number are an alias the package knows, which
+// it then reads as one syscall, and every alias the package knows shares
+// one somewhere. A release whose header gives another two names one
+// __PNR_ number fails here.
+func TestOnlyKnownAliasesSharePseudoNumbers(t *testing.T) {
+	t.Parallel()
+
+	archs, placements := seccomp.SyscallTable()
+	known := make(map[[2]string]bool)
+
+	for _, alias := range seccomp.SyscallAliases() {
+		known[alias] = false
+	}
+
+	names := slices.Sorted(maps.Keys(placements))
+
+	for _, arch := range archs {
+		for number, shared := range sharedPseudoNumbers(arch, names) {
+			pair := [2]string{shared[0], shared[1]}
+			if _, ok := known[pair]; len(shared) > 2 || !ok {
+				t.Errorf("%s: %v share %d, which the package does not know as an alias",
+					arch, shared, number)
+
+				continue
+			}
+
+			known[pair] = true
+		}
+	}
+
+	for alias, seen := range known {
+		if !seen {
+			t.Errorf("%v share no number on any architecture", alias)
+		}
+	}
+}
+
+// sharedPseudoNumbers returns the made-up numbers the linked libseccomp
+// resolves more than one of the names to on the architecture, with those
+// names in order.
+func sharedPseudoNumbers(arch specs.Arch, names []string) map[int32][]string {
+	byNumber := make(map[int32][]string)
+
+	for _, name := range names {
+		number, err := libseccomp.SyscallNumberArch(name, arch)
+		if err != nil || number >= 0 {
+			continue
+		}
+
+		byNumber[number] = append(byNumber[number], name)
+	}
+
+	maps.DeleteFunc(byNumber, func(_ int32, shared []string) bool { return len(shared) < 2 })
+
+	return byNumber
+}
+
+// TestAliasesLoadAsValidated checks the validators and the merges against
+// libseccomp for rules on switch_endian and sys_debug_setcontext, on the
+// lists of architectures of the host's byte order below: a profile holding
+// rules on both that conflict loads exactly where ValidateArtifact accepts
+// it, and the merges of two artifacts it accepts, each filtering one name,
+// load.
+func TestAliasesLoadAsValidated(t *testing.T) {
+	t.Parallel()
+	requireNativeArch(t)
+
+	native, _ := seccomp.NativeArchitecture()
+
+	errno := filtered("switch_endian", specs.ActErrno, arg(0, specs.OpEqualTo, 1))
+	trap := filtered("sys_debug_setcontext", specs.ActTrap, arg(0, specs.OpEqualTo, 1))
+
+	for _, archs := range [][]specs.Arch{
+		nil,
+		{specs.ArchX86},
+		{specs.ArchAARCH64},
+		{specs.ArchPPC64LE},
+		{specs.ArchS390X},
+		{specs.ArchPPC64},
+	} {
+		if slices.ContainsFunc(archs, func(arch specs.Arch) bool {
+			return seccomp.BigEndian(arch) != seccomp.BigEndian(native)
+		}) {
+			continue
+		}
+
+		both := on(profileOf(specs.ActAllow, errno, trap), archs...)
+
+		_, err := compilers.compile(both)
+		if accepted := seccomp.ValidateArtifact(both) == nil; accepted != (err == nil) {
+			t.Errorf("%v: ValidateArtifact accepts %v, libseccomp loads it with %v",
+				archs, accepted, err)
+		}
+
+		left := on(profileOf(specs.ActAllow, errno), archs...)
+		right := on(profileOf(specs.ActAllow, trap), archs...)
+
+		for _, input := range []*specs.LinuxSeccomp{left, right} {
+			err := seccomp.ValidateArtifact(input)
+			if err != nil {
+				t.Fatalf("%v: %s fails ValidateArtifact: %v",
+					archs, seccomp.FormatProfile(input), err)
+			}
+		}
+
+		for name, merge := range map[string]func(...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error){
+			"Intersect": seccomp.Intersect,
+			"Union":     seccomp.Union,
+		} {
+			result, err := merge(left, right)
+			if refusedLostRules(err) {
+				continue
+			}
+
+			if err != nil {
+				t.Fatalf("%v: %s: %v", archs, name, err)
+			}
+
+			_, err = compilers.compile(result)
+			if err != nil {
+				t.Errorf("%v: %s yields %s, which does not load: %v",
+					archs, name, seccomp.FormatProfile(result), err)
+			}
+		}
+	}
+}
+
+// TestAliasesOutsideTheSafeShapesAgainstLibseccomp checks the merges of a
+// profile whose rules on switch_endian and sys_debug_setcontext form no safe
+// shape together against what libseccomp compiles for the ppc64le block,
+// which has both: on an x86_64 node libseccomp places the rules of both on
+// one ppc64le syscall and answers a call there that matches neither rule
+// with SCMP_ACT_ALLOW. No call of either syscall may get a more permissive
+// action from Intersect, or a less permissive one from Union, than from
+// the profile.
+func TestAliasesOutsideTheSafeShapesAgainstLibseccomp(t *testing.T) {
+	t.Parallel()
+
+	native, _ := seccomp.NativeArchitecture()
+	if native != specs.ArchX86_64 {
+		t.Skip("the profile below is written for an x86_64 node")
+	}
+
+	profile := on(profileOf(specs.ActErrno,
+		filtered("switch_endian", specs.ActKill,
+			arg(0, specs.OpLessThan, 3), arg(1, specs.OpEqualTo, 2)),
+		filtered("sys_debug_setcontext", specs.ActAllow, arg(0, specs.OpGreaterThan, 3)),
+	), specs.ArchPPC64LE)
+
+	audit, err := callAuditArch(specs.ArchPPC64LE)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	input, err := compilers.compile(profile)
+	if err != nil {
+		t.Fatalf("compile the profile: %v", err)
+	}
+
+	for _, direction := range []libseccompDirection{intersectDirection(), unionDirection()} {
+		result, err := direction.merge(profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		prog, err := compilers.compile(result)
+		if err != nil {
+			t.Fatalf("%s yields %s, which does not load: %v",
+				direction.name, seccomp.FormatProfile(result), err)
+		}
+
+		checkAliasCalls(t, direction, input, prog, audit, result)
+	}
+}
+
+// checkAliasCalls runs calls of switch_endian and sys_debug_setcontext on
+// ppc64le against the programs of a profile and of its merge, and reports
+// each the merge answers less safely than the profile.
+func checkAliasCalls(
+	t *testing.T, direction libseccompDirection, input, prog []libseccomp.Instruction,
+	audit uint32, result *specs.LinuxSeccomp,
+) {
+	t.Helper()
+
+	for _, name := range []string{"switch_endian", "sys_debug_setcontext"} {
+		number, err := libseccomp.SyscallNumberArch(name, specs.ArchPPC64LE)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for _, args := range [][]uint64{{2, 5}, {2, 2}, {5, 2}, {3, 3}} {
+			want, _ := runProgramArch(t, input, audit, number, args)
+			got, _ := runProgramArch(t, prog, audit, number, args)
+
+			if !direction.safe(got, want) {
+				t.Errorf("%s on ppc64le %s%v: %s, the profile gives %s, in %s",
+					direction.name, name, args, got, want, seccomp.FormatProfile(result))
+			}
+		}
+	}
+}

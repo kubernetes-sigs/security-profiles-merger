@@ -250,7 +250,7 @@ limitations under the License.
 // architecture kills only the thread, and both deny the call.
 //
 // The evaluation model covers the program libseccomp compiles for a 64-bit
-// architecture on which every syscall is called directly. The three effects
+// architecture on which every syscall is called directly. The four effects
 // below are read for each architecture a profile lists and for the native
 // architecture, which the merges and [Diff] take to be the one of the
 // running program (see [NativeArchitecture]) unless [Options] names another.
@@ -330,6 +330,36 @@ limitations under the License.
 // copies libseccomp may refuse, and conditional rules of the multiplexer
 // next to rules of a syscall it carries; [ValidateBaseline] reports what
 // every merge settles in a profile, whatever the other inputs.
+//
+// Aliases: libseccomp gives switch_endian and sys_debug_setcontext one
+// made-up number on every architecture but ppc, ppc64 and ppc64le, which
+// have both as syscalls. Where it resolves both names to that number, it
+// reads their rules as rules of one syscall and refuses those that
+// conflict with EEXIST. That happens in the block of a covered
+// architecture that lacks both and keeps their rules, which is every one
+// but the multiplexing ones. Where the native architecture lacks both, it
+// also happens in a ppc, ppc64 or ppc64le block: libseccomp translates a
+// rule for another architecture from the native number by name, so on
+// x86_64 a rule on switch_endian lands on sys_debug_setcontext of ppc64le.
+// ValidateArtifact and ValidateStrict check the two names as one syscall
+// in such a filter, for conflicts (ErrConflictingEntries) and for the
+// limits on one syscall. On a node lacking both, the merges and [Diff] read
+// them as one syscall, which is exact: a result names both in one entry,
+// and Diff reports a change under the names the profiles use. On a ppc,
+// ppc64 or ppc64le node, or one not known, the merges merge each name on
+// its own and leave the result as it is unless the filter may read the two
+// as one and the rules the result holds for them would conflict there, as
+// ValidateArtifact checks them. Only then do they give both names the
+// same rules: what the two merge to in their direction. That is sound: a
+// PowerPC block reads the names as two syscalls on a PowerPC node, where
+// each name gets rules at least as restrictive (Intersect) or as
+// permissive (Union) as the merge gave it, and every other block reading
+// them as one lacks both or is a PowerPC block on a node that never enters
+// it, where the same rules on both only have to load. It can tighten a
+// baseline's rule on one name where the artifact's rule on the other
+// conflicts with it, as any stricter artifact can, and [ValidateBaseline]
+// reports a baseline whose own rules on the two conflict, which a merge
+// unifies wherever the artifact leaves them so.
 //
 // Dropping an architecture from the list does not remove it from a filter
 // where it is native, so Intersect is meant to run on the node that loads
@@ -508,12 +538,17 @@ limitations under the License.
 // counted the way runtimes add them: one per entry naming the syscall, one
 // per condition for an entry repeating an argument index, none for an entry
 // equal to the default, so the rule limits also bound the conditions of
-// such an entry. The limits on the whole profile are checked first
-// and reported on their own. An accepted artifact is read rule by rule, and
+// such an entry. switch_endian and sys_debug_setcontext count as one
+// syscall where libseccomp reads them so (see the Architectures section).
+// The limits on the whole profile are checked first and reported on their
+// own. An accepted artifact is read rule by rule, and
 // merged precisely against a baseline with up to a dozen filtered rules for
 // a syscall; a baseline with more, or a union with several hundred filtered
-// rules for one syscall, can still collapse it. [Validate] enforces none of
-// the limits, since a runtime loads a profile past them.
+// rules for one syscall, can still collapse it. On a ppc, ppc64 or ppc64le
+// node, or one not known, the merges can also lose filters of
+// switch_endian and sys_debug_setcontext where they give both the same
+// rules (see the Architectures section). [Validate] enforces none of the
+// limits, since a runtime loads a profile past them.
 //
 // # Conflicting rules
 //
@@ -521,11 +556,13 @@ limitations under the License.
 // different results ([ErrConflictingEntries]) when the filter of one is
 // equal to or wider than the other's (its conditions are a subset, which
 // includes an unconditional rule), and when the conditional rules do not
-// form a safe shape. This covers every case in which libseccomp refuses a
-// rule with EEXIST, which runc and crun report as a failure to load the
-// profile, or keeps only one of the rules, whatever the order of the
-// entries. Filters are also compared with every value truncated to 32 bits,
-// as on a 32-bit architecture. Rules are counted and compared the way
+// form a safe shape, checking the rules of switch_endian and
+// sys_debug_setcontext as one syscall's where libseccomp reads them so (see
+// the Architectures section). This covers every case in which libseccomp
+// refuses a rule with EEXIST, which runc and crun report as a failure to
+// load the profile, or keeps only one of the rules, whatever the order of
+// the entries. Filters are also compared with every value truncated to 32
+// bits, as on a 32-bit architecture. Rules are counted and compared the way
 // runtimes add them, and these checks only run when [Validate] passes.
 //
 // A profile that passes may still hold rules sharing one result that

@@ -33,13 +33,13 @@ import (
 // The tests in this file check merge results on architectures other than
 // the native one, where libseccomp compiles something else than the model
 // reads: x86, mipsel and sh, which compare only the lower 32 bits of every
-// value and reach the socket syscalls through socketcall(2) as well,
-// ppc64le, which is 64-bit but multiplexes the same way, and x32, arm and
-// aarch64, which lack syscalls the others have. All are little-endian, as
-// the BPF interpreter of these tests assumes of seccomp_data. The filters list
-// them, as runc adds them, and every call is made on every architecture, so
-// a filter that does not cover one answers with libseccomp's action for an
-// unlisted architecture.
+// value and reach the socket and SysV IPC syscalls through socketcall(2)
+// and ipc(2) as well, ppc64le, which is 64-bit but multiplexes the same
+// way, and x32, arm and aarch64, which lack syscalls the others have. All
+// are little-endian, as the BPF interpreter of these tests assumes of
+// seccomp_data. The filters list them, as runc adds them, and every call
+// is made on every architecture, so a filter that does not cover one
+// answers with libseccomp's action for an unlisted architecture.
 
 // archCall is one probed call on one architecture and the actions the
 // inputs apply to it, or nil where libseccomp does not load the input.
@@ -57,13 +57,21 @@ type archCall struct {
 // multiplexer, one that is neither, and one that x86 does not have, as
 // x86_64, x32 and aarch64 do not have the multiplexer; two that x86_64 and
 // x32 do not share: x32 lacks set_thread_area, and only the x86 family has
-// arch_prctl; and two that libseccomp 2.6 knows and 2.5.5 does not, mseal
-// everywhere and uretprobe on x86_64, which a 2.5.5 skips.
+// arch_prctl; two that libseccomp 2.6 knows and 2.5.5 does not, mseal
+// everywhere and uretprobe on x86_64, which a 2.5.5 skips; and those of
+// ipcNames.
 func archNames() []string {
-	return []string{
+	return append([]string{
 		"socket", "connect", "socketcall", "personality", "accept",
 		"set_thread_area", "arch_prctl", "mseal", "uretprobe",
-	}
+	}, ipcNames()...)
+}
+
+// ipcNames are the SysV IPC syscalls of archNames: the multiplexer ipc(2),
+// semop, which no probed multiplexing architecture has as a syscall of its
+// own, and semget, which they have as well.
+func ipcNames() []string {
+	return []string{"ipc", "semop", "semget"}
 }
 
 // archProbes are the architectures the checks make calls on besides the
@@ -96,26 +104,47 @@ func callAuditArch(arch specs.Arch) (uint32, error) {
 
 // archValues are the argument values the architecture checks draw from:
 // small ones, which include the socketcall sub-calls of socket (1) and
-// connect (3), and ones above 32 bits whose lower half is one of them.
+// connect (3) and the ipc sub-calls of semop (1) and semget (2), and ones
+// above 32 bits whose lower half is one of them.
 func archValues() []uint64 {
 	return []uint64{0, 1, 2, 3, 4, 1<<32 | 1, 1<<32 | 3, wide}
 }
 
 // archCalls returns every call of the architecture checks, on the native
 // architecture and on each foreign one: every name the architecture has,
-// with every pair of values on the first two arguments.
+// with pairs of values on the first two arguments. The names of ipcNames
+// take fewer values, with the sub-calls of semop and semget and one above
+// 32 bits whose lower half is semget's, and the others take archValues,
+// with accept's sub-call (5) on the first argument instead of 4, which is
+// no sub-call of archNames, so that a call through socketcall(2) reaches
+// every socket syscall of archNames at the cost of the calls before.
 func archCalls(t *testing.T) []archCall {
 	t.Helper()
 
-	args := make([][]uint64, 0, len(archValues())*len(archValues()))
+	pairs := func(firsts, seconds []uint64) [][]uint64 {
+		args := make([][]uint64, 0, len(firsts)*len(seconds))
 
-	for _, first := range archValues() {
-		for _, second := range archValues() {
-			args = append(args, []uint64{first, second})
+		for _, first := range firsts {
+			for _, second := range seconds {
+				args = append(args, []uint64{first, second})
+			}
 		}
+
+		return args
 	}
 
-	return archCallsWith(t, archNames(), args)
+	firsts := archValues()
+	firsts[slices.Index(firsts, 4)] = 5
+	ipcValues := []uint64{0, 1, 2, 3, 1<<32 | 2, wide}
+
+	others := slices.DeleteFunc(archNames(), func(name string) bool {
+		return slices.Contains(ipcNames(), name)
+	})
+
+	return append(
+		archCallsWith(t, others, pairs(firsts, archValues())),
+		archCallsWith(t, ipcNames(), pairs(ipcValues, ipcValues))...,
+	)
 }
 
 // archCallsWith returns a call of every name on the native architecture and
@@ -155,28 +184,29 @@ func archCallsWith(t *testing.T, names []string, args [][]uint64) []archCall {
 	return calls
 }
 
-// directSocketNumbers are the numbers of the socket syscalls the probed
-// multiplexing architectures also have as syscalls of their own, from the
-// kernel's syscall tables, which libseccomp's syscalls.csv copies. For
-// these libseccomp resolves the name to a number it makes up (socket is
-// -101 on each of them) and places a rule on the syscall under this number
-// as well as on socketcall(2), as the direct bits of the placement table
-// say. x86 has no accept(2) of its own, only accept4(2).
-var directSocketNumbers = map[specs.Arch]map[string]int32{
-	specs.ArchX86:     {"socket": 359, "connect": 362},
-	specs.ArchPPC64LE: {"socket": 326, "connect": 328, "accept": 330},
-	specs.ArchMIPSEL:  {"socket": 4183, "connect": 4170, "accept": 4168},
-	specs.ArchSH:      {"socket": 340, "connect": 342, "accept": 344},
+// directMultiplexedNumbers are the numbers of the socket and SysV IPC
+// syscalls of archNames the probed multiplexing architectures also have as
+// syscalls of their own, from the kernel's syscall tables, which
+// libseccomp's syscalls.csv copies. For these libseccomp resolves the name
+// to a number it makes up (socket is -101 and semget -202 on each of them)
+// and places a rule on the syscall under this number as well as on the
+// multiplexer, as the direct bits of the placement table say. x86 has no
+// accept(2) of its own, only accept4(2), and none of them has semop(2).
+var directMultiplexedNumbers = map[specs.Arch]map[string]int32{
+	specs.ArchX86:     {"socket": 359, "connect": 362, "semget": 393},
+	specs.ArchPPC64LE: {"socket": 326, "connect": 328, "accept": 330, "semget": 393},
+	specs.ArchMIPSEL:  {"socket": 4183, "connect": 4170, "accept": 4168, "semget": 4393},
+	specs.ArchSH:      {"socket": 340, "connect": 342, "accept": 344, "semget": 393},
 }
 
 // archCallNumber returns the number a call of the syscall carries on the
 // architecture, and false where the architecture has no such syscall or
 // the linked libseccomp does not know it, as runtimes then skip a rule on
 // it. That is the number libseccomp resolves the name to, unless it makes
-// one up for a socket syscall a multiplexing architecture reaches through
-// socketcall(2) and has as a syscall of its own too: the call then carries
-// the number of directSocketNumbers, which the placement table must place
-// the rule under as well.
+// one up for a syscall a multiplexing architecture reaches through
+// socketcall(2) or ipc(2) and has as a syscall of its own too: the call
+// then carries the number of directMultiplexedNumbers, which the placement
+// table must place the rule under as well.
 func archCallNumber(t *testing.T, name string, arch specs.Arch) (int32, bool) {
 	t.Helper()
 
@@ -194,9 +224,9 @@ func archCallNumber(t *testing.T, name string, arch specs.Arch) (int32, bool) {
 		return number, true
 	}
 
-	direct, has := directSocketNumbers[arch][name]
+	direct, has := directMultiplexedNumbers[arch][name]
 	if has != placedDirectly(t, name, arch) {
-		t.Fatalf("directSocketNumbers has %s on %s = %t, the placement table says %t",
+		t.Fatalf("directMultiplexedNumbers has %s on %s = %t, the placement table says %t",
 			name, arch, has, !has)
 	}
 
@@ -442,7 +472,7 @@ func rulesLostOn(t *testing.T, profile *specs.LinuxSeccomp) func(specs.Arch, boo
 // placesRule reports whether libseccomp places a rule of the profile in the
 // block of the architecture: an entry whose action differs from the default,
 // which libseccomp refuses otherwise, names a syscall the architecture has,
-// directly or through socketcall(2).
+// directly or through socketcall(2) or ipc(2).
 func placesRule(t *testing.T, profile *specs.LinuxSeccomp, arch specs.Arch) bool {
 	t.Helper()
 
@@ -463,28 +493,16 @@ func placesRule(t *testing.T, profile *specs.LinuxSeccomp, arch specs.Arch) bool
 				t.Fatalf("resolve %s on %s: %v", name, arch, err)
 			}
 
-			if number >= 0 || multiplexes(arch) && slices.Contains(socketNames(), name) {
+			// A multiplexing architecture adds a rule on a syscall it
+			// multiplexes as one on the multiplexer too.
+			if number >= 0 ||
+				seccomp.MultiplexingArchitecture(arch) && seccomp.Multiplexer(name) != "" {
 				return true
 			}
 		}
 	}
 
 	return false
-}
-
-// multiplexes reports whether the architecture reaches the socket syscalls
-// through socketcall(2), where libseccomp adds a rule on a socket syscall
-// as one on the multiplexer. Of the probed architectures, x86, ppc64le,
-// mipsel and sh do.
-func multiplexes(arch specs.Arch) bool {
-	return slices.Contains(
-		[]specs.Arch{specs.ArchX86, specs.ArchPPC64LE, specs.ArchMIPSEL, specs.ArchSH}, arch,
-	)
-}
-
-// socketNames are the names of archNames that socketcall(2) multiplexes.
-func socketNames() []string {
-	return []string{"socket", "connect", "accept"}
 }
 
 // checkArchResultCalls checks a compiled merge result against the actions
@@ -667,9 +685,10 @@ func TestMergesKeepRulesOnNewerSyscallsAgainstLibseccomp(t *testing.T) {
 }
 
 // TestModelMatchesLibseccompOnOtherArchitectures samples small profile pairs
-// over the multiplexed socket syscalls, their multiplexer and values above
-// 32 bits, listing x86 and ppc64le in various combinations, and checks their
-// merges against what libseccomp compiles for every architecture.
+// over the multiplexed socket and SysV IPC syscalls, their multiplexers and
+// values above 32 bits, listing x86 and ppc64le in various combinations, and
+// checks their merges against what libseccomp compiles for every
+// architecture.
 func TestModelMatchesLibseccompOnOtherArchitectures(t *testing.T) {
 	t.Parallel()
 	requireNativeArch(t)
@@ -948,16 +967,17 @@ func TestModelMatchesLibseccompForArchitectureFindings(t *testing.T) {
 	}
 }
 
-// TestDirectSocketNumbersAgainstLibseccomp checks directSocketNumbers
-// against the filters libseccomp compiles: on each multiplexing
-// architecture, a rule on a socket syscall applies to a call under its own
-// number, on the argument it names, and to no other syscall.
-func TestDirectSocketNumbersAgainstLibseccomp(t *testing.T) {
+// TestDirectMultiplexedNumbersAgainstLibseccomp checks
+// directMultiplexedNumbers against the filters libseccomp compiles: on each
+// multiplexing architecture, a rule on a socket or SysV IPC syscall applies
+// to a call under its own number, on the argument it names, and to no
+// other syscall.
+func TestDirectMultiplexedNumbersAgainstLibseccomp(t *testing.T) {
 	t.Parallel()
 	requireNativeArch(t)
 
 	for _, arch := range archProbes() {
-		numbers, multiplexing := directSocketNumbers[arch]
+		numbers, multiplexing := directMultiplexedNumbers[arch]
 		if !multiplexing {
 			continue
 		}
