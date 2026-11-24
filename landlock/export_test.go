@@ -20,9 +20,24 @@ package landlock
 const MaxMergeWork = maxMergeWork
 
 // MergeLookups exposes the count the merge budget weighs, which stops once
-// it exceeds limit.
+// it exceeds limit, on the rule paths cleaned as validation cleans them.
+// Each distinct profile is cleaned once, so that many pointers to one
+// profile cost one cleaning.
 func MergeLookups(profiles []*Profile, limit uint64) (uint64, bool) {
-	return mergeLookups(profiles, limit)
+	byProfile := make(map[*Profile][]string)
+	cleaned := make([][]string, len(profiles))
+
+	for idx, profile := range profiles {
+		paths, ok := byProfile[profile]
+		if !ok {
+			paths = cleanPaths(profile.PathRules)
+			byProfile[profile] = paths
+		}
+
+		cleaned[idx] = paths
+	}
+
+	return mergeLookups(profiles, cleaned, limit)
 }
 
 // CheckMergeBudget exposes the budget check of Intersect, and with
@@ -35,5 +50,10 @@ func CheckMergeBudget(profiles []*Profile, settlesMoves bool) error {
 		return err
 	}
 
-	return checkMergeBudget(profiles, cleaned, settlesMoves)
+	var finishWork workFunc
+	if settlesMoves {
+		finishWork = moveSettlingWork
+	}
+
+	return checkMergeBudget(profiles, cleaned, finishWork)
 }

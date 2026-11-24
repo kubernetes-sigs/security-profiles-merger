@@ -87,7 +87,7 @@ type InputError = spm.InputError
 // ValidateArtifact first. The result shares no memory with the inputs, a
 // single input included.
 func Intersect(profiles ...*Profile) (*Profile, error) {
-	result, _, err := foldProfiles(profiles, intersectTwo, finishIntersect, false)
+	result, _, err := foldProfiles(profiles, intersectTwo, finishIntersect, nil)
 
 	return result, err
 }
@@ -102,7 +102,7 @@ func Intersect(profiles ...*Profile) (*Profile, error) {
 // Inputs are validated, the cost is bounded, and the result is owned by the
 // caller, as for Intersect.
 func Union(profiles ...*Profile) (*Profile, error) {
-	result, _, err := foldProfiles(profiles, unionTwo, finishUnion, true)
+	result, _, err := foldProfiles(profiles, unionTwo, finishUnion, moveSettlingWork)
 
 	return result, err
 }
@@ -112,13 +112,14 @@ func Union(profiles ...*Profile) (*Profile, error) {
 // well. A move or link depends on the rights of two paths at once, which a
 // pairwise fold cannot see, so finish settles it against every input at the
 // end, and the result does not depend on how the fold grouped them.
-// settlesMoves reports a finish that settles moves as a union does (see
-// unhandleMoveConflicts), whose work the budget counts besides the lookups.
+// finishWork returns the work finish does besides the lookups mergeLookups
+// counts, as a union settling moves does, for the budget to count (see
+// checkMergeBudget); it is nil for a finish that does none.
 func foldProfiles(
 	profiles []*Profile,
 	mergeTwo func(left, right *Profile) *Profile,
 	finish func(result *Profile, inputs []*Profile),
-	settlesMoves bool,
+	finishWork workFunc,
 ) (*Profile, []*Profile, error) {
 	// Validate the caller's profiles first, so errors name their own
 	// indices and paths, and so that a path past MaxPathLen is reported as
@@ -130,7 +131,7 @@ func foldProfiles(
 		return nil, nil, err
 	}
 
-	err = checkMergeBudget(profiles, cleaned, settlesMoves)
+	err = checkMergeBudget(profiles, cleaned, finishWork)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -160,23 +161,24 @@ func foldProfiles(
 
 // checkMergeBudget refuses inputs whose merge would cost more than
 // maxMergeWork. It runs after validation and before anything is merged, and
-// it stops counting as soon as the budget is exceeded, so that the count
-// costs no more than the budget. settlesMoves adds the work a union settling
-// moves does (see moveSettlingWork), for which cleaned holds the cleaned
-// rule paths of each input, as validation returns them.
-func checkMergeBudget(profiles []*Profile, cleaned [][]string, settlesMoves bool) error {
+// it stops counting after the rule that exceeds the budget, so that the
+// count costs at most the budget and one rule. cleaned holds the cleaned
+// rule paths of each input, as validation returns them. finishWork, where
+// not nil, adds the work the finish of the merge does, such as
+// moveSettlingWork for a union.
+func checkMergeBudget(profiles []*Profile, cleaned [][]string, finishWork workFunc) error {
 	if len(profiles) == 0 {
 		return nil
 	}
 
 	inputs := uint64(len(profiles))
 
-	lookups, exceeded := mergeLookups(profiles, maxMergeWork/inputs)
-	if !exceeded && settlesMoves {
+	lookups, exceeded := mergeLookups(profiles, cleaned, maxMergeWork/inputs)
+	if !exceeded && finishWork != nil {
 		// Past mergeLookups, the product is within maxMergeWork and the
-		// work of settling moves within a small multiple of it (see
+		// work of the finish within a small multiple of it (see
 		// moveSettlingWork), so neither wraps.
-		exceeded = lookups*inputs+moveSettlingWork(profiles, cleaned) > maxMergeWork
+		exceeded = lookups*inputs+finishWork(profiles, cleaned) > maxMergeWork
 	}
 
 	if exceeded {
@@ -186,6 +188,14 @@ func checkMergeBudget(profiles []*Profile, cleaned [][]string, settlesMoves bool
 
 	return nil
 }
+
+// workFunc returns the work a merge does besides the lookups mergeLookups
+// counts, given the inputs and their cleaned rule paths. checkMergeBudget
+// calls it only once those lookups times the inputs are within
+// maxMergeWork, and adds the two, so the work it returns then must stay
+// within a small multiple of maxMergeWork, as moveSettlingWork does, for
+// the sum not to wrap.
+type workFunc func(profiles []*Profile, cleaned [][]string) uint64
 
 // moveSettlingWork returns the work a union settling moves does besides the
 // ancestor lookups mergeLookups counts (see unhandleMoveConflicts and
@@ -323,23 +333,31 @@ func beneathAny(path string, paths map[string]struct{}) bool {
 }
 
 // mergeLookups counts the paths every rule of every input has as itself or
-// an ancestor, as the ancestor walk of the merge visits them on the cleaned
-// path, and one for a network rule. Merging costs that count times the
-// number of inputs. It stops as soon as the count exceeds limit and reports
-// whether it did, so that neither the count nor the product can wrap
-// however many inputs or rules there are. The inputs must not be nil, which
-// validation ensures.
-func mergeLookups(profiles []*Profile, limit uint64) (uint64, bool) {
+// an ancestor, as the ancestor walk of the merge visits them, and one for a
+// network rule. cleaned holds the cleaned rule paths of each input, as
+// validation returns them. Merging costs that count times the number of
+// inputs. It stops after the rule that takes the count past limit, which
+// it can overshoot by that rule, and reports whether it did, so that
+// neither the count nor the product can wrap however many inputs or rules
+// there are. The inputs must not be nil, which validation ensures.
+func mergeLookups(profiles []*Profile, cleaned [][]string, limit uint64) (uint64, bool) {
 	var lookups uint64
 
-	for _, profile := range profiles {
+	for idx, profile := range profiles {
 		lookups += uint64(len(profile.NetRules))
 		if lookups > limit {
 			return lookups, true
 		}
 
-		for _, rule := range profile.PathRules {
-			lookups += pathLookups(rule.Path, limit-min(lookups, limit))
+		for _, path := range cleaned[idx] {
+			// A cleaned path other than "/" has one ancestor per slash
+			// besides itself (see ancestors).
+			lookups++
+			if path != rootPath {
+				//nolint:gosec // a count is never negative
+				lookups += uint64(strings.Count(path, "/"))
+			}
+
 			if lookups > limit {
 				return lookups, true
 			}
@@ -347,25 +365,6 @@ func mergeLookups(profiles []*Profile, limit uint64) (uint64, bool) {
 	}
 
 	return lookups, false
-}
-
-// pathLookups returns how many paths the ancestor walk of the merge visits
-// for a rule path: the cleaned path itself and each of its parents, one per
-// component that is neither empty nor ".", so that repeated slashes and "."
-// components count nothing. It stops once the count exceeds limit.
-func pathLookups(path string, limit uint64) uint64 {
-	lookups := uint64(1)
-
-	for rest, more := path, true; more && lookups <= limit; {
-		var part string
-
-		part, rest, more = strings.Cut(rest, "/")
-		if part != "" && part != "." {
-			lookups++
-		}
-	}
-
-	return lookups
 }
 
 // finishIntersect drops refer where the result could allow a move or link an
@@ -880,7 +879,7 @@ func validateInputs(profiles []*Profile) ([][]string, error) {
 // with the ancestor a runtime opens it beneath.
 type LoweredPath struct {
 	// Path is the rule path of the result, cleaned as the merge cleans it.
-	Path string
+	Path string `json:"path"`
 	// Ancestor is the strict ancestor of Path a runtime opens Path
 	// beneath. It is "/" when the input's rule on "/" grants every right
 	// lowered onto Path, and otherwise the shallowest strict ancestor other
@@ -888,18 +887,18 @@ type LoweredPath struct {
 	// carries at Path, which that input grants neither on "/" nor through
 	// its own rule on Path. Every such grant then comes from a rule on
 	// Ancestor or between it and Path.
-	Ancestor string
+	Ancestor string `json:"ancestor"`
 	// Input is the index, numbered as Intersect numbers its inputs, of the
 	// first input whose rule on Ancestor grants a right that input lowered
 	// onto Path; where Ancestor is not "/", a right its rule on "/" does
 	// not grant.
-	Input int
+	Input int `json:"input"`
 	// InRoot reports that Ancestor is "/" and no rule of the result grants
 	// FSAccessRefer, so Path may be opened with RESOLVE_IN_ROOT alone,
 	// relative to the root the runtime resolves rule paths against. Where
 	// it is false, Path is opened beneath Ancestor, "/" included, with
 	// RESOLVE_BENEATH, RESOLVE_NO_SYMLINKS and RESOLVE_NO_XDEV.
-	InRoot bool
+	InRoot bool `json:"inRoot"`
 }
 
 // IntersectLowered returns what Intersect returns, together with the rule
@@ -915,7 +914,7 @@ type LoweredPath struct {
 // opening a path as reported here is at least as strict as the copy needs.
 // A path whose rule the copy no longer holds needs no opening.
 func IntersectLowered(profiles ...*Profile) (*Profile, []LoweredPath, error) {
-	result, inputs, err := foldProfiles(profiles, intersectTwo, finishIntersect, false)
+	result, inputs, err := foldProfiles(profiles, intersectTwo, finishIntersect, nil)
 	if err != nil {
 		return nil, nil, err
 	}

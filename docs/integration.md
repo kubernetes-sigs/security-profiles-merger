@@ -267,7 +267,12 @@ for that too.
    `r:-/x rw:+/x`, where the artifact's own pattern grants the literal more
    than it lists and the merge drops that pattern: the result then lists
    the literal with what both inputs grant it, the artifact through the
-   dropped pattern, so it permits nothing the artifact did not.
+   dropped pattern, so it permits nothing the artifact did not. An
+   apparmor diff also compares the rules each list spells rather than
+   what they permit: a baseline listing `/d/*` read-write and an artifact
+   listing `/d/*` read-write and `/d/x` read-only give a result that
+   permits what the baseline does, yet `Diff(baseline, effective)`
+   reports `r:+/d/x`.
 
 ## Extra steps after Intersect
 

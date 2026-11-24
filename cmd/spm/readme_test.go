@@ -84,21 +84,15 @@ func TestReadmeExamples(t *testing.T) {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			t.Parallel()
 
-			resolved := make([]string, 0, len(args)+2)
+			// The commands run as written, so an example that depends on
+			// the machine it runs on fails on some machine here too.
+			resolved := make([]string, 0, len(args))
 			for _, arg := range args {
 				if strings.HasPrefix(arg, "examples/") {
 					arg = filepath.Join(repoRoot, filepath.FromSlash(arg))
 				}
 
 				resolved = append(resolved, arg)
-			}
-
-			// The seccomp examples list x86 architectures, which an
-			// intersection refuses on a node of the other byte order, so
-			// a seccomp merge runs for an amd64 node wherever the test
-			// runs.
-			if args[0] == cmdMerge && slices.Contains(args, typeSeccomp) {
-				resolved = slices.Insert(resolved, 1, "--"+flagNameArch, archPrefix+"X86_64")
 			}
 
 			var stdout, stderr bytes.Buffer

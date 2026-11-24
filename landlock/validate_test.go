@@ -842,6 +842,29 @@ func TestABIVersionString(t *testing.T) {
 	}
 }
 
+// TestOptionsString checks that String spells the options as Go source
+// writes them: a known version by its constant, any other by its number,
+// and the zero value as Options{}.
+func TestOptionsString(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		opts landlock.Options
+		want string
+	}{
+		{opts: landlock.Options{ABI: landlock.ABIV1}, want: "Options{ABI: ABIV1}"},
+		{opts: landlock.Options{ABI: landlock.ABIV4}, want: "Options{ABI: ABIV4}"},
+		{opts: landlock.Options{ABI: landlock.LatestABIVersion}, want: "Options{ABI: ABIV12}"},
+		{opts: landlock.Options{ABI: landlock.LatestABIVersion + 1}, want: "Options{ABI: 13}"},
+		{opts: landlock.Options{ABI: -1}, want: "Options{ABI: -1}"},
+		{opts: landlock.Options{}, want: "Options{}"},
+	} {
+		if got := test.opts.String(); got != test.want {
+			t.Errorf("String() = %s, want %s", got, test.want)
+		}
+	}
+}
+
 // TestFSAccessRightsMatchOptions checks that every listed filesystem right
 // is one Validate knows, with the version Options asks for, and that the
 // list is a copy.

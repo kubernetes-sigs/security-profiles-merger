@@ -347,7 +347,7 @@ import "sigs.k8s.io/security-profiles-merger/apparmor"
 | `ValidateBaseline` | The check of a baseline at config load: `Validate`; `QuotePath` of every path, the patterns `ValidateArtifact` refuses as invalid or too complex, `.` and `..` components, NUL bytes and the spelling of every capability name; the total pattern length (`ErrBudgetExceeded`); a pattern that fails to compile (`ErrGlobTooComplex`); then `Diff` against its own intersection (`ErrInexactBaseline`) |
 | `UnmarshalStrict` | Decode a profile, refusing what `encoding/json` accepts silently; see [strict decoding](#strict-decoding) |
 | `DecodeArtifact` | `UnmarshalStrict` then `ValidateArtifact`, returning the profile only when both pass |
-| `Diff` | Structured diff, comparing what AppArmor loads from the two profiles. A nil profile is an `InputError` naming it, wrapping `ErrNilProfile` |
+| `Diff` | Structured diff, comparing the rules the two profiles spell as AppArmor loads them, not what they permit. A nil profile is an `InputError` naming it, wrapping `ErrNilProfile` |
 | `IsGlobPattern` | Whether a path holds glob syntax, including syntax apparmor_parser rejects |
 | `QuotePath` | A path spelled as one token of a rendered file rule; `ErrRelativePath`, `ErrEmptyPath`, or `ErrUnquotablePath` where no such spelling exists, which for a pattern apparmor_parser rejects matches `ErrInvalidGlob` too |
 
@@ -472,10 +472,12 @@ and the diff types
 (`ProfileDiff`, `SliceDiff[T]`, `PathRulesDiff`, `PathRuleChange`,
 `NetRulesDiff`, `NetRuleChange`). The access rights mirror the Landlock UAPI,
 and each names the ABI version that introduced it. `*Profile`, `PathRule`,
-`NetRule`, `ProfileDiff` and `ABIVersion` implement `fmt.Stringer`, the first
-four quoted and cut at 64 KiB as in [seccomp](#functions); a nil `*Profile`
-formats as `Profile{<nil>}`, and `ProfileDiff` has value receivers, as in
-seccomp.
+`NetRule`, `ProfileDiff`, `ABIVersion` and `Options` implement
+`fmt.Stringer`, the first four quoted and cut at 64 KiB as in
+[seccomp](#functions); a nil `*Profile` formats as `Profile{<nil>}`,
+`ProfileDiff` has value receivers, as in seccomp, and `Options` reads as Go
+source spells it, such as `Options{ABI: ABIV4}`. `LoweredPath` has the JSON
+names `path`, `ancestor`, `input` and `inRoot`.
 `(*Profile).Clone` returns a deep copy, or nil for a nil profile.
 
 ### Errors

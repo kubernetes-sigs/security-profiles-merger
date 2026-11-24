@@ -17,6 +17,7 @@ limitations under the License.
 package apparmor_test
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -78,10 +79,9 @@ func sliceDiff(added, removed []string) *apparmor.SliceDiff[string] {
 	return &apparmor.SliceDiff[string]{Added: added, Removed: removed}
 }
 
-// boolDiff builds the diff of a network boolean, as Diff reports it: with
-// both sides set.
-func boolDiff(left, right bool) *apparmor.ValueDiff[*bool] {
-	return &apparmor.ValueDiff[*bool]{Left: boolPtr(left), Right: boolPtr(right)}
+// boolDiff builds the diff of a network boolean.
+func boolDiff(left, right bool) *apparmor.ValueDiff[bool] {
+	return &apparmor.ValueDiff[bool]{Left: left, Right: right}
 }
 
 // diffCase is a pair of profiles and the whole diff of them, with how
@@ -558,6 +558,15 @@ func TestDiffOfMergeResult(t *testing.T) {
 			AllowedCapabilities: []string{capNetAdmin, capChown},
 		},
 	}
+	dirBaseline := &apparmor.Profile{
+		Filesystem: &apparmor.FilesystemRules{ReadWritePaths: []string{"/d/*"}},
+	}
+	dirArtifact := &apparmor.Profile{
+		Filesystem: &apparmor.FilesystemRules{
+			ReadOnlyPaths:  []string{"/d/x"},
+			ReadWritePaths: []string{"/d/*"},
+		},
+	}
 
 	for _, test := range []struct {
 		name    string
@@ -621,6 +630,17 @@ func TestDiffOfMergeResult(t *testing.T) {
 				AllowedCapabilities: sliceDiff(nil, []string{capChown}),
 			}},
 		},
+		{
+			// The example of the Diff documentation: the result
+			// permits what the baseline permits, but lists a rule the
+			// baseline does not.
+			name:    "a literal a pattern of the baseline covers",
+			profile: dirBaseline,
+			merged:  []*apparmor.Profile{dirBaseline, dirArtifact},
+			want: &apparmor.ProfileDiff{Filesystem: &apparmor.FilesystemDiff{
+				ReadOnlyPaths: sliceDiff([]string{"/d/x"}, nil),
+			}},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -642,35 +662,16 @@ func TestDiffOfMergeResult(t *testing.T) {
 	}
 }
 
-// TestProfileDiffStringNilBool covers String directly: ValueDiff is
-// exported, so a caller can still hand String a nil side even though Diff
-// no longer produces one.
-func TestProfileDiffStringNilBool(t *testing.T) {
+// TestDiffUnsetBoolIsFalse covers a network boolean one profile leaves
+// unset: Diff reports it as false, in the diff and in its JSON.
+func TestDiffUnsetBoolIsFalse(t *testing.T) {
 	t.Parallel()
-
-	trueVal := true
-
-	got := (&apparmor.ProfileDiff{
-		Network: &apparmor.NetworkDiff{
-			AllowRaw: &apparmor.ValueDiff[*bool]{Left: nil, Right: &trueVal},
-		},
-	}).String()
-
-	if !strings.Contains(got, "raw:<nil>->true") {
-		t.Errorf("String() = %q, missing raw:<nil>->true", got)
-	}
-}
-
-func TestDiffBoolPtrIsolation(t *testing.T) {
-	t.Parallel()
-
-	boolTrue := true
 
 	left := &apparmor.Profile{
-		Network: &apparmor.NetworkRules{AllowRaw: &boolTrue, Protocols: nil},
+		Network: &apparmor.NetworkRules{AllowRaw: nil, Protocols: nil},
 	}
 	right := &apparmor.Profile{
-		Network: &apparmor.NetworkRules{AllowRaw: nil, Protocols: nil},
+		Network: &apparmor.NetworkRules{AllowRaw: boolPtr(true), Protocols: nil},
 	}
 
 	diff, err := apparmor.Diff(left, right)
@@ -678,12 +679,23 @@ func TestDiffBoolPtrIsolation(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if diff.Network == nil || diff.Network.AllowRaw == nil {
-		t.Fatal("expected network AllowRaw diff")
+	want := &apparmor.NetworkDiff{AllowRaw: boolDiff(false, true)}
+	if !reflect.DeepEqual(diff.Network, want) {
+		t.Fatalf("Diff().Network = %+v, want %+v", diff.Network, want)
 	}
 
-	if diff.Network.AllowRaw.Left == left.Network.AllowRaw {
-		t.Error("diff Left should not alias source pointer")
+	got, err := json.Marshal(diff.Network)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const wantJSON = `{"allowRaw":{"left":false,"right":true}}`
+	if string(got) != wantJSON {
+		t.Errorf("JSON = %s, want %s", got, wantJSON)
+	}
+
+	if str := diff.String(); str != "Diff{net:raw:false->true}" {
+		t.Errorf("String() = %q", str)
 	}
 }
 
