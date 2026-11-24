@@ -44,7 +44,8 @@ What a runtime gets wrong most easily, each explained further down:
 - **Merge Landlock profiles with `landlock.IntersectLowered`** and open
   each path it reports beneath its `Ancestor` without crossing a symlink
   or a mount (where `InRoot` is set, only inside the root), or refuse the
-  profile
+  profile; where a mount can expose such a path outside its `Ancestor`,
+  enforce the inputs as separate layers instead
   ([Landlock: lowered rule paths](#landlock-lowered-rule-paths)).
 - **Check the Landlock result against the node's ABI** with
   `landlock.Options{ABI: nodeABI}.Validate`: a ruleset the kernel refuses
@@ -85,15 +86,20 @@ treat their inputs alike, so it is the caller who keeps the two apart.
 ## The runtime flow
 
 <!-- go-snippet
-var baseline, podProfile *specs.LinuxSeccomp
-var data []byte
+var podProfile *specs.LinuxSeccomp
+var baselineData, data []byte
 var nodeMisconfigured, reject func(error) error
 var load func(*specs.LinuxSeccomp)
 -->
 ```go
-// 0. At config load, check that the baseline loads, then that the merge
-//    reads every rule of it: the intersection of the baseline alone is
-//    equal to it exactly then.
+// 0. At config load, decode the baseline strictly, so that a misspelled
+//    member cannot drop its rules unseen, check that it loads, then that
+//    the merge reads every rule of it: the intersection of the baseline
+//    alone is equal to it exactly then.
+baseline := new(specs.LinuxSeccomp)
+if err := seccomp.UnmarshalStrict(baselineData, baseline); err != nil {
+    return nodeMisconfigured(err)
+}
 if err := seccomp.ValidateBaseline(baseline); err != nil {
     return nodeMisconfigured(err)
 }
@@ -152,7 +158,9 @@ there anyway, so a baseline listing `read_file` and `refer` diffs unequal
 for that too.
 
 0. **Check the baseline once, at config load, with `ValidateBaseline`**
-   (for Landlock see above): `Validate`, then
+   (for Landlock see above), after decoding it with `UnmarshalStrict`:
+   `ValidateBaseline` sees only the decoded profile, so a deny rule under a
+   misspelled member would be gone without a trace. It runs `Validate`, then
    `Diff(baseline, Intersect(baseline))`. The intersection of the baseline
    alone is equal to it exactly when the merge reads every rule of it, so
    an unequal diff, `ErrInexactBaseline`, names what every merge with that
@@ -554,6 +562,16 @@ Open each reported path so that it cannot leave the hierarchy of its
    Opening the path again by name would leave a window in which a symlink
    or a mount swapped into it redirects the rule.
 
+These steps establish how the runtime reached the object, but the kernel
+binds the rule to the object itself, so a bind mount elsewhere that
+exposes it carries the rule there too, without the checked lookup crossing
+any mount (see
+[bind mounts and OverlayFS](https://docs.kernel.org/userspace-api/landlock.html#bind-mounts-and-overlayfs)).
+A runtime that cannot guarantee that each lowered object with an
+`Ancestor` other than `/` stays within that hierarchy for the lifetime of
+the workload, with no mount exposing it elsewhere, enforces the inputs as
+separate layers (below) instead of the merged result.
+
 An `Ancestor` of `/` is reported only where the rule on `/` of the input
 the grant came from grants every right lowered onto the path, as in a
 baseline granting read access on `/`. That rule grants its rights on
@@ -670,8 +688,9 @@ A profile answering `SCMP_ACT_NOTIFY` needs a `listenerPath`, which names a
 socket on the node. `ValidateArtifact` and `ValidateStrict` therefore reject
 the action and every listener setting in an artifact, while `Validate`, the
 level a baseline is checked with, accepts them as long as a profile that
-notifies names a listener. `Intersect` takes the listener from its first
-input, the baseline, and refuses a later input that sets `listenerPath` or
+notifies names a listener and `listenerMetadata` comes with a
+`listenerPath`. `Intersect` takes the listener from its first input, the
+baseline, and refuses a later input that sets `listenerPath` or
 `listenerMetadata` other than exactly as the baseline does with
 `ErrConflictingListener`, rather than let the artifact choose who answers
 the workload's calls. `Union` takes it from whichever input names one and

@@ -50,7 +50,8 @@ const (
 	// one drops the rule it was meant to carry.
 	modeArtifact
 	// modeBaseline runs the checks a runtime runs on its baseline at
-	// config load, for validate alone: merge --validate and diff --validate
+	// config load and rejects unknown, repeated and misspelled JSON
+	// members, for validate alone: merge --validate and diff --validate
 	// take no such mode, since neither checks a baseline as the runtime
 	// loads it.
 	modeBaseline
@@ -85,9 +86,11 @@ func modeByName(name string, withBaseline bool) (validateMode, bool) {
 // JSON ambiguity unmarshalAll looks for rather than warning about it, as
 // the UnmarshalStrict a runtime decodes an artifact with does. Each is a
 // hazard for a profile a person wrote and a sign of a crafted one in an
-// artifact.
+// artifact. A baseline decodes strictly too: its check sees the decoded
+// profile, which no longer holds the rule a misspelled member carried, so
+// a warning would let a baseline that lost its deny rules pass.
 func (mode validateMode) strictDecode() bool {
-	return mode == modeStrict || mode == modeArtifact
+	return mode != modeDefault
 }
 
 // weakestMode returns the mode whose checks every listed mode includes:
@@ -143,6 +146,13 @@ type inputChecks struct {
 type kindOps[T any, D any] struct {
 	intersect func(...*T) (*T, error)
 	union     func(...*T) (*T, error)
+	// intersectLowered, where set, is the intersection the merge command
+	// runs, which also returns the lowered rule paths of its result (see
+	// landlock.IntersectLowered).
+	intersectLowered func(...*T) (*T, []loweredPath, error)
+	// checkResult, where set, checks a merge result before it is written:
+	// that the kernel of the ABI version --abi names loads it.
+	checkResult func(*T) error
 	// validators holds the check of each mode, indexed by it; the one of
 	// modeBaseline is the check of a baseline at config load.
 	validators [modeCount]func(*T) error
@@ -271,6 +281,11 @@ func landlockOps(abi landlock.ABIVersion) kindOps[landlock.Profile, landlock.Pro
 		modeBaseline: landlock.ValidateBaseline,
 	}
 
+	// A union can need a newer version than any input (see the ABI
+	// versions section of the landlock package), so the result is checked
+	// for the version too.
+	var checkResult func(*landlock.Profile) error
+
 	if abi != 0 {
 		kernel := landlock.Options{ABI: abi}
 		validators = [modeCount]func(*landlock.Profile) error{
@@ -279,18 +294,45 @@ func landlockOps(abi landlock.ABIVersion) kindOps[landlock.Profile, landlock.Pro
 			modeArtifact: kernel.ValidateArtifact,
 			modeBaseline: kernel.ValidateBaseline,
 		}
+		checkResult = kernel.Validate
 	}
 
 	return kindOps[landlock.Profile, landlock.ProfileDiff]{
-		intersect:  landlock.Intersect,
-		union:      landlock.Union,
-		validators: validators,
-		checksABI:  abi != 0,
-		format:     humanLandlock,
-		diff:       landlock.Diff,
-		formatDiff: humanLandlockDiff,
-		equal:      func(diff *landlock.ProfileDiff) bool { return diff.Equal },
+		intersect:        landlock.Intersect,
+		union:            landlock.Union,
+		intersectLowered: intersectLandlock,
+		checkResult:      checkResult,
+		validators:       validators,
+		checksABI:        abi != 0,
+		format:           humanLandlock,
+		diff:             landlock.Diff,
+		formatDiff:       humanLandlockDiff,
+		equal:            func(diff *landlock.ProfileDiff) bool { return diff.Equal },
 	}
+}
+
+// loweredPath is a rule path of an intersection that carries a grant an
+// input made only on an ancestor, which a loader opens beneath that
+// ancestor, and whether it may be opened inside the root alone (see
+// landlock.LoweredPath).
+type loweredPath struct {
+	path, ancestor string
+	inRoot         bool
+}
+
+// intersectLandlock runs landlock.IntersectLowered.
+func intersectLandlock(profiles ...*landlock.Profile) (*landlock.Profile, []loweredPath, error) {
+	result, lowered, err := landlock.IntersectLowered(profiles...)
+	if err != nil {
+		return nil, nil, err //nolint:wrapcheck // reportMergeFailure reads the InputErrors
+	}
+
+	paths := make([]loweredPath, len(lowered))
+	for idx, each := range lowered {
+		paths[idx] = loweredPath{path: each.Path, ancestor: each.Ancestor, inRoot: each.InRoot}
+	}
+
+	return result, paths, nil
 }
 
 // mergeFn returns the merge function of the strategy, which the flags were
@@ -327,6 +369,11 @@ func (ops kindOps[T, D]) inputCheck(mode validateMode, strategy string) (func(*T
 func (ops kindOps[T, D]) mergeCommand(
 	inv *invocation, strategy string, modes []validateMode,
 ) int {
+	mergeFn := withoutLowered(ops.mergeFn(strategy))
+	if strategy == strategyIntersect && ops.intersectLowered != nil {
+		mergeFn = ops.intersectLowered
+	}
+
 	checks := make([]func(*T) error, len(modes))
 	alone := make([]func(*T) error, len(modes))
 	strict := make([]bool, len(modes))
@@ -342,7 +389,20 @@ func (ops kindOps[T, D]) mergeCommand(
 		strict[idx] = mode.strictDecode()
 	}
 
-	return ops.mergeProfiles(inv, ops.mergeFn(strategy), checks, alone, strict)
+	return ops.mergeProfiles(inv, mergeFn, checks, alone, strict,
+		slices.ContainsFunc(modes, func(mode validateMode) bool {
+			return mode == modeArtifact || mode == modeStrict
+		}))
+}
+
+// withoutLowered returns mergeFn as a merge that reports no lowered rule
+// paths, for a merge that has none.
+func withoutLowered[T any](mergeFn func(...*T) (*T, error)) func(...*T) (*T, []loweredPath, error) {
+	return func(profiles ...*T) (*T, []loweredPath, error) {
+		result, err := mergeFn(profiles...)
+
+		return result, nil, err
+	}
 }
 
 // apparmorOps returns the functions of the apparmor package.

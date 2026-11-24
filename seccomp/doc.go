@@ -388,8 +388,8 @@ limitations under the License.
 // input sets neither member or both exactly as the first input does, and is
 // otherwise refused with ErrConflictingListener, also where the first input
 // sets none. [Union], whose inputs are peers, takes the listener from
-// whichever input sets one and ignores the listenerMetadata of an input
-// without a listenerPath.
+// whichever input sets one. [Validate] refuses a listenerMetadata without a
+// listenerPath ([ErrListenerMetadataWithoutPath]), as the runtime-spec does.
 //
 // runc refuses a filter that notifies without a listenerPath, so [Validate]
 // requires one from every profile that notifies ([ErrNotifyWithoutListener])

@@ -351,6 +351,12 @@ type invocation struct {
 	// node is the node --arch and --abi describe.
 	node   nodeOptions
 	format string
+	// quiet says that the command writes nothing on success, so it
+	// composes no output either: validate --quiet.
+	quiet bool
+	// encode encodes a profile as the JSON format writes it: encodeJSON,
+	// unless a test replaces it.
+	encode func(io.Writer, any) error
 	// out holds what the command writes on success, which flushOutput then
 	// writes to stdout or to the --output file, so that a failed run never
 	// truncates an existing file.

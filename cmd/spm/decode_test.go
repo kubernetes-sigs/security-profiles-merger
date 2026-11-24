@@ -187,7 +187,8 @@ func TestInvalidUTF8CountsBytesOfTheInput(t *testing.T) {
 	t.Parallel()
 
 	const (
-		element = `{"defaultAction":"SCMP_ACT_ERRNO","listenerMetadata":"` + "\xff" + `"}`
+		element = `{"defaultAction":"SCMP_ACT_ERRNO","listenerMetadata":"` + "\xff" +
+			`","listenerPath":"/run/l.sock"}`
 		first   = `{"defaultAction":"SCMP_ACT_ERRNO"}`
 		message = "invalid UTF-8, which the JSON decoder replaces with U+FFFD, " +
 			"so distinct profiles can decode alike (first at byte "

@@ -86,6 +86,10 @@ var (
 	// listenerMetadata is not valid UTF-8, which JSON would carry to the
 	// runtime as another value.
 	ErrInvalidUTF8Listener = errors.New("listener setting is not valid UTF-8")
+	// ErrListenerMetadataWithoutPath is returned by Validate for a
+	// listenerMetadata without a listenerPath, which the runtime-spec
+	// forbids: the metadata is for the listener, and there is none.
+	ErrListenerMetadataWithoutPath = errors.New("set without a listenerPath")
 	// ErrListenerNotAllowed is returned by ValidateArtifact and
 	// ValidateStrict for a profile setting listenerPath, listenerMetadata or
 	// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV.
@@ -167,9 +171,10 @@ const MaxArtifactRulesPerSyscall = 256
 // without a NUL byte ([ErrInvalidSyscallName]); argument indices 0 to 5;
 // SCMP_ACT_NOTIFY only where runc loads it ([ErrNotifyUnsupported]) and
 // with a listenerPath ([ErrNotifyWithoutListener]); listener settings in
-// valid UTF-8 ([ErrInvalidUTF8Listener]); and no field of the runtime-spec
-// types this package does not read ([ErrUnsupportedSpecField]). Intersect
-// and Union run it on every input.
+// valid UTF-8 ([ErrInvalidUTF8Listener]); no listenerMetadata without a
+// listenerPath ([ErrListenerMetadataWithoutPath]); and no field of the
+// runtime-spec types this package does not read
+// ([ErrUnsupportedSpecField]). Intersect and Union run it on every input.
 //
 // It enforces none of the MaxArtifact limits and does not range-check errno
 // values (see the Errno values section). Failures are collected into one
@@ -196,6 +201,11 @@ func Validate(profile *specs.LinuxSeccomp) error {
 
 	validateArchitecturesAndFlags(&errs, profile)
 	validateListenerEncoding(&errs, profile)
+
+	if profile.ListenerMetadata != "" && profile.ListenerPath == "" {
+		errs.Reportf("listenerMetadata: %w", ErrListenerMetadataWithoutPath)
+	}
+
 	reportUnreadProfileFields(&errs, profile)
 
 	notifies := false
@@ -797,7 +807,9 @@ func validateNoListener(errs *merge.Collector, profile *specs.LinuxSeccomp) {
 		errs.Reportf("listenerPath: %w", ErrListenerNotAllowed)
 	}
 
-	if profile.ListenerMetadata != "" {
+	// Validate refuses a listenerMetadata without a listenerPath already
+	// (ErrListenerMetadataWithoutPath), so it is reported once.
+	if profile.ListenerMetadata != "" && profile.ListenerPath != "" {
 		errs.Reportf("listenerMetadata: %w", ErrListenerNotAllowed)
 	}
 

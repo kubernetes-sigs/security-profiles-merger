@@ -244,6 +244,7 @@ error is nil.
 | `ErrUnsupportedSpecField` | `Validate` and up, `Marshal` | A field of the runtime-spec types this package does not read, which a program built against a newer runtime-spec can set and the merge would drop |
 | `ErrNotifyUnsupported` | `Validate` and up | `SCMP_ACT_NOTIFY` as the default action or on `write`, which runc refuses |
 | `ErrInvalidUTF8Listener` | `Validate` and up | A `listenerPath` or `listenerMetadata` that is not valid UTF-8, which JSON carries to the runtime as U+FFFD, naming another socket |
+| `ErrListenerMetadataWithoutPath` | `Validate` and up | A `listenerMetadata` without a `listenerPath`, which the runtime-spec forbids |
 | `ErrNotifyWithoutListener` | `Validate` and up; `Intersect`, `Union` on their result | `SCMP_ACT_NOTIFY` without a `listenerPath`, which runc refuses |
 | `ErrLostRules` | `Union`; `Intersect` where it cannot drop an architecture; `ValidateArtifact`, `ValidateStrict` | The result, or for the validators the profile as a runtime loads it unmerged, would hold rules libseccomp loses on a covered architecture, testing a syscall the architecture lacks first ([Architectures](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Architectures)) |
 | `ErrConflictingListener` | `Intersect`, `Union` | Two inputs name listeners the merge cannot reconcile; see [seccomp: the listener](integration.md#seccomp-the-listener). Wrapped in an `InputError` naming the later input |

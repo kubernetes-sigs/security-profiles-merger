@@ -181,6 +181,16 @@ limitations under the License.
 //   - It enforces the rulesets as separate Landlock layers (one
 //     landlock_restrict_self call each) instead of merging them.
 //
+// The checks of the first establish how the caller reached the object, but
+// the kernel binds the rule to the object itself: a bind mount or other
+// mount exposing it elsewhere carries the rule to that name too, without
+// the checked lookup crossing any mount, and no check at load time holds
+// for the lifetime of the workload. So the first is safe only where the
+// caller guarantees that each lowered object whose Ancestor is not "/"
+// stays within the hierarchy of its Ancestor while the workload runs; a
+// caller that cannot does one of the other two (see
+// https://docs.kernel.org/userspace-api/landlock.html#bind-mounts-and-overlayfs).
+//
 // Where [LoweredPath].InRoot is set, the caller opens the path relative to
 // the root it resolves rule paths against with RESOLVE_IN_ROOT alone and
 // needs no link check: the Ancestor is "/", reported only when the rule on

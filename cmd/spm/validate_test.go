@@ -17,6 +17,8 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -693,6 +695,57 @@ func TestArtifactRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+// TestBaselineDecodesStrictly covers --baseline on a baseline whose deny
+// rule sits under a misspelled member: the decoded baseline allows every
+// call and passes ValidateBaseline, which cannot see the rule it lost, so
+// the baseline mode decodes strictly and refuses the member instead. A
+// member spelled in another case and a repeated one fail alike.
+func TestBaselineDecodesStrictly(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name, doc, want string
+	}{
+		{
+			name: "misspelled member",
+			doc: `{"defaultAction":"SCMP_ACT_ALLOW","syscals":[{"names":["ptrace"],` +
+				`"action":"SCMP_ACT_ERRNO"}]}`,
+			want: `: unknown field "syscals"`,
+		},
+		{
+			name: "member in another case",
+			doc: `{"defaultAction":"SCMP_ACT_ALLOW","Syscalls":[{"names":["ptrace"],` +
+				`"action":"SCMP_ACT_ERRNO"}]}`,
+			want: `: misspelled field "Syscalls" (want "syscalls")`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := writeTemp(t, test.doc)
+
+			for _, args := range [][]string{
+				{cmdValidate, "--baseline", flagQuiet, path},
+				{cmdValidate, "--validate", modeNameBaseline, flagQuiet, path},
+			} {
+				code, stdout, stderr := runCapture(t, args, nil)
+				if code != 1 || stdout != "" ||
+					!strings.Contains(stderr, "error: "+path+test.want) {
+					t.Errorf("%v: exit code = %d, stdout = %q, stderr = %q, want 1 and %q",
+						args, code, stdout, stderr, test.want)
+				}
+			}
+
+			// The default checks still only warn.
+			code, _, stderr := runCapture(t, []string{cmdValidate, flagQuiet, path}, nil)
+			if code != 0 || !strings.Contains(stderr, "warning: "+path+test.want) {
+				t.Errorf("default: exit code = %d, stderr = %q, want 0 and a warning",
+					code, stderr)
+			}
+		})
+	}
+}
+
 // TestValidateQuietWritesNothing covers the --quiet contract in full: no
 // profile on stdout and nothing at all on stderr, the auto-detect note
 // included. It deliberately omits --type, which is the only case in which
@@ -718,6 +771,94 @@ func TestValidateQuietWritesNothing(t *testing.T) {
 
 	if stderr != "" {
 		t.Errorf("stderr = %q, want nothing on a quiet success", stderr)
+	}
+}
+
+// TestValidateQuietRendersNothing covers what --quiet skips: the output
+// buffer stays empty, so no output is composed, escaped or copied for
+// nobody to read, while the warnings and the exit code stay as without it.
+// The profile holds a member spelled in another case, which validate
+// encodes anew.
+func TestValidateQuietRendersNothing(t *testing.T) {
+	t.Parallel()
+
+	file := writeTemp(t, `{"DefaultAction":"SCMP_ACT_ERRNO"}`)
+
+	for _, quiet := range []bool{false, true} {
+		args := []string{flagType, typeSeccomp, file}
+		if quiet {
+			args = append(args, flagQuiet)
+		}
+
+		var stdout, stderr bytes.Buffer
+
+		flags := newFlagSet(cmdValidate)
+		opts := bindValidateFlags(flags)
+
+		inv, code := startCommand(flags, opts, validateUsage, args, nil, &stdout, &stderr)
+		if inv == nil {
+			t.Fatalf("quiet %v: startCommand exit code = %d: %s", quiet, code, stderr.String())
+		}
+
+		code = validateInputs(opts, inv)
+
+		wantWarning := "warning: " + file + `: misspelled field "DefaultAction" (want "defaultAction")` + "\n"
+		if code != 0 || stderr.String() != wantWarning {
+			t.Errorf("quiet %v: exit code = %d, stderr = %q, want 0 and %q",
+				quiet, code, stderr.String(), wantWarning)
+		}
+
+		if rendered := inv.out.Len() > 0; rendered == quiet {
+			t.Errorf("quiet %v: rendered %d bytes", quiet, inv.out.Len())
+		}
+	}
+}
+
+// errEncodeFailed is the failure TestValidateQuietEncodesAlike encodes
+// with.
+var errEncodeFailed = errors.New("encoding failed")
+
+// TestValidateQuietEncodesAlike covers a profile validate encodes anew,
+// one holding a member spelled in another case, whose encoding fails: a
+// quiet run takes the path a plain one does, so both exit 1 with the same
+// stderr rather than the quiet one passing.
+func TestValidateQuietEncodesAlike(t *testing.T) {
+	t.Parallel()
+
+	file := writeTemp(t, `{"DefaultAction":"SCMP_ACT_ERRNO"}`)
+
+	var stderrs [2]string
+
+	for idx, quiet := range []bool{false, true} {
+		args := []string{flagType, typeSeccomp, file}
+		if quiet {
+			args = append(args, flagQuiet)
+		}
+
+		var stdout, stderr bytes.Buffer
+
+		flags := newFlagSet(cmdValidate)
+		opts := bindValidateFlags(flags)
+
+		inv, code := startCommand(flags, opts, validateUsage, args, nil, &stdout, &stderr)
+		if inv == nil {
+			t.Fatalf("quiet %v: startCommand exit code = %d: %s", quiet, code, stderr.String())
+		}
+
+		inv.encode = func(io.Writer, any) error { return errEncodeFailed }
+
+		code = validateInputs(opts, inv)
+		if code != 1 || stdout.Len() != 0 ||
+			!strings.Contains(stderr.String(), "error: encoding failed\n") {
+			t.Errorf("quiet %v: exit code = %d, stdout = %q, stderr = %q, want 1 and the error",
+				quiet, code, stdout.String(), stderr.String())
+		}
+
+		stderrs[idx] = stderr.String()
+	}
+
+	if stderrs[0] != stderrs[1] {
+		t.Errorf("stderr differs: plain %q, quiet %q", stderrs[0], stderrs[1])
 	}
 }
 
@@ -955,7 +1096,8 @@ func TestValidateArtifactMatchesDecodeArtifact(t *testing.T) {
 		{typeSeccomp, `{"defaultAction":"SCMP_ACT_ERRNO","comment":"x"}`, false},
 		{typeSeccomp, `{"DefaultAction":"SCMP_ACT_ERRNO"}`, false},
 		{typeSeccomp, `{"defaultAction":"SCMP_ACT_ERRNO","defaultAction":"SCMP_ACT_ERRNO"}`, false},
-		{typeSeccomp, "{\"defaultAction\":\"SCMP_ACT_ERRNO\",\"listenerMetadata\":\"\xff\"}", false},
+		{typeSeccomp, "{\"defaultAction\":\"SCMP_ACT_ERRNO\",\"listenerMetadata\":\"\xff\"," +
+			"\"listenerPath\":\"/run/l.sock\"}", false},
 		{typeSeccomp, `{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[{"names":["read"],` +
 			`"action":"SCMP_ACT_ALLOW","args":[{"op":"SCMP_CMP_EQ"}]}]}`, false},
 		{typeSeccomp, `{"defaultAction":"SCMP_ACT_ERRNO"} {}`, false},

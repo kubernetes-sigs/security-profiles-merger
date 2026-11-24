@@ -1397,6 +1397,70 @@ func TestValidateRejectsInvalidUTF8Listener(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsListenerMetadataWithoutPath checks that Validate, and
+// so ValidateBaseline and the merges, refuse a listenerMetadata without a
+// listenerPath, which the runtime-spec forbids, rather than carry it into
+// a result.
+func TestValidateRejectsListenerMetadataWithoutPath(t *testing.T) {
+	t.Parallel()
+
+	profile := &specs.LinuxSeccomp{DefaultAction: specs.ActAllow, ListenerMetadata: "id=1"}
+
+	err := seccomp.Validate(profile)
+	if !errors.Is(err, seccomp.ErrListenerMetadataWithoutPath) ||
+		err.Error() != "listenerMetadata: set without a listenerPath" {
+		t.Errorf("Validate = %v, want ErrListenerMetadataWithoutPath", err)
+	}
+
+	err = seccomp.ForArch(specs.ArchX86_64).ValidateBaseline(profile)
+	if !errors.Is(err, seccomp.ErrListenerMetadataWithoutPath) {
+		t.Errorf("ValidateBaseline = %v, want ErrListenerMetadataWithoutPath", err)
+	}
+
+	result, err := seccomp.Intersect(profile)
+	if !errors.Is(err, seccomp.ErrListenerMetadataWithoutPath) {
+		t.Errorf("Intersect = %v, %v, want ErrListenerMetadataWithoutPath", result, err)
+	}
+
+	profile.ListenerPath = "/run/agent.sock"
+
+	err = seccomp.Validate(profile)
+	if err != nil {
+		t.Errorf("Validate with a listenerPath: %v", err)
+	}
+}
+
+// TestValidateArtifactReportsListenerMetadataOnce checks that an artifact
+// with a listenerMetadata and no listenerPath gets the one error Validate
+// reports for it, not also ErrListenerNotAllowed for the same member, and
+// that one setting both members gets ErrListenerNotAllowed for each.
+func TestValidateArtifactReportsListenerMetadataOnce(t *testing.T) {
+	t.Parallel()
+
+	opts := seccomp.ForArch(specs.ArchX86_64)
+
+	for name, check := range map[string]func(*specs.LinuxSeccomp) error{
+		"ValidateArtifact": opts.ValidateArtifact,
+		"ValidateStrict":   opts.ValidateStrict,
+	} {
+		err := check(&specs.LinuxSeccomp{DefaultAction: specs.ActErrno, ListenerMetadata: "x"})
+		if err == nil || err.Error() != "listenerMetadata: set without a listenerPath" {
+			t.Errorf("%s of metadata alone = %v, want one ErrListenerMetadataWithoutPath",
+				name, err)
+		}
+
+		err = check(&specs.LinuxSeccomp{
+			DefaultAction: specs.ActErrno, ListenerPath: "/run/x.sock", ListenerMetadata: "x",
+		})
+
+		want := "listenerPath: listener settings are not allowed\n" +
+			"listenerMetadata: listener settings are not allowed"
+		if !errors.Is(err, seccomp.ErrListenerNotAllowed) || err.Error() != want {
+			t.Errorf("%s of both members =\n%v\nwant\n%s", name, err, want)
+		}
+	}
+}
+
 // TestValidateArtifactByteOrder checks that an architecture whose byte
 // order differs from the node's is reported: libseccomp keeps one byte
 // order per filter, and refuses s390x next to a native x86_64 with EDOM, so

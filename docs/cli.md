@@ -49,8 +49,9 @@ spm merge --type seccomp --strategy intersect --validate default,artifact \
 
 The baseline comes first: input order decides the seccomp tie-breaks, and
 an intersection takes the notification listener from the first input
-only. It is checked with `default`, since the seccomp defaults runtimes
-ship fail `strict`; the artifact is checked with `artifact`, which decodes
+only. `--baseline` checks it as the runtime does at config load; the
+merge then checks it with `default`, since the seccomp defaults runtimes
+ship fail `strict`. The artifact is checked with `artifact`, which decodes
 it as strictly as a runtime does. `--arch` names the node that loads the
 result. For Landlock, `--abi` names the kernel's ABI version instead:
 
@@ -59,6 +60,25 @@ spm validate --type landlock --baseline --quiet --abi 4 baseline.json
 spm merge --type landlock --strategy intersect --validate default,artifact \
   --abi 4 baseline.json artifact.json
 ```
+
+A Landlock result loaded by pathname can permit more than an input in two
+cases, which the [integration guide](integration.md#landlock-lowered-rule-paths)
+explains:
+
+- A rule of the result can carry the baseline's grant on a directory onto
+  a deeper path the artifact names, a lowered rule path, which a symlink
+  or mount can carry outside that directory. With an `artifact` or
+  `strict` input the merge refuses such a result; load the inputs as
+  separate Landlock layers instead, or merge with the Go API's
+  `IntersectLowered`. With other modes it writes the result and names the
+  paths in a warning. A path lowered from a rule on `/` in a result
+  granting no `refer` is accepted: the baseline's rule on `/` already
+  grants those rights on everything the workload reaches through its
+  root, so it widens nothing unless the workload is handed a descriptor
+  for a file outside its root.
+- A result granting `refer` can allow a move or link an input denies
+  where two rule paths are one directory to the kernel, or inside a mount
+  other than the root mount.
 
 ### Combine recorded profiles
 
@@ -118,7 +138,13 @@ spm merge --type apparmor --strategy union recording1.json recording2.json
 `--strategy intersect` runs the library's `Intersect`, which permits only
 what every input permits, and `--strategy union` its `Union`, which
 permits what any input permits. A single input is normalized without
-merging.
+merging. For Landlock, `intersect` runs `IntersectLowered` and treats the
+lowered rule paths as
+[Check a baseline and merge an artifact into it](#check-a-baseline-and-merge-an-artifact-into-it)
+says, and with `--abi` the result is checked with
+`landlock.Options.Validate` for that version before it is written: a
+union can need a newer version than any input, such as `refer`, which
+needs version 2, for inputs that share no handled right.
 
 Input order matters for seccomp: `errnoRet` follows the earlier input
 where the actions tie, and an intersection takes `listenerPath` and
@@ -241,10 +267,10 @@ library and handle what `encoding/json` accepts silently as follows:
 |-------|-----------|------------|----------|------------|
 | Library validator | `Validate` | `ValidateArtifact` | `ValidateStrict` | `ValidateBaseline` |
 | Member repeated within one object | reject | reject | reject | reject |
-| Member spelled only in another case | warn | reject | reject | warn |
-| Byte that is not valid UTF-8 | warn | reject | reject | warn |
-| Required member left out: a seccomp syscall entry's `names` or `action`, a seccomp condition's `index` or `op`, a Landlock rule's `path` or `port`, or a null entry, condition or rule | warn | reject | reject | warn |
-| Member the profile type has no field for | warn | reject | reject | warn |
+| Member spelled only in another case | warn | reject | reject | reject |
+| Byte that is not valid UTF-8 | warn | reject | reject | reject |
+| Required member left out: a seccomp syscall entry's `names` or `action`, a seccomp condition's `index` or `op`, a Landlock rule's `path` or `port`, or a null entry, condition or rule | warn | reject | reject | reject |
+| Member the profile type has no field for | warn | reject | reject | reject |
 | Data after the profile, or a document that is not an object | reject | reject | reject | reject |
 
 - `artifact` is for a profile a runtime did not author, such as one pulled
@@ -255,11 +281,14 @@ library and handle what `encoding/json` accepts silently as follows:
   what is likely a mistake, such as a duplicate entry.
 - `baseline` is for the baseline a runtime merges every artifact into,
   checked as the runtime checks it at config load, and only `validate`
-  takes it. For seccomp it runs `seccomp.Options.ValidateBaseline` for the
-  node `--arch` names: `Validate`, then a merge of the baseline alone and
-  a diff against it, and a diff against its merge with a profile allowing
-  every call, which fail with the rules every merge would take away. The
-  CRI-O default fails here until restated (see the
+  takes it. It decodes as `artifact` does, since `ValidateBaseline` sees
+  only the decoded profile: a deny rule under a misspelled `syscals` would
+  be gone, and the baseline would pass. For seccomp it runs
+  `seccomp.Options.ValidateBaseline` for the node `--arch` names:
+  `Validate`, then a merge of the baseline alone and a diff against it,
+  and a diff against its merge with a profile allowing every call, which
+  fail with the rules every merge would take away. The CRI-O default
+  fails here until restated (see the
   [integration guide](integration.md#the-runtime-flow)). For AppArmor it
   runs `apparmor.ValidateBaseline`, which also refuses a path
   `QuotePath` cannot render and one `ValidateArtifact` refuses for what it
@@ -438,7 +467,7 @@ profile comes near the bound, and the JSON format is never cut.
 | Code | `merge` | `validate` | `diff` |
 |------|---------|------------|--------|
 | `0` | The merge succeeded | Every profile is valid | The profiles are equal |
-| `1` | A profile is bad, the merge fails on inputs that pass, such as with `ErrLostRules` or `ErrBudgetExceeded`, or the output could not be written | A profile is bad, or the output could not be written | The profiles differ, and nothing else |
+| `1` | A profile is bad, the merge fails on inputs that pass, such as with `ErrLostRules` or `ErrBudgetExceeded`, the result fails `--abi` or holds Landlock lowered rule paths with an `artifact` or `strict` input, or the output could not be written | A profile is bad, or the output could not be written | The profiles differ, and nothing else |
 | `2` | A usage error | A usage error | A usage error, and every other failure |
 
 A profile is bad when it is empty, does not parse, is not of the type

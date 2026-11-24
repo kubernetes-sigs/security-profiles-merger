@@ -83,14 +83,16 @@ jobs:
             dist/spm_*.sbom.json
             dist/checksums.txt
       # The command README.md gives users, so that a release whose
-      # signature they could not verify is never published.
+      # signature they could not verify is never published. The identity
+      # names this tag exactly, as the user names the version they want,
+      # prerelease suffix included.
       - name: Verify the checksums signature
         run: |
           set -euo pipefail
           cosign verify-blob \
             --bundle dist/checksums.txt.sigstore.json \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            --certificate-identity-regexp '^https://github.com/kubernetes-sigs/security-profiles-merger/\.github/workflows/release\.yml@refs/tags/v' \
+            --certificate-identity "https://github.com/kubernetes-sigs/security-profiles-merger/.github/workflows/release.yml@${GITHUB_REF}" \
             dist/checksums.txt
       # goreleaser leaves the release a draft (see .goreleaser.yml), so it
       # becomes visible only once its provenance is attested and its

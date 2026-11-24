@@ -78,22 +78,27 @@ Download a pre-built binary from the
 [RELEASE.md](RELEASE.md) lists the platforms a release covers. Each release
 includes cosign-signed checksums, SBOMs, and build provenance attestations.
 
-To verify a downloaded binary:
+To verify a downloaded binary, set `VERSION` to the release you meant to
+download, so that an older release's genuine signature does not pass:
 
 ```sh
-# Verify checksums signature
+VERSION=v0.8.0
+BINARY="spm_${VERSION#v}_linux_amd64"
+
+# Verify that the release workflow signed the checksums at that tag
 cosign verify-blob \
   --bundle checksums.txt.sigstore.json \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity-regexp '^https://github.com/kubernetes-sigs/security-profiles-merger/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-identity "https://github.com/kubernetes-sigs/security-profiles-merger/.github/workflows/release.yml@refs/tags/${VERSION}" \
   checksums.txt
 
-# Verify the downloaded binaries against the signed checksums
-sha256sum --ignore-missing -c checksums.txt
+# Verify the binary against its signed checksum; this prints "$BINARY: OK"
+sha256sum --check --ignore-missing checksums.txt
 
 # Or verify build provenance directly
-gh attestation verify spm_*_linux_amd64 -R kubernetes-sigs/security-profiles-merger \
-  --signer-workflow kubernetes-sigs/security-profiles-merger/.github/workflows/release.yml
+gh attestation verify "$BINARY" -R kubernetes-sigs/security-profiles-merger \
+  --signer-workflow kubernetes-sigs/security-profiles-merger/.github/workflows/release.yml \
+  --source-ref "refs/tags/${VERSION}"
 ```
 
 Or install from source:
@@ -153,7 +158,9 @@ incompatible Go API change within a major version
   types) changes incompatibly only in a major release.
 - **The merge invariant**, that `Intersect` never permits more than any input
   and `Union` never permits less, judged by how the runtime loads the
-  profile, never changes.
+  profile, never changes. A Landlock result holds it only under the
+  filesystem assumptions of
+  [Landlock: lowered rule paths](docs/integration.md#landlock-lowered-rule-paths).
 - **Merge results** may change in a minor release when a change corrects the
   model of what a runtime loads, including a security fix that makes a
   result stricter, and when a merge becomes more precise. A patch release

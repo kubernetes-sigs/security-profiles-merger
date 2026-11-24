@@ -65,7 +65,15 @@ settles the result for every architecture a runtime can be native on.
 
 --abi names the Landlock ABI version of the kernel that loads the result:
 the --validate checks then refuse every right of an input that kernel does
-not know, which it would reject.
+not know, which it would reject, and so does the check of the result.
+
+A Landlock intersection can carry a grant on a directory onto a deeper
+path another input names, a lowered rule path, which a symlink or mount
+can carry outside that directory once the result is loaded by pathname.
+With an input checked as artifact or strict, a result holding one is
+refused: load the inputs as separate Landlock layers, or merge with the Go
+API's IntersectLowered. Otherwise a warning names the paths. A path
+lowered from a rule on / in a result granting no refer is accepted.
 
 Options:
 `
@@ -260,10 +268,13 @@ func (opts *mergeOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) int 
 // mergeProfiles decodes every input, runs the check of each that has one
 // of its own (nil for an input the merge checks itself, which alone holds
 // the check of) and merges them with mergeFn. strict says which inputs are
-// decoded strictly.
+// decoded strictly. A result is checked with ops.checkResult before it is
+// written, and its lowered rule paths are refused where refuseLowered is
+// set, as an input is checked as an artifact or strictly, and noted
+// otherwise (see reportLowered).
 func (ops kindOps[T, D]) mergeProfiles(
-	inv *invocation, mergeFn func(...*T) (*T, error), checks, alone []func(*T) error,
-	strict []bool,
+	inv *invocation, mergeFn func(...*T) (*T, []loweredPath, error),
+	checks, alone []func(*T) error, strict []bool, refuseLowered bool,
 ) int {
 	report := inv.report
 	profiles := unmarshalAll[T](inv.inputs, strict, report)
@@ -284,7 +295,7 @@ func (ops kindOps[T, D]) mergeProfiles(
 		return inv.stop(1)
 	}
 
-	result, err := mergeFn(profiles...)
+	result, lowered, err := mergeFn(profiles...)
 	if err != nil {
 		// The merge names at most merge.MaxJoinedErrors failing inputs.
 		// Past that, each input is checked alone, as when the merge does
@@ -304,7 +315,94 @@ func (ops kindOps[T, D]) mergeProfiles(
 
 	report.flush(inv.stderr)
 
+	if ops.checkResult != nil && reportResultFailure(ops.checkResult(result), inv.stderr) {
+		return 1
+	}
+
+	if reportLowered(lowered, refuseLowered, inv.stderr) {
+		return 1
+	}
+
 	return inv.write(result, func() string { return ops.format(result) })
+}
+
+// reportResultFailure writes why a merge result fails its check, one line
+// per problem, and reports whether it does: with --abi, a union can need a
+// newer Landlock ABI version than any input, which the kernel of that
+// version would refuse.
+func reportResultFailure(err error, stderr io.Writer) bool {
+	if err == nil {
+		return false
+	}
+
+	for _, each := range spm.Problems(err) {
+		//nolint:err113,errorlint // Problems lists the sentinel itself
+		if each == spm.ErrMoreProblems {
+			lines := strings.Split(err.Error(), "\n")
+			_, _ = fmt.Fprintf(stderr, "error: %s\n", lines[len(lines)-1])
+
+			continue
+		}
+
+		_, _ = fmt.Fprintf(stderr, "error: merge result: %v\n", each)
+	}
+
+	return true
+}
+
+// maxLoweredListed bounds the lowered rule paths a message names, which an
+// artifact can hold thousands of.
+const maxLoweredListed = 10
+
+// reportLowered writes the lowered rule paths of an intersection result,
+// and reports whether they refuse it. A loader that opens such a path by
+// name, as one loading the written profile does, binds the rule to
+// whatever a symlink or mount there leads to, outside the ancestor the
+// grant came from, so the result can permit more than an input (see
+// landlock.IntersectLowered). Where an input is checked as an artifact,
+// whose author chose the path, or strictly, which adds to those checks,
+// the run refuses the result; otherwise a warning names the paths, as the
+// default checks warn about what the artifact checks refuse. A path that
+// may be opened inside the root alone is left out: the input's rule on "/"
+// already grants its rights on everything a path from the root reaches, so
+// the rule widens nothing there.
+func reportLowered(all []loweredPath, refuse bool, stderr io.Writer) bool {
+	var lowered []loweredPath
+
+	for _, each := range all {
+		if !each.inRoot {
+			lowered = append(lowered, each)
+		}
+	}
+
+	if len(lowered) == 0 {
+		return false
+	}
+
+	listed := make([]string, 0, min(len(lowered), maxLoweredListed)+1)
+	for _, each := range lowered[:min(len(lowered), maxLoweredListed)] {
+		listed = append(listed, merge.QuoteBounded(each.path)+" beneath "+
+			merge.QuoteBounded(each.ancestor))
+	}
+
+	if len(lowered) > maxLoweredListed {
+		listed = append(listed, fmt.Sprintf("and %d more", len(lowered)-maxLoweredListed))
+	}
+
+	paths := strings.Join(listed, ", ")
+
+	if refuse {
+		_, _ = fmt.Fprintf(stderr, "error: the intersection carries grants onto lowered "+
+			"rule paths, which loading it by pathname can widen: %s; load the inputs "+
+			"as separate Landlock layers\n", paths)
+
+		return true
+	}
+
+	_, _ = fmt.Fprintf(stderr, "warning: the intersection carries grants onto lowered "+
+		"rule paths, which loading it by pathname can widen: %s\n", paths)
+
+	return false
 }
 
 // checkLeftInputs runs the check the merge runs on each input on the ones

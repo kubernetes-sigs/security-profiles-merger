@@ -425,9 +425,8 @@ func withoutAny(archs []specs.Arch, set map[specs.Arch]bool) []specs.Arch {
 // succeeds would then change with an unrelated rule. A listener is also a
 // node-local setting chosen for a reason the merge cannot see, so the
 // conservative reading is that two listeners conflict wherever both are
-// named. For Union an input without a listenerPath names no listener: the
-// merge has always ignored its listenerMetadata, which a runtime hands only
-// to a listener.
+// named. For Union an input without a listenerPath names no listener, and
+// Validate refuses one setting listenerMetadata without it.
 func checkListeners(profiles []*specs.LinuxSeccomp, intersect bool) error {
 	if intersect {
 		return checkBaselineListener(profiles)

@@ -1092,15 +1092,18 @@ func TestValidateWritesWhatDoesNotDecodeAlikeAsDecoded(t *testing.T) {
 	}{
 		{
 			"a byte that is not valid UTF-8", typeSeccomp,
-			`{"defaultAction":"SCMP_ACT_ERRNO","listenerMetadata":"a` + "\x9b" + `b"}`,
+			`{"defaultAction":"SCMP_ACT_ERRNO","listenerMetadata":"a` + "\x9b" +
+				`b","listenerPath":"/run/l.sock"}`,
 			"invalid UTF-8",
-			"{\n  \"defaultAction\": \"SCMP_ACT_ERRNO\",\n  \"listenerMetadata\": \"a\ufffdb\"\n}\n",
+			"{\n  \"defaultAction\": \"SCMP_ACT_ERRNO\",\n  \"listenerPath\": \"/run/l.sock\",\n" +
+				"  \"listenerMetadata\": \"a\ufffdb\"\n}\n",
 		},
 		{
 			"a lone surrogate escape", typeSeccomp,
-			`{"defaultAction":"SCMP_ACT_ERRNO","listenerMetadata":"a\ud800b"}`,
+			`{"defaultAction":"SCMP_ACT_ERRNO","listenerMetadata":"a\ud800b","listenerPath":"/run/l.sock"}`,
 			"lone surrogate escape",
-			"{\n  \"defaultAction\": \"SCMP_ACT_ERRNO\",\n  \"listenerMetadata\": \"a\ufffdb\"\n}\n",
+			"{\n  \"defaultAction\": \"SCMP_ACT_ERRNO\",\n  \"listenerPath\": \"/run/l.sock\",\n" +
+				"  \"listenerMetadata\": \"a\ufffdb\"\n}\n",
 		},
 		{
 			"a required member left out", typeLandlock,
