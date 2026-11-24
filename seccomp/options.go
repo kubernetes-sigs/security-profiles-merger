@@ -61,8 +61,8 @@ var ErrInvalidOptions = spm.ErrInvalidOptions
 // equal when they come from the same constructor with the same argument:
 // ForHost() and ForArch of the running program's architecture behave alike
 // but are not equal. Validate does not depend on the node and is a method
-// so that every check can run through an Options; Marshal, Clone and
-// FormatProfile have no method.
+// so that every check can run through an Options; UnmarshalStrict,
+// Marshal, Clone, FormatProfile and FormatSyscall have no method.
 type Options struct {
 	node nodeKind
 	arch specs.Arch

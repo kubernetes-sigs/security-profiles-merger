@@ -584,9 +584,9 @@ func highestABI[T ~string](rights []T, table map[T]ABIVersion) ABIVersion {
 // for. It has a method for every operation whose result depends on that
 // version; the merges, IntersectLowered and Diff do not, so a runtime checks
 // a merge result with Options.Validate before it applies it. The zero value
-// names no version, and every method reports it with ErrUnknownABIVersion.
-// A kernel without Landlock reports no version; such a node applies no
-// ruleset. See the ABI versions section.
+// names no version, and every method reports it with ErrUnknownABIVersion
+// and ErrInvalidOptions. A kernel without Landlock reports no version; such
+// a node applies no ruleset. See the ABI versions section.
 type Options struct {
 	// ABI is the version the kernel reports, as
 	// landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)

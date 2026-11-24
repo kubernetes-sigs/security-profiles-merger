@@ -128,10 +128,10 @@ func Union(profiles ...*specs.LinuxSeccomp) (*specs.LinuxSeccomp, error) {
 // every call on the same architectures, with the same flags and listener.
 // An unequal diff names what every merge with that baseline takes away
 // whatever the artifact says, and is reported with [ErrInexactBaseline] and
-// the diff in the message; treat any error as a misconfigured node. For
-// switch_endian and sys_debug_setcontext on a PowerPC node, or one not
-// known, it names what a merge takes away wherever the artifact leaves the
-// baseline's rules on the two as they are (see the Architectures section).
+// the diff in the message; treat any error as a misconfigured node. On a
+// PowerPC node, or one not known, an artifact can avoid what the diff names
+// for switch_endian and sys_debug_setcontext (see the Architectures
+// section).
 //
 // Failures of Validate are returned as Validate returns them, and merge
 // errors without an InputError. It depends on the native architecture as

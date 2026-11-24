@@ -189,20 +189,20 @@ for that too.
    exactly. The CRI-O default needs restating before it passes: the merge
    reads its other repeated syscalls exactly, but not the two sets below:
 
-   - `clone`: one `ALLOW` clause with a masked comparison on the flags (no
-     namespace flag set) next to `ERRNO` clauses for each namespace flag.
-     The single `ALLOW` clause alone is a safe shape; a clone with a
+   - `clone`: one `ALLOW` rule with a masked comparison on the flags (no
+     namespace flag set) next to `ERRNO` rules for each namespace flag.
+     The single `ALLOW` rule alone is a safe shape; a clone with a
      namespace flag then gets the profile default's errno (ENOSYS in that
      profile) instead of EPERM.
    - `socket`: `ERRNO` (EPERM) for AF_VSOCK, `ERRNO` (EINVAL) for
      AF_NETLINK with NETLINK_AUDIT, `ALLOW` for AF_NETLINK otherwise, and
      `ALLOW a0 != AF_NETLINK`, which overlaps the AF_VSOCK rule with a
-     different result, so the set is no safe shape. One clause,
+     different result, so the set is no safe shape. One rule,
      `ALLOW a0 != AF_VSOCK`, is the restatement: AF_VSOCK then gets the
      default's errno instead of EPERM, and the NETLINK_AUDIT rule is gone.
      The [defaults README](../seccomp/testdata/defaults/README.md#why-socket-is-restated-this-way)
      says why dropping that rule changes little and why keeping EPERM for
-     AF_VSOCK with a second clause is no restatement.
+     AF_VSOCK with a second rule is no restatement.
 
    `ValidateArtifact` reports one more entry of the CRI-O default, `setns`:
    an unconditional `ALLOW` followed by an unconditional `ERRNO`. libseccomp
@@ -348,11 +348,6 @@ bounds the cost of the merge.
 - The seccomp merge falls back to a conservative result past budgets of its
   own, collapsing a syscall in the merge direction; see
   [Cost bounds](https://pkg.go.dev/sigs.k8s.io/security-profiles-merger/seccomp#hdr-Cost_bounds).
-  The read budget keeps `Diff` and the merges linear in the size of a
-  profile that skipped validation, but not cheap: `Diff` of one allocates
-  around 150 times its size, and `Union` far less. Both are cheap on
-  validated profiles, which is why the flow above validates before anything
-  else.
 - The apparmor merge bounds pattern matching and pattern compilation on its
   own, while reading, validating and normalizing paths stays linear in the
   size of the input. Past the matching or the compile budget `Intersect`
@@ -403,19 +398,8 @@ what a runtime does per artifact: `DecodeArtifact`, then `Intersect` with a
 baseline checked once. Against an apparmor baseline of some thirty
 patterns, the example artifact allocates about 70 KB, an artifact of a few
 dozen paths about 140 KB, and one at `MaxArtifactPaths` with paths of some
-64 bytes about 2.6 MB in some 4 ms of one processor (measured on a mostly idle
-16-thread desktop); the seccomp and landlock examples allocate under 30 KB.
-Running on every processor at once allocates about the same per artifact.
-The costly cases are the adversarial ones: a 1 MiB apparmor artifact of
-4 KiB paths and sixteen 4 KiB `*/` patterns allocates some 145 MB in some
-110 ms, half of it to decode and validate and half to intersect with that
-baseline, within what the compile and work budgets admit. None of this
-calls for another limit. The work a runtime cannot bound itself is in the
-merges, so that is where a cancellable variant would check its context:
-between the steps of a fold, while compiling patterns, and where the
-merges charge their budgets, which is where matching stops past them
-today. Decoding is bounded by the cap on the document and validation is
-linear in the profile, so a check before and after each covers them.
+64 bytes about 2.6 MB in some 4 ms of one processor; the seccomp and
+landlock examples allocate under 30 KB.
 
 The API reference lists each package's limits, their values and the errors
 they raise: [seccomp](api.md#limits), [apparmor](api.md#limits-1) and
@@ -431,10 +415,7 @@ shape (a list of empty syscall entries comes close to that, nearly all of
 it the decoded profile, which `json.Unmarshal` holds as well), and
 allocates about 125 times the size of the document in total, so at a 1 MiB
 cap each artifact can hold on the order of 75 MB before `ValidateArtifact`
-gets to refuse it on its counts. Those ratios are for documents near the
-cap: a small one nested as deeply as encoding/json reads, 10,000 levels,
-costs more per byte, on the order of 10 MB in all, which stays far below
-what a document near the cap costs. Size the number of artifacts decoded
+gets to refuse it on its counts. Size the number of artifacts decoded
 in parallel by that. The `spm` command reads up to 10 MiB per input,
 since its user picks the files.
 

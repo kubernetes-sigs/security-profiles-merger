@@ -30,8 +30,8 @@ import (
 // pseudo number on an architecture that has neither as a syscall, the
 // first name sorting before the second. Wherever both names resolve to that
 // number, libseccomp reads the rules of either as rules of one syscall: it
-// refuses with EEXIST a rule of one that conflicts with a rule of the
-// other, and evaluates the rest as one rule set.
+// refuses with EEXIST, or keeps only one of, a rule of one that conflicts
+// with a rule of the other, and evaluates the rest as one rule set.
 type syscallAlias [2]string
 
 // syscallAliases are the aliases libseccomp knows. libseccomp 2.5.2
@@ -222,11 +222,7 @@ func aliasLabels(syscalls []specs.LinuxSyscall, aliases []syscallAlias) countLab
 	labels := make(countLabels)
 
 	for _, alias := range aliases {
-		used := slices.DeleteFunc(slices.Clone(alias[:]), func(name string) bool {
-			return !slices.ContainsFunc(syscalls, func(entry specs.LinuxSyscall) bool {
-				return slices.Contains(entry.Names, name)
-			})
-		})
+		used := alias.usedNames(syscalls)
 
 		quoted := make([]string, 0, len(used))
 		for _, name := range used {
@@ -239,6 +235,18 @@ func aliasLabels(syscalls []specs.LinuxSyscall, aliases []syscallAlias) countLab
 	}
 
 	return labels
+}
+
+// usedNames returns the names of the alias some entry of the lists names,
+// in the order of the alias.
+func (alias syscallAlias) usedNames(lists ...[]specs.LinuxSyscall) []string {
+	return slices.DeleteFunc(slices.Clone(alias[:]), func(name string) bool {
+		return !slices.ContainsFunc(lists, func(syscalls []specs.LinuxSyscall) bool {
+			return slices.ContainsFunc(syscalls, func(entry specs.LinuxSyscall) bool {
+				return slices.Contains(entry.Names, name)
+			})
+		})
+	})
 }
 
 // joinedAliases returns the aliases whose names a runtime on a node of the

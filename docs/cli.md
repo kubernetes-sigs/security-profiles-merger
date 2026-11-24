@@ -259,10 +259,9 @@ library and handle what `encoding/json` accepts silently as follows:
   node `--arch` names: `Validate`, then a merge of the baseline alone and
   a diff against it, and a diff against its merge with a profile allowing
   every call, which fail with the rules every merge would take away. The
-  CRI-O default seccomp profile fails here, since the merge rewrites its
-  masked `clone` and its `socket` clauses; restated as the
-  [integration guide](integration.md) describes, it passes. For AppArmor
-  it runs `apparmor.ValidateBaseline`, which also refuses a path
+  CRI-O default fails here until restated (see the
+  [integration guide](integration.md#the-runtime-flow)). For AppArmor it
+  runs `apparmor.ValidateBaseline`, which also refuses a path
   `QuotePath` cannot render and one `ValidateArtifact` refuses for what it
   loads as, such as `/a/[\^x]` or a `..` component. For Landlock it runs
   `landlock.ValidateBaseline`, or `landlock.Options.ValidateBaseline` for
