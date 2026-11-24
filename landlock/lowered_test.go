@@ -17,6 +17,7 @@ limitations under the License.
 package landlock_test
 
 import (
+	"encoding/json"
 	"errors"
 	"reflect"
 	"slices"
@@ -329,6 +330,26 @@ func TestIntersectLoweredNamesTheAncestor(t *testing.T) {
 
 	if lowered := intersectLowered(t, baseline, artifact); !slices.Equal(lowered, want) {
 		t.Errorf("IntersectLowered = %v, want %v", lowered, want)
+	}
+}
+
+// TestLoweredPathJSON pins the JSON names of LoweredPath, which follow the
+// camelCase of the package's other types.
+func TestLoweredPathJSON(t *testing.T) {
+	t.Parallel()
+
+	got, err := json.Marshal([]landlock.LoweredPath{
+		{Path: "/srv/a", Ancestor: "/", Input: 1, InRoot: true},
+		{Path: "/srv/a/x", Ancestor: "/srv", Input: 0, InRoot: false},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const want = `[{"path":"/srv/a","ancestor":"/","input":1,"inRoot":true},` +
+		`{"path":"/srv/a/x","ancestor":"/srv","input":0,"inRoot":false}]`
+	if string(got) != want {
+		t.Errorf("JSON = %s, want %s", got, want)
 	}
 }
 

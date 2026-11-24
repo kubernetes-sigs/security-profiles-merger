@@ -22,8 +22,8 @@ limitations under the License.
 // merge a CRI runtime uses to combine an artifact (the untrusted profile it
 // pulled) with its baseline (the profile it trusts), as KEP-6061 describes.
 // [Union] permits an operation where any input does, the merge the Security
-// Profiles Operator uses to combine recorded profiles. [Diff] compares two
-// profiles in the same terms. Paths are matched as apparmor_parser matches
+// Profiles Operator uses to combine recorded profiles. [Diff] compares the
+// rules two profiles spell. Paths are matched as apparmor_parser matches
 // them (see Glob patterns), and [IsGlobPattern] reports whether a path is a
 // pattern.
 //
@@ -292,13 +292,14 @@ limitations under the License.
 // AppArmor denies everything the section covers, so the zero [Profile]
 // permits nothing. Intersect treats a nil section as an explicit empty one
 // and a nil network boolean as false ({caps: [NET_ADMIN]} intersected with
-// {caps: nil} yields [], as with {caps: []}), and its result carries every
-// section explicitly, an empty FilesystemRules where no paths overlap.
-// Union lets a nil section defer to the other profile, which grants the same
-// as an empty one; a section nil on both sides stays nil. Diff compares the
-// same way, so a profile silent on raw sockets equals one forbidding them,
-// and Diff(p, Intersect(p)) is equal unless p has patterns that match
-// nothing, which the intersection drops.
+// {caps: nil} yields a non-nil CapabilityRules listing no capability, whose
+// JSON is {}, as with {caps: []}), and its result carries every section
+// explicitly, an empty FilesystemRules where no paths overlap. Union lets
+// a nil section defer to the other profile, which grants the same as an
+// empty one; a section nil on both sides stays nil. Diff compares the same
+// way, so a profile silent on raw sockets equals one forbidding them, and
+// Diff(p, Intersect(p)) is equal unless p has patterns that match nothing,
+// which the intersection drops.
 //
 // # Cost bounds
 //

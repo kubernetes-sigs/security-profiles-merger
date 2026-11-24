@@ -18,6 +18,7 @@ package apparmor
 
 import (
 	"slices"
+	"strconv"
 
 	"sigs.k8s.io/security-profiles-merger/internal/merge"
 	"sigs.k8s.io/security-profiles-merger/spm"
@@ -73,18 +74,21 @@ type FilesystemDiff struct {
 
 // NetworkDiff describes differences in network rules.
 type NetworkDiff struct {
-	// AllowRaw is set when the raw socket permission differs.
-	AllowRaw *ValueDiff[*bool] `json:"allowRaw,omitempty"`
+	// AllowRaw is set when the raw socket permission differs. A side is
+	// false where its profile sets none.
+	AllowRaw *ValueDiff[bool] `json:"allowRaw,omitempty"`
 	// Protocols is set when the TCP or UDP permission differs.
 	Protocols *AllowedProtocolsDiff `json:"allowedProtocols,omitempty"`
 }
 
 // AllowedProtocolsDiff describes differences in the permitted protocols.
 type AllowedProtocolsDiff struct {
-	// AllowTCP is set when the TCP permission differs.
-	AllowTCP *ValueDiff[*bool] `json:"allowTcp,omitempty"`
-	// AllowUDP is set when the UDP permission differs.
-	AllowUDP *ValueDiff[*bool] `json:"allowUdp,omitempty"`
+	// AllowTCP is set when the TCP permission differs. A side is false
+	// where its profile sets none.
+	AllowTCP *ValueDiff[bool] `json:"allowTcp,omitempty"`
+	// AllowUDP is set when the UDP permission differs. A side is false
+	// where its profile sets none.
+	AllowUDP *ValueDiff[bool] `json:"allowUdp,omitempty"`
 }
 
 // CapabilityDiff describes differences in the capability rules.
@@ -94,19 +98,23 @@ type CapabilityDiff struct {
 	AllowedCapabilities *SliceDiff[string] `json:"allowedCapabilities,omitempty"`
 }
 
-// ValueDiff represents a changed value. It is [spm.ValueDiff]. For an
-// optional boolean, Diff sets both sides, false where a profile sets none.
+// ValueDiff represents a changed value. It is [spm.ValueDiff].
 type ValueDiff[T any] = spm.ValueDiff[T]
 
-// Diff compares two profiles by what AppArmor loads from them, without
-// validating them first, so a profile and its merge result compare equal
-// unless the merge changed what it permits. Paths are compared by the rule
-// they spell (/foo//bar, /foo/bar and an escaped spelling of either are one
-// rule, /foo/./bar another), and an omitted section or network boolean
-// equals the explicit empty section or false Intersect writes (see the Nil
-// and empty sections section). A nil profile is reported as an InputError
-// naming it (Index 0 for left, 1 for right) wrapping ErrNilProfile. The
-// diff shares no memory with the profiles.
+// Diff compares the rules two profiles spell, list by list, as AppArmor
+// loads them, without validating the profiles first. Paths are compared by
+// the rule they spell (/foo//bar, /foo/bar and an escaped spelling of
+// either are one rule, /foo/./bar another), and an omitted section or
+// network boolean equals the explicit empty section or false Intersect
+// writes (see the Nil and empty sections section). Diff does not compare
+// what the rules permit, so it can report a difference between profiles
+// that permit the same: a baseline listing /d/* read-write, intersected
+// with an artifact listing /d/* read-write and /d/x read-only, gives a
+// result that permits what the baseline permits, yet differs from it by
+// /d/x added to the read-only paths, which String writes as r:+/d/x. A
+// nil profile is reported as an InputError naming it (Index 0 for left, 1
+// for right) wrapping ErrNilProfile. The diff shares no memory with the
+// profiles.
 func Diff(left, right *Profile) (*ProfileDiff, error) {
 	err := merge.RequireNonNil(left, right)
 	if err != nil {
@@ -183,13 +191,9 @@ func diffNetwork(left, right *Profile) *NetworkDiff {
 }
 
 // diffBool compares two network booleans, which populateEmpty has set, and
-// returns nil when they agree. The diff holds copies of the values.
-func diffBool(left, right *bool) *ValueDiff[*bool] {
-	if *left == *right {
-		return nil
-	}
-
-	return &ValueDiff[*bool]{Left: merge.ClonePtr(left), Right: merge.ClonePtr(right)}
+// returns nil when they agree.
+func diffBool(left, right *bool) *ValueDiff[bool] {
+	return merge.NewValueDiff(*left, *right)
 }
 
 func diffCapabilities(left, right *Profile) *CapabilityDiff {
@@ -302,14 +306,14 @@ func writeNetworkDiff(out *merge.Builder, networkDiff *NetworkDiff) {
 
 	parts := merge.NewJoiner(out, ",")
 
-	var tcpDiff, udpDiff *ValueDiff[*bool]
+	var tcpDiff, udpDiff *ValueDiff[bool]
 	if networkDiff.Protocols != nil {
 		tcpDiff, udpDiff = networkDiff.Protocols.AllowTCP, networkDiff.Protocols.AllowUDP
 	}
 
 	for _, field := range [...]struct {
 		name string
-		diff *ValueDiff[*bool]
+		diff *ValueDiff[bool]
 	}{
 		{name: "raw", diff: networkDiff.AllowRaw},
 		{name: "tcp", diff: tcpDiff},
@@ -322,19 +326,8 @@ func writeNetworkDiff(out *merge.Builder, networkDiff *NetworkDiff) {
 		parts.Next()
 		out.WriteString(field.name)
 		out.WriteString(":")
-		writeBoolPtr(out, field.diff.Left)
+		out.WriteString(strconv.FormatBool(field.diff.Left))
 		out.WriteString("->")
-		writeBoolPtr(out, field.diff.Right)
-	}
-}
-
-func writeBoolPtr(out *merge.Builder, boolPtr *bool) {
-	switch {
-	case boolPtr == nil:
-		out.WriteString("<nil>")
-	case *boolPtr:
-		out.WriteString("true")
-	default:
-		out.WriteString("false")
+		out.WriteString(strconv.FormatBool(field.diff.Right))
 	}
 }

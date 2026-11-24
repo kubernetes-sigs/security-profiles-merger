@@ -356,13 +356,15 @@ log.Print(llCombined)
 
 The `examples/` directory contains sample profiles for each type (seccomp,
 AppArmor, Landlock) that can be used to try out the CLI or as starting points
-for custom profiles:
+for custom profiles. The seccomp examples are for x86-64, so they name
+that architecture with `--arch`; without it `spm` merges for the machine
+it runs on.
 
 ```sh
-spm merge --type seccomp --strategy intersect \
+spm merge --type seccomp --strategy intersect --arch SCMP_ARCH_X86_64 \
   examples/seccomp_baseline.json examples/seccomp_application.json
 
-spm merge --type seccomp --strategy union \
+spm merge --type seccomp --strategy union --arch SCMP_ARCH_X86_64 \
   examples/seccomp_recording_1.json examples/seccomp_recording_2.json
 
 spm diff --type apparmor --format human \

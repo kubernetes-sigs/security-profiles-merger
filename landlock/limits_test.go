@@ -402,17 +402,18 @@ func TestMergeLookupsCountCleanedPaths(t *testing.T) {
 // one profile of 8192 rules on the deepest path MaxPathLen allows would
 // cost 2^64 lookups, which wrap to 0 in a product of 64-bit counts. The
 // count stops past the share of the budget one input may take, so it reads
-// one rule.
+// one rule: the path and each of its MaxPathLen/2 parents.
 func TestMergeBudgetStopsCounting(t *testing.T) {
 	t.Parallel()
 
 	inputs := deepCopies(1<<20, 1<<13)
 	limit := uint64(landlock.MaxMergeWork / len(inputs))
+	want := uint64(landlock.MaxPathLen/2 + 1)
 
 	got, exceeded := landlock.MergeLookups(inputs, limit)
-	if !exceeded || got > limit+1 {
-		t.Errorf("lookups = %d, exceeded %t, want the count stopped just past %d",
-			got, exceeded, limit)
+	if !exceeded || got != want {
+		t.Errorf("lookups = %d, exceeded %t, want the count stopped at %d past %d",
+			got, exceeded, want, limit)
 	}
 }
 

@@ -369,7 +369,7 @@ func humanAppArmorDiff(diff *apparmor.ProfileDiff) string {
 		}
 
 		if changes := diff.Network; changes != nil {
-			var tcp, udp *apparmor.ValueDiff[*bool]
+			var tcp, udp *apparmor.ValueDiff[bool]
 			if changes.Protocols != nil {
 				tcp, udp = changes.Protocols.AllowTCP, changes.Protocols.AllowUDP
 			}
@@ -385,27 +385,17 @@ func humanAppArmorDiff(diff *apparmor.ProfileDiff) string {
 	})
 }
 
-// writeBoolChange writes a changed setting that may be unset, as "<nil>"
-// then, and nothing for a nil diff.
-func writeBoolChange(lines *humanText, prefix string, diff *apparmor.ValueDiff[*bool]) {
+// writeBoolChange writes a changed setting, and nothing for a nil diff.
+func writeBoolChange(lines *humanText, prefix string, diff *apparmor.ValueDiff[bool]) {
 	if diff == nil {
 		return
 	}
 
 	lines.line(func(out *merge.Builder) {
 		out.WriteString(prefix)
-
-		for idx, value := range []*bool{diff.Left, diff.Right} {
-			if idx > 0 {
-				out.WriteString("->")
-			}
-
-			if value == nil {
-				out.WriteString("<nil>")
-			} else {
-				out.WriteString(strconv.FormatBool(*value))
-			}
-		}
+		out.WriteString(strconv.FormatBool(diff.Left))
+		out.WriteString("->")
+		out.WriteString(strconv.FormatBool(diff.Right))
 	})
 }
 

@@ -19,6 +19,7 @@ package landlock
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -632,6 +633,21 @@ func (o Options) DecodeArtifact(data []byte) (*Profile, error) {
 	return strictjson.DecodeValidated(data, UnmarshalStrict, o.ValidateArtifact)
 }
 
+// String spells the options as Go source writes them, such as
+// "Options{ABI: ABIV4}", or "Options{}" for the zero value. A version this
+// package names no constant for, one newer than LatestABIVersion or below
+// ABIV1, is spelled as its number, as in "Options{ABI: 13}".
+func (o Options) String() string {
+	switch {
+	case o.ABI == 0:
+		return "Options{}"
+	case o.ABI >= ABIV1 && o.ABI <= LatestABIVersion:
+		return "Options{ABI: " + o.ABI.String() + "}"
+	default:
+		return "Options{ABI: " + strconv.Itoa(int(o.ABI)) + "}"
+	}
+}
+
 // Downgrade returns a copy of the profile without the access rights the ABI
 // version does not support, for a node that would rather enforce what its
 // kernel can than nothing. The copy is another policy: a right dropped from
@@ -639,7 +655,12 @@ func (o Options) DecodeArtifact(data []byte) (*Profile, error) {
 // kernel at ABIV1 denies every move or link into another directory under a
 // ruleset handling a filesystem right, so where the copy still handles one
 // it denies the moves the profile granted, and where refer was the only
-// filesystem right handled it restricts none.
+// filesystem right handled it restricts none. Every kernel denies such
+// moves only under a ruleset handling a filesystem right, so refer also
+// stops being restricted where the copy keeps no filesystem right at all,
+// whether or not the profile listed refer: a profile handling ioctl_dev
+// and bind_tcp, downgraded to ABIV4, handles bind_tcp alone and lets the
+// process move files between any directories.
 //
 // Rules lose the dropped rights and every rule left without a right is
 // dropped, also one that had none; rights this package does not know are
