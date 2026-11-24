@@ -58,16 +58,14 @@ func (c clause) sameResult(other clause) bool {
 	return !errnoSignificant(c.action) || compareUintPtr(c.errnoRet, other.errnoRet) == 0
 }
 
-// pickClause selects between two clauses using the given action preference.
-// On a tie the left clause wins, so ErrnoRet comes from the leftmost profile.
+// pickClause selects between two clauses using the given action preference,
+// which returns one of the two actions it is given. On a tie the left clause
+// wins, so ErrnoRet comes from the leftmost profile: whichever of two
+// equivalent actions pick returns is equivalent to the left one.
 func pickClause(
 	left, right clause,
 	pick func(first, second specs.LinuxSeccompAction) specs.LinuxSeccompAction,
 ) clause {
-	if actionsEquivalent(left.action, right.action) {
-		return left
-	}
-
 	if actionsEquivalent(pick(left.action, right.action), left.action) {
 		return left
 	}
@@ -583,9 +581,7 @@ func (m ruleMerger) settleInputs(rules map[string]*syscallRules, def *clause) {
 		}
 
 		if current.unconditional != nil {
-			if !m.settleNarrowFirst(current, def) {
-				delete(rules, name)
-			}
+			m.settleNarrowFirst(current)
 
 			continue
 		}
@@ -627,26 +623,17 @@ func (m ruleMerger) forInput(input *specs.LinuxSeccomp) ruleMerger {
 // clause where a 32-bit architecture the filter covers applies another
 // clause to every call (see settleInputs). The default applies to no call
 // of such a syscall on any architecture, so the collapse picks between the
-// two clauses alone. It reports false when the pick equals the default,
-// which then decides the syscall as the pick would. The pick is one of the
-// two clauses, and collectRules drops every clause equal to the default it
-// is given, so that happens only for a default other than the one the rules
-// were collected with; the check costs one comparison and keeps the syscall
-// from being emitted as a rule equal to the default.
-func (m ruleMerger) settleNarrowFirst(current *syscallRules, def *clause) bool {
+// two clauses alone. The pick is one of the two, and collectRules drops
+// every clause equal to the default, so it never equals the default and
+// the syscall keeps a rule.
+func (m ruleMerger) settleNarrowFirst(current *syscallRules) {
 	first := current.narrowFirst
 	if !m.narrowCovered || first == nil || first.sameResult(*current.unconditional) {
-		return true
+		return
 	}
 
 	picked := m.pickClause(*current.unconditional, *first)
-	if picked.sameResult(*def) {
-		return false
-	}
-
 	current.unconditional = &picked
-
-	return true
 }
 
 // settleOutput makes the merged rules of one syscall safe to emit: they
@@ -1424,8 +1411,8 @@ func (m ruleMerger) mergeProfileSyscalls(
 ) []specs.LinuxSyscall {
 	leftDef := defaultClause(left)
 	rightDef := defaultClause(right)
-	leftRules := collectRules(left.Syscalls, leftDef)
-	rightRules := collectRules(right.Syscalls, rightDef)
+	leftRules := m.readRules(left.Syscalls, leftDef)
+	rightRules := m.readRules(right.Syscalls, rightDef)
 
 	m.forInput(left).settleInputs(leftRules, leftDef)
 	m.forInput(right).settleInputs(rightRules, rightDef)
@@ -1443,7 +1430,14 @@ func (m ruleMerger) mergeProfileSyscalls(
 		result = appendRules(result, name, mergedDefault, fallback, conditional)
 	}
 
-	return result
+	return m.shareJoinedEntries(result)
+}
+
+// readRules reads syscall entries as collectRules reads them, with the
+// names of an alias the native architecture lacks read as one syscall (see
+// joinedAliases).
+func (m ruleMerger) readRules(syscalls []specs.LinuxSyscall, def *clause) map[string]*syscallRules {
+	return collectRules(joinAliases(syscalls, joinedAliases(m.native)), def)
 }
 
 // appendRules emits the settled rules of one syscall, eliding a fallback
@@ -1497,19 +1491,20 @@ func (m ruleMerger) finishRules(
 	return m.settleOutput(mergedDefault, fallback, conditional)
 }
 
-// settledSyscalls returns the entries of one profile the way a
-// merge in direction m reads them (see settleInputs), in the form a merge
-// result takes: one name per entry, conditional clauses sorted, and none
-// another one with the same result covers (see pruneCovered). def is the
-// profile default; entries equal to it are elided.
+// settledSyscalls returns the entries of one profile the way a merge in
+// the direction of merger reads them (see readRules and settleInputs), in
+// the form a merge result takes: one name per entry, conditional clauses
+// sorted, and none another one with the same result covers (see
+// pruneCovered). def is the profile default; entries equal to it are
+// elided.
 func settledSyscalls(
-	m ruleMerger, syscalls []specs.LinuxSyscall, def *clause,
+	merger ruleMerger, syscalls []specs.LinuxSyscall, def *clause,
 ) []specs.LinuxSyscall {
-	rules := collectRules(syscalls, def)
-	m.settleInputs(rules, def)
+	rules := merger.readRules(syscalls, def)
+	merger.settleInputs(rules, def)
 	pruneCovered(rules)
 
-	return syscallsOfRules(rules, def)
+	return merger.shareJoinedEntries(syscallsOfRules(rules, def))
 }
 
 // pruneCovered drops, from every syscall whose conditional clauses form a

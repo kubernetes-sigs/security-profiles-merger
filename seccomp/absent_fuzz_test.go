@@ -28,13 +28,15 @@ import (
 
 // The pools FuzzMergesKeepRulesOnEveryArchitecture draws from: syscalls
 // that architectures place differently, among them ones x86_64, x32,
-// aarch64 or x86 lack and ones only libseccomp 2.6 knows, architecture
+// aarch64 or x86 lack, ones only libseccomp 2.6 knows and the two names of
+// an alias, which libseccomp reads as one syscall there, architecture
 // lists that pair x86_64 with x32 or mix architectures that do and do not
 // have them, and native architectures including none.
 var (
 	absentNames = []string{
 		"socket", "socketcall", "accept", "open", "set_thread_area", "arch_prctl",
 		"read", "personality", "mseal", "uretprobe",
+		"switch_endian", "sys_debug_setcontext",
 	}
 	absentLists = [][]specs.Arch{
 		nil,

@@ -71,18 +71,16 @@ func TestSettleWithArchitecturesRebuildsWithout32Bit(t *testing.T) {
 	}
 }
 
-// TestSettleNarrowFirstLeavesTheDefaultToDecide covers a pick equal to the
-// default, which collectRules never leaves since it drops such clauses:
-// settleNarrowFirst reports it, so that settleInputs drops the syscall
-// rather than emit a rule the default already applies.
-func TestSettleNarrowFirstLeavesTheDefaultToDecide(t *testing.T) {
+// TestSettleNarrowFirstPicksBetweenTheClauses checks that a syscall whose
+// first rule decides every call on a covered 32-bit architecture, and whose
+// unconditional rule decides them elsewhere, settles to the pick of the two
+// in the merge direction, and that without a 32-bit architecture it keeps
+// its unconditional rule.
+func TestSettleNarrowFirstPicksBetweenTheClauses(t *testing.T) {
 	t.Parallel()
 
 	allow := clause{action: specs.ActAllow, errnoRet: nil, args: nil}
 	kill := clause{action: specs.ActKill, errnoRet: nil, args: nil}
-
-	merger := intersectRulesFor(specs.ArchX86_64)
-	merger.narrowCovered = true
 
 	rules := func() *syscallRules {
 		return &syscallRules{
@@ -90,14 +88,23 @@ func TestSettleNarrowFirstLeavesTheDefaultToDecide(t *testing.T) {
 		}
 	}
 
-	if merger.settleNarrowFirst(rules(), &kill) {
-		t.Error("a pick equal to the default was kept")
-	}
+	for _, test := range []struct {
+		merger        ruleMerger
+		narrowCovered bool
+		want          clause
+	}{
+		{merger: intersectRulesFor(specs.ArchX86_64), narrowCovered: true, want: kill},
+		{merger: unionRulesFor(specs.ArchX86_64), narrowCovered: true, want: allow},
+		{merger: intersectRulesFor(specs.ArchX86_64), narrowCovered: false, want: allow},
+	} {
+		test.merger.narrowCovered = test.narrowCovered
 
-	errno := clause{action: specs.ActErrno, errnoRet: nil, args: nil}
+		current := rules()
+		test.merger.settleNarrowFirst(current)
 
-	current := rules()
-	if !merger.settleNarrowFirst(current, &errno) || !current.unconditional.sameResult(kill) {
-		t.Errorf("under another default the pick is %v, want %v", current.unconditional, kill)
+		if !current.unconditional.sameResult(test.want) {
+			t.Errorf("intersect %v, narrowCovered %v: the pick is %v, want %v",
+				test.merger.intersect, test.narrowCovered, current.unconditional, test.want)
+		}
 	}
 }

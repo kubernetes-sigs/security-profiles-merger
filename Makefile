@@ -73,7 +73,11 @@ test: ## Run tests with race detection and coverage report (set RACE= to skip th
 # SPM_LIBSECCOMP_OPTIMIZE=2 to compile every filter as a binary tree, as
 # runc does above 32 syscall names. Only the tests the libseccomp tag adds
 # run: the tag adds files and changes nothing the other tests read, which
-# make test runs. TESTFLAGS go to go test after that selection; a -run
+# make test runs. They can take minutes on a slow runner, so the timeout
+# is 17 minutes rather than go test's default of ten: short of the 20 the
+# CI job allows for its checkout and libseccomp build as well, so that a
+# hang ends in go test's goroutine dump rather than in the job being
+# killed. TESTFLAGS go to go test after that selection; a -run or -timeout
 # among them replaces it.
 .PHONY: test-libseccomp
 test-libseccomp: ## Check the seccomp evaluation model against libseccomp itself (needs cgo and the libseccomp headers)
@@ -84,8 +88,8 @@ test-libseccomp: ## Check the seccomp evaluation model against libseccomp itself
 	tests=$$(grep -E '^(Test|Example|Fuzz)' "$$tagged" | \
 		grep -vxF -f "$$untagged" | paste -sd '|' -); \
 	if [ -z "$$tests" ]; then echo "the libseccomp tag adds no tests"; exit 1; fi; \
-	echo "CGO_ENABLED=1 $(GO) test -v -count=1 -tags libseccomp -run '^($$tests)$$' $(TESTFLAGS) ./seccomp/"; \
-	CGO_ENABLED=1 $(GO) test -v -count=1 -tags libseccomp -run "^($$tests)\$$" $(TESTFLAGS) ./seccomp/
+	echo "CGO_ENABLED=1 $(GO) test -v -count=1 -timeout=17m -tags libseccomp -run '^($$tests)$$' $(TESTFLAGS) ./seccomp/"; \
+	CGO_ENABLED=1 $(GO) test -v -count=1 -timeout=17m -tags libseccomp -run "^($$tests)\$$" $(TESTFLAGS) ./seccomp/
 
 # The apparmor_parser tag adds tests that check the apparmor package's port
 # of the parser's path stages against apparmor_parser itself. As with

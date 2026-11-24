@@ -149,6 +149,12 @@ func diffProfiles(native specs.Arch, left, right *specs.LinuxSeccomp) (*ProfileD
 		return nil, err
 	}
 
+	// The merges read the two names of an alias the native architecture
+	// lacks as one syscall (see joinedAliases), and so does Diff.
+	joined := joinedAliases(native)
+	leftSyscalls := joinAliases(left.Syscalls, joined)
+	rightSyscalls := joinAliases(right.Syscalls, joined)
+
 	diff := &ProfileDiff{
 		DefaultAction: merge.NewValueDiff(
 			defaultClause(left).action, defaultClause(right).action,
@@ -159,11 +165,12 @@ func diffProfiles(native specs.Arch, left, right *specs.LinuxSeccomp) (*ProfileD
 		ListenerPath:     merge.NewValueDiff(left.ListenerPath, right.ListenerPath),
 		ListenerMetadata: merge.NewValueDiff(left.ListenerMetadata, right.ListenerMetadata),
 		Syscalls: diffSyscallLists(
-			left.Syscalls, right.Syscalls, defaultClause(left), defaultClause(right),
+			leftSyscalls, rightSyscalls, defaultClause(left), defaultClause(right),
 		),
 	}
 	if diff.Syscalls != nil {
-		reportWrittenErrnos(diff.Syscalls, left.Syscalls, right.Syscalls)
+		reportWrittenErrnos(diff.Syscalls, leftSyscalls, rightSyscalls)
+		splitJoinedNames(diff.Syscalls, joined, left.Syscalls, right.Syscalls)
 	}
 	// Every field but Equal is a pointer, set only where its section
 	// differs, so the profiles are equal where none is set.
@@ -240,6 +247,105 @@ func diffSyscallLists(left, right []specs.LinuxSyscall, leftDef, rightDef *claus
 			}
 		},
 	)
+}
+
+// splitJoinedNames reports the changes of a syscall Diff read as the two
+// names of an alias (see joinedAliases), which it finds under the first
+// name, under the names the profiles use: each name of the alias some entry
+// of either profile names, so that a diff never names a syscall neither
+// profile does.
+func splitJoinedNames(diff *SyscallsDiff, joined []syscallAlias, left, right []specs.LinuxSyscall) {
+	split := false
+
+	for _, alias := range joined {
+		used := slices.DeleteFunc(slices.Clone(alias[:]), func(name string) bool {
+			return !slices.ContainsFunc(
+				slices.Concat(left, right),
+				func(entry specs.LinuxSyscall) bool {
+					return slices.Contains(entry.Names, name)
+				},
+			)
+		})
+
+		if slices.Equal(used, alias[:1]) {
+			continue
+		}
+
+		split = true
+		diff.Removed = renameEntries(diff.Removed, alias[0], used)
+		diff.Added = renameEntries(diff.Added, alias[0], used)
+
+		var changed []SyscallChange
+
+		for _, change := range diff.Changed {
+			if change.Name != alias[0] {
+				changed = append(changed, change)
+
+				continue
+			}
+
+			for _, name := range used {
+				changed = append(changed, SyscallChange{
+					Name:  name,
+					Left:  cloneDetails(change.Left),
+					Right: cloneDetails(change.Right),
+				})
+			}
+		}
+
+		diff.Changed = changed
+	}
+
+	if split {
+		byName := func(first, second SyscallEntry) int { return cmp.Compare(first.Name, second.Name) }
+		slices.SortStableFunc(diff.Removed, byName)
+		slices.SortStableFunc(diff.Added, byName)
+		slices.SortStableFunc(diff.Changed, func(first, second SyscallChange) int {
+			return cmp.Compare(first.Name, second.Name)
+		})
+	}
+}
+
+// renameEntries returns the entries with each entry of the syscall name
+// repeated under every one of names, in their place.
+func renameEntries(entries []SyscallEntry, name string, names []string) []SyscallEntry {
+	var renamed []SyscallEntry
+
+	for _, entry := range entries {
+		if entry.Name != name {
+			renamed = append(renamed, entry)
+
+			continue
+		}
+
+		for _, each := range names {
+			renamed = append(renamed, SyscallEntry{
+				Name: each, SyscallDetail: cloneDetails([]SyscallDetail{entry.SyscallDetail})[0],
+			})
+		}
+	}
+
+	return renamed
+}
+
+// cloneDetails returns a copy of rules sharing no memory with them, so that
+// the copies a diff reports under two names are its own.
+func cloneDetails(details []SyscallDetail) []SyscallDetail {
+	if details == nil {
+		return nil
+	}
+
+	cloned := make([]SyscallDetail, len(details))
+
+	for idx, detail := range details {
+		cloned[idx] = SyscallDetail{
+			Action:   detail.Action,
+			ErrnoRet: merge.ClonePtr(detail.ErrnoRet),
+			Args:     slices.Clone(detail.Args),
+		}
+	}
+
+	return cloned
 }
 
 // syscallVerdict is how a syscall compares where its entries are not
