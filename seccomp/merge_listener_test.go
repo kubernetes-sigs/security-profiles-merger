@@ -161,12 +161,33 @@ func TestMergesRefuseListenerConflicts(t *testing.T) {
 			blamed:   1,
 		},
 		{
+			// The runtime-spec forbids listenerMetadata without a
+			// listenerPath, so Validate refuses it in every input.
 			name:  "intersect with listener metadata alone",
 			merge: seccomp.Intersect,
 			profiles: []*specs.LinuxSeccomp{listening(), {
 				DefaultAction: specs.ActAllow, ListenerMetadata: metaA,
 			}},
-			sentinel: seccomp.ErrConflictingListener,
+			sentinel: seccomp.ErrListenerMetadataWithoutPath,
+			blamed:   1,
+		},
+		{
+			name:  "intersect of one input with listener metadata alone",
+			merge: seccomp.Intersect,
+			profiles: []*specs.LinuxSeccomp{{
+				DefaultAction: specs.ActErrno, ListenerMetadata: metaA,
+			}},
+			sentinel: seccomp.ErrListenerMetadataWithoutPath,
+			blamed:   0,
+		},
+		{
+			name:  "union with listener metadata alone",
+			merge: seccomp.Union,
+			profiles: []*specs.LinuxSeccomp{
+				notifyingProfile(listenerSock, metaA, "mkdir"),
+				{DefaultAction: specs.ActErrno, ListenerMetadata: "stray"},
+			},
+			sentinel: seccomp.ErrListenerMetadataWithoutPath,
 			blamed:   1,
 		},
 		{
@@ -251,22 +272,6 @@ func TestMergesTakeTheListener(t *testing.T) {
 			merge:    seccomp.Intersect,
 			profiles: []*specs.LinuxSeccomp{same("mkdir"), bare, same("chmod")},
 			want:     "Profile{default:SCMP_ACT_ERRNO listener:/run/agent.sock listenerMeta:meta-a}",
-		},
-		{
-			// listenerMetadata without a listenerPath names no listener and
-			// has always been ignored.
-			name:  "union ignores listener metadata without a path",
-			merge: seccomp.Union,
-			profiles: []*specs.LinuxSeccomp{
-				{
-					DefaultAction:    specs.ActErrno,
-					ListenerMetadata: "stray",
-				},
-				same("mkdir"),
-				same("chmod"),
-			},
-			want: "Profile{default:SCMP_ACT_ERRNO listener:/run/agent.sock listenerMeta:meta-a " +
-				"chmod,mkdir->SCMP_ACT_NOTIFY}",
 		},
 		{
 			// The intersection denies read, so nothing notifies, but the

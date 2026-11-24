@@ -1738,9 +1738,9 @@ func TestMergeReportsEveryBadInputAcrossModes(t *testing.T) {
 			modes:       "default,artifact",
 			defaultBad: `{"defaultAction":"SCMP_ACT_ERRNO",` +
 				`"syscalls":[{"names":[],"action":"SCMP_ACT_ALLOW"}]}`,
-			checkedBad:  `{"defaultAction":"SCMP_ACT_ERRNO","listenerMetadata":"x"}`,
+			checkedBad:  `{"defaultAction":"SCMP_ACT_ERRNO","listenerPath":"x"}`,
 			wantDefault: "syscalls[0].names: syscall entry has no names",
-			wantChecked: "listenerMetadata: listener settings are not allowed",
+			wantChecked: "listenerPath: listener settings are not allowed",
 		},
 		{
 			name:        "apparmor",
@@ -1805,7 +1805,7 @@ func TestMergeNamesEveryBadInput(t *testing.T) {
 func TestMergeChecksLeftInputsAlone(t *testing.T) {
 	t.Parallel()
 
-	artifact := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO","listenerMetadata":"x"}`)
+	artifact := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO","listenerPath":"/run/x.sock"}`)
 	first := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO","listenerPath":"/run/a.sock"}`)
 	second := writeTemp(t, `{"defaultAction":"SCMP_ACT_ERRNO","listenerPath":"/run/b.sock"}`)
 
@@ -1814,9 +1814,256 @@ func TestMergeChecksLeftInputsAlone(t *testing.T) {
 		"--validate", "artifact,default,default", artifact, first, second,
 	}, nil)
 
-	want := "error: " + artifact + ": listenerMetadata: listener settings are not allowed\n"
+	want := "error: " + artifact + ": listenerPath: listener settings are not allowed\n"
 	if code != 1 || stdout != "" || stderr != want {
 		t.Errorf("exit code = %d, stdout = %q, stderr = %q, want 1, nothing and %q",
 			code, stdout, stderr, want)
+	}
+}
+
+// TestListenerMetadataWithoutPath covers a seccomp profile with a
+// listenerMetadata and no listenerPath, which the runtime-spec forbids: the
+// baseline check refuses it, and so does a merge of it alone, rather than
+// carry it into the result. The artifact and strict checks report it once,
+// not also as a listener setting an artifact may not hold, while an
+// artifact setting both members gets one error for each.
+func TestListenerMetadataWithoutPath(t *testing.T) {
+	t.Parallel()
+
+	profile := writeTemp(t, `{"defaultAction":"SCMP_ACT_ALLOW","listenerMetadata":"id=1"}`)
+	baseline := writeTemp(t, `{"defaultAction":"SCMP_ACT_ALLOW"}`)
+	want := "error: " + profile + ": listenerMetadata: set without a listenerPath\n"
+
+	for _, args := range [][]string{
+		{cmdValidate, flagType, typeSeccomp, "--baseline", flagQuiet, profile},
+		{cmdValidate, flagType, typeSeccomp, "--artifact", flagQuiet, profile},
+		{cmdValidate, flagType, typeSeccomp, flagStrict, flagQuiet, profile},
+		{cmdMerge, flagType, typeSeccomp, flagStrategy, strategyIntersect, profile},
+		{
+			cmdMerge, flagType, typeSeccomp, flagStrategy, strategyIntersect,
+			"--validate", "default,artifact", baseline, profile,
+		},
+	} {
+		code, stdout, stderr := runCapture(t, args, nil)
+		if code != 1 || stdout != "" || stderr != want {
+			t.Errorf("%v: exit code = %d, stdout = %q, stderr = %q, want 1, nothing and %q",
+				args, code, stdout, stderr, want)
+		}
+	}
+
+	both := writeTemp(t, `{"defaultAction":"SCMP_ACT_ALLOW",`+
+		`"listenerPath":"/run/x.sock","listenerMetadata":"id=1"}`)
+	wantBoth := "error: " + both + ": listenerPath: listener settings are not allowed\n" +
+		"error: " + both + ": listenerMetadata: listener settings are not allowed\n"
+
+	code, stdout, stderr := runCapture(t, []string{
+		cmdValidate, flagType, typeSeccomp, "--artifact", flagQuiet, both,
+	}, nil)
+	if code != 1 || stdout != "" || stderr != wantBoth {
+		t.Errorf("both members: exit code = %d, stdout = %q, stderr = %q, want 1, nothing and %q",
+			code, stdout, stderr, wantBoth)
+	}
+}
+
+// TestMergeLandlockLoweredPaths covers the lowered rule paths of a Landlock
+// intersection: the baseline grants read_file on /srv and the artifact on
+// /srv/link, so the result carries the baseline's grant onto a path the
+// artifact chose, which a symlink there would carry elsewhere once the
+// result is loaded by pathname. With an input checked as artifact or
+// strict the run refuses the result; otherwise it writes it and names the
+// path in a warning. A union lowers nothing.
+func TestMergeLandlockLoweredPaths(t *testing.T) {
+	t.Parallel()
+
+	baseline := writeTemp(t, `{"handledAccessFs":["read_file"],`+
+		`"pathRules":[{"path":"/srv","accessFs":["read_file"]}]}`)
+	artifact := writeTemp(t, `{"handledAccessFs":["read_file"],`+
+		`"pathRules":[{"path":"/srv/link","accessFs":["read_file"]}]}`)
+
+	const (
+		refused = `error: the intersection carries grants onto lowered rule paths, ` +
+			`which loading it by pathname can widen: "/srv/link" beneath "/srv"; ` +
+			"load the inputs as separate Landlock layers\n"
+		warned = `warning: the intersection carries grants onto lowered rule paths, ` +
+			`which loading it by pathname can widen: "/srv/link" beneath "/srv"` + "\n"
+	)
+
+	for _, test := range []struct {
+		name     string
+		args     []string
+		wantCode int
+		wantOut  bool
+		want     string
+	}{
+		{
+			name:     "artifact input",
+			args:     []string{flagStrategy, strategyIntersect, "--validate", "default,artifact"},
+			wantCode: 1,
+			want:     refused,
+		},
+		{
+			name: "artifact input, human format",
+			args: []string{
+				flagStrategy, strategyIntersect, "--validate", "artifact", flagFormat, "human",
+			},
+			wantCode: 1,
+			want:     refused,
+		},
+		{
+			name:     "default checks",
+			args:     []string{flagStrategy, strategyIntersect},
+			wantCode: 0,
+			wantOut:  true,
+			want:     warned,
+		},
+		{
+			name:     "strict checks",
+			args:     []string{flagStrategy, strategyIntersect, "--validate", "strict"},
+			wantCode: 1,
+			want:     refused,
+		},
+		{
+			name:     "union",
+			args:     []string{flagStrategy, strategyUnion, "--validate", "default,artifact"},
+			wantCode: 0,
+			wantOut:  true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			args := append([]string{cmdMerge, flagType, typeLandlock}, test.args...)
+			args = append(args, baseline, artifact)
+
+			code, stdout, stderr := runCapture(t, args, nil)
+			if code != test.wantCode || (stdout != "") != test.wantOut || stderr != test.want {
+				t.Errorf("exit code = %d, stdout = %q, stderr = %q, want %d, output %v and %q",
+					code, stdout, stderr, test.wantCode, test.wantOut, test.want)
+			}
+		})
+	}
+}
+
+// TestMergeLandlockLoweredBeneathRoot covers lowered rule paths beneath
+// "/": where the result grants no refer, the baseline's rule on "/" grants
+// those rights on everything a path from the root reaches, so the path
+// widens nothing and is accepted, in artifact mode without a warning. A
+// result granting refer gets no such exception, and a path lowered from
+// another ancestor beside one beneath "/" is refused alone.
+func TestMergeLandlockLoweredBeneathRoot(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name               string
+		baseline, artifact string
+		wantCode           int
+		want               string
+	}{
+		{
+			name: "no refer",
+			baseline: `{"handledAccessFs":["read_file"],` +
+				`"pathRules":[{"path":"/","accessFs":["read_file"]}]}`,
+			artifact: `{"handledAccessFs":["read_file"],` +
+				`"pathRules":[{"path":"/srv/link","accessFs":["read_file"]}]}`,
+			wantCode: 0,
+		},
+		{
+			name: "refer",
+			baseline: `{"handledAccessFs":["read_file","refer"],` +
+				`"pathRules":[{"path":"/","accessFs":["read_file","refer"]}]}`,
+			artifact: `{"handledAccessFs":["read_file","refer"],` +
+				`"pathRules":[{"path":"/srv/link","accessFs":["read_file","refer"]}]}`,
+			wantCode: 1,
+			want:     `"/srv/link" beneath "/"; load`,
+		},
+		{
+			name: "beside a path lowered from another ancestor",
+			baseline: `{"handledAccessFs":["read_file","write_file"],"pathRules":[` +
+				`{"path":"/","accessFs":["read_file"]},{"path":"/srv","accessFs":["write_file"]}]}`,
+			artifact: `{"handledAccessFs":["read_file","write_file"],"pathRules":[` +
+				`{"path":"/srv/a","accessFs":["read_file","write_file"]},` +
+				`{"path":"/opt/b","accessFs":["read_file"]}]}`,
+			wantCode: 1,
+			want:     `widen: "/srv/a" beneath "/srv"; load`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			baseline, artifact := writeTemp(t, test.baseline), writeTemp(t, test.artifact)
+
+			code, stdout, stderr := runCapture(t, []string{
+				cmdMerge, flagType, typeLandlock, flagStrategy, strategyIntersect,
+				"--validate", "default,artifact", baseline, artifact,
+			}, nil)
+			if code != test.wantCode || (stdout != "") != (test.wantCode == 0) ||
+				!strings.Contains(stderr, test.want) || test.want == "" && stderr != "" ||
+				strings.Contains(stderr, "/opt/b") {
+				t.Errorf("exit code = %d, stdout = %q, stderr = %q, want %d and %q",
+					code, stdout, stderr, test.wantCode, test.want)
+			}
+		})
+	}
+}
+
+// TestMergeLandlockLoweredPathsBounded covers a result with more lowered
+// rule paths than a message names: the rest are counted.
+func TestMergeLandlockLoweredPathsBounded(t *testing.T) {
+	t.Parallel()
+
+	rules := make([]string, maxLoweredListed+2)
+	for idx := range rules {
+		rules[idx] = fmt.Sprintf(`{"path":"/srv/%02d","accessFs":["read_file"]}`, idx)
+	}
+
+	baseline := writeTemp(t, `{"handledAccessFs":["read_file"],`+
+		`"pathRules":[{"path":"/srv","accessFs":["read_file"]}]}`)
+	artifact := writeTemp(t, `{"handledAccessFs":["read_file"],"pathRules":[`+
+		strings.Join(rules, ",")+`]}`)
+
+	code, stdout, stderr := runCapture(t, []string{
+		cmdMerge, flagType, typeLandlock, flagStrategy, strategyIntersect,
+		"--validate", "default,artifact", baseline, artifact,
+	}, nil)
+	if code != 1 || stdout != "" ||
+		!strings.Contains(stderr, `"/srv/09" beneath "/srv", and 2 more;`) ||
+		strings.Contains(stderr, `"/srv/10"`) {
+		t.Errorf("exit code = %d, stdout = %q, stderr = %q, want 1 and ten paths named",
+			code, stdout, stderr)
+	}
+}
+
+// TestMergeChecksResultABI covers --abi on the result of a merge: two ABI
+// 1 profiles that share no handled right merge by union into one handling
+// refer alone, which needs ABI 2, so the run fails rather than write a
+// profile the kernel of that version refuses. The inputs alone pass.
+func TestMergeChecksResultABI(t *testing.T) {
+	t.Parallel()
+
+	reads := writeTemp(t, `{"handledAccessFs":["read_file"],`+
+		`"pathRules":[{"path":"/","accessFs":["read_file"]}]}`)
+	writes := writeTemp(t, `{"handledAccessFs":["write_file"],`+
+		`"pathRules":[{"path":"/","accessFs":["write_file"]}]}`)
+
+	want := `error: merge result: handledAccessFs[0]: "refer": access right needs a newer ` +
+		"Landlock ABI (needs v2, have v1)\n"
+
+	for _, modes := range []string{"default", "artifact"} {
+		code, stdout, stderr := runCapture(t, []string{
+			cmdMerge, flagStrategy, strategyUnion, "--validate", modes, "--abi", "1",
+			flagNoDetectNote, reads, writes,
+		}, nil)
+		if code != 1 || stdout != "" || stderr != want {
+			t.Errorf("--validate %s: exit code = %d, stdout = %q, stderr = %q, "+
+				"want 1, nothing and %q", modes, code, stdout, stderr, want)
+		}
+	}
+
+	code, stdout, stderr := runCapture(t, []string{
+		cmdMerge, flagStrategy, strategyUnion, "--abi", "2", flagNoDetectNote, reads, writes,
+	}, nil)
+	if code != 0 || !strings.Contains(stdout, `"refer"`) || stderr != "" {
+		t.Errorf("--abi 2: exit code = %d, stdout = %q, stderr = %q, want 0 and the result",
+			code, stdout, stderr)
 	}
 }

@@ -905,9 +905,10 @@ type LoweredPath struct {
 // paths where the result grants a right that some input grants through a
 // rule on an ancestor and not through its own rule on the path, once each,
 // sorted by path, or nil when no grant was lowered. A caller opens these
-// paths as the Lowered rule paths section says. It fails as Intersect
-// fails, and reads the inputs as the merge reads them: paths cleaned, rules
-// for one path folded, unhandled rights dropped.
+// paths as the Lowered rule paths section says, which also names the
+// filesystem layout this needs. It fails as Intersect fails, and reads the
+// inputs as the merge reads them: paths cleaned, rules for one path folded,
+// unhandled rights dropped.
 //
 // A copy of the result that Options.Downgrade returns carries a subset of
 // the rights at each rule path, so its lowered paths are among these, and

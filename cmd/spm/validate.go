@@ -58,14 +58,14 @@ baseline, and cannot be combined with each other or with --validate.
 artifact is for a profile a runtime did not author, such as one pulled
 with a workload: it adds the limits and checks of the library's
 ValidateArtifact. strict is for a profile a person wrote: it adds to those
-what is likely a mistake, such as a duplicate entry. Both decode strictly,
-refusing unknown and misspelled fields, missing required members and
-invalid UTF-8, which the default checks only warn about. baseline is for
-the baseline a runtime merges every artifact into, checked as the runtime
+what is likely a mistake, such as a duplicate entry. baseline is for the
+baseline a runtime merges every artifact into, checked as the runtime
 checks it at config load, with the library's ValidateBaseline: for seccomp
 and AppArmor it refuses a baseline the merge does not read exactly, and
 for Landlock what the merge would read otherwise than meant, such as a
-rule granting a right the baseline does not handle.
+rule granting a right the baseline does not handle. All three decode
+strictly, refusing unknown and misspelled fields, missing required members
+and invalid UTF-8, which the default checks only warn about.
 
 --arch names the native seccomp architecture of the node that loads the
 profiles. A value above 32 bits is refused where that node covers a 32-bit
@@ -187,6 +187,7 @@ func (opts *validateOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) i
 // back.
 func validateInputs(opts *validateOptions, inv *invocation) int {
 	inv.checks = &inputChecks{modes: inv.validateModes(opts.modes)}
+	inv.quiet = opts.quiet
 
 	// --quiet promises a silent stderr on success, so it implies
 	// --no-detect-note.
@@ -196,12 +197,8 @@ func validateInputs(opts *validateOptions, inv *invocation) int {
 	}
 
 	code = inv.kind.validateCommand(inv)
-	if code != 0 {
+	if code != 0 || opts.quiet {
 		return code
-	}
-
-	if opts.quiet {
-		return 0
 	}
 
 	return flushOutput(opts.output, inv.out.Bytes(), inv.stdout, inv.stderr)
@@ -265,9 +262,10 @@ func checkModeFlags(opts *validateOptions, flags *flag.FlagSet, stderr io.Writer
 
 // validateCommand decodes and checks under its mode every profile that the
 // report holds no failure for, and writes them when none failed, the ones
-// the report holds included. A mode that decodes strictly makes the JSON
-// ambiguities unmarshalAll looks for, such as members the profile type does
-// not know, errors rather than warnings.
+// the report holds included, unless the run is quiet, which composes no
+// output. A mode that decodes strictly makes the JSON ambiguities
+// unmarshalAll looks for, such as members the profile type does not know,
+// errors rather than warnings.
 func (ops kindOps[T, D]) validateCommand(inv *invocation) int {
 	modes := inv.checks.modes
 	strict := make([]bool, len(modes))
@@ -298,13 +296,25 @@ func (ops kindOps[T, D]) validateCommand(inv *invocation) int {
 
 	// The report is read for the warnings before it is flushed, which
 	// forgets them.
-	decoded, err := encodeAmbiguous(profiles, report)
+	encode := inv.encode
+	if encode == nil {
+		encode = encodeJSON
+	}
+
+	decoded, err := encodeAmbiguous(profiles, report, encode)
 	report.flush(inv.stderr)
 
 	if err != nil {
 		_, _ = fmt.Fprintf(inv.stderr, "error: %v\n", err)
 
 		return 1
+	}
+
+	// A quiet run fails where a plain one would, so it encodes the
+	// profiles above, and skips only composing the output: --quiet cannot
+	// be combined with --format, so the warnings are all it writes.
+	if inv.quiet {
+		return 0
 	}
 
 	_, _ = inv.out.Write(escapeInvisible(validatedJSON(inv.inputs, decoded)))
@@ -340,7 +350,9 @@ var readAlike = []error{spm.ErrMisspelledField, spm.ErrInvalidUTF8, spm.ErrMissi
 // every other one. Written as it was read, the profile validate judged and
 // the one another reader loads would differ. Members the profile type does
 // not know are dropped then, as the warning about them says.
-func encodeAmbiguous[T any](profiles []*T, report *inputReport) ([][]byte, error) {
+func encodeAmbiguous[T any](
+	profiles []*T, report *inputReport, encode func(io.Writer, any) error,
+) ([][]byte, error) {
 	decoded := make([][]byte, len(profiles))
 
 	for idx, profile := range profiles {
@@ -352,7 +364,7 @@ func encodeAmbiguous[T any](profiles []*T, report *inputReport) ([][]byte, error
 
 		var out bytes.Buffer
 
-		err := encodeJSON(&out, profile)
+		err := encode(&out, profile)
 		if err != nil {
 			return nil, err
 		}

@@ -75,9 +75,21 @@ var fsRightBits = map[landlock.FSAccessRight]uint64{
 
 // childSpec is what the child of a Landlock test applies: each profile as
 // a ruleset of its own, in order, then the probes on the tree at root.
+// Mounts are the bind mounts the child makes first, in a user and mount
+// namespace of its own, and Beneath maps a rule path to the ancestor the
+// child opens it beneath, as the integration guide's recipe opens a
+// lowered rule path, rather than by name.
 type childSpec struct {
-	Root   string              `json:"root"`
-	Layers []*landlock.Profile `json:"layers"`
+	Root    string              `json:"root"`
+	Layers  []*landlock.Profile `json:"layers"`
+	Mounts  []bindMount         `json:"mounts,omitempty"`
+	Beneath map[string]string   `json:"beneath,omitempty"`
+}
+
+// bindMount is a bind mount of Source onto Target.
+type bindMount struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
 }
 
 // probes are the accesses a case compares, named by what each does. A child
@@ -202,7 +214,16 @@ func landlockChild(spec string) int {
 
 	err := json.Unmarshal([]byte(spec), &child)
 	if err == nil {
-		err = restrict(child.Layers)
+		err = mountAll(child.Mounts)
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+			fmt.Fprintln(os.Stderr, err)
+
+			return mountFailedExit
+		}
+	}
+
+	if err == nil {
+		err = restrict(child.Layers, child.Beneath)
 	}
 
 	if err != nil {
@@ -224,15 +245,36 @@ func landlockChild(spec string) int {
 	return 0
 }
 
-// restrict applies each profile as a Landlock layer of its own.
-func restrict(layers []*landlock.Profile) error {
+// mountFailedExit is the exit code of a child whose bind mounts were
+// refused with EPERM or EACCES, as where a user namespace is created but
+// grants no mount, such as on Ubuntu with
+// kernel.apparmor_restrict_unprivileged_userns set. Any other failure is
+// a bug of the test, and exits as every other failure of the child does.
+const mountFailedExit = 3
+
+// mountAll makes the bind mounts, in the mount namespace the child was
+// started in.
+func mountAll(mounts []bindMount) error {
+	for _, each := range mounts {
+		err := syscall.Mount(each.Source, each.Target, "", syscall.MS_BIND, "")
+		if err != nil {
+			return fmt.Errorf("bind mount %s on %s: %w", each.Source, each.Target, err)
+		}
+	}
+
+	return nil
+}
+
+// restrict applies each profile as a Landlock layer of its own, opening
+// the rule paths beneath maps beneath their ancestor.
+func restrict(layers []*landlock.Profile, beneath map[string]string) error {
 	_, _, errno := syscall.RawSyscall(syscall.SYS_PRCTL, prSetNoNewPrivs, 1, 0)
 	if errno != 0 {
 		return fmt.Errorf("no_new_privs: %w", errno)
 	}
 
 	for idx, profile := range layers {
-		err := restrictOne(profile)
+		err := restrictOne(profile, beneath)
 		if err != nil {
 			return fmt.Errorf("layer %d: %w", idx, err)
 		}
@@ -243,8 +285,9 @@ func restrict(layers []*landlock.Profile) error {
 
 // restrictOne builds a ruleset from profile, opening each rule path as a
 // runtime that does not check IntersectLowered would, following symlinks,
-// and enforces it on this thread.
-func restrictOne(profile *landlock.Profile) error {
+// or beneath the ancestor beneath maps it to, and enforces it on this
+// thread.
+func restrictOne(profile *landlock.Profile, beneath map[string]string) error {
 	if len(profile.HandledAccessNet) > 0 || len(profile.Scoped) > 0 {
 		return errNotFS
 	}
@@ -268,7 +311,7 @@ func restrictOne(profile *landlock.Profile) error {
 	defer func() { _ = syscall.Close(int(ruleset)) }()
 
 	for _, rule := range profile.PathRules {
-		err = addRule(int(ruleset), rule)
+		err = addRule(int(ruleset), rule, beneath[rule.Path])
 		if err != nil {
 			return fmt.Errorf("%s: %w", rule.Path, err)
 		}
@@ -283,16 +326,17 @@ func restrictOne(profile *landlock.Profile) error {
 }
 
 // addRule adds a path-beneath rule, a packed struct of the rights as 64
-// bits and the descriptor as 32.
-func addRule(ruleset int, rule landlock.PathRule) error {
+// bits and the descriptor as 32. The rule path is opened by name, or
+// beneath ancestor where it is set (see openRulePath).
+func addRule(ruleset int, rule landlock.PathRule, ancestor string) error {
 	allowed, err := rightBits(rule.AccessFS)
 	if err != nil {
 		return err
 	}
 
-	parent, err := syscall.Open(rule.Path, oPath|syscall.O_CLOEXEC, 0)
+	parent, err := openRulePath(rule.Path, ancestor)
 	if err != nil {
-		return fmt.Errorf("open: %w", err)
+		return err
 	}
 
 	defer func() { _ = syscall.Close(parent) }()
@@ -309,6 +353,34 @@ func addRule(ruleset int, rule landlock.PathRule) error {
 	}
 
 	return nil
+}
+
+// openRulePath opens path as O_PATH: by name, following symlinks, where
+// ancestor is empty, and otherwise as the integration guide's recipe opens
+// a lowered rule path, beneath ancestor with openat2.
+func openRulePath(path, ancestor string) (int, error) {
+	if ancestor == "" {
+		fd, err := syscall.Open(path, oPath|syscall.O_CLOEXEC, 0)
+		if err != nil {
+			return -1, fmt.Errorf("open: %w", err)
+		}
+
+		return fd, nil
+	}
+
+	dir, err := syscall.Open(ancestor, oPath|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("open %s: %w", ancestor, err)
+	}
+
+	defer func() { _ = syscall.Close(dir) }()
+
+	rel, err := filepath.Rel(ancestor, path)
+	if err != nil {
+		return -1, fmt.Errorf("%s beneath %s: %w", path, ancestor, err)
+	}
+
+	return openBeneath(dir, rel)
 }
 
 func rightBits(rights []landlock.FSAccessRight) (uint64, error) {
@@ -355,12 +427,31 @@ func applied(
 ) map[string]string {
 	t.Helper()
 
+	return appliedSpec(t, setup, func(root string) childSpec {
+		return childSpec{Layers: layers(root)}
+	})
+}
+
+// appliedSpec runs the probes in a child that does what specFor says for
+// its tree, a tree of its own that setup may add to, and returns the
+// results. A child that makes bind mounts runs in a user and mount
+// namespace of its own, so they stay out of every other test's view.
+func appliedSpec(
+	t *testing.T,
+	setup func(root string),
+	specFor func(root string) childSpec,
+) map[string]string {
+	t.Helper()
+
 	root := makeTree(t)
 	if setup != nil {
 		setup(root)
 	}
 
-	spec, err := json.Marshal(childSpec{Root: root, Layers: layers(root)})
+	child := specFor(root)
+	child.Root = root
+
+	spec, err := json.Marshal(child)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,13 +460,21 @@ func applied(
 
 	cmd.Env = append(os.Environ(), landlockChildEnv+"="+string(spec))
 
+	if len(child.Mounts) > 0 {
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS,
+			UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
+			GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
+		}
+	}
+
 	var stderr strings.Builder
 
 	cmd.Stderr = &stderr
 
 	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("child: %v: %s", err, stderr.String())
+		childFailed(t, err, len(child.Mounts) > 0, stderr.String())
 	}
 
 	var results map[string]string
@@ -394,6 +493,24 @@ func fs(rights ...landlock.FSAccessRight) []landlock.FSAccessRight { return righ
 // rule is a shorthand for a path rule under root.
 func rule(root, rel string, rights ...landlock.FSAccessRight) landlock.PathRule {
 	return landlock.PathRule{Path: filepath.Join(root, rel), AccessFS: rights}
+}
+
+// childFailed ends a test whose child failed. A child that makes bind
+// mounts and could not be started in a user and mount namespace, or could
+// not mount in it, skips the test, or fails it where requireEnv asks.
+func childFailed(t *testing.T, err error, mounts bool, stderr string) {
+	t.Helper()
+
+	var exitErr *exec.ExitError
+
+	switch {
+	case mounts && !errors.As(err, &exitErr):
+		skipOrFailf(t, "no user and mount namespace for the child: %v", err)
+	case mounts && exitErr.ExitCode() == mountFailedExit:
+		skipOrFailf(t, "no bind mount in the child's namespace: %s", stderr)
+	default:
+		t.Fatalf("child: %v: %s", err, stderr)
+	}
 }
 
 // TestIntersectLoadsAsItsLayers compares Intersect of two profiles, applied
@@ -621,6 +738,163 @@ func TestLoweredRulePathOnASymlink(t *testing.T) {
 
 	if len(lowered) == 0 {
 		t.Error("IntersectLowered reported nothing")
+	}
+}
+
+// makeSub returns the setup of the bind-mount tests, which adds a/sub
+// holding a file to the tree.
+func makeSub(t *testing.T) func(root string) {
+	t.Helper()
+
+	return func(root string) {
+		err := os.Mkdir(filepath.Join(root, "a", "sub"), 0o755)
+		if err == nil {
+			err = os.WriteFile(filepath.Join(root, "a", "sub", "file"), []byte("x"), 0o644)
+		}
+
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// subOverB is the bind mount of the bind-mount tests, which exposes a/sub
+// at b, so that b/file is a/sub/file.
+func subOverB(root string) []bindMount {
+	return []bindMount{{
+		Source: filepath.Join(root, "a", "sub"),
+		Target: filepath.Join(root, "b"),
+	}}
+}
+
+// TestLoweredRulePathUnderABindMount pins the condition the integration
+// guide puts on opening a lowered rule path beneath its ancestor: the
+// kernel binds a rule to the object, not to the name it was opened by. The
+// artifact names a/sub below the baseline's rule on a, and a bind mount
+// exposes a/sub at b, outside a. The child opens a/sub beneath a as the
+// recipe says, which crosses no mount and succeeds, yet the merged rule
+// grants reading b/file through the bind mount, which the baseline layer
+// denies when the inputs are stacked.
+func TestLoweredRulePathUnderABindMount(t *testing.T) {
+	t.Parallel()
+
+	requireLandlock(t)
+
+	read := landlock.FSAccessReadFile
+	sub := makeSub(t)
+	mounts := subOverB
+	baseline := func(root string) *landlock.Profile {
+		return &landlock.Profile{
+			HandledAccessFS: fs(read),
+			PathRules:       []landlock.PathRule{rule(root, "a", read)},
+		}
+	}
+	artifact := func(root string) *landlock.Profile {
+		return &landlock.Profile{
+			HandledAccessFS: fs(read),
+			PathRules:       []landlock.PathRule{rule(root, "a/sub", read)},
+		}
+	}
+
+	merged := appliedSpec(t, sub, func(root string) childSpec {
+		effective, lowered, err := landlock.IntersectLowered(baseline(root), artifact(root))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		want := []landlock.LoweredPath{{
+			Path:     filepath.Join(root, "a", "sub"),
+			Ancestor: filepath.Join(root, "a"),
+			Input:    0,
+			InRoot:   false,
+		}}
+		if !slices.Equal(lowered, want) {
+			t.Errorf("IntersectLowered = %+v, want %+v", lowered, want)
+		}
+
+		beneath := make(map[string]string, len(lowered))
+		for _, each := range lowered {
+			beneath[each.Path] = each.Ancestor
+		}
+
+		return childSpec{
+			Layers:  []*landlock.Profile{effective},
+			Mounts:  mounts(root),
+			Beneath: beneath,
+		}
+	})
+	stacked := appliedSpec(t, sub, func(root string) childSpec {
+		return childSpec{
+			Layers: []*landlock.Profile{baseline(root), artifact(root)},
+			Mounts: mounts(root),
+		}
+	})
+
+	if merged["read b/file"] != "ok" || stacked["read b/file"] == "ok" {
+		t.Errorf(
+			"read b/file: merged %s, stacked %s, want the merged rule to reach the bind mount alone",
+			merged["read b/file"],
+			stacked["read b/file"],
+		)
+	}
+}
+
+// TestLoweredRulePathBeneathRootUnderABindMount pins the exception the
+// integration guide makes for a lowered rule path whose Ancestor is "/" in
+// a result granting no refer: the baseline's rule on "/" grants its rights
+// on everything a path from the root reaches, so a bind mount exposing the
+// lowered directory elsewhere widens nothing. The merged profile, its
+// rule path opened by name, answers every probe as the stacked inputs do.
+func TestLoweredRulePathBeneathRootUnderABindMount(t *testing.T) {
+	t.Parallel()
+
+	requireLandlock(t)
+
+	read := landlock.FSAccessReadFile
+	sub := makeSub(t)
+	mounts := subOverB
+	baseline := &landlock.Profile{
+		HandledAccessFS: fs(read),
+		PathRules:       []landlock.PathRule{{Path: "/", AccessFS: fs(read)}},
+	}
+	artifact := func(root string) *landlock.Profile {
+		return &landlock.Profile{
+			HandledAccessFS: fs(read),
+			PathRules:       []landlock.PathRule{rule(root, "a/sub", read)},
+		}
+	}
+
+	merged := appliedSpec(t, sub, func(root string) childSpec {
+		effective, lowered, err := landlock.IntersectLowered(baseline, artifact(root))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		want := []landlock.LoweredPath{{
+			Path: filepath.Join(root, "a", "sub"), Ancestor: "/", Input: 0, InRoot: true,
+		}}
+		if !slices.Equal(lowered, want) {
+			t.Errorf("IntersectLowered = %+v, want %+v", lowered, want)
+		}
+
+		return childSpec{Layers: []*landlock.Profile{effective}, Mounts: mounts(root)}
+	})
+	stacked := appliedSpec(t, sub, func(root string) childSpec {
+		return childSpec{
+			Layers: []*landlock.Profile{baseline, artifact(root)},
+			Mounts: mounts(root),
+		}
+	})
+
+	for _, probe := range probes {
+		if merged[probe] != stacked[probe] {
+			t.Errorf("%s: merged %s, stacked %s", probe, merged[probe], stacked[probe])
+		}
+	}
+
+	if stacked["read b/file"] != "ok" || stacked["read a/file"] == "ok" {
+		t.Errorf("read b/file %s, read a/file %s, want the bind mount alone readable",
+			stacked["read b/file"], stacked["read a/file"])
 	}
 }
 
