@@ -183,13 +183,8 @@ incompatible Go API change within a major version
 - **Dependencies.** A minor release may raise the required runtime-spec
   version, which can add fields `seccomp.Validate` then reads instead of
   rejecting (`ErrUnsupportedSpecField`), or the minimum Go version.
-- **No `context.Context`.** No function takes one, since every merge is
-  bounded by budgets of its own rather than by its caller. A cancellable
-  variant would be added beside the current functions as methods taking a
-  context on the `Options` types: `seccomp.Options`, `landlock.Options`,
-  and an `apparmor.Options` added for it, since `apparmor` has none yet, so
-  adding it breaks no caller. Until then, bound how long a caller waits as
-  [Limits](docs/integration.md#limits) describes.
+- **No `context.Context`.** No function takes one; every merge bounds its
+  own work (see [Limits](docs/integration.md#limits)).
 
 ## Usage
 

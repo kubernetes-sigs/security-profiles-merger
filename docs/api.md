@@ -88,13 +88,10 @@ filesystem.readOnlyPaths[2]: "@{HOME}/notes": AppArmor variables are not support
 pathRules[2].path: "//etc": duplicate rule (also at pathRules[0].path)
 ```
 
-`seccomp.Validate` reports in the order the profile holds what it reports
-on, an entry at a time, except that a notification listener missing from
-the profile is reported last, after every entry. Counts name the lists they
-count, as in `pathRules, netRules: 2000 rules: too many rules (max 1024)`.
-The text is for people: match the sentinels with
-`errors.Is` rather than parsing it, and list the failures with
-`spm.Problems` (see
+Counts name the lists they count, as in
+`pathRules, netRules: 2000 rules: too many rules (max 1024)`. The text is
+for people: match the sentinels with `errors.Is` rather than parsing it,
+and list the failures with `spm.Problems` (see
 [reading a validation error](integration.md#reading-a-validation-error)).
 
 ## Concurrency
@@ -229,10 +226,7 @@ syscall's `Name`, which it embeds.
 for human-readable formatting, quoted and bounded as `FormatProfile` is.
 `ProfileDiff.String` has a value receiver, so a diff and a pointer to one
 both implement `fmt.Stringer`; `Diff` returns a non-nil diff whenever its
-error is nil. A diff compares errno values as a runtime loads them, the
-lower 16 bits, and reports one wider than that as the profile writes it:
-the default's, and a rule's where every entry of the syscall with that
-action and loaded value, in both profiles, writes the same one.
+error is nil.
 
 ### Errors
 

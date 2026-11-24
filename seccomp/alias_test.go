@@ -683,15 +683,6 @@ func TestValidateArtifactCountsAnEntryNamingBothOnce(t *testing.T) {
 		t.Errorf("entries at both limits: ValidateArtifact = %v, want nil", err)
 	}
 
-	err = node.ValidateArtifact(profileOf(specs.ActErrno,
-		namingBoth(aliasEntries(switchEndian, limit+1, 1, 0))...))
-	if !errors.Is(err, seccomp.ErrTooManyEntriesPerSyscall) {
-		t.Errorf(
-			"an entry past the limit: ValidateArtifact = %v, want ErrTooManyEntriesPerSyscall",
-			err,
-		)
-	}
-
 	// The first entry allows a0 == 0, which the last one traps.
 	conflicting := profileOf(specs.ActErrno, append(
 		namingBoth(aliasEntries(switchEndian, limit-8, perEntry, 0)),

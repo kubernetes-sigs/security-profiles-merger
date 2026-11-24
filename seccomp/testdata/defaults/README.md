@@ -78,8 +78,8 @@ rule as a masked comparison.
 ## crio-amd64-restated.json
 
 `crio-amd64.json` restated by hand as the integration guide describes: the
-masked `clone` clause alone, `setns` left to its first unconditional entry,
-and one `socket` clause allowing every address family but AF_VSOCK in place
+masked `clone` rule alone, `setns` left to its first unconditional entry,
+and one `socket` rule allowing every address family but AF_VSOCK in place
 of the four `socket` entries. Every other entry is unchanged.
 
 ### Why socket is restated this way

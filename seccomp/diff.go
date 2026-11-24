@@ -258,14 +258,7 @@ func splitJoinedNames(diff *SyscallsDiff, joined []syscallAlias, left, right []s
 	split := false
 
 	for _, alias := range joined {
-		used := slices.DeleteFunc(slices.Clone(alias[:]), func(name string) bool {
-			return !slices.ContainsFunc(
-				slices.Concat(left, right),
-				func(entry specs.LinuxSyscall) bool {
-					return slices.Contains(entry.Names, name)
-				},
-			)
-		})
+		used := alias.usedNames(left, right)
 
 		if slices.Equal(used, alias[:1]) {
 			continue
@@ -320,7 +313,7 @@ func renameEntries(entries []SyscallEntry, name string, names []string) []Syscal
 
 		for _, each := range names {
 			renamed = append(renamed, SyscallEntry{
-				Name: each, SyscallDetail: cloneDetails([]SyscallDetail{entry.SyscallDetail})[0],
+				Name: each, SyscallDetail: cloneDetail(entry.SyscallDetail),
 			})
 		}
 	}
@@ -338,14 +331,19 @@ func cloneDetails(details []SyscallDetail) []SyscallDetail {
 	cloned := make([]SyscallDetail, len(details))
 
 	for idx, detail := range details {
-		cloned[idx] = SyscallDetail{
-			Action:   detail.Action,
-			ErrnoRet: merge.ClonePtr(detail.ErrnoRet),
-			Args:     slices.Clone(detail.Args),
-		}
+		cloned[idx] = cloneDetail(detail)
 	}
 
 	return cloned
+}
+
+// cloneDetail returns a copy of a rule sharing no memory with it.
+func cloneDetail(detail SyscallDetail) SyscallDetail {
+	return SyscallDetail{
+		Action:   detail.Action,
+		ErrnoRet: merge.ClonePtr(detail.ErrnoRet),
+		Args:     slices.Clone(detail.Args),
+	}
 }
 
 // syscallVerdict is how a syscall compares where its entries are not

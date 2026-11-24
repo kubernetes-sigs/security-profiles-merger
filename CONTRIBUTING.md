@@ -411,6 +411,12 @@ which a change to them has to redo:
   syscall tables of the releases `SYSCALL_CSVS` in the Makefile lists,
   those of the `test-libseccomp` matrix and 2.5.2, and combined so that it
   errs safe for all of them (see `make verify-syscalls`).
+- The aliases (`switch_endian`, `sys_debug_setcontext`):
+  `TestOnlyKnownAliasesSharePseudoNumbers` checks that the linked release
+  gives no other two names one made-up number, and
+  `TestAliasesLoadAsValidated` that conflicting rules on the two load
+  exactly where `ValidateArtifact` accepts them and that merges of
+  artifacts it accepts load.
 - A node whose native architecture is not known may be any architecture
   libseccomp resolves as native, not only those Go runs on: crun is written
   in C and runs natively on x32, MIPS n32, ppc, s390, sh, m68k and parisc.
