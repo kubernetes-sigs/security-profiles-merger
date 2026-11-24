@@ -614,7 +614,7 @@ func TestMergeFileTooLarge(t *testing.T) {
 	}
 
 	// The error names the file as every error about an input does.
-	if want := "error: " + bigFile + ": file exceeds 10485760 byte limit\n" +
+	if want := "error: " + bigFile + ": profile exceeds 10485760 byte limit\n" +
 		usageHintOf(cmdMerge); stderr != want {
 		t.Errorf("stderr = %q, want %q", stderr, want)
 	}

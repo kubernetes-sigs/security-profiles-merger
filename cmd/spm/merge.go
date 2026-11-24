@@ -75,7 +75,10 @@ type mergeOptions struct {
 	commonOptions
 
 	strategy string
+	// validate is the --validate value, and modes the modes it lists,
+	// which checkFlags parses.
 	validate string
+	modes    []validateMode
 }
 
 // bindMergeFlags declares the merge flags on the set and returns the struct
@@ -116,7 +119,7 @@ func runMerge(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 // mergeInputs validates, merges and writes the profiles that were read.
 func mergeInputs(opts *mergeOptions, inv *invocation) int {
-	modes := inv.validateModes(opts.validate)
+	modes := inv.validateModes(opts.modes)
 	inv.checks = &inputChecks{modes: modes, strategy: opts.strategy}
 
 	code := resolveKind(inv, opts.profileType, 1, opts.noDetectNote)
@@ -175,28 +178,19 @@ func modeCountError(listed, count int, of string) error {
 	)
 }
 
-// validateModes returns the mode of each input a --validate value names:
-// either a single mode for all of them, or exactly one each. A list shorter
-// than the file arguments was refused before anything was read (see
-// checkValidateModes); a longer one is checked against the inputs here,
-// since a file argument may bring several, as the elements of an array. A
-// count that does not match is refused once the inputs are checked, under
-// the weakest mode listed, which is the one every input is known to be
-// meant for at least: each mode accepts only what the weaker ones accept,
-// so an input that fails it fails whatever mode was meant. An input that
-// could not be read brings an unknown number of profiles, one at least, so
-// only a list too short is refused then: its failure is the answer.
-func (inv *invocation) validateModes(value string) []validateMode {
-	// The flags were checked to name modes the command takes, so baseline
-	// is one only for validate.
-	listed, err := parseValidateModes(value, true)
-	if err != nil {
-		// The flags were checked to name known modes.
-		inv.refusals = append(inv.refusals, err)
-
-		return slices.Repeat([]validateMode{modeDefault}, len(inv.inputs))
-	}
-
+// validateModes returns the mode of each input, out of the modes a
+// --validate value lists (see checkValidateModes): either a single mode
+// for all of them, or exactly one each. A list shorter than the file
+// arguments was refused before anything was read; a longer one is checked
+// against the inputs here, since a file argument may bring several, as the
+// elements of an array. A count that does not match is refused once the
+// inputs are checked, under the weakest mode listed, which is the one
+// every input is known to be meant for at least: each mode accepts only
+// what the weaker ones accept, so an input that fails it fails whatever
+// mode was meant. An input that could not be read brings an unknown number
+// of profiles, one at least, so only a list too short is refused then: its
+// failure is the answer.
+func (inv *invocation) validateModes(listed []validateMode) []validateMode {
 	count := len(inv.inputs)
 
 	switch {
@@ -211,12 +205,15 @@ func (inv *invocation) validateModes(value string) []validateMode {
 	return slices.Repeat([]validateMode{weakestMode(listed)}, count)
 }
 
-// checkValidateModes reports a --validate value that names an unknown
-// mode, or lists one mode each for fewer profiles than the args file
-// arguments bring at least, before anything is read. withBaseline says
-// whether the command takes baseline. The modes are parsed again once the
-// inputs are known (see invocation.validateModes).
-func checkValidateModes(value string, args int, withBaseline bool, stderr io.Writer) int {
+// checkValidateModes returns the modes a --validate value lists, and
+// reports one that names an unknown mode, or lists one mode each for fewer
+// profiles than the args file arguments bring at least, before anything is
+// read. withBaseline says whether the command takes baseline. The modes are
+// matched to the inputs once those are known (see
+// invocation.validateModes).
+func checkValidateModes(
+	value string, args int, withBaseline bool, stderr io.Writer,
+) ([]validateMode, int) {
 	listed, err := parseValidateModes(value, withBaseline)
 	if err == nil && len(listed) > 1 && len(listed) < args {
 		err = modeCountError(len(listed), args, "file argument")
@@ -225,17 +222,20 @@ func checkValidateModes(value string, args int, withBaseline bool, stderr io.Wri
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 
-		return exitUsage
+		return nil, exitUsage
 	}
 
-	return 0
+	return listed, 0
 }
 
 // checkFlags checks the merge flags (see commandOptions).
 func (opts *mergeOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) int {
-	if code := checkValidateModes(opts.validate, flags.NArg(), false, stderr); code != 0 {
+	modes, code := checkValidateModes(opts.validate, flags.NArg(), false, stderr)
+	if code != 0 {
 		return code
 	}
+
+	opts.modes = modes
 
 	strategy := opts.strategy
 	if strategy == "" {
@@ -258,10 +258,12 @@ func (opts *mergeOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) int 
 }
 
 // mergeProfiles decodes every input, runs the check of each that has one
-// (nil for an input the merge checks itself) and merges them with mergeFn.
-// strict says which inputs are decoded strictly.
+// of its own (nil for an input the merge checks itself, which alone holds
+// the check of) and merges them with mergeFn. strict says which inputs are
+// decoded strictly.
 func (ops kindOps[T, D]) mergeProfiles(
-	inv *invocation, mergeFn func(...*T) (*T, error), checks []func(*T) error, strict []bool,
+	inv *invocation, mergeFn func(...*T) (*T, error), checks, alone []func(*T) error,
+	strict []bool,
 ) int {
 	report := inv.report
 	profiles := unmarshalAll[T](inv.inputs, strict, report)
@@ -277,7 +279,7 @@ func (ops kindOps[T, D]) mergeProfiles(
 	})
 
 	if inv.halted() {
-		checkLeftInputs(mergeFn, checks, profiles, report)
+		checkLeftInputs(alone, profiles, report)
 
 		return inv.stop(1)
 	}
@@ -288,7 +290,7 @@ func (ops kindOps[T, D]) mergeProfiles(
 		// Past that, each input is checked alone, as when the merge does
 		// not run, so that the run names every one.
 		if omitsProblems(err) {
-			checkLeftInputs(mergeFn, checks, profiles, report)
+			checkLeftInputs(alone, profiles, report)
 
 			if report.anyFailed() {
 				return inv.stop(1)
@@ -306,24 +308,20 @@ func (ops kindOps[T, D]) mergeProfiles(
 }
 
 // checkLeftInputs runs the check the merge runs on each input on the ones
-// that decoded and asked for no check of their own, when the merge does not
-// run, because another input has failed or the run is refused, so that one
-// run names every bad input, as the other validation modes do. Each is
-// checked on its own, so that a failure between two inputs, such as a
-// conflict between their listeners, is neither reported nor blamed on
-// either: the merge was not going to run (see mergeInputCheck).
-func checkLeftInputs[T any](
-	mergeFn func(...*T) (*T, error), checks []func(*T) error, profiles []*T,
-	report *inputReport,
-) {
-	check := mergeInputCheck(mergeFn)
-
+// that decoded and asked for no check of their own, which alone holds, when
+// the merge does not run, because another input has failed or the run is
+// refused, so that one run names every bad input, as the other validation
+// modes do. Each is checked on its own, so that a failure between two
+// inputs, such as a conflict between their listeners, is neither reported
+// nor blamed on either: the merge was not going to run (see
+// mergeInputCheck).
+func checkLeftInputs[T any](alone []func(*T) error, profiles []*T, report *inputReport) {
 	checkInputs(profiles, report, func(idx int, profile *T) error {
-		if checks[idx] != nil {
+		if alone[idx] == nil {
 			return nil
 		}
 
-		return check(profile)
+		return alone[idx](profile)
 	})
 }
 

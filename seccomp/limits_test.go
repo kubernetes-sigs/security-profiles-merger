@@ -17,9 +17,11 @@ limitations under the License.
 package seccomp_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -319,5 +321,78 @@ func TestIntersectArtifactSizeLimit(t *testing.T) {
 	err = seccomp.Validate(result)
 	if err != nil {
 		t.Fatalf("merged profile is invalid: %v", err)
+	}
+}
+
+// TestUnmarshalStrictAllocatesAboutWhatTheDecoderDoes covers what strict
+// decoding allocates beyond encoding/json for the shapes that cost the
+// most per byte of the document, which docs/integration.md sizes the
+// memory of a runtime by: lists of empty or null entries and conditions.
+// The scan that looks for what encoding/json reads silently allocates
+// nothing of its own per object it opens, closes or finds members missing
+// in, once its report is full, so strict decoding allocates about what
+// json.Unmarshal does and what json.Decoder.Token allocates for the tokens
+// of the document, which some Go releases do for each literal, such as each
+// null. A scan that allocated per object made it more than twice that.
+//
+//nolint:paralleltest // AllocatedBytes reads the counters of the whole process
+func TestUnmarshalStrictAllocatesAboutWhatTheDecoderDoes(t *testing.T) {
+	if !testutil.UninstrumentedRun() {
+		t.Skip("coverage counters and the race detector allocate on their own")
+	}
+
+	const size = 64 << 10
+
+	list := func(head, entry, tail string) []byte {
+		count := size / (len(entry) + 1)
+
+		return []byte(head + strings.TrimSuffix(strings.Repeat(entry+",", count), ",") + tail)
+	}
+
+	for name, doc := range map[string][]byte{
+		"empty entries": list(`{"syscalls":[`, `{}`, `]}`),
+		"null entries":  list(`{"syscalls":[`, `null`, `]}`),
+		"empty conditions": list(
+			`{"syscalls":[{"names":["read"],"action":"SCMP_ACT_ALLOW","args":[`, `{}`, `]}]}`,
+		),
+	} {
+		var strictErr, plainErr error
+
+		strict := testutil.AllocatedBytes(func() {
+			var profile specs.LinuxSeccomp
+
+			strictErr = seccomp.UnmarshalStrict(doc, &profile)
+		})
+		plain := testutil.AllocatedBytes(func() {
+			var profile specs.LinuxSeccomp
+
+			plainErr = json.Unmarshal(doc, &profile)
+		})
+		tokens := testutil.AllocatedBytes(func() {
+			decoder := json.NewDecoder(bytes.NewReader(doc))
+			decoder.UseNumber()
+
+			for {
+				_, err := decoder.Token()
+				if err != nil {
+					break
+				}
+			}
+		})
+
+		// Every entry and condition misses its required members.
+		if plainErr != nil || !errors.Is(strictErr, seccomp.ErrMissingField) {
+			t.Fatalf("%s: UnmarshalStrict = %v, json.Unmarshal = %v", name, strictErr, plainErr)
+		}
+
+		// A quarter of what json.Unmarshal allocates, and the document
+		// again, leave room for what the strict decoder allocates besides
+		// that does not depend on the scan: mostly the buffer json.Decoder
+		// doubles as it reads the document, four to five times its size
+		// here, which the quarter absorbs, and the report.
+		if limit := plain + tokens + plain/4 + size; strict > limit {
+			t.Errorf("%s: UnmarshalStrict allocated %d bytes, json.Unmarshal %d and the "+
+				"tokens %d, want at most %d", name, strict, plain, tokens, limit)
+		}
 	}
 }

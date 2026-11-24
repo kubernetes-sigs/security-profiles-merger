@@ -90,14 +90,13 @@ type validateOptions struct {
 	commonOptions
 
 	// validate is the --validate value, default where it is left out, and
-	// validateGiven whether the flag was given, which its value cannot say:
-	// left out, a boolean mode flag may name the mode instead.
-	validate      string
-	validateGiven bool
-	strict        bool
-	artifact      bool
-	baseline      bool
-	quiet         bool
+	// modes the modes the flags name, which checkModeFlags parses.
+	validate string
+	modes    []validateMode
+	strict   bool
+	artifact bool
+	baseline bool
+	quiet    bool
 }
 
 // bindValidateFlags declares the validate flags on the set and returns the
@@ -187,7 +186,7 @@ func (opts *validateOptions) checkFlags(flags *flag.FlagSet, stderr io.Writer) i
 // validateInputs validates the profiles that were read, and writes them
 // back.
 func validateInputs(opts *validateOptions, inv *invocation) int {
-	inv.checks = &inputChecks{modes: inv.validateModes(opts.modes())}
+	inv.checks = &inputChecks{modes: inv.validateModes(opts.modes)}
 
 	// --quiet promises a silent stderr on success, so it implies
 	// --no-detect-note.
@@ -208,29 +207,15 @@ func validateInputs(opts *validateOptions, inv *invocation) int {
 	return flushOutput(opts.output, inv.out.Bytes(), inv.stdout, inv.stderr)
 }
 
-// modes returns the --validate value the flags amount to: --validate as
-// given, or the mode the boolean flag that is set names, or default. The
-// flags have already been checked not to be set together.
-func (opts *validateOptions) modes() string {
-	switch {
-	case opts.validateGiven:
-		return opts.validate
-	case opts.artifact:
-		return modeNameArtifact
-	case opts.strict:
-		return modeNameStrict
-	case opts.baseline:
-		return modeNameBaseline
-	default:
-		return modeNameDefault
-	}
-}
-
 // checkModeFlags checks the flags that choose the validation mode and what
-// it depends on: --artifact, --strict and --baseline name one mode each, so
-// at most one of them may be set, and none beside --validate.
+// it depends on, and records the modes they name: --validate as given, or
+// the mode the boolean flag that is set names, or default. --artifact,
+// --strict and --baseline name one mode each, so at most one of them may
+// be set, and none beside --validate.
 func checkModeFlags(opts *validateOptions, flags *flag.FlagSet, stderr io.Writer) int {
 	var set []string
+
+	value := opts.validate
 
 	for _, each := range []struct {
 		name string
@@ -242,11 +227,11 @@ func checkModeFlags(opts *validateOptions, flags *flag.FlagSet, stderr io.Writer
 	} {
 		if each.set {
 			set = append(set, "--"+each.name)
+			value = each.name
 		}
 	}
 
-	opts.validateGiven = flagNamed(flags, "validate")
-	if opts.validateGiven {
+	if flagNamed(flags, "validate") {
 		set = append(set, "--validate")
 	}
 
@@ -256,16 +241,18 @@ func checkModeFlags(opts *validateOptions, flags *flag.FlagSet, stderr io.Writer
 		return exitUsage
 	}
 
-	if code := checkValidateModes(opts.modes(), flags.NArg(), true, stderr); code != 0 {
+	modes, code := checkValidateModes(value, flags.NArg(), true, stderr)
+	if code != 0 {
 		return code
 	}
+
+	opts.modes = modes
 
 	// The default checks do not depend on the architecture, so --arch
 	// without the checks that do would be a flag that quietly does nothing,
 	// as it would be for a profile type without architectures.
-	listed, _ := parseValidateModes(opts.modes(), true)
 	if flagNamed(flags, flagNameArch) &&
-		!slices.ContainsFunc(listed, func(mode validateMode) bool { return mode != modeDefault }) {
+		!slices.ContainsFunc(modes, func(mode validateMode) bool { return mode != modeDefault }) {
 		_, _ = fmt.Fprintln(
 			stderr, "error: --arch only applies to the strict, artifact and baseline checks",
 		)
@@ -430,7 +417,7 @@ func composeArray(inputs []profileInput, decoded [][]byte) []byte {
 
 	out.WriteString("[\n")
 
-	for idx, input := range inputs {
+	for idx := range inputs {
 		if idx > 0 {
 			out.WriteString(",\n")
 		}
@@ -438,7 +425,7 @@ func composeArray(inputs []profileInput, decoded [][]byte) []byte {
 		if decoded[idx] != nil {
 			out.Write(bytes.TrimSuffix(decoded[idx], []byte("\n")))
 		} else {
-			out.Write(bytes.Trim(input.data, strictjson.Space))
+			out.Write(bytes.Trim(inputs[idx].data, strictjson.Space))
 		}
 	}
 

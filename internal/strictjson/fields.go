@@ -244,6 +244,8 @@ type jsonField struct {
 	name string
 	// typ is the type of the field.
 	typ reflect.Type
+	// index is the position of the field in fieldSet.fields.
+	index int
 	// required reports whether a document has to hold the member (see
 	// isRequired).
 	required bool
@@ -315,7 +317,10 @@ func jsonFields(typ reflect.Type) fieldSet {
 
 		name, _, _ := strings.Cut(tag, ",")
 		member := jsonField{
-			name: cmp.Or(name, field.Name), typ: field.Type, required: isRequired(typ, &field),
+			name:     cmp.Or(name, field.Name),
+			typ:      field.Type,
+			index:    len(set.fields),
+			required: isRequired(typ, &field),
 		}
 
 		set.fields = append(set.fields, member)

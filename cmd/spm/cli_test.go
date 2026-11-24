@@ -941,7 +941,7 @@ func TestInputLimitsAtTheirBoundary(t *testing.T) {
 		code, _, stderr = runCapture(t, []string{
 			cmdValidate, flagType, typeSeccomp, "--quiet",
 		}, strings.NewReader(profileOf(maxInputSize+1)))
-		if want := "error: stdin: input exceeds 10485760 byte limit\n" +
+		if want := "error: stdin: profile exceeds 10485760 byte limit\n" +
 			usageHintOf(cmdValidate); code != exitUsage ||
 			stderr != want {
 			t.Errorf("one past the limit: exit %d, stderr %q, want %d and %q",

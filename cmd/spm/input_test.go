@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"io/fs"
@@ -267,6 +268,96 @@ func TestSplitArrayEdgeCases(t *testing.T) {
 	}
 }
 
+// TestElementPositions covers the line and column of a byte of an element
+// of an array, counted in the array: for elements on lines of their own,
+// several on one line, an element spanning lines, and lines broken by
+// CRLF, whose CR counts as a byte of the line it ends. The position is
+// found without reading the array before the element, which splitArray
+// counted the lines of already: an array of many elements that each fail
+// would otherwise be read up to each of them, as often as it has elements.
+// So it stays the same once every byte before the element is overwritten.
+func TestElementPositions(t *testing.T) {
+	t.Parallel()
+
+	type position struct {
+		element int
+		offset  int64
+		want    string
+	}
+
+	for _, test := range []struct {
+		name  string
+		array string
+		want  []position
+	}{
+		{
+			name:  "lines of their own and one shared",
+			array: "[\n  {\"a\":1},\n  {\"b\":2}, {\"c\":3}\n]",
+			want: []position{
+				{0, 0, "line 2, column 3"},
+				{1, 0, "line 3, column 3"},
+				{2, 0, "line 3, column 12"},
+				{2, 5, "line 3, column 17"},
+			},
+		},
+		{
+			name:  "elements on one line",
+			array: `[{"a":1},{"b":2} , {"c":3}]`,
+			want: []position{
+				{0, 0, "line 1, column 2"},
+				{1, 5, "line 1, column 15"},
+				{2, 7, "line 1, column 27"},
+			},
+		},
+		{
+			name:  "elements spanning lines",
+			array: "[{\"a\":\n1},\n{\"b\":\n\n2}, {\"c\":3}]",
+			want: []position{
+				{0, 0, "line 1, column 2"},
+				{0, 6, "line 2, column 1"},
+				{1, 0, "line 3, column 1"},
+				{1, 7, "line 5, column 1"},
+				{2, 0, "line 5, column 5"},
+			},
+		},
+		{
+			name:  "CRLF",
+			array: "[\r\n{\"a\":1},\r\n {\"b\":\r\n2}]",
+			want: []position{
+				{0, 0, "line 2, column 1"},
+				{0, 7, "line 2, column 8"},
+				{1, 0, "line 3, column 2"},
+				{1, 5, "line 3, column 7"},
+				{1, 7, "line 4, column 1"},
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			inputs, err := splitArray(stdinName, []byte(test.array))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for _, want := range test.want {
+				input := inputs[want.element]
+				if got := input.position(want.offset); got != want.want {
+					t.Errorf("%s at %d: %s, want %s", input.name, want.offset, got, want.want)
+				}
+
+				input.source = bytes.Repeat([]byte("\n"), len(test.array))
+				copy(input.source[input.offset:], input.data)
+
+				if got := input.position(want.offset); got != want.want {
+					t.Errorf("%s at %d with line breaks before it: %s, want %s",
+						input.name, want.offset, got, want.want)
+				}
+			}
+		})
+	}
+}
+
 // TestReadFromStdinArrayErrorOrder covers a stdin array past the bound that
 // also does not parse: the syntax is checked before anything is counted, so
 // the syntax error is reported wherever it sits, the same on either side of
@@ -417,7 +508,7 @@ func TestArrayLimits(t *testing.T) {
 	file := writeTemp(t, "[{},"+big+"]")
 
 	_, err = readInputs([]string{file}, nil)
-	if want := file + "[1]: " + errElementTooLarge.Error(); err == nil || err.Error() != want ||
+	if want := file + "[1]: " + errProfileTooLarge.Error(); err == nil || err.Error() != want ||
 		!isInputLimitError(err) {
 		t.Errorf("an element past the bound: error = %v, want %q, a limit", err, want)
 	}
@@ -429,9 +520,9 @@ func TestArrayLimits(t *testing.T) {
 	size := huge.Len()
 
 	_, err = readInputs(nil, huge)
-	if read := size - huge.Len(); !errors.Is(err, errStdinTooLarge) || read != maxInputSize+1 {
+	if read := size - huge.Len(); !errors.Is(err, errProfileTooLarge) || read != maxInputSize+1 {
 		t.Errorf("one profile past the bound: error = %v after %d bytes, want %v after %d",
-			err, read, errStdinTooLarge, maxInputSize+1)
+			err, read, errProfileTooLarge, maxInputSize+1)
 	}
 }
 
@@ -450,7 +541,7 @@ func TestSplitArrayCopiesNothing(t *testing.T) {
 
 	allocated := testutil.AllocatedBytes(func() { _, err = splitArray("big.json", big) })
 
-	if want := "big.json[0]: " + errElementTooLarge.Error(); err == nil || err.Error() != want {
+	if want := "big.json[0]: " + errProfileTooLarge.Error(); err == nil || err.Error() != want {
 		t.Errorf("error = %v, want %q", err, want)
 	}
 
@@ -740,7 +831,7 @@ func TestInputPastTheLimitsBesideABadOne(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing.json")
 	bad := writeTemp(t, `{"defaultAction":1}`)
 	large := writeTemp(t, string(make([]byte, maxInputSize+1)))
-	want := "error: " + large + ": " + errFileTooLarge.Error() + "\n" + usageHintOf(cmdValidate)
+	want := "error: " + large + ": " + errProfileTooLarge.Error() + "\n" + usageHintOf(cmdValidate)
 
 	for _, args := range [][]string{{missing, large}, {large, missing}, {bad, large}} {
 		code, _, stderr := runCapture(t,
@@ -802,12 +893,14 @@ func TestErrorSentinels(t *testing.T) {
 		{errDuplicateStdin, `stdin ("-") can only be specified once`},
 		{errTooManyFiles, "too many input files (max 1000)"},
 		{errTooManyProfiles, "too many profiles (max 1000)"},
-		{errElementTooLarge, "profile exceeds 10485760 byte limit"},
+		{errProfileTooLarge, "profile exceeds 10485760 byte limit"},
 		{errEmptyArray, "empty JSON array, no profile"},
-		{errStdinTooLarge, "stdin: input exceeds 10485760 byte limit"},
-		{errFileTooLarge, "file exceeds 10485760 byte limit"},
 		{errInputTooLarge, "inputs exceed 67108864 bytes in total"},
 		{errAloneTooLarge, "input exceeds 67108864 bytes, the limit on all inputs together"},
+		// A limit a single input is past names it, quoted where its name
+		// would not print as itself.
+		{errProfileTooLarge.of(stdinName), "stdin: profile exceeds 10485760 byte limit"},
+		{errProfileTooLarge.of("a\nb.json"), `"a\nb.json": profile exceeds 10485760 byte limit`},
 	} {
 		if got := testCase.err.Error(); got != testCase.want {
 			t.Errorf("message = %q, want %q", got, testCase.want)

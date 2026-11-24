@@ -144,8 +144,8 @@ func testInvocation(inputs []profileInput) *invocation {
 // cares about the bytes.
 func inputData(inputs []profileInput) []string {
 	data := make([]string, len(inputs))
-	for idx, input := range inputs {
-		data[idx] = string(input.data)
+	for idx := range inputs {
+		data[idx] = string(inputs[idx].data)
 	}
 
 	return data
@@ -155,8 +155,8 @@ func inputData(inputs []profileInput) []string {
 // an error or warning would identify them.
 func inputNames(inputs []profileInput) []string {
 	names := make([]string, len(inputs))
-	for idx, input := range inputs {
-		names[idx] = input.name
+	for idx := range inputs {
+		names[idx] = inputs[idx].name
 	}
 
 	return names
